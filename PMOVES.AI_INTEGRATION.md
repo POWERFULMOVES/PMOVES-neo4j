@@ -1,48 +1,39 @@
-# PMOVES.AI Integration — Neo4j
+# PMOVES.AI Integration Dossier
 
-## Role in PMOVES.AI
+_Last updated: 2026-04-04_
 
-Neo4j serves as the **graph database backbone** for PMOVES.AI, providing:
+## Module
+- Name: PMOVES-Neo4j
+- Path: PMOVES-Neo4j
 
-- **Knowledge management** — Entity-relationship storage for Hi-RAG v2 hybrid retrieval
-- **CHIT consciousness taxonomy** — Graph representation of Compressed Hierarchical Information Transfer structures
-- **Agent memory** — Persistent graph-based memory for Cipher Memory service and agent coordination
-- **Relationship traversal** — Multi-hop queries across knowledge entities, agents, and content
+## Purpose in PMOVES.AI
+- Graph database for knowledge management, CHIT consciousness taxonomy, and agent memory.
 
-## Service Integration
+## PMOVES Overlay Surface
+- pmoves-integrations/ overlay path (if used): _TBD_
+- Compose/profile wiring: _TBD_
+- Env/secret inputs: _TBD_
+- Auth/JWT requirements: _TBD_
 
-| Service | Port | Protocol | Purpose |
-|---------|------|----------|---------|
-| Neo4j HTTP | 7474 | HTTP | Cypher transaction API |
-| Neo4j Bolt | 7687 | Bolt | Driver connections |
+## Contracts and Topics
+- NATS subjects (if any): _TBD_
+- Supabase schema/tables touched (if any): _TBD_
+- MCP endpoints/skills (if any): _TBD_
 
-## Docker Compose Profile
+## Boot Order and Health
+- Bring-up dependency order: _TBD_
+- Health endpoints: _TBD_
+- Smoke targets: _TBD_
 
-Neo4j runs under the `neo4j-local` profile in `pmoves/docker-compose.yml`:
+## Hardening Notes
+- Image pinning / provenance: _TBD_
+- Secrets source (*_FILE / vault / GH env): _TBD_
+- Network/security policy constraints: _TBD_
 
-```bash
-make -C pmoves neo4j-local-up
-```
+## Source Documentation
+- Upstream docs entrypoint: README.md
+- PMOVES docs index reference: pmoves/docs/SUBMODULE_DOCS_DOSSIER.md
 
-## Consumers
-
-- **Hi-RAG v2** (port 8086/8087) — Graph queries for hybrid retrieval
-- **Cipher Memory** (port 8096) — Knowledge-graph memory storage
-- **Extract Worker** (port 8083) — Entity indexing
-
-## Health Check
-
-```bash
-curl http://localhost:7474/db/neo4j/health
-```
-
-## NATS Subjects
-
-Neo4j state changes propagate via:
-- `model.registry.updated.v1` — Catalog mutations that may affect graph state
-
-## Security Notes
-
-- Default credentials must be overridden via `NEO4J_AUTH` env var
-- Cypher queries must use parameterized queries (no f-string label construction)
-- See `pmoves/docs/security/` for hardening requirements
+## Owner / Audit
+- Owning lane: _TBD_
+- Last integration audit run: 2026-04-04
