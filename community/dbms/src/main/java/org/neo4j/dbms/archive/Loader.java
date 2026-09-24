@@ -19,6 +19,7 @@
  */
 package org.neo4j.dbms.archive;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.neo4j.dbms.archive.LoggingArchiveProgressPrinter.createProgressPrinter;
 import static org.neo4j.dbms.archive.Utils.checkWritableDirectory;
 import static org.neo4j.dbms.archive.printer.ProgressPrinters.emptyPrinter;
@@ -39,17 +40,17 @@ import org.apache.commons.compress.archivers.ArchiveInputStream;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.neo4j.commandline.dbms.StoreVersionLoader;
 import org.neo4j.configuration.Config;
+import org.neo4j.dbms.archive.ArchiveInput.FileInput;
 import org.neo4j.dbms.archive.printer.OutputProgressPrinter;
 import org.neo4j.dbms.archive.printer.ProgressPrinters;
-import org.neo4j.function.ThrowingSupplier;
 import org.neo4j.graphdb.Resource;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
-import org.neo4j.kernel.impl.transaction.log.files.TransactionLogFiles;
 import org.neo4j.logging.InternalLogProvider;
 import org.neo4j.storageengine.api.StorageEngineFactory;
 import org.neo4j.util.VisibleForTesting;
+import org.neo4j.wal.files.TransactionLogFiles;
 
 public class Loader {
     private final FileSystemAbstraction filesystem;
@@ -90,8 +91,7 @@ public class Loader {
                 validateDatabaseExistence,
                 validateLogsExistence,
                 selector,
-                () -> filesystem.openAsInputStream(archive),
-                archive.toString());
+                FileInput.of(filesystem, archive));
     }
 
     public void load(
@@ -99,8 +99,7 @@ public class Loader {
             boolean validateDatabaseExistence,
             boolean validateLogsExistence,
             DecompressionSelector selector,
-            ThrowingSupplier<InputStream, IOException> streamSupplier,
-            String inputName)
+            ArchiveInput input)
             throws IOException, IncorrectFormat {
         Path databaseDestination = databaseLayout.databaseDirectory();
         Path transactionLogsDirectory = databaseLayout.getTransactionLogsDirectory();
@@ -113,10 +112,10 @@ public class Loader {
 
         checkDatabasePresence(filesystem, databaseLayout);
 
-        try (var stream = openArchiveIn(selector, streamSupplier, inputName);
+        try (var stream = openArchiveIn(selector, input);
                 Resource ignore = progressPrinter.startPrinting()) {
             ArchiveEntry entry;
-            while ((entry = nextEntry(stream, inputName)) != null) {
+            while ((entry = nextEntry(stream, input.description())) != null) {
                 Path destination = determineEntryDestination(entry, databaseDestination, transactionLogsDirectory);
                 loadEntry(destination, stream, entry);
             }
@@ -133,10 +132,8 @@ public class Loader {
         }
     }
 
-    public DumpMetaData getMetaData(
-            ThrowingSupplier<InputStream, IOException> streamSupplier, DecompressionSelector selector)
-            throws IOException {
-        try (InputStream decompressor = selector.decompress(streamSupplier)) {
+    public DumpMetaData getMetaData(ArchiveInput input, DecompressionSelector selector) throws IOException {
+        try (InputStream decompressor = selector.decompress(input)) {
             return readDumpMetadata(decompressor);
         }
     }
@@ -207,11 +204,11 @@ public class Loader {
         }
     }
 
-    private ArchiveInputStream<?> openArchiveIn(
-            DecompressionSelector selector, ThrowingSupplier<InputStream, IOException> streamSupplier, String inputName)
+    private ArchiveInputStream<?> openArchiveIn(DecompressionSelector selector, ArchiveInput input)
             throws IOException, IncorrectFormat {
+        InputStream decompressor = null;
         try {
-            InputStream decompressor = selector.decompress(streamSupplier);
+            decompressor = selector.decompress(input);
 
             if (StandardCompressionFormat.ZSTD.isFormat(decompressor)) {
                 // Important: Only the ZSTD compressed archives have any archive metadata.
@@ -220,11 +217,22 @@ public class Loader {
                 progressPrinter.maxBytes(fab.bytes());
             }
 
-            return new TarArchiveInputStream(decompressor);
-        } catch (NoSuchFileException ioe) {
-            throw ioe;
-        } catch (IOException e) {
-            throw new IncorrectFormat(inputName, e);
+            return new TarArchiveInputStream(decompressor, UTF_8.name());
+        } catch (Exception e) {
+            if (decompressor != null) {
+                try {
+                    decompressor.close();
+                } catch (IOException closeException) {
+                    e.addSuppressed(closeException);
+                }
+            }
+            switch (e) {
+                case NoSuchFileException nsfe -> throw nsfe;
+                case IllegalArgumentException iae ->
+                    throw new IncorrectFormat(input.description(), new IOException(iae.getMessage(), iae));
+                case IOException ioe -> throw new IncorrectFormat(input.description(), ioe);
+                default -> throw e;
+            }
         }
     }
 

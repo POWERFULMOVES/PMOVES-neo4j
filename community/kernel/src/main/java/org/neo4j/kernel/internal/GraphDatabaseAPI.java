@@ -19,6 +19,7 @@
  */
 package org.neo4j.kernel.internal;
 
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import org.neo4j.common.DependencyResolver;
@@ -60,6 +61,15 @@ public interface GraphDatabaseAPI extends GraphDatabaseService {
     HostedOnMode mode();
 
     /**
+     * Begin internal transaction with {@link org.neo4j.kernel.api.KernelTransaction.Type#EXPLICIT} and
+     * {@link LoginContext#AUTH_DISABLED}.
+     * @return internal transaction
+     */
+    default InternalTransaction beginTransaction() {
+        return beginTransaction(KernelTransaction.Type.EXPLICIT, LoginContext.AUTH_DISABLED);
+    }
+
+    /**
      * Begin internal transaction with specified type and access mode
      * @param type transaction type
      * @param loginContext transaction login context
@@ -99,6 +109,7 @@ public interface GraphDatabaseAPI extends GraphDatabaseService {
      * @param loginContext transaction login context
      * @param clientInfo transaction client info
      * @param routingInfo routing information provided by the client
+     * @param bookmarks bookmarks provided to the client
      * @param timeout transaction timeout
      * @param unit time unit of timeout argument
      * @param terminationCallback termination callback
@@ -110,6 +121,7 @@ public interface GraphDatabaseAPI extends GraphDatabaseService {
             LoginContext loginContext,
             ClientConnectionInfo clientInfo,
             RoutingInfo routingInfo,
+            List<String> bookmarks,
             long timeout,
             TimeUnit unit,
             Consumer<Status> terminationCallback,

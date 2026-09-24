@@ -28,6 +28,8 @@ import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.graphdb.RelationshipType
 import org.neo4j.internal.helpers.collection.Iterables
 
+object SetRelationshipPropertiesTestBase
+
 abstract class SetRelationshipPropertiesTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
@@ -46,7 +48,7 @@ abstract class SetRelationshipPropertiesTestBase[CONTEXT <: RuntimeContext](
       .produceResults("p1", "p2")
       .projection("r.p1 as p1", "r.p2 as p2")
       .setRelationshipProperties("r", ("p1", "1"), ("p2", "2"))
-      .directedRelationshipByIdSeek("r", "a", "b", Set.empty, r.getId)
+      .relationshipByIdSeek("(a)-[r]->(b)", Set.empty, r.getId)
       .build(readOnly = false)
 
     // then
@@ -70,7 +72,7 @@ abstract class SetRelationshipPropertiesTestBase[CONTEXT <: RuntimeContext](
       .projection("rRef.p1 as p1", "rRef.p2 as p2")
       .setRelationshipProperties("rRef", ("p1", "1"), ("p2", "2"))
       .unwind("[r] as rRef")
-      .directedRelationshipByIdSeek("r", "a", "b", Set.empty, r.getId)
+      .relationshipByIdSeek("(a)-[r]->(b)", Set.empty, r.getId)
       .build(readOnly = false)
 
     // then
@@ -95,7 +97,7 @@ abstract class SetRelationshipPropertiesTestBase[CONTEXT <: RuntimeContext](
       .produceResults("p1", "p2")
       .projection("r.p1 as p1", "r.p2 as p2")
       .setRelationshipProperties("r", ("p1", "null"), ("p2", "2"))
-      .directedRelationshipByIdSeek("r", "a", "b", Set.empty, r.getId)
+      .relationshipByIdSeek("(a)-[r]->(b)", Set.empty, r.getId)
       .build(readOnly = false)
 
     // then
@@ -122,7 +124,7 @@ abstract class SetRelationshipPropertiesTestBase[CONTEXT <: RuntimeContext](
       .produceResults("p1", "p2")
       .projection("r.p1 as p1", "r.p2 as p2")
       .setRelationshipProperties("r", ("p1", "1"), ("p2", "1"))
-      .directedRelationshipByIdSeek("r", "a", "b", Set.empty, r.getId)
+      .relationshipByIdSeek("(a)-[r]->(b)", Set.empty, r.getId)
       .build(readOnly = false)
 
     // then
@@ -149,7 +151,7 @@ abstract class SetRelationshipPropertiesTestBase[CONTEXT <: RuntimeContext](
       .setRelationshipProperties("r", ("p1", "oldP1 + 1"), ("p2", "oldP2 + 1"))
       .filter("oldP1 < 5", "oldP2 < 5")
       .projection("r.p1 as oldP1", "r.p2 as oldP2")
-      .directedRelationshipByIdSeek("r", "a", "b", Set.empty, rs.map(_.getId): _*)
+      .relationshipByIdSeek("(a)-[r]->(b)", Set.empty, rs.map(_.getId): _*)
       .build(readOnly = false)
 
     // then
@@ -180,7 +182,7 @@ abstract class SetRelationshipPropertiesTestBase[CONTEXT <: RuntimeContext](
       .|.filter("oldP1 < 5", "oldP2 < 5")
       .|.argument("oldP1", "oldP2")
       .projection("r.p1 as oldP1", "r.p2 as oldP2")
-      .directedRelationshipByIdSeek("r", "a", "b", Set.empty, rs.map(_.getId): _*)
+      .relationshipByIdSeek("(a)-[r]->(b)", Set.empty, rs.map(_.getId): _*)
       .build(readOnly = false)
 
     // then
@@ -210,7 +212,7 @@ abstract class SetRelationshipPropertiesTestBase[CONTEXT <: RuntimeContext](
       .limit(3)
       .filter("oldP1 < 5", "oldP2 < 5")
       .projection("r.p1 as oldP1", "r.p2 as oldP2")
-      .directedRelationshipByIdSeek("r", "a", "b", Set.empty, rs.map(_.getId): _*)
+      .relationshipByIdSeek("(a)-[r]->(b)", Set.empty, rs.map(_.getId): _*)
       .build(readOnly = false)
 
     // then
@@ -241,7 +243,7 @@ abstract class SetRelationshipPropertiesTestBase[CONTEXT <: RuntimeContext](
       .|.filter("oldP1 < 5", "oldP2 < 5")
       .|.argument("oldP1", "oldP2")
       .projection("r.p1 as oldP1", "r.p2 as oldP2")
-      .directedRelationshipByIdSeek("r", "a", "b", Set.empty, rs.map(_.getId): _*)
+      .relationshipByIdSeek("(a)-[r]->(b)", Set.empty, rs.map(_.getId): _*)
       .build(readOnly = false)
 
     // then
@@ -266,7 +268,7 @@ abstract class SetRelationshipPropertiesTestBase[CONTEXT <: RuntimeContext](
       .setRelationshipProperties("r", ("p1", "2"), ("p2", "2"))
       .cacheProperties("r.p1", "r.p2")
       .setRelationshipProperties("r", ("p1", "1"), ("p2", "1"))
-      .directedRelationshipByIdSeek("r", "a", "b", Set.empty, r.getId)
+      .relationshipByIdSeek("(a)-[r]->(b)", Set.empty, r.getId)
       .build(readOnly = false)
 
     // then
@@ -287,7 +289,7 @@ abstract class SetRelationshipPropertiesTestBase[CONTEXT <: RuntimeContext](
       .produceResults("p1", "p2")
       .projection("r.p1 as p1", "r.p2 as p2")
       .setRelationshipProperties("r", ("p1", "null"), ("p2", "null"))
-      .directedRelationshipByIdSeek("r", "a", "b", Set.empty, r.getId)
+      .relationshipByIdSeek("(a)-[r]->(b)", Set.empty, r.getId)
       .build(readOnly = false)
 
     // then
@@ -317,7 +319,7 @@ abstract class SetRelationshipPropertiesTestBase[CONTEXT <: RuntimeContext](
 
     // then
     val runtimeResult: RecordingRuntimeResult = execute(logicalQuery, runtime, input)
-    runtimeResult should beColumns("p1", "p2").withRows(Seq(Array(3, 3), Array(null, null))).withStatistics(
+    runtimeResult should beColumns("p1", "p2").withRows(Seq(Array(3, 3), Array[Any](null, null))).withStatistics(
       propertiesSet = 2
     )
   }
@@ -335,7 +337,7 @@ abstract class SetRelationshipPropertiesTestBase[CONTEXT <: RuntimeContext](
       .produceResults("p1", "p2")
       .projection("r.p1 as p1", "r.p2 as p2")
       .setRelationshipProperties("r", ("p1", "sin(null)"), ("p2", "cos(null)"))
-      .directedRelationshipByIdSeek("r", "a", "b", Set.empty, r.getId)
+      .relationshipByIdSeek("(a)-[r]->(b)", Set.empty, r.getId)
       .build(readOnly = false)
 
     // then
@@ -357,7 +359,7 @@ abstract class SetRelationshipPropertiesTestBase[CONTEXT <: RuntimeContext](
       .produceResults("p1", "p2")
       .projection("r.p1 as p1", "r.p2 as p2")
       .setRelationshipProperties("r", ("p1", "100"), ("p2", "100"))
-      .directedRelationshipByIdSeek("r", "a", "b", Set.empty, r.getId)
+      .relationshipByIdSeek("(a)-[r]->(b)", Set.empty, r.getId)
       .build(readOnly = false)
 
     // then

@@ -26,9 +26,10 @@ import org.neo4j.internal.schema.AllIndexProviderDescriptors
 import org.neo4j.internal.schema.IndexCapability
 import org.neo4j.internal.schema.IndexProviderDescriptor
 import org.neo4j.internal.schema.IndexQuery.IndexQueryType
-import org.neo4j.kernel.api.impl.schema.TextIndexProvider
+import org.neo4j.kernel.api.impl.schema.text.TextIndexProvider
 import org.neo4j.kernel.impl.index.schema.PointIndexProvider
 import org.neo4j.kernel.impl.index.schema.RangeIndexProvider
+import org.neo4j.values.storable.RandomValuesUtils
 import org.neo4j.values.storable.ValueCategory
 import org.neo4j.values.storable.ValueGroup
 import org.neo4j.values.storable.ValueType
@@ -37,13 +38,37 @@ import org.scalactic.source.Position
 trait PropertyIndexTestSupport[CONTEXT <: RuntimeContext] {
   self: RuntimeTestSuite[CONTEXT] =>
 
-  private val defaultSupportedTypes: Seq[ValueType] = {
-    val unsupportedTypes = Set(ValueType.CHAR, ValueType.CHAR_ARRAY, ValueType.BYTE, ValueType.BYTE_ARRAY)
-    ValueType.values().toSeq.filterNot(unsupportedTypes.contains)
+  private lazy val defaultSupportedTypes: Seq[ValueType] = {
+    val unsupportedTypes = Set(
+      ValueType.CHAR,
+      ValueType.CHAR_ARRAY,
+      ValueType.BYTE,
+      ValueType.BYTE_ARRAY,
+      // TODO UID, UID_ARRAY, VECTOR_ARRAY disabled due to not finding a way to figure it out correctly for db/version
+      ValueType.UUID,
+      ValueType.UUID_ARRAY,
+      ValueType.VECTOR_ARRAY,
+      ValueType.FLOAT16_VECTOR,
+      ValueType.BFLOAT16_VECTOR
+    )
+    // graphDb can be null for some tests
+    val unsupportedVectorTypes: Set[ValueType] =
+      if (graphDb != null && RandomValuesUtils.selectStorageEngineDependentConfiguration(graphDb).includeVectorTypes())
+        Set.empty
+      else Set(
+        ValueType.INT8_VECTOR,
+        ValueType.INT16_VECTOR,
+        ValueType.INT32_VECTOR,
+        ValueType.INT64_VECTOR,
+        ValueType.FLOAT32_VECTOR,
+        ValueType.FLOAT64_VECTOR
+      )
+
+    (ValueType.ALL_TYPES.toSet -- unsupportedTypes -- unsupportedVectorTypes).toSeq.sorted
   }
 
   // Parallel has no support for functions so we are limited to values that have literals
-  protected val parallelSupportedTypes: Seq[ValueType] = {
+  protected lazy val parallelSupportedTypes: Seq[ValueType] = {
     val supportedGroups = Set(
       ValueGroup.NUMBER,
       ValueGroup.NUMBER_ARRAY,

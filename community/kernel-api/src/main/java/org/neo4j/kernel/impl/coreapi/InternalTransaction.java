@@ -19,6 +19,7 @@
  */
 package org.neo4j.kernel.impl.coreapi;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -31,6 +32,7 @@ import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.api.ResourceMonitor;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.impl.core.TransactionalEntityFactory;
+import org.neo4j.monitoring.ExceptionHandlerService;
 import org.neo4j.values.ElementIdMapper;
 
 public interface InternalTransaction extends Transaction, TransactionalEntityFactory, ResourceMonitor {
@@ -53,6 +55,8 @@ public interface InternalTransaction extends Transaction, TransactionalEntityFac
      */
     RoutingInfo routingInfo();
 
+    List<String> bookmarks();
+
     KernelTransaction.Revertable overrideWith(SecurityContext context);
 
     Optional<Status> terminationReason();
@@ -73,5 +77,7 @@ public interface InternalTransaction extends Transaction, TransactionalEntityFac
 
     ElementIdMapper elementIdMapper();
 
-    void commit(KernelTransaction.KernelTransactionMonitor monitor);
+    void commit(KernelTransaction.Monitor monitor);
+
+    ExceptionHandlerService exceptionHandlerService();
 }

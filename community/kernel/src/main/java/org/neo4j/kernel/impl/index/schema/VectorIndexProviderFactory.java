@@ -19,6 +19,7 @@
  */
 package org.neo4j.kernel.impl.index.schema;
 
+import static org.neo4j.kernel.KernelVersion.VERSION_LUCENE_10_INTRODUCED;
 import static org.neo4j.kernel.api.impl.index.storage.DirectoryFactory.directoryFactory;
 import static org.neo4j.kernel.api.index.IndexDirectoryStructure.directoriesByProvider;
 
@@ -32,9 +33,11 @@ import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.KernelVersionProvider;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneContext;
 import org.neo4j.kernel.api.impl.schema.vector.VectorIndexProvider;
 import org.neo4j.kernel.api.impl.schema.vector.VectorIndexVersion;
-import org.neo4j.logging.InternalLog;
+import org.neo4j.logging.InternalLogProvider;
 import org.neo4j.monitoring.Monitors;
 import org.neo4j.scheduler.JobScheduler;
 import org.neo4j.token.TokenHolders;
@@ -63,23 +66,31 @@ public class VectorIndexProviderFactory extends AbstractIndexProviderFactory<Vec
             Monitors monitors,
             String monitorTag,
             Config config,
+            KernelVersionProvider kernelVersionProvider,
             DatabaseReadOnlyChecker readOnlyDatabaseChecker,
             RecoveryCleanupWorkCollector recoveryCleanupWorkCollector,
             DatabaseLayout databaseLayout,
-            InternalLog log,
+            InternalLogProvider logProvider,
             TokenHolders tokenHolders,
             JobScheduler scheduler,
             CursorContextFactory contextFactory,
             PageCacheTracer pageCacheTracer,
             DependencyResolver dependencyResolver) {
+        LuceneContext luceneContext = version.minimumRequiredKernelVersion().isLessThan(VERSION_LUCENE_10_INTRODUCED)
+                ? LuceneContext.LUCENE_9
+                : LuceneContext.LUCENE_10;
+
         return new VectorIndexProvider(
                 version,
+                luceneContext,
                 fs,
-                directoryFactory(fs),
+                directoryFactory(luceneContext, fs),
                 directoriesByProvider(databaseLayout.databaseDirectory()),
                 monitors,
                 config,
+                kernelVersionProvider,
                 readOnlyDatabaseChecker,
-                scheduler);
+                scheduler,
+                logProvider);
     }
 }

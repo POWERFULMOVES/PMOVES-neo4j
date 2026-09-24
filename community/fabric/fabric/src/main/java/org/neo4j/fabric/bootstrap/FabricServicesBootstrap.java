@@ -20,20 +20,19 @@
 package org.neo4j.fabric.bootstrap;
 
 import static org.neo4j.scheduler.Group.CYPHER_CACHE;
-import static org.neo4j.scheduler.Group.FABRIC_WORKER;
 import static org.neo4j.scheduler.JobMonitoringParams.systemJob;
 
-import java.util.concurrent.Executor;
 import org.neo4j.bolt.dbapi.BoltGraphDatabaseManagementServiceSPI;
 import org.neo4j.collection.Dependencies;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.cypher.internal.cache.ExecutorBasedCaffeineCacheFactory;
 import org.neo4j.cypher.internal.config.CypherConfiguration;
-import org.neo4j.cypher.internal.frontend.phases.InternalSyntaxUsageStats;
+import org.neo4j.cypher.internal.frontend.phases.InternalUsageStats;
 import org.neo4j.dbms.api.DatabaseManagementService;
 import org.neo4j.dbms.database.DatabaseContext;
 import org.neo4j.dbms.database.DatabaseContextProvider;
+import org.neo4j.dbms.systemgraph.DefaultQueryLanguageLookup;
 import org.neo4j.fabric.FabricDatabaseManager;
 import org.neo4j.fabric.bolt.BoltFabricDatabaseManagementService;
 import org.neo4j.fabric.bookmark.LocalGraphTransactionIdTracker;
@@ -133,7 +132,7 @@ public abstract class FabricServicesBootstrap extends CommonQueryRouterBootstrap
 
         var globalProcedures = resolve(GlobalProcedures.class);
 
-        var internalSyntaxUsageStats = resolve(InternalSyntaxUsageStats.class);
+        var internalSyntaxUsageStats = resolve(InternalUsageStats.class);
 
         var executor = jobScheduler.executor(Group.FABRIC_WORKER);
 
@@ -161,19 +160,18 @@ public abstract class FabricServicesBootstrap extends CommonQueryRouterBootstrap
         var planner =
                 register(new FabricPlanner(fabricConfig, cypherConfig, monitors, cacheFactory), FabricPlanner.class);
         var useEvaluation = register(new UseEvaluation(), UseEvaluation.class);
+        var defaultQueryLanguageLookup = resolve(DefaultQueryLanguageLookup.class);
 
-        register(new FabricReactorHooksService(errorReporter), FabricReactorHooksService.class);
-
-        Executor fabricWorkerExecutor = jobScheduler.executor(FABRIC_WORKER);
         var fabricExecutor = new FabricExecutor(
                 fabricConfig,
                 planner,
                 useEvaluation,
                 internalLogProvider,
                 statementLifecycles,
-                fabricWorkerExecutor,
+                executor,
                 monitors,
                 internalSyntaxUsageStats,
+                defaultQueryLanguageLookup,
                 systemNanoClock);
         register(fabricExecutor, FabricExecutor.class);
         return createBoltDatabaseManagementServiceProvider();

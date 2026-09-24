@@ -27,50 +27,72 @@ import org.neo4j.internal.helpers.collection.Iterables;
 /**
  * Contains logic around a single or multiple :ID columns, the combined value and also which parts are stored
  * as properties on the node.
+ * <p>
+ * An empty id column still contributes a (null) part, so that a part's position in the combined value is stable
+ * regardless of which parts are empty. Such a part contributes nothing but the delimiter to the combined value.
+ * An id where every part is empty is no id at all, i.e. {@link #isEmpty()}.
  */
-class IdValueBuilder {
+public class IdValueBuilder {
+    public static final char DELIMITER = '\u0007'; // BEL char
+    private final boolean delimitIDs;
     private final List<Part> parts = new ArrayList<>();
+    private final StringBuilder builder = new StringBuilder();
+    private boolean hasNonNullParts;
     private Group group;
 
-    void clear() {
+    public IdValueBuilder(boolean delimitIds) {
+        this.delimitIDs = delimitIds;
+    }
+
+    public void clear() {
         parts.clear();
+        hasNonNullParts = false;
         group = null;
     }
 
-    void part(Object value, Header.Entry entry) {
+    public void part(Object value, Header.Entry entry) {
         if (group != null && !entry.group().equals(group)) {
             throw new IllegalStateException(
                     "Multiple ID columns for different groups:" + group + " and " + entry.group());
         }
         parts.add(new Part(entry.name(), value));
+        if (value != null) {
+            hasNonNullParts = true;
+        }
         this.group = entry.group();
     }
 
-    Object value() {
-        return switch (parts.size()) {
-            case 0 -> null;
-            case 1 -> parts.get(0).value;
-            default -> {
-                var result = new StringBuilder();
-                for (var part : parts) {
-                    result.append(part.value);
-                }
-                yield result.toString();
+    public Object value() {
+        if (!hasNonNullParts) {
+            return null;
+        }
+        if (parts.size() == 1) {
+            return parts.getFirst().value;
+        }
+        builder.setLength(0);
+        for (int i = 0; i < parts.size(); i++) {
+            if (i > 0 && delimitIDs) {
+                builder.append(DELIMITER);
             }
-        };
+            Object value = parts.get(i).value;
+            if (value != null) {
+                builder.append(value);
+            }
+        }
+        return builder.toString();
     }
 
-    Group group() {
+    public Group group() {
         return group;
     }
 
-    Iterable<Part> idPropertyValues() {
-        return Iterables.filter(p -> p.name != null, parts);
+    public Iterable<Part> idPropertyValues() {
+        return Iterables.filter(parts, p -> p.name != null && p.value != null);
     }
 
-    boolean isEmpty() {
-        return parts.isEmpty();
+    public boolean isEmpty() {
+        return !hasNonNullParts;
     }
 
-    record Part(String name, Object value) {}
+    public record Part(String name, Object value) {}
 }

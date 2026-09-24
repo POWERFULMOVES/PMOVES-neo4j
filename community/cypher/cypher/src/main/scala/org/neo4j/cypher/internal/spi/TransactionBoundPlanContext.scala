@@ -25,19 +25,27 @@ import org.neo4j.cypher.internal.LastCommittedTxIdProvider
 import org.neo4j.cypher.internal.frontend.phases.DeprecationInfo
 import org.neo4j.cypher.internal.frontend.phases.FieldSignature
 import org.neo4j.cypher.internal.frontend.phases.ProcedureSignature
-import org.neo4j.cypher.internal.frontend.phases.QualifiedName
+import org.neo4j.cypher.internal.frontend.phases.QueryLanguage
+import org.neo4j.cypher.internal.frontend.phases.QueryLanguage.toCypherVersion
 import org.neo4j.cypher.internal.frontend.phases.QueryLanguage.toKernelScope
+import org.neo4j.cypher.internal.frontend.phases.ScopedProcedureSignatureResolver
 import org.neo4j.cypher.internal.frontend.phases.UserFunctionSignature
 import org.neo4j.cypher.internal.logical.plans.CanGetValue
 import org.neo4j.cypher.internal.logical.plans.DoNotGetValue
+import org.neo4j.cypher.internal.notification.InternalNotificationLogger
 import org.neo4j.cypher.internal.planner.spi.DatabaseMode
 import org.neo4j.cypher.internal.planner.spi.DatabaseMode.DatabaseMode
-import org.neo4j.cypher.internal.planner.spi.EventuallyConsistent
+import org.neo4j.cypher.internal.planner.spi.GraphStatistics
 import org.neo4j.cypher.internal.planner.spi.IndexDescriptor
+import org.neo4j.cypher.internal.planner.spi.IndexLookupError
 import org.neo4j.cypher.internal.planner.spi.IndexOrderCapability
 import org.neo4j.cypher.internal.planner.spi.InstrumentedGraphStatistics
 import org.neo4j.cypher.internal.planner.spi.MutableGraphStatisticsSnapshot
+import org.neo4j.cypher.internal.planner.spi.NodeFulltextIndexDescriptor
+import org.neo4j.cypher.internal.planner.spi.NodeVectorIndexDescriptor
 import org.neo4j.cypher.internal.planner.spi.PlanContext
+import org.neo4j.cypher.internal.planner.spi.RelationshipFulltextIndexDescriptor
+import org.neo4j.cypher.internal.planner.spi.RelationshipVectorIndexDescriptor
 import org.neo4j.cypher.internal.planner.spi.TokenIndexDescriptor
 import org.neo4j.cypher.internal.runtime.interpreted.TransactionBoundReadTokenContext
 import org.neo4j.cypher.internal.runtime.interpreted.TransactionalContextWrapper
@@ -45,8 +53,9 @@ import org.neo4j.cypher.internal.spi.procsHelpers.asCypherProcedureSignature
 import org.neo4j.cypher.internal.spi.procsHelpers.asCypherType
 import org.neo4j.cypher.internal.spi.procsHelpers.asCypherValue
 import org.neo4j.cypher.internal.spi.procsHelpers.asOption
-import org.neo4j.cypher.internal.util.InternalNotificationLogger
+import org.neo4j.cypher.internal.util.FunctionName
 import org.neo4j.cypher.internal.util.LabelId
+import org.neo4j.cypher.internal.util.ProcedureName
 import org.neo4j.cypher.internal.util.PropertyKeyId
 import org.neo4j.cypher.internal.util.RelTypeId
 import org.neo4j.exceptions.KernelException
@@ -56,9 +65,11 @@ import org.neo4j.internal.kernel.api.exceptions.schema.IndexNotFoundKernelExcept
 import org.neo4j.internal.kernel.api.procs
 import org.neo4j.internal.schema
 import org.neo4j.internal.schema.ConstraintDescriptor
+import org.neo4j.internal.schema.EndpointType
+import org.neo4j.internal.schema.IndexType
 import org.neo4j.internal.schema.SchemaDescriptor
 import org.neo4j.internal.schema.SchemaDescriptors
-import org.neo4j.internal.schema.constraints.SchemaValueType
+import org.neo4j.internal.schema.constraints.ConstrainableType
 import org.neo4j.kernel.api.KernelTransaction
 import org.neo4j.kernel.impl.query.TransactionalContext
 import org.neo4j.logging.InternalLog
@@ -72,7 +83,8 @@ object TransactionBoundPlanContext {
     tc: TransactionalContextWrapper,
     logger: InternalNotificationLogger,
     log: InternalLog,
-    cypherVersion: CypherVersion
+    cypherVersion: CypherVersion,
+    graphStatisticsDecorator: GraphStatistics => GraphStatistics
   ): TransactionBoundPlanContext = {
 
     val statistics = TransactionBoundGraphStatistics(tc.dataRead, tc.schemaRead, log)
@@ -80,13 +92,29 @@ object TransactionBoundPlanContext {
     new TransactionBoundPlanContext(
       tc,
       logger,
-      InstrumentedGraphStatistics(statistics, new MutableGraphStatisticsSnapshot()),
+      InstrumentedGraphStatistics(graphStatisticsDecorator(statistics), new MutableGraphStatisticsSnapshot()),
       cypherVersion
     )
   }
 
-  def procedureSignature(tx: KernelTransaction, name: QualifiedName, version: CypherVersion): ProcedureSignature = {
-    val kn = new procs.QualifiedName(name.namespace.toArray, name.name)
+  def resolver(tc: TransactionalContextWrapper, cypherVersion: CypherVersion): ScopedProcedureSignatureResolver =
+    new ScopedProcedureSignatureResolver {
+      val other: QueryLanguage = QueryLanguage.otherVersion(QueryLanguage.from(cypherVersion))
+      override def procedureSignature(name: ProcedureName): ProcedureSignature =
+        TransactionBoundPlanContext.procedureSignature(tc.kernelTransaction, name, cypherVersion)
+      override def functionSignature(name: FunctionName): Option[UserFunctionSignature] =
+        TransactionBoundPlanContext.functionSignature(tc.kernelTransaction, name, cypherVersion)
+      override def procedureSignatureVersion: Long =
+        tc.procedures.signatureVersion
+      override def queryLanguage: QueryLanguage =
+        QueryLanguage.from(cypherVersion)
+
+      override def functionSignatureInOtherVersion(name: FunctionName): Option[UserFunctionSignature] =
+        TransactionBoundPlanContext.functionSignature(tc.kernelTransaction, name, toCypherVersion(other))
+    }
+
+  def procedureSignature(tx: KernelTransaction, name: ProcedureName, version: CypherVersion): ProcedureSignature = {
+    val kn = new procs.QualifiedName(name.namespace.parts.toArray, name.name)
     val procedures = tx.procedures()
     val handle = procedures.procedureGet(kn, toKernelScope(version))
 
@@ -95,10 +123,10 @@ object TransactionBoundPlanContext {
 
   def functionSignature(
     tx: KernelTransaction,
-    name: QualifiedName,
+    name: FunctionName,
     version: CypherVersion
   ): Option[UserFunctionSignature] = {
-    val kn = new procs.QualifiedName(name.namespace.toArray, name.name)
+    val kn = new procs.QualifiedName(name.namespace.parts.toArray, name.name)
     val procedures = tx.procedures()
     val func = procedures.functionGet(kn, toKernelScope(version))
 
@@ -190,6 +218,94 @@ class TransactionBoundPlanContext(
     tc.schemaRead.getRelTypeIndexesNonLocking(relTypeId).asScala
       .filter(selector)
       .flatMap(getOnlineIndex)
+  }
+
+  def nodeVectorIndexByName(indexName: String): Either[IndexLookupError, NodeVectorIndexDescriptor] =
+    indexByName(
+      indexName,
+      IndexType.VECTOR,
+      EntityType.NODE,
+      LabelId.apply,
+      (labels, props) => NodeVectorIndexDescriptor(labels, props.head, props.tail)
+    )
+
+  def relationshipVectorIndexByName(indexName: String): Either[IndexLookupError, RelationshipVectorIndexDescriptor] =
+    indexByName(
+      indexName,
+      IndexType.VECTOR,
+      EntityType.RELATIONSHIP,
+      RelTypeId.apply,
+      (types, props) => RelationshipVectorIndexDescriptor(types, props.head, props.tail)
+    )
+
+  def nodeFulltextIndexByName(indexName: String): Either[IndexLookupError, NodeFulltextIndexDescriptor] =
+    indexByName(
+      indexName,
+      IndexType.FULLTEXT,
+      EntityType.NODE,
+      LabelId.apply,
+      (labels, props) => NodeFulltextIndexDescriptor(labels, props)
+    )
+
+  def relationshipFulltextIndexByName(indexName: String)
+    : Either[IndexLookupError, RelationshipFulltextIndexDescriptor] =
+    indexByName(
+      indexName,
+      IndexType.FULLTEXT,
+      EntityType.RELATIONSHIP,
+      RelTypeId.apply,
+      (types, props) => RelationshipFulltextIndexDescriptor(types, props)
+    )
+
+  private def indexByName[T, D](
+    indexName: String,
+    requiredIndexType: IndexType,
+    requiredEntityType: EntityType,
+    toTokenId: Int => T,
+    build: (Seq[T], Seq[PropertyKeyId]) => D
+  ): Either[IndexLookupError, D] = {
+    val indexDescriptor = tc.schemaRead.indexGetForName(indexName)
+    for {
+      _ <- ensureIndexExists(indexDescriptor)
+      _ <- ensureIndexType(indexDescriptor, requiredIndexType)
+      tokenIds <- validateEntityType(indexDescriptor, requiredEntityType, toTokenId)
+      propertyIds = indexDescriptor.schema().getPropertyIds.map(PropertyKeyId.apply).toSeq
+      _ <- ensureIndexCanBeUsed(indexDescriptor)
+    } yield build(tokenIds, propertyIds)
+  }
+
+  final private def ensureIndexExists(indexDescriptor: schema.IndexDescriptor)
+    : Either[IndexLookupError.NotFound.type, Unit] = {
+    Either.cond(indexDescriptor != schema.IndexDescriptor.NO_INDEX, (), IndexLookupError.NotFound)
+  }
+
+  final private def ensureIndexType(
+    indexDescriptor: schema.IndexDescriptor,
+    requiredIndexType: IndexType
+  ): Either[IndexLookupError.WrongIndexType, Unit] = {
+    val actual = indexDescriptor.getIndexType
+    Either.cond(actual == requiredIndexType, (), IndexLookupError.WrongIndexType(requiredIndexType, actual))
+  }
+
+  final private def validateEntityType[T](
+    indexDescriptor: schema.IndexDescriptor,
+    requiredEntityType: EntityType,
+    toTokenId: Int => T
+  ): Either[IndexLookupError.WrongEntityType, Seq[T]] = {
+    val schema = indexDescriptor.schema()
+    Either.cond(
+      schema.entityType() == requiredEntityType,
+      schema.getEntityTokenIds.toSeq.map(toTokenId),
+      IndexLookupError.WrongEntityType(requiredEntityType, schema.entityType())
+    )
+  }
+
+  final private def ensureIndexCanBeUsed(indexDescriptor: schema.IndexDescriptor): Either[IndexLookupError, Unit] = {
+    val indexState = tc.schemaRead.indexGetStateNonLocking(indexDescriptor)
+    for {
+      _ <- Either.cond(indexState != InternalIndexState.POPULATING, (), IndexLookupError.Populating)
+      _ <- Either.cond(indexCanBeUsed(indexDescriptor), (), IndexLookupError.NotFound)
+    } yield ()
   }
 
   override def propertyIndexesGetAll(): Iterator[IndexDescriptor] =
@@ -295,66 +411,82 @@ class TransactionBoundPlanContext(
     pointIndexGetForRelTypeAndProperties(relTypeName, propertyKey).isDefined
   }
 
-  private def getOnlineIndex(reference: schema.IndexDescriptor): Option[IndexDescriptor] = {
+  private def getOnlineIndex(reference: schema.IndexDescriptor): Option[IndexDescriptor] =
+    if (indexCanBeUsed(reference) && reference.schema.getPropertyIds.nonEmpty) {
+      val entityType = {
+        val tokenId = reference.schema().getEntityTokenIds()(0)
+        reference.schema().entityType() match {
+          case EntityType.NODE         => IndexDescriptor.EntityType.Node(LabelId(tokenId))
+          case EntityType.RELATIONSHIP => IndexDescriptor.EntityType.Relationship(RelTypeId(tokenId))
+        }
+      }
+
+      val properties = reference.schema.getPropertyIds.map(PropertyKeyId.apply)
+      val isUnique = reference.isUnique
+      val behaviours = reference.getCapability.behaviours().map(kernelToCypher).toSet
+      val orderCapability =
+        if (reference.getCapability.supportsOrdering()) {
+          IndexOrderCapability.BOTH
+        } else {
+          IndexOrderCapability.NONE
+        }
+      val valueCapability =
+        if (reference.getCapability.supportsReturningValues()) {
+          CanGetValue
+        } else {
+          DoNotGetValue
+        }
+
+      kernelToCypher(reference.getIndexType).map { indexType =>
+        IndexDescriptor(
+          indexType,
+          entityType,
+          properties,
+          behaviours,
+          orderCapability,
+          valueCapability,
+          Some(reference.getCapability),
+          isUnique
+        )
+      }
+    } else {
+      None
+    }
+
+  private def indexCanBeUsed(reference: schema.IndexDescriptor): Boolean =
     try {
       tc.schemaRead.indexGetStateNonLocking(reference) match {
-        case InternalIndexState.ONLINE if reference.schema.getPropertyIds.nonEmpty =>
-          val entityType = {
-            val tokenId = reference.schema().getEntityTokenIds()(0)
-            reference.schema().entityType() match {
-              case EntityType.NODE         => IndexDescriptor.EntityType.Node(LabelId(tokenId))
-              case EntityType.RELATIONSHIP => IndexDescriptor.EntityType.Relationship(RelTypeId(tokenId))
-            }
-          }
-
-          val properties = reference.schema.getPropertyIds.map(PropertyKeyId)
-          val isUnique = reference.isUnique
-          val behaviours = reference.getCapability.behaviours().map(kernelToCypher).toSet
-          val orderCapability =
-            if (reference.getCapability.supportsOrdering()) {
-              IndexOrderCapability.BOTH
-            } else {
-              IndexOrderCapability.NONE
-            }
-          val valueCapability =
-            if (reference.getCapability.supportsReturningValues()) {
-              CanGetValue
-            } else {
-              DoNotGetValue
-            }
-          if (behaviours.contains(EventuallyConsistent)) {
+        case InternalIndexState.ONLINE =>
+          val shouldBeIgnored =
             // Ignore eventually consistent indexes. Those are for explicit querying via procedures.
-            None
-          } else if (isUnique && (tc.schemaRead.indexGetOwningUniquenessConstraintIdNonLocking(reference) eq null)) {
-            // Unique indexes must have a matching constraint. If not, something went wrong during constraint creation.
-            // Shouldn't really happen.
-            None
-          } else {
-            kernelToCypher(reference.getIndexType) map { indexType =>
-              IndexDescriptor(
-                indexType,
-                entityType,
-                properties,
-                behaviours,
-                orderCapability,
-                valueCapability,
-                Some(reference.getCapability),
-                isUnique
-              )
-            }
-          }
-        case _ => None
+            reference.getCapability.behaviours().contains(schema.IndexBehaviour.EVENTUALLY_CONSISTENT) ||
+              // Unique indexes must have a matching constraint. If not, something went wrong during constraint creation.
+              // Shouldn't really happen.
+              reference.isUnique && (tc.schemaRead.indexGetOwningUniquenessConstraintIdNonLocking(reference) eq null)
+
+          !shouldBeIgnored
+
+        case _ =>
+          false
       }
     } catch {
       case _: IndexNotFoundKernelException =>
         // The index may be dropped after acquiring the reference.
-        None
+        false
+    }
+
+  private def indexExistsAndIsOnline(index: schema.IndexDescriptor): Boolean = {
+    try {
+      tc.schemaRead.indexGetStateNonLocking(index) == InternalIndexState.ONLINE
+    } catch {
+      case _: IndexNotFoundKernelException => false
     }
   }
 
   private def getTokenIndexDescriptor(indexes: java.util.Iterator[schema.IndexDescriptor])
     : Option[TokenIndexDescriptor] = {
     indexes.asScala
+      .filter(indexExistsAndIsOnline)
       .nextOption()
       .map { kernelIndexDescriptor =>
         val typ = kernelIndexDescriptor.schema().entityType()
@@ -454,7 +586,7 @@ class TransactionBoundPlanContext(
   override def hasNodePropertyTypeConstraint(
     labelName: String,
     propertyKey: String,
-    cypherType: SchemaValueType
+    cypherType: ConstrainableType
   ): Boolean = {
     getNodePropertiesWithTypeConstraint(labelName).get(propertyKey) match {
       case Some(Seq(`cypherType`)) => true
@@ -462,7 +594,7 @@ class TransactionBoundPlanContext(
     }
   }
 
-  override def getNodePropertiesWithTypeConstraint(labelName: String): Map[String, Seq[SchemaValueType]] = {
+  override def getNodePropertiesWithTypeConstraint(labelName: String): Map[String, Seq[ConstrainableType]] = {
     try {
       val labelId = getLabelId(labelName)
 
@@ -483,7 +615,7 @@ class TransactionBoundPlanContext(
   override def hasRelationshipPropertyTypeConstraint(
     relTypeName: String,
     propertyKey: String,
-    cypherType: SchemaValueType
+    cypherType: ConstrainableType
   ): Boolean = {
     getRelationshipPropertiesWithTypeConstraint(relTypeName).get(propertyKey) match {
       case Some(Seq(`cypherType`)) => true
@@ -491,7 +623,7 @@ class TransactionBoundPlanContext(
     }
   }
 
-  override def getRelationshipPropertiesWithTypeConstraint(relTypeName: String): Map[String, Seq[SchemaValueType]] = {
+  override def getRelationshipPropertiesWithTypeConstraint(relTypeName: String): Map[String, Seq[ConstrainableType]] = {
     try {
       val relTypeId = getRelTypeId(relTypeName)
 
@@ -510,14 +642,56 @@ class TransactionBoundPlanContext(
     }
   }
 
+  override def hasRelationshipEndpointLabelConstraint(
+    relTypeName: String,
+    labelName: String,
+    endpointType: EndpointType
+  ): Boolean =
+    getRelationshipEndpointLabelConstraints(relTypeName).get(endpointType).contains(labelName)
+
+  override def getRelationshipEndpointLabelConstraints(relTypeName: String): Map[EndpointType, String] = {
+    try {
+      val relTypeId = getRelTypeId(relTypeName)
+
+      tc.schemaRead
+        .constraintsGetForRelationshipTypeNonLocking(relTypeId).asScala
+        .filter(_.isRelationshipEndpointLabelConstraint)
+        .map(_.asRelationshipEndpointLabelConstraint())
+        .map { constraint =>
+          constraint.endpointType() -> getLabelName(constraint.endpointLabelId())
+        }
+        .toMap
+    } catch {
+      case _: KernelException => Map.empty
+    }
+  }
+
+  override def hasNodeLabelConstraint(constrainedLabel: String, impliedLabel: String): Boolean =
+    getNodeLabelConstraints(constrainedLabel).contains(impliedLabel)
+
+  override def getNodeLabelConstraints(constrainedLabel: String): Set[String] =
+    try {
+      val labelId = getLabelId(constrainedLabel)
+
+      tc.schemaRead
+        .constraintsGetForLabelNonLocking(labelId).asScala
+        .filter(_.isNodeLabelExistenceConstraint)
+        .map(_.asNodeLabelExistenceConstraint())
+        .map(_.requiredLabelId())
+        .map(getLabelName)
+        .toSet
+    } catch {
+      case _: KernelException => Set.empty
+    }
+
   override val statistics: InstrumentedGraphStatistics = graphStatistics
 
   override val lastCommittedTxIdProvider: LastCommittedTxIdProvider = LastCommittedTxIdProvider(tc.graph)
 
-  override def procedureSignature(name: QualifiedName): ProcedureSignature =
+  override def procedureSignature(name: ProcedureName): ProcedureSignature =
     TransactionBoundPlanContext.procedureSignature(tc.kernelTransaction, name, cypherVersion)
 
-  override def functionSignature(name: QualifiedName): Option[UserFunctionSignature] =
+  override def functionSignature(name: FunctionName): Option[UserFunctionSignature] =
     TransactionBoundPlanContext.functionSignature(tc.kernelTransaction, name, cypherVersion)
 
   override def notificationLogger(): InternalNotificationLogger = logger
@@ -530,17 +704,39 @@ class TransactionBoundPlanContext(
     new TransactionBoundPlanContext(tc, notificationLogger, graphStatistics, cypherVersion)
 
   override def databaseMode: DatabaseMode = tc.kernelTransactionalContext.databaseMode match {
-    case TransactionalContext.DatabaseMode.SINGLE    => DatabaseMode.SINGLE
-    case TransactionalContext.DatabaseMode.COMPOSITE => DatabaseMode.COMPOSITE
-    case TransactionalContext.DatabaseMode.SHARDED   => DatabaseMode.SHARDED
+    case TransactionalContext.DatabaseMode.SINGLE       => DatabaseMode.SINGLE
+    case TransactionalContext.DatabaseMode.COMPOSITE    => DatabaseMode.COMPOSITE
+    case TransactionalContext.DatabaseMode.SHARDED      => DatabaseMode.SHARDED
+    case TransactionalContext.DatabaseMode.GRAPH_ENGINE => DatabaseMode.GRAPH_ENGINE
   }
 
   override def storageHasPropertyColocation: Boolean = {
     try {
-      tc.kernelTransaction.storageEngineCostCharacteristics().hasPropertyColocation
+      tc.kernelTransaction.storageEngineCharacteristics().hasPropertyColocation
     } catch {
-      // VirtualKernelTransaction.storageEngineCostCharacteristics throws
+      // VirtualKernelTransaction.storageEngineCharacteristics throws
       case _: Neo4jException => false
     }
   }
+
+  override def storageSupportsFastExpandInto: Boolean =
+    try {
+      tc.kernelTransaction.storageEngineCharacteristics().supportsFastExpandInto()
+    } catch {
+      // VirtualKernelTransaction.storageEngineCharacteristics throws
+      case _: Neo4jException => false
+    }
+
+  override def storageIsMvcc: Boolean =
+    try {
+      tc.kernelTransaction.storageEngineCharacteristics().isMultiVersioned()
+    } catch {
+      // VirtualKernelTransaction.storageEngineCharacteristics throws
+      case _: Neo4jException => false
+    }
+
+  override def queryLanguage: QueryLanguage = QueryLanguage.from(cypherVersion)
+
+  override def functionSignatureInOtherVersion(name: FunctionName): Option[UserFunctionSignature] =
+    TransactionBoundPlanContext.functionSignature(tc.kernelTransaction, name, cypherVersion.otherVersion())
 }

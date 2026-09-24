@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.kernel.impl.api.index.IndexUpdateMode.ONLINE;
 
@@ -34,7 +35,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.neo4j.graphdb.ResourceIterator;
 import org.neo4j.index.internal.gbptree.Layout;
+import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.io.pagecache.PageCache;
+import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.kernel.api.index.IndexAccessor;
 import org.neo4j.kernel.api.index.IndexUpdater;
 import org.neo4j.test.extension.pagecache.PageCacheSupportExtension;
@@ -54,7 +57,11 @@ abstract class IndexAccessorTests<KEY, VALUE, LAYOUT extends Layout<KEY, VALUE>>
         accessor.close();
     }
 
-    abstract IndexAccessor createAccessor(PageCache pageCache) throws IOException;
+    final IndexAccessor createAccessor(PageCache pageCache) throws IOException {
+        return createAccessor(pageCache, indexDescriptor());
+    }
+
+    abstract IndexAccessor createAccessor(PageCache pageCache, IndexDescriptor indexDescriptor) throws IOException;
 
     @Test
     void shouldHandleCloseWithoutCallsToProcess() throws Exception {
@@ -95,8 +102,8 @@ abstract class IndexAccessorTests<KEY, VALUE, LAYOUT extends Layout<KEY, VALUE>>
         try (PageCache pageCache = PageCacheSupportExtension.getPageCache(fs, PageCacheConfig.config())) {
             accessor = createAccessor(pageCache);
             long baseline = pageCacheTracer.flushes();
-            try (var flushEvent = pageCacheTracer.beginFileFlush()) {
-                accessor.force(flushEvent, NULL_CONTEXT);
+            try (FileFlushEvent flushEvent = pageCacheTracer.beginFileFlush()) {
+                accessor.force(flushEvent, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
             }
             long preDrop = pageCacheTracer.flushes();
             assertThat(preDrop).isGreaterThan(baseline);
@@ -117,7 +124,7 @@ abstract class IndexAccessorTests<KEY, VALUE, LAYOUT extends Layout<KEY, VALUE>>
 
         // then
         assertTrue(files.hasNext());
-        assertEquals(indexFiles.getStoreFile(), files.next());
+        assertEquals(indexFiles.getStoreFile().baseSegment(), files.next());
         assertFalse(files.hasNext());
     }
 

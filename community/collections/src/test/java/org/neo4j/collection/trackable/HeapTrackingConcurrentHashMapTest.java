@@ -20,7 +20,6 @@
 package org.neo4j.collection.trackable;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.HashMap;
 import java.util.List;
@@ -36,6 +35,7 @@ import java.util.stream.Stream;
 import org.eclipse.collections.impl.list.Interval;
 import org.eclipse.collections.impl.parallel.ParallelIterate;
 import org.eclipse.collections.impl.tuple.ImmutableEntry;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
 import org.neo4j.memory.EmptyMemoryTracker;
@@ -44,24 +44,30 @@ import org.neo4j.memory.EmptyMemoryTracker;
 public class HeapTrackingConcurrentHashMapTest {
 
     public volatile long volatileLong = 0L;
+    private final ExecutorService executor = Executors.newFixedThreadPool(20);
+
+    @AfterEach
+    void tearDown() {
+        executor.shutdown();
+    }
 
     @Test
-    public void putIfAbsent() {
+    void putIfAbsent() {
         HeapTrackingConcurrentHashMap<Integer, Integer> map = newMapWithKeysValues(1, 1, 2, 2);
-        assertThat(map.putIfAbsent(1, 1)).isEqualTo(1);
+        assertThat(map.putIfAbsent(1, 1)).isOne();
         assertThat(map.putIfAbsent(3, 3)).isNull();
     }
 
     @Test
-    public void replace() {
+    void replace() {
         HeapTrackingConcurrentHashMap<Integer, Integer> map = newMapWithKeysValues(1, 1, 2, 2);
-        assertThat(map.replace(1, 7)).isEqualTo(1);
+        assertThat(map.replace(1, 7)).isOne();
         assertThat(map.get(1)).isEqualTo(7);
         assertThat(map.replace(3, 3)).isNull();
     }
 
     @Test
-    public void entrySetContains() {
+    void entrySetContains() {
         HeapTrackingConcurrentHashMap<String, Integer> map = newMapWithKeysValues("One", 1, "Two", 2, "Three", 3);
         assertThat(map.entrySet()).doesNotContainNull();
         assertThat(map.entrySet()).doesNotContain(entry("Zero", 0));
@@ -69,7 +75,7 @@ public class HeapTrackingConcurrentHashMapTest {
     }
 
     @Test
-    public void entrySetRemove() {
+    void entrySetRemove() {
         HeapTrackingConcurrentHashMap<String, Integer> map = newMapWithKeysValues("One", 1, "Two", 2, "Three", 3);
         assertThat(map.entrySet().remove(null)).isFalse();
         assertThat(map.entrySet().remove(entry("Zero", 0))).isFalse();
@@ -77,7 +83,7 @@ public class HeapTrackingConcurrentHashMapTest {
     }
 
     @Test
-    public void replaceWithOldValue() {
+    void replaceWithOldValue() {
         HeapTrackingConcurrentHashMap<Integer, Integer> map = newMapWithKeysValues(1, 1, 2, 2);
 
         assertThat(map.replace(1, 1, 7)).isTrue();
@@ -86,7 +92,7 @@ public class HeapTrackingConcurrentHashMapTest {
     }
 
     @Test
-    public void removeWithKeyValue() {
+    void removeWithKeyValue() {
         HeapTrackingConcurrentHashMap<Integer, Integer> map = newMapWithKeysValues(1, 1, 2, 2);
 
         assertThat(map.remove(1, 1)).isTrue();
@@ -94,31 +100,31 @@ public class HeapTrackingConcurrentHashMapTest {
     }
 
     @Test
-    public void removeFromEntrySet() {
+    void removeFromEntrySet() {
         HeapTrackingConcurrentHashMap<String, Integer> map = newMapWithKeysValues("One", 1, "Two", 2, "Three", 3);
 
         assertThat(map.entrySet().remove(entry("Two", 2))).isTrue();
-        assertThat(Map.of("One", 1, "Three", 3)).isEqualTo(map);
+        assertThat(Map.of("One", 1, "Three", 3)).containsExactlyInAnyOrderEntriesOf(map);
 
         assertThat(map.entrySet().remove(entry("Four", 4))).isFalse();
-        assertThat(Map.of("One", 1, "Three", 3)).isEqualTo(map);
+        assertThat(Map.of("One", 1, "Three", 3)).containsExactlyInAnyOrderEntriesOf(map);
     }
 
     @Test
-    public void removeAllFromEntrySet() {
+    void removeAllFromEntrySet() {
         HeapTrackingConcurrentHashMap<String, Integer> map = newMapWithKeysValues("One", 1, "Two", 2, "Three", 3);
 
         assertThat(map.entrySet().removeAll(List.of(entry("One", 1), entry("Three", 3))))
                 .isTrue();
-        assertThat(Map.of("Two", 2)).isEqualTo(map);
+        assertThat(Map.of("Two", 2)).containsExactlyInAnyOrderEntriesOf(map);
 
         assertThat(map.entrySet().removeAll(List.of(entry("Four", 4)))).isFalse();
-        assertThat(Map.of("Two", 2)).isEqualTo(map);
+        assertThat(Map.of("Two", 2)).containsExactlyInAnyOrderEntriesOf(map);
     }
 
     @SuppressWarnings("RedundantCollectionOperation")
     @RepeatedTest(100)
-    public void concurrentPutGetPutAllRemoveContainsKeyContainsValueGetIfAbsentPutTest() {
+    void concurrentPutGetPutAllRemoveContainsKeyContainsValueGetIfAbsentPutTest() {
         HeapTrackingConcurrentHashMap<Integer, Integer> map1 =
                 HeapTrackingConcurrentHashMap.newMap(EmptyMemoryTracker.INSTANCE);
         HeapTrackingConcurrentHashMap<Integer, Integer> map2 =
@@ -134,30 +140,26 @@ public class HeapTrackingConcurrentHashMapTest {
                     assertThat(each).isEqualTo(map2.get(each));
                     map2.remove(each);
                     assertThat(map2.get(each)).isNull();
-                    assertThat(map2.containsValue(each)).isFalse();
-                    assertThat(map2.containsKey(each)).isFalse();
+                    assertThat(map2).doesNotContainValue(each).doesNotContainKey(each);
                     assertThat(map2.putIfAbsent(each, each)).isNull();
-                    assertThat(map2.containsValue(each)).isTrue();
-                    assertThat(map2.containsKey(each)).isTrue();
+                    assertThat(map2).containsValue(each).containsKey(each);
                     map2.remove(each);
-                    assertThat(map2.containsValue(each)).isFalse();
-                    assertThat(map2.containsKey(each)).isFalse();
+                    assertThat(map2).doesNotContainValue(each).doesNotContainKey(each);
                     assertThat(map2.computeIfAbsent(each, i -> i)).isEqualTo(each);
-                    assertThat(map2.containsValue(each)).isTrue();
-                    assertThat(map2.containsKey(each)).isTrue();
+                    assertThat(map2).containsValue(each).containsKey(each);
                     assertThat(each).isEqualTo(map2.computeIfAbsent(each, i -> i));
                     map2.remove(each);
                     assertThat(map2.putIfAbsent(each, each)).isNull();
                 },
                 1,
-                executor());
-        assertThat(map1).isEqualTo(map2);
+                executor);
+        assertThat(map1).containsExactlyInAnyOrderEntriesOf(map2);
         assertThat(map1).hasSameHashCodeAs(map2);
     }
 
     @SuppressWarnings("RedundantCollectionOperation")
     @RepeatedTest(10)
-    public void concurrentSlowComputeIfAbsentTest() {
+    void concurrentSlowComputeIfAbsentTest() {
         ThreadLocalRandom random = ThreadLocalRandom.current();
 
         HeapTrackingConcurrentHashMap<Integer, Integer> map1 =
@@ -175,14 +177,11 @@ public class HeapTrackingConcurrentHashMapTest {
                     assertThat(each).isEqualTo(map2.get(each));
                     map2.remove(each);
                     assertThat(map2.get(each)).isNull();
-                    assertThat(map2.containsValue(each)).isFalse();
-                    assertThat(map2.containsKey(each)).isFalse();
+                    assertThat(map2).doesNotContainValue(each).doesNotContainKey(each);
                     assertThat(map2.putIfAbsent(each, each)).isNull();
-                    assertThat(map2.containsValue(each)).isTrue();
-                    assertThat(map2.containsKey(each)).isTrue();
+                    assertThat(map2).containsValue(each).containsKey(each);
                     map2.remove(each);
-                    assertThat(map2.containsValue(each)).isFalse();
-                    assertThat(map2.containsKey(each)).isFalse();
+                    assertThat(map2).doesNotContainValue(each).doesNotContainKey(each);
                     assertThat(map2.computeIfAbsent(each, i -> {
                                 long iterations = random.nextLong(500000L, 5000000L);
                                 for (long c = 0L; c < iterations; c++) {
@@ -191,20 +190,19 @@ public class HeapTrackingConcurrentHashMapTest {
                                 return i;
                             }))
                             .isEqualTo(each);
-                    assertThat(map2.containsValue(each)).isTrue();
-                    assertThat(map2.containsKey(each)).isTrue();
+                    assertThat(map2).containsValue(each).containsKey(each);
                     assertThat(each).isEqualTo(map2.computeIfAbsent(each, i -> i));
                     map2.remove(each);
                     assertThat(map2.putIfAbsent(each, each)).isNull();
                 },
                 1,
-                executor());
-        assertThat(map1).isEqualTo(map2);
+                executor);
+        assertThat(map1).containsExactlyInAnyOrderEntriesOf(map2);
         assertThat(map1).hasSameHashCodeAs(map2);
     }
 
     @Test
-    public void concurrentClear() {
+    void concurrentClear() {
         HeapTrackingConcurrentHashMap<Integer, Integer> map =
                 HeapTrackingConcurrentHashMap.newMap(EmptyMemoryTracker.INSTANCE);
         ParallelIterate.forEach(
@@ -216,12 +214,12 @@ public class HeapTrackingConcurrentHashMapTest {
                     map.clear();
                 },
                 1,
-                executor());
+                executor);
         assertThat(map).isEmpty();
     }
 
     @Test
-    public void concurrentRemoveAndPutIfAbsent() {
+    void concurrentRemoveAndPutIfAbsent() {
         HeapTrackingConcurrentHashMap<Integer, Integer> map =
                 HeapTrackingConcurrentHashMap.newMap(EmptyMemoryTracker.INSTANCE);
         ParallelIterate.forEach(
@@ -247,7 +245,7 @@ public class HeapTrackingConcurrentHashMapTest {
                     }
                 },
                 1,
-                executor());
+                executor);
     }
 
     @RepeatedTest(100)
@@ -257,46 +255,47 @@ public class HeapTrackingConcurrentHashMapTest {
         ThreadLocalRandom random = ThreadLocalRandom.current();
 
         int threads = random.nextInt(1, 2 * Runtime.getRuntime().availableProcessors());
-        var executor = Executors.newFixedThreadPool(threads);
-        int key = 42;
-        int value = 1337;
+        try (var executor = Executors.newFixedThreadPool(threads)) {
+            int key = 42;
+            int value = 1337;
 
-        final AtomicBoolean hasBeenCalledMultipleTimes = new AtomicBoolean(false);
-        var callOnce = new Function<Integer, Integer>() {
-            private final AtomicBoolean hasBeenCalled = new AtomicBoolean(false);
+            final AtomicBoolean hasBeenCalledMultipleTimes = new AtomicBoolean(false);
+            var callOnce = new Function<Integer, Integer>() {
+                private final AtomicBoolean hasBeenCalled = new AtomicBoolean(false);
 
-            @Override
-            public Integer apply(Integer anInt) {
-                if (hasBeenCalled.compareAndSet(false, true)) {
-                    try {
-                        Thread.sleep(10);
-                    } catch (InterruptedException e) {
-                        throw new RuntimeException(e);
+                @Override
+                public Integer apply(Integer anInt) {
+                    if (hasBeenCalled.compareAndSet(false, true)) {
+                        try {
+                            Thread.sleep(10);
+                        } catch (InterruptedException e) {
+                            throw new RuntimeException(e);
+                        }
+                    } else {
+                        hasBeenCalledMultipleTimes.set(true);
                     }
-                } else {
-                    hasBeenCalledMultipleTimes.set(true);
+
+                    return value;
                 }
-
-                return value;
+            };
+            var getFailed = new AtomicBoolean(false);
+            executor.submit(new GetContestant(map, key, value, getFailed));
+            for (int i = 0; i < threads; i++) {
+                executor.submit(() -> {
+                    map.computeIfAbsent(key, callOnce);
+                });
             }
-        };
-        var getFailed = new AtomicBoolean(false);
-        executor.submit(new GetContestant(map, key, value, getFailed));
-        for (int i = 0; i < threads; i++) {
-            executor.submit(() -> {
-                map.computeIfAbsent(key, callOnce);
-            });
-        }
 
-        executor.shutdown();
-        assertThat(executor.awaitTermination(1, TimeUnit.MINUTES)).isTrue();
-        assertThat(map.size()).isEqualTo(1);
-        assertThat(hasBeenCalledMultipleTimes.get()).isFalse();
-        assertThat(getFailed.get()).isFalse();
+            executor.shutdown();
+            assertThat(executor.awaitTermination(1, TimeUnit.MINUTES)).isTrue();
+            assertThat(map.size()).isOne();
+            assertThat(hasBeenCalledMultipleTimes.get()).isFalse();
+            assertThat(getFailed.get()).isFalse();
+        }
     }
 
     @Test
-    void concurrentComputeIfAbsent() throws InterruptedException {
+    void concurrentComputeIfAbsent() throws Exception {
         final var seed = new Random().nextLong();
         final var rand = new Random(seed);
 
@@ -309,7 +308,6 @@ public class HeapTrackingConcurrentHashMapTest {
         final var map = HeapTrackingConcurrentHashMap.<Integer, String>newMap(EmptyMemoryTracker.INSTANCE);
         for (final var key : initialKeys) map.put(key, "occupied1");
 
-        final var executor = executor();
         try {
             for (final var key : newKeys) {
                 executor.submit(() -> map.computeIfAbsent(key, k -> "occupied2"));
@@ -319,7 +317,7 @@ public class HeapTrackingConcurrentHashMapTest {
             }
         } finally {
             executor.shutdown();
-            assertTrue(executor.awaitTermination(10, TimeUnit.MINUTES));
+            assertThat(executor.awaitTermination(10, TimeUnit.MINUTES)).isTrue();
         }
 
         final var expected = new HashMap<Integer, String>();
@@ -327,7 +325,7 @@ public class HeapTrackingConcurrentHashMapTest {
         for (final var key : newKeys) expected.put(key, "occupied2");
         assertThat(map)
                 .describedAs("seed=%s", seed)
-                .hasSize(expected.size())
+                .hasSameSizeAs(expected)
                 .containsOnlyKeys(expected.keySet())
                 .containsExactlyInAnyOrderEntriesOf(expected);
     }
@@ -367,9 +365,5 @@ public class HeapTrackingConcurrentHashMapTest {
 
     private <K, V> Map.Entry<K, V> entry(K k, V v) {
         return ImmutableEntry.of(k, v);
-    }
-
-    private ExecutorService executor() {
-        return Executors.newFixedThreadPool(20);
     }
 }

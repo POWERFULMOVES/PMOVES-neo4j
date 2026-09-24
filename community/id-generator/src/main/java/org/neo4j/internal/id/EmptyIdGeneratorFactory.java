@@ -19,22 +19,24 @@
  */
 package org.neo4j.internal.id;
 
-import static java.util.Collections.emptyList;
-
 import java.io.IOException;
 import java.nio.file.OpenOption;
-import java.nio.file.Path;
-import java.util.Collection;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 import org.eclipse.collections.api.set.ImmutableSet;
+import org.eclipse.collections.api.set.primitive.LongSet;
 import org.neo4j.annotations.documented.ReporterFactory;
+import org.neo4j.collection.PrimitiveLongResourceCollections;
+import org.neo4j.collection.PrimitiveLongResourceIterator;
 import org.neo4j.configuration.Config;
 import org.neo4j.internal.helpers.progress.ProgressMonitorFactory;
 import org.neo4j.internal.id.range.PageIdRange;
+import org.neo4j.io.async.AsyncBlockAccessor;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.context.OldestVisibilityHorizonFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 
 public class EmptyIdGeneratorFactory implements IdGeneratorFactory {
@@ -45,7 +47,7 @@ public class EmptyIdGeneratorFactory implements IdGeneratorFactory {
     @Override
     public IdGenerator open(
             PageCache pageCache,
-            Path filename,
+            StoreFile storeFile,
             IdType idType,
             LongSupplier highIdScanner,
             long maxId,
@@ -61,7 +63,7 @@ public class EmptyIdGeneratorFactory implements IdGeneratorFactory {
     @Override
     public IdGenerator create(
             PageCache pageCache,
-            Path filename,
+            StoreFile storeFile,
             IdType idType,
             long highId,
             boolean throwIfFileExists,
@@ -90,11 +92,6 @@ public class EmptyIdGeneratorFactory implements IdGeneratorFactory {
         // nothing
     }
 
-    @Override
-    public Collection<Path> listIdFiles() {
-        return emptyList();
-    }
-
     private static class EmptyIdGenerator implements IdGenerator {
         private static final EmptyIdGenerator EMPTY_ID_GENERATOR = new EmptyIdGenerator();
         private static final int EMPTY_ID = -1;
@@ -102,14 +99,10 @@ public class EmptyIdGeneratorFactory implements IdGeneratorFactory {
         private EmptyIdGenerator() {}
 
         @Override
-        public void setHighId(long id) {
-            // nothing
-        }
+        public void setHighId(long id) {}
 
         @Override
-        public void markHighestWrittenAtHighId() {
-            // nothing
-        }
+        public void markHighestWrittenAtHighId() {}
 
         @Override
         public long getHighestWritten() {
@@ -142,34 +135,24 @@ public class EmptyIdGeneratorFactory implements IdGeneratorFactory {
         }
 
         @Override
-        public void close() {
-            // nothing
-        }
+        public void close() {}
 
         @Override
-        public void checkpoint(FileFlushEvent flushEvent, CursorContext cursorContext) {
-            // nothing
-        }
+        public void checkpoint(
+                FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext) {}
 
         @Override
-        public void maintenance(CursorContext cursorContext) {
-            // nothing
-        }
+        public void maintenance(
+                CursorContext cursorContext, OldestVisibilityHorizonFactory oldestVisibilityHorizonFactory) {}
 
         @Override
-        public void start(FreeIds freeIdsForRebuild, CursorContext cursorContext) {
-            // nothing
-        }
+        public void start(FreeIds freeIdsForRebuild, CursorContext cursorContext) {}
 
         @Override
-        public void stop() {
-            // nothing
-        }
+        public void stop() {}
 
         @Override
-        public void clearCache(boolean allocationEnabled, CursorContext cursorContext) {
-            // nothing
-        }
+        public void clearCache(boolean allocationEnabled, CursorContext cursorContext) {}
 
         @Override
         public boolean allocationEnabled() {
@@ -184,6 +167,26 @@ public class EmptyIdGeneratorFactory implements IdGeneratorFactory {
         @Override
         public boolean hasOnlySingleIds() {
             return true;
+        }
+
+        @Override
+        public PrimitiveLongResourceIterator notUsedIdsIterator() {
+            return PrimitiveLongResourceCollections.emptyIterator();
+        }
+
+        @Override
+        public PrimitiveLongResourceIterator notUsedIdsIterator(long fromIdInclusive, long toIdExclusive) {
+            return PrimitiveLongResourceCollections.emptyIterator();
+        }
+
+        @Override
+        public PrimitiveLongResourceIterator freeIdsIterator() {
+            return PrimitiveLongResourceCollections.emptyIterator();
+        }
+
+        @Override
+        public PrimitiveLongResourceIterator usedIdsIterator() {
+            return PrimitiveLongResourceCollections.emptyIterator();
         }
 
         @Override
@@ -202,7 +205,15 @@ public class EmptyIdGeneratorFactory implements IdGeneratorFactory {
         }
 
         @Override
+        public PageIdRange nextContinuousPageRange(int idsPerPage, CursorContext cursorContext) {
+            return PageIdRange.EMPTY;
+        }
+
+        @Override
         public void releasePageRange(PageIdRange range, CursorContext cursorContext) {}
+
+        @Override
+        public void releasePageRangesLocks(LongSet pageIds, CursorContext cursorContext) {}
 
         @Override
         public boolean consistencyCheck(

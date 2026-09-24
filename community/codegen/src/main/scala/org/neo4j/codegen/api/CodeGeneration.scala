@@ -21,6 +21,7 @@ package org.neo4j.codegen.api
 
 import org.neo4j.codegen
 import org.neo4j.codegen.ClassHandle
+import org.neo4j.codegen.CodeBlock
 import org.neo4j.codegen.CodeGenerationNotSupportedException
 import org.neo4j.codegen.CodeGenerator
 import org.neo4j.codegen.CodeGenerator.generateCode
@@ -58,9 +59,10 @@ import org.neo4j.exceptions.InternalException
 
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.util.function.Consumer
 
-import scala.annotation.nowarn
 import scala.collection.mutable.ArrayBuffer
+import scala.jdk.CollectionConverters.SeqHasAsJava
 import scala.language.existentials
 
 /**
@@ -72,20 +74,23 @@ object CodeGeneration {
   final val MAX_METHOD_LIMIT: Int = 65535
 
   // Use these options for Debugging. They will print generated code to stdout
-  private val DEBUG_PRINT_SOURCE = false
+  val DEBUG_PRINT_SOURCE = false
   private val DEBUG_PRINT_BYTECODE = false
 
   final val GENERATE_JAVA_SOURCE_DEBUG_OPTION = CypherDebugOption.generateJavaSource.name
   final val GENERATED_SOURCE_LOCATION_PROPERTY = "org.neo4j.cypher.DEBUG.generated_source_location"
 
-  def fromDebugOptions(methodLimit: Int = MAX_METHOD_LIMIT, debugOptions: CypherDebugOptions): CodeGeneration =
-    codeGeneration(methodLimit, modeFromDebugOptions(debugOptions))
+  def fromDebugOptions(
+    stats: CodeGenerator.Stats,
+    methodLimit: Int = MAX_METHOD_LIMIT,
+    debugOptions: CypherDebugOptions
+  ): CodeGeneration = codeGeneration(stats, methodLimit, modeFromDebugOptions(debugOptions))
 
   def codeGeneration(
+    stats: CodeGenerator.Stats,
     methodLimit: Int = MAX_METHOD_LIMIT,
-    mode: CodeGenerationMode =
-      ByteCodeGeneration(new CodeSaver(false, false))
-  ): CodeGeneration = new CodeGeneration(methodLimit, mode)
+    mode: CodeGenerationMode = ByteCodeGeneration(new CodeSaver(false, false))
+  ): CodeGeneration = new CodeGeneration(methodLimit, mode, stats)
 
   sealed trait CodeGenerationMode {
     def saver: CodeSaver
@@ -134,7 +139,7 @@ object CodeGeneration {
   }
 }
 
-class CodeGeneration(methodLimit: Int, val codeGenerationMode: CodeGenerationMode) {
+class CodeGeneration(methodLimit: Int, val codeGenerationMode: CodeGenerationMode, val stats: CodeGenerator.Stats) {
 
   def createGenerator(): CodeGenerator = {
     createGenerator(classOf[IntermediateRepresentation].getClassLoader)
@@ -149,7 +154,7 @@ class CodeGeneration(methodLimit: Int, val codeGenerationMode: CodeGenerationMod
     if (DEBUG_PRINT_SOURCE) options ::= PRINT_SOURCE
     if (DEBUG_PRINT_BYTECODE) options ::= PRINT_BYTECODE
 
-    generateCode(parentClassLoader, strategy, options: _*)
+    generateCode(parentClassLoader, strategy, options: _*).withStats(stats)
   }
 
   def compileClass[T](c: ClassDeclaration[T], generator: CodeGenerator): ClassHandle = {
@@ -175,12 +180,10 @@ class CodeGeneration(methodLimit: Int, val codeGenerationMode: CodeGenerationMod
     }
     val declaredFields = clazz.getDeclaredFields
 
-    @nowarn("msg=return statement")
     def findField(fields: Array[java.lang.reflect.Field], name: String): java.lang.reflect.Field = {
-      for (field <- fields) {
-        if (field.getName == name) return field
-      }
-      throw new NoSuchFieldException(name)
+      fields
+        .find(field => field.getName == name)
+        .getOrElse(throw new NoSuchFieldException(name))
     }
 
     fields.distinct.foreach {
@@ -457,6 +460,19 @@ class CodeGeneration(methodLimit: Int, val codeGenerationMode: CodeGenerationMod
       case Loop(test, body, labelName) =>
         beginBlock(block.whileLoop(compileExpression(test, block), labelName))(compileExpression(body, _))
 
+      case TableSwitch(test, ops, start) =>
+        block.tableSwitch(
+          compileExpression(test, block),
+          start,
+          ops.map(op =>
+            new Consumer[CodeBlock] {
+              override def accept(t: CodeBlock): Unit = compileExpression(op, t)
+
+            }
+          ).asJava
+        )
+        codegen.Expression.EMPTY
+
       // break label
       case Break(labelName) =>
         block.breaks(labelName)
@@ -559,7 +575,8 @@ class CodeGeneration(methodLimit: Int, val codeGenerationMode: CodeGenerationMod
 
     val estimatedSize = estimateByteCodeSize(m)
     if (estimatedSize > methodLimit) {
-      throw new CantCompileQueryException(
+      throw CantCompileQueryException.internalError(
+        this.getClass.getSimpleName,
         s"Method '${m.methodName}' is too big, estimated size $estimatedSize is bigger than $methodLimit"
       )
     }
@@ -588,7 +605,8 @@ class CodeGeneration(methodLimit: Int, val codeGenerationMode: CodeGenerationMod
     } catch {
       case e: ArrayIndexOutOfBoundsException =>
         // NOTE: This could be a CantCompileQueryException, but then it would be handled at runtime, and may pass unnoticed
-        throw new InternalException(
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
           s"""Method '${m.methodName}' in class '${clazz.handle().name()}' failed in code generation: ${e.getClass.getSimpleName} '${e.getMessage}
              |This could mean that an intermediate representation instruction has been generated with an incorrect type.
              |One common mistake is that a method type parameter of an invoke has been set to the wrong type:
@@ -599,7 +617,8 @@ class CodeGeneration(methodLimit: Int, val codeGenerationMode: CodeGenerationMod
 
       case e: Exception =>
         // NOTE: This could be a CantCompileQueryException, but then it would be handled at runtime, and may pass unnoticed
-        throw new InternalException(
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
           s"Method '${m.methodName}' in class '${clazz.handle().name()}' failed in code generation: ${e.getClass.getSimpleName} '${e.getMessage}",
           e
         )

@@ -22,7 +22,6 @@ package org.neo4j.internal.counts;
 import static java.lang.Long.max;
 import static org.neo4j.internal.batchimport.RecordIdIterator.forwards;
 import static org.neo4j.internal.batchimport.RecordIdIterator.withProgress;
-import static org.neo4j.internal.batchimport.cache.NumberArrayFactories.NO_MONITOR;
 import static org.neo4j.internal.batchimport.staging.ExecutionSupervisors.superviseDynamicExecution;
 import static org.neo4j.storageengine.api.RelationshipDirection.INCOMING;
 import static org.neo4j.storageengine.api.RelationshipDirection.LOOP;
@@ -46,7 +45,6 @@ import org.neo4j.internal.helpers.progress.ProgressListener;
 import org.neo4j.internal.helpers.progress.ProgressMonitorFactory;
 import org.neo4j.io.IOUtils;
 import org.neo4j.io.layout.DatabaseLayout;
-import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.kernel.impl.store.NeoStores;
@@ -60,28 +58,29 @@ import org.neo4j.logging.Level;
 import org.neo4j.logging.LoggerPrintWriterAdaptor;
 import org.neo4j.logging.NullLog;
 import org.neo4j.memory.MemoryTracker;
+import org.neo4j.storageengine.api.LogMetadataProvider;
 
 /**
  * Scans the store and rebuilds the {@link GBPTreeRelationshipGroupDegreesStore} contents if the file is missing.
  */
 public class DegreesRebuildFromStore implements DegreesRebuilder {
-    private final PageCache pageCache;
     private final NeoStores neoStores;
     private final DatabaseLayout databaseLayout;
+    private final LogMetadataProvider logMetadataProvider;
     private final CursorContextFactory contextFactory;
     private final InternalLog log;
     private final Configuration processingConfig;
 
     public DegreesRebuildFromStore(
-            PageCache pageCache,
             NeoStores neoStores,
             DatabaseLayout databaseLayout,
+            LogMetadataProvider logMetadataProvider,
             CursorContextFactory contextFactory,
             InternalLogProvider logProvider,
             Configuration processingConfig) {
-        this.pageCache = pageCache;
         this.neoStores = neoStores;
         this.databaseLayout = databaseLayout;
+        this.logMetadataProvider = logMetadataProvider;
         this.contextFactory = contextFactory;
         this.log = logProvider.getLog(DegreesRebuildFromStore.class);
         this.processingConfig = processingConfig;
@@ -89,7 +88,7 @@ public class DegreesRebuildFromStore implements DegreesRebuilder {
 
     @Override
     public long lastCommittedTxId() {
-        return neoStores.getMetaDataStore().getLastCommittedTransactionId();
+        return logMetadataProvider.getLastCommittedTransactionId();
     }
 
     @Override
@@ -99,18 +98,12 @@ public class DegreesRebuildFromStore implements DegreesRebuilder {
         }
 
         log.warn("Missing relationship degrees store, rebuilding it.");
-        NumberArrayFactory numberArrayFactory = NumberArrayFactories.auto(
-                pageCache,
-                contextFactory,
-                databaseLayout.databaseDirectory(),
-                true,
-                NO_MONITOR,
-                NullLog.getInstance(),
-                databaseLayout.getDatabaseName());
         var loggerPrintWriterAdaptor = new LoggerPrintWriterAdaptor(log, Level.INFO);
         var totalCount = neoStores.getRelationshipGroupStore().getIdGenerator().getHighId()
                 + neoStores.getRelationshipStore().getIdGenerator().getHighId();
-        try (GroupDegreesCache cache = new GroupDegreesCache(
+        try (NumberArrayFactory numberArrayFactory = NumberArrayFactories.auto(
+                        neoStores.getFileSystem(), databaseLayout.databaseDirectory(), NullLog.getInstance());
+                GroupDegreesCache cache = new GroupDegreesCache(
                         numberArrayFactory,
                         neoStores.getNodeStore().getIdGenerator().getHighId(),
                         memoryTracker);
@@ -142,7 +135,8 @@ public class DegreesRebuildFromStore implements DegreesRebuilder {
         GroupDegreesCache(NumberArrayFactory numberArrayFactory, long highNodeId, MemoryTracker memoryTracker) {
             this.highNodeId = highNodeId;
             this.nodeCache = numberArrayFactory.newLongArray(highNodeId, -1, memoryTracker);
-            this.groupCache = numberArrayFactory.newDynamicLongArray(max(1_000_000, highNodeId / 10), 0, memoryTracker);
+            this.groupCache =
+                    numberArrayFactory.newDynamicLongArray((int) max(1_000_000, highNodeId / 10), 0, memoryTracker);
         }
 
         @Override

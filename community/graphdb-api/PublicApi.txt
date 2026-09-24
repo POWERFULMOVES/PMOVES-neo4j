@@ -1,30 +1,19 @@
 org.neo4j.dbms.api.DatabaseAliasExistsException public class extends org.neo4j.dbms.api.DatabaseManagementException
-org.neo4j.dbms.api.DatabaseAliasExistsException::DatabaseAliasExistsException() void public
-org.neo4j.dbms.api.DatabaseAliasExistsException::DatabaseAliasExistsException(java.lang.String) void public
-org.neo4j.dbms.api.DatabaseAliasExistsException::DatabaseAliasExistsException(java.lang.String, java.lang.Throwable) void public
-org.neo4j.dbms.api.DatabaseAliasExistsException::DatabaseAliasExistsException(java.lang.Throwable) void public
 org.neo4j.dbms.api.DatabaseAliasExistsException::DatabaseAliasExistsException(org.neo4j.gqlstatus.ErrorGqlStatusObject) void public
 org.neo4j.dbms.api.DatabaseAliasExistsException::DatabaseAliasExistsException(org.neo4j.gqlstatus.ErrorGqlStatusObject, java.lang.String) void public
 org.neo4j.dbms.api.DatabaseAliasExistsException::DatabaseAliasExistsException(org.neo4j.gqlstatus.ErrorGqlStatusObject, java.lang.String, java.lang.Throwable) void public
 org.neo4j.dbms.api.DatabaseAliasExistsException::DatabaseAliasExistsException(org.neo4j.gqlstatus.ErrorGqlStatusObject, java.lang.Throwable) void public
 org.neo4j.dbms.api.DatabaseAliasExistsException::status() org.neo4j.kernel.api.exceptions.Status public
 org.neo4j.dbms.api.DatabaseExistsException public class extends org.neo4j.dbms.api.DatabaseManagementException
-org.neo4j.dbms.api.DatabaseExistsException::DatabaseExistsException() void public
-org.neo4j.dbms.api.DatabaseExistsException::DatabaseExistsException(java.lang.String) void public
-org.neo4j.dbms.api.DatabaseExistsException::DatabaseExistsException(java.lang.String, java.lang.Throwable) void public
-org.neo4j.dbms.api.DatabaseExistsException::DatabaseExistsException(java.lang.Throwable) void public
 org.neo4j.dbms.api.DatabaseExistsException::DatabaseExistsException(org.neo4j.gqlstatus.ErrorGqlStatusObject) void public
 org.neo4j.dbms.api.DatabaseExistsException::DatabaseExistsException(org.neo4j.gqlstatus.ErrorGqlStatusObject, java.lang.String) void public
 org.neo4j.dbms.api.DatabaseExistsException::DatabaseExistsException(org.neo4j.gqlstatus.ErrorGqlStatusObject, java.lang.String, java.lang.Throwable) void public
 org.neo4j.dbms.api.DatabaseExistsException::DatabaseExistsException(org.neo4j.gqlstatus.ErrorGqlStatusObject, java.lang.Throwable) void public
 org.neo4j.dbms.api.DatabaseExistsException::status() org.neo4j.kernel.api.exceptions.Status public
 org.neo4j.dbms.api.DatabaseLimitReachedException public class extends org.neo4j.dbms.api.DatabaseManagementException
-org.neo4j.dbms.api.DatabaseLimitReachedException::DatabaseLimitReachedException(java.lang.String) void public
 org.neo4j.dbms.api.DatabaseLimitReachedException::DatabaseLimitReachedException(org.neo4j.gqlstatus.ErrorGqlStatusObject, java.lang.String) void public
 org.neo4j.dbms.api.DatabaseLimitReachedException::status() org.neo4j.kernel.api.exceptions.Status public
 org.neo4j.dbms.api.DatabaseManagementException public class extends org.neo4j.gqlstatus.GqlRuntimeException implements org.neo4j.kernel.api.exceptions.Status.HasStatus
-org.neo4j.dbms.api.DatabaseManagementException::DatabaseManagementException() void public
-org.neo4j.dbms.api.DatabaseManagementException::DatabaseManagementException(java.lang.String) void public
 org.neo4j.dbms.api.DatabaseManagementException::DatabaseManagementException(java.lang.String, java.lang.Throwable) void public
 org.neo4j.dbms.api.DatabaseManagementException::DatabaseManagementException(java.lang.Throwable) void public
 org.neo4j.dbms.api.DatabaseManagementException::DatabaseManagementException(org.neo4j.gqlstatus.ErrorGqlStatusObject) void public
@@ -33,7 +22,8 @@ org.neo4j.dbms.api.DatabaseManagementException::DatabaseManagementException(org.
 org.neo4j.dbms.api.DatabaseManagementException::DatabaseManagementException(org.neo4j.gqlstatus.ErrorGqlStatusObject, java.lang.Throwable) void public
 org.neo4j.dbms.api.DatabaseManagementException::status() org.neo4j.kernel.api.exceptions.Status public
 org.neo4j.dbms.api.DatabaseManagementException::wrap(java.lang.Throwable) org.neo4j.dbms.api.DatabaseManagementException public static
-org.neo4j.dbms.api.DatabaseManagementService public abstract interface
+org.neo4j.dbms.api.DatabaseManagementService public abstract interface implements java.lang.AutoCloseable
+org.neo4j.dbms.api.DatabaseManagementService::close() void public default
 org.neo4j.dbms.api.DatabaseManagementService::createDatabase(java.lang.String) void public default throws org.neo4j.dbms.api.DatabaseExistsException
 org.neo4j.dbms.api.DatabaseManagementService::createDatabase(java.lang.String, org.neo4j.graphdb.config.Configuration) void public abstract throws org.neo4j.dbms.api.DatabaseExistsException
 org.neo4j.dbms.api.DatabaseManagementService::database(java.lang.String) org.neo4j.graphdb.GraphDatabaseService public abstract throws org.neo4j.dbms.api.DatabaseNotFoundException
@@ -47,10 +37,6 @@ org.neo4j.dbms.api.DatabaseManagementService::startDatabase(java.lang.String) vo
 org.neo4j.dbms.api.DatabaseManagementService::unregisterDatabaseEventListener(org.neo4j.graphdb.event.DatabaseEventListener) void public abstract
 org.neo4j.dbms.api.DatabaseManagementService::unregisterTransactionEventListener(java.lang.String, org.neo4j.graphdb.event.TransactionEventListener<?>) void public abstract
 org.neo4j.dbms.api.DatabaseNotFoundException public class extends org.neo4j.dbms.api.DatabaseManagementException
-org.neo4j.dbms.api.DatabaseNotFoundException::DatabaseNotFoundException() void public
-org.neo4j.dbms.api.DatabaseNotFoundException::DatabaseNotFoundException(java.lang.String) void public
-org.neo4j.dbms.api.DatabaseNotFoundException::DatabaseNotFoundException(java.lang.String, java.lang.Throwable) void public
-org.neo4j.dbms.api.DatabaseNotFoundException::DatabaseNotFoundException(java.lang.Throwable) void public
 org.neo4j.dbms.api.DatabaseNotFoundException::DatabaseNotFoundException(org.neo4j.gqlstatus.ErrorGqlStatusObject) void public
 org.neo4j.dbms.api.DatabaseNotFoundException::DatabaseNotFoundException(org.neo4j.gqlstatus.ErrorGqlStatusObject, java.lang.String) void public
 org.neo4j.dbms.api.DatabaseNotFoundException::DatabaseNotFoundException(org.neo4j.gqlstatus.ErrorGqlStatusObject, java.lang.String, java.lang.Throwable) void public
@@ -351,10 +337,6 @@ org.neo4j.graphdb.Transaction::schema() org.neo4j.graphdb.schema.Schema public a
 org.neo4j.graphdb.Transaction::terminate() void public abstract
 org.neo4j.graphdb.Transaction::traversalDescription() org.neo4j.graphdb.traversal.TraversalDescription public abstract
 org.neo4j.graphdb.TransactionFailureException public class extends org.neo4j.gqlstatus.GqlRuntimeException implements org.neo4j.kernel.api.exceptions.Status.HasStatus
-org.neo4j.graphdb.TransactionFailureException::TransactionFailureException(java.lang.String) void public
-org.neo4j.graphdb.TransactionFailureException::TransactionFailureException(java.lang.String, java.lang.Throwable) void public
-org.neo4j.graphdb.TransactionFailureException::TransactionFailureException(java.lang.String, java.lang.Throwable, org.neo4j.kernel.api.exceptions.Status) void public
-org.neo4j.graphdb.TransactionFailureException::TransactionFailureException(java.lang.String, org.neo4j.kernel.api.exceptions.Status) void public
 org.neo4j.graphdb.TransactionFailureException::TransactionFailureException(org.neo4j.gqlstatus.ErrorGqlStatusObject, java.lang.String) void public
 org.neo4j.graphdb.TransactionFailureException::TransactionFailureException(org.neo4j.gqlstatus.ErrorGqlStatusObject, java.lang.String, java.lang.Throwable) void public
 org.neo4j.graphdb.TransactionFailureException::TransactionFailureException(org.neo4j.gqlstatus.ErrorGqlStatusObject, java.lang.String, java.lang.Throwable, org.neo4j.kernel.api.exceptions.Status) void public
@@ -364,9 +346,22 @@ org.neo4j.graphdb.TransactionFailureException::status() org.neo4j.kernel.api.exc
 org.neo4j.graphdb.TransactionTerminatedException public class extends org.neo4j.graphdb.TransactionFailureException implements org.neo4j.kernel.api.exceptions.Status.HasStatus
 org.neo4j.graphdb.TransactionTerminatedException::TransactionTerminatedException(org.neo4j.gqlstatus.ErrorGqlStatusObject, org.neo4j.kernel.api.exceptions.Status) void public
 org.neo4j.graphdb.TransactionTerminatedException::TransactionTerminatedException(org.neo4j.gqlstatus.ErrorGqlStatusObject, org.neo4j.kernel.api.exceptions.Status, java.lang.String) void protected
-org.neo4j.graphdb.TransactionTerminatedException::TransactionTerminatedException(org.neo4j.kernel.api.exceptions.Status) void public
-org.neo4j.graphdb.TransactionTerminatedException::TransactionTerminatedException(org.neo4j.kernel.api.exceptions.Status, java.lang.String) void protected
 org.neo4j.graphdb.TransactionTerminatedException::status() org.neo4j.kernel.api.exceptions.Status public
+org.neo4j.graphdb.Vector public abstract interface
+org.neo4j.graphdb.Vector.CoordinateType public static final enum extends java.lang.Enum<org.neo4j.graphdb.Vector.CoordinateType>
+org.neo4j.graphdb.Vector.CoordinateType::BFLOAT16 org.neo4j.graphdb.Vector.CoordinateType public static final
+org.neo4j.graphdb.Vector.CoordinateType::FLOAT16 org.neo4j.graphdb.Vector.CoordinateType public static final
+org.neo4j.graphdb.Vector.CoordinateType::FLOAT32 org.neo4j.graphdb.Vector.CoordinateType public static final
+org.neo4j.graphdb.Vector.CoordinateType::FLOAT64 org.neo4j.graphdb.Vector.CoordinateType public static final
+org.neo4j.graphdb.Vector.CoordinateType::INTEGER16 org.neo4j.graphdb.Vector.CoordinateType public static final
+org.neo4j.graphdb.Vector.CoordinateType::INTEGER32 org.neo4j.graphdb.Vector.CoordinateType public static final
+org.neo4j.graphdb.Vector.CoordinateType::INTEGER64 org.neo4j.graphdb.Vector.CoordinateType public static final
+org.neo4j.graphdb.Vector.CoordinateType::INTEGER8 org.neo4j.graphdb.Vector.CoordinateType public static final
+org.neo4j.graphdb.Vector.CoordinateType::normalizedCypherString() java.lang.String public
+org.neo4j.graphdb.Vector.CoordinateType::valueOf(java.lang.String) org.neo4j.graphdb.Vector.CoordinateType public static
+org.neo4j.graphdb.Vector.CoordinateType::values() org.neo4j.graphdb.Vector.CoordinateType[] public static
+org.neo4j.graphdb.Vector::coordinateType() org.neo4j.graphdb.Vector.CoordinateType public abstract
+org.neo4j.graphdb.Vector::dimensions() int public abstract
 org.neo4j.graphdb.config.Configuration public abstract interface
 org.neo4j.graphdb.config.Configuration::<T extends java.lang.Object>get(org.neo4j.graphdb.config.Setting<T>) #T public abstract
 org.neo4j.graphdb.config.Configuration::EMPTY org.neo4j.graphdb.config.Configuration public static final
@@ -388,10 +383,19 @@ org.neo4j.graphdb.event.LabelEntry::label() org.neo4j.graphdb.Label public abstr
 org.neo4j.graphdb.event.LabelEntry::node() org.neo4j.graphdb.Node public abstract
 org.neo4j.graphdb.event.PropertyEntry<T extends java.lang.Object> public abstract interface
 org.neo4j.graphdb.event.PropertyEntry<T>::entity() #T public abstract
+org.neo4j.graphdb.event.PropertyEntry<T>::hasPreviouslyCommittedValue() boolean public abstract
+org.neo4j.graphdb.event.PropertyEntry<T>::hasValue() boolean public abstract
 org.neo4j.graphdb.event.PropertyEntry<T>::key() java.lang.String public abstract
 org.neo4j.graphdb.event.PropertyEntry<T>::previouslyCommittedValue() java.lang.Object public abstract
 org.neo4j.graphdb.event.PropertyEntry<T>::value() java.lang.Object public abstract
 org.neo4j.graphdb.event.TransactionData public abstract interface
+org.neo4j.graphdb.event.TransactionData.DataSelection public static final enum extends java.lang.Enum<org.neo4j.graphdb.event.TransactionData.DataSelection>
+org.neo4j.graphdb.event.TransactionData.DataSelection::deletedNodeLabels org.neo4j.graphdb.event.TransactionData.DataSelection public static final
+org.neo4j.graphdb.event.TransactionData.DataSelection::removedPropertKeys org.neo4j.graphdb.event.TransactionData.DataSelection public static final
+org.neo4j.graphdb.event.TransactionData.DataSelection::removedPropertyValues org.neo4j.graphdb.event.TransactionData.DataSelection public static final
+org.neo4j.graphdb.event.TransactionData.DataSelection::replacedPropertyValues org.neo4j.graphdb.event.TransactionData.DataSelection public static final
+org.neo4j.graphdb.event.TransactionData.DataSelection::valueOf(java.lang.String) org.neo4j.graphdb.event.TransactionData.DataSelection public static
+org.neo4j.graphdb.event.TransactionData.DataSelection::values() org.neo4j.graphdb.event.TransactionData.DataSelection[] public static
 org.neo4j.graphdb.event.TransactionData::assignedLabels() java.lang.Iterable<org.neo4j.graphdb.event.LabelEntry> public abstract
 org.neo4j.graphdb.event.TransactionData::assignedNodeProperties() java.lang.Iterable<org.neo4j.graphdb.event.PropertyEntry<org.neo4j.graphdb.Node>> public abstract
 org.neo4j.graphdb.event.TransactionData::assignedRelationshipProperties() java.lang.Iterable<org.neo4j.graphdb.event.PropertyEntry<org.neo4j.graphdb.Relationship>> public abstract
@@ -401,6 +405,7 @@ org.neo4j.graphdb.event.TransactionData::deletedNodes() java.lang.Iterable<org.n
 org.neo4j.graphdb.event.TransactionData::deletedRelationships() java.lang.Iterable<org.neo4j.graphdb.Relationship> public abstract
 org.neo4j.graphdb.event.TransactionData::getCommitTime() long public default
 org.neo4j.graphdb.event.TransactionData::getTransactionId() long public default
+org.neo4j.graphdb.event.TransactionData::hasDataChanges() boolean public default
 org.neo4j.graphdb.event.TransactionData::isDeleted(org.neo4j.graphdb.Node) boolean public abstract
 org.neo4j.graphdb.event.TransactionData::isDeleted(org.neo4j.graphdb.Relationship) boolean public abstract
 org.neo4j.graphdb.event.TransactionData::isLast() boolean public default
@@ -414,6 +419,7 @@ org.neo4j.graphdb.event.TransactionEventListener<T extends java.lang.Object> pub
 org.neo4j.graphdb.event.TransactionEventListener<T>::afterCommit(org.neo4j.graphdb.event.TransactionData, #T, org.neo4j.graphdb.GraphDatabaseService) void public abstract
 org.neo4j.graphdb.event.TransactionEventListener<T>::afterRollback(org.neo4j.graphdb.event.TransactionData, #T, org.neo4j.graphdb.GraphDatabaseService) void public abstract
 org.neo4j.graphdb.event.TransactionEventListener<T>::beforeCommit(org.neo4j.graphdb.event.TransactionData, org.neo4j.graphdb.Transaction, org.neo4j.graphdb.GraphDatabaseService) #T public abstract throws java.lang.Exception
+org.neo4j.graphdb.event.TransactionEventListener<T>::transactionDataSelection() java.util.Set<org.neo4j.graphdb.event.TransactionData.DataSelection> public default
 org.neo4j.graphdb.schema.AnyTokens public final enum extends java.lang.Enum<org.neo4j.graphdb.schema.AnyTokens>
 org.neo4j.graphdb.schema.AnyTokens::ANY_LABELS org.neo4j.graphdb.schema.AnyTokens public static final
 org.neo4j.graphdb.schema.AnyTokens::ANY_RELATIONSHIP_TYPES org.neo4j.graphdb.schema.AnyTokens public static final
@@ -490,10 +496,12 @@ org.neo4j.graphdb.schema.IndexSetting::spatial_Wgs84_3D_Max() org.neo4j.graphdb.
 org.neo4j.graphdb.schema.IndexSetting::spatial_Wgs84_3D_Min() org.neo4j.graphdb.schema.IndexSetting public static
 org.neo4j.graphdb.schema.IndexSetting::spatial_Wgs84_Max() org.neo4j.graphdb.schema.IndexSetting public static
 org.neo4j.graphdb.schema.IndexSetting::spatial_Wgs84_Min() org.neo4j.graphdb.schema.IndexSetting public static
+org.neo4j.graphdb.schema.IndexSetting::vector_Default_Search_Expansion_Factor() org.neo4j.graphdb.schema.IndexSetting public static
 org.neo4j.graphdb.schema.IndexSetting::vector_Dimensions() org.neo4j.graphdb.schema.IndexSetting public static
 org.neo4j.graphdb.schema.IndexSetting::vector_Hnsw_Ef_Construction() org.neo4j.graphdb.schema.IndexSetting public static
 org.neo4j.graphdb.schema.IndexSetting::vector_Hnsw_M() org.neo4j.graphdb.schema.IndexSetting public static
 org.neo4j.graphdb.schema.IndexSetting::vector_Quantization_Enabled() org.neo4j.graphdb.schema.IndexSetting public static
+org.neo4j.graphdb.schema.IndexSetting::vector_Quantization_Type() org.neo4j.graphdb.schema.IndexSetting public static
 org.neo4j.graphdb.schema.IndexSetting::vector_Similarity_Function() org.neo4j.graphdb.schema.IndexSetting public static
 org.neo4j.graphdb.schema.IndexType public final enum extends java.lang.Enum<org.neo4j.graphdb.schema.IndexType>
 org.neo4j.graphdb.schema.IndexType::FULLTEXT org.neo4j.graphdb.schema.IndexType public static final
@@ -519,12 +527,16 @@ org.neo4j.graphdb.schema.PropertyType::LIST_LOCAL_DATETIME_NOT_NULL org.neo4j.gr
 org.neo4j.graphdb.schema.PropertyType::LIST_LOCAL_TIME_NOT_NULL org.neo4j.graphdb.schema.PropertyType public static final
 org.neo4j.graphdb.schema.PropertyType::LIST_POINT_NOT_NULL org.neo4j.graphdb.schema.PropertyType public static final
 org.neo4j.graphdb.schema.PropertyType::LIST_STRING_NOT_NULL org.neo4j.graphdb.schema.PropertyType public static final
+org.neo4j.graphdb.schema.PropertyType::LIST_UUID_NOT_NULL org.neo4j.graphdb.schema.PropertyType public static final
+org.neo4j.graphdb.schema.PropertyType::LIST_VECTOR_NOT_NULL org.neo4j.graphdb.schema.PropertyType public static final
 org.neo4j.graphdb.schema.PropertyType::LIST_ZONED_DATETIME_NOT_NULL org.neo4j.graphdb.schema.PropertyType public static final
 org.neo4j.graphdb.schema.PropertyType::LIST_ZONED_TIME_NOT_NULL org.neo4j.graphdb.schema.PropertyType public static final
 org.neo4j.graphdb.schema.PropertyType::LOCAL_DATETIME org.neo4j.graphdb.schema.PropertyType public static final
 org.neo4j.graphdb.schema.PropertyType::LOCAL_TIME org.neo4j.graphdb.schema.PropertyType public static final
 org.neo4j.graphdb.schema.PropertyType::POINT org.neo4j.graphdb.schema.PropertyType public static final
 org.neo4j.graphdb.schema.PropertyType::STRING org.neo4j.graphdb.schema.PropertyType public static final
+org.neo4j.graphdb.schema.PropertyType::UUID org.neo4j.graphdb.schema.PropertyType public static final
+org.neo4j.graphdb.schema.PropertyType::VECTOR org.neo4j.graphdb.schema.PropertyType public static final
 org.neo4j.graphdb.schema.PropertyType::ZONED_DATETIME org.neo4j.graphdb.schema.PropertyType public static final
 org.neo4j.graphdb.schema.PropertyType::ZONED_TIME org.neo4j.graphdb.schema.PropertyType public static final
 org.neo4j.graphdb.schema.PropertyType::valueOf(java.lang.String) org.neo4j.graphdb.schema.PropertyType public static

@@ -52,14 +52,22 @@ public interface StorageNodeCursor extends StorageEntityScanCursor<AllNodeScan> 
      */
     long relationshipsReference();
 
+    default void relationships(StorageRelationshipTraversalCursor traversalCursor, RelationshipSelection selection) {
+        relationships(traversalCursor, selection, true);
+    }
+
     /**
      * Initializes the provided {@code traversalCursor} with selected relationships connected to the node this cursor is currently at.
      * After this call the relationships can be accessed using {@link StorageRelationshipTraversalCursor#next()}.
      *
      * @param traversalCursor the {@link StorageRelationshipTraversalCursor} to initialize with relationships for this current node.
      * @param selection {@link RelationshipSelection} of relationships to select.
+     * @param includeChangesFromThisTransaction whether to include changes from this transaction.
      */
-    void relationships(StorageRelationshipTraversalCursor traversalCursor, RelationshipSelection selection);
+    void relationships(
+            StorageRelationshipTraversalCursor traversalCursor,
+            RelationshipSelection selection,
+            boolean includeChangesFromThisTransaction);
 
     /**
      * @return {@code true} if a call to {@link #relationshipsTo(StorageRelationshipTraversalCursor, RelationshipSelection, long)} is allowed,
@@ -102,4 +110,9 @@ public interface StorageNodeCursor extends StorageEntityScanCursor<AllNodeScan> 
      * @return whether or not this node is dense.
      */
     boolean supportsFastDegreeLookup();
+
+    /**
+     * Check that the cursor is properly initialised
+     */
+    void check();
 }

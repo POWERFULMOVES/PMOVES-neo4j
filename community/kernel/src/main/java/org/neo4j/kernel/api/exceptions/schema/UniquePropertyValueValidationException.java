@@ -19,11 +19,16 @@
  */
 package org.neo4j.kernel.api.exceptions.schema;
 
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 import org.neo4j.common.TokenNameLookup;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
+import org.neo4j.gqlstatus.GqlParams;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.internal.helpers.Exceptions;
 import org.neo4j.internal.kernel.api.exceptions.schema.ConstraintValidationException;
 import org.neo4j.internal.schema.constraints.IndexBackedConstraintDescriptor;
@@ -32,38 +37,7 @@ import org.neo4j.kernel.api.exceptions.index.IndexEntryConflictException;
 public class UniquePropertyValueValidationException extends ConstraintValidationException {
     private final Set<IndexEntryConflictException> conflicts;
 
-    public UniquePropertyValueValidationException(
-            IndexBackedConstraintDescriptor constraint,
-            ConstraintValidationException.Phase phase,
-            IndexEntryConflictException conflict,
-            TokenNameLookup tokenNameLookup) {
-        this(constraint, phase, Collections.singleton(conflict), tokenNameLookup);
-    }
-
-    public UniquePropertyValueValidationException(
-            ErrorGqlStatusObject gqlStatusObject,
-            IndexBackedConstraintDescriptor constraint,
-            ConstraintValidationException.Phase phase,
-            IndexEntryConflictException conflict,
-            TokenNameLookup tokenNameLookup) {
-        this(gqlStatusObject, constraint, phase, Collections.singleton(conflict), tokenNameLookup);
-    }
-
-    public UniquePropertyValueValidationException(
-            IndexBackedConstraintDescriptor constraint,
-            ConstraintValidationException.Phase phase,
-            Set<IndexEntryConflictException> conflicts,
-            TokenNameLookup tokenNameLookup) {
-        super(
-                constraint,
-                phase,
-                phase == Phase.VERIFICATION ? "Existing data" : "New data",
-                buildCauseChain(conflicts),
-                tokenNameLookup);
-        this.conflicts = conflicts;
-    }
-
-    public UniquePropertyValueValidationException(
+    private UniquePropertyValueValidationException(
             ErrorGqlStatusObject gqlStatusObject,
             IndexBackedConstraintDescriptor constraint,
             ConstraintValidationException.Phase phase,
@@ -88,16 +62,7 @@ public class UniquePropertyValueValidationException extends ConstraintValidation
         return chainedConflicts;
     }
 
-    public UniquePropertyValueValidationException(
-            IndexBackedConstraintDescriptor constraint,
-            ConstraintValidationException.Phase phase,
-            Throwable cause,
-            TokenNameLookup tokenNameLookup) {
-        super(constraint, phase, phase == Phase.VERIFICATION ? "Existing data" : "New data", cause, tokenNameLookup);
-        this.conflicts = Collections.emptySet();
-    }
-
-    public UniquePropertyValueValidationException(
+    private UniquePropertyValueValidationException(
             ErrorGqlStatusObject gqlStatusObject,
             IndexBackedConstraintDescriptor constraint,
             ConstraintValidationException.Phase phase,
@@ -112,6 +77,45 @@ public class UniquePropertyValueValidationException extends ConstraintValidation
                 tokenNameLookup);
 
         this.conflicts = Collections.emptySet();
+    }
+
+    public static UniquePropertyValueValidationException propertyUniquenessViolation(
+            IndexBackedConstraintDescriptor constraint,
+            ConstraintValidationException.Phase phase,
+            Exception cause,
+            TokenNameLookup tokenNameLookup) {
+        var causeMessage =
+                switch (cause) {
+                    case KernelException ke -> ke.getUserMessage(tokenNameLookup);
+                    case Exception e -> e.getMessage();
+                };
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N79)
+                .withParam(GqlParams.ListParam.reasonList, List.of(causeMessage))
+                .build();
+        return new UniquePropertyValueValidationException(gql, constraint, phase, cause, tokenNameLookup);
+    }
+
+    public static UniquePropertyValueValidationException propertyUniquenessViolation(
+            IndexBackedConstraintDescriptor constraint,
+            ConstraintValidationException.Phase phase,
+            IndexEntryConflictException conflict,
+            TokenNameLookup tokenNameLookup) {
+        return propertyUniquenessViolation(constraint, phase, Set.of(conflict), tokenNameLookup);
+    }
+
+    public static UniquePropertyValueValidationException propertyUniquenessViolation(
+            IndexBackedConstraintDescriptor constraint,
+            ConstraintValidationException.Phase phase,
+            Set<IndexEntryConflictException> conflicts,
+            TokenNameLookup tokenNameLookup) {
+        var reasonList = new ArrayList<String>();
+        for (var conflict : conflicts) {
+            reasonList.add(conflict.getUserMessage(tokenNameLookup));
+        }
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N79)
+                .withParam(GqlParams.ListParam.reasonList, reasonList)
+                .build();
+        return new UniquePropertyValueValidationException(gql, constraint, phase, conflicts, tokenNameLookup);
     }
 
     @Override

@@ -37,16 +37,43 @@ import org.neo4j.server.configuration.ServerSettings;
 import org.neo4j.server.queryapi.metrics.QueryAPIMetricsMonitor;
 import org.neo4j.server.queryapi.request.AccessMode;
 import org.neo4j.server.queryapi.request.QueryRequest;
+import org.neo4j.server.queryapi.request.QueryTxRequest;
+import org.neo4j.server.queryapi.versioning.QueryVersion;
 
-@Path(QueryResource.ROOT_PATH)
-@Produces({QueryMimeTypes.UNTYPED_JSON, QueryMimeTypes.TYPED_JSON, QueryMimeTypes.TYPED_JSON_V1x0})
-@Consumes({QueryMimeTypes.UNTYPED_JSON, QueryMimeTypes.TYPED_JSON, QueryMimeTypes.TYPED_JSON_V1x0})
+@Path(QueryResource.ROOT_PATH_V2)
+@Produces({
+    QueryMimeTypes.PLAIN_JSON,
+    QueryMimeTypes.TYPED_JSON,
+    QueryMimeTypes.TYPED_JSON_V1x0,
+    QueryMimeTypes.TYPED_JSON_V1x1,
+    QueryMimeTypes.TYPED_JSON_V1x2,
+    QueryMimeTypes.PLAIN_JSONL,
+    QueryMimeTypes.TYPED_JSONL_V1x0,
+    QueryMimeTypes.TYPED_JSONL_V1x1,
+    QueryMimeTypes.TYPED_JSONL_V1x2,
+})
+@Consumes({
+    QueryMimeTypes.PLAIN_JSON,
+    QueryMimeTypes.TYPED_JSON,
+    QueryMimeTypes.TYPED_JSON_V1x0,
+    QueryMimeTypes.TYPED_JSON_V1x1,
+    QueryMimeTypes.TYPED_JSON_V1x2,
+})
 public class QueryResource {
+    public static final QueryVersion VERSION = new QueryVersion(2, 0);
+    // Legacy Discovery Address
+    public static final String NAME_V2 = "query";
 
-    public static final String NAME = "query";
     private static final String DB_PATH_PARAM_NAME = "databaseName";
+    private static final String VERSION_PATH_PARAM_NAME = "queryApiMajorVersion";
+
+    public static final String ROOT_PATH_V2 = "/{" + DB_PATH_PARAM_NAME + "}/query/v2";
+    // Discovery Address
+    public static final String NAME = "query_api";
+
+    public static final String ROOT_PATH = "/{" + DB_PATH_PARAM_NAME + "}/query/v{" + VERSION_PATH_PARAM_NAME + "}";
+
     private static final String TX_ID_PATH_PARAM_NAME = "txId";
-    public static final String ROOT_PATH = "/{" + DB_PATH_PARAM_NAME + "}/query/v2";
     private final QueryAPIMetricsMonitor monitor;
     private final QueryController queryController;
 
@@ -58,7 +85,7 @@ public class QueryResource {
     @POST
     public Response execute(
             @PathParam(DB_PATH_PARAM_NAME) String databaseName,
-            QueryRequest request,
+            QueryTxRequest request,
             @Context HttpServletRequest rawRequest,
             @Context HttpHeaders headers) {
         meterRequest(request);
@@ -75,7 +102,7 @@ public class QueryResource {
     @Path("/tx")
     public Response beginTransaction(
             @PathParam(DB_PATH_PARAM_NAME) String databaseName,
-            QueryRequest request,
+            QueryTxRequest request,
             @Context HttpServletRequest rawRequest,
             @Context HttpHeaders headers) {
         meterRequest(request);
@@ -117,15 +144,23 @@ public class QueryResource {
         return queryController.rollbackTransaction(txId, rawRequest, databaseName);
     }
 
+    public static String absoluteDatabaseTransactionPathV2(Config config) {
+        return config.get(ServerSettings.db_api_path).getPath() + ROOT_PATH_V2;
+    }
+
     public static String absoluteDatabaseTransactionPath(Config config) {
         return config.get(ServerSettings.db_api_path).getPath() + ROOT_PATH;
     }
 
     private void meterRequest(QueryRequest request) {
-        if (request.accessMode() != null && request.accessMode().equals(AccessMode.READ)) {
-            monitor.readRequest();
+        if (request instanceof QueryTxRequest txRequest) {
+            if (txRequest.accessMode() != null && txRequest.accessMode().equals(AccessMode.READ)) {
+                monitor.readRequest();
+            }
         }
-        if (request.parameters() != null && !request.parameters().isEmpty()) {
+
+        if (request.maybeParameters().isPresent()
+                && !request.maybeParameters().get().isEmpty()) {
             monitor.parameter();
         }
     }

@@ -19,25 +19,32 @@
  */
 package org.neo4j.kernel.impl.newapi;
 
-import static org.neo4j.collection.PrimitiveLongCollections.mergeToSet;
-
-import org.eclipse.collections.api.set.primitive.LongSet;
+import org.neo4j.internal.helpers.collection.Iterables;
 import org.neo4j.internal.kernel.api.KernelReadTracer;
 import org.neo4j.internal.kernel.api.NodeCursor;
 import org.neo4j.internal.kernel.api.NodeValueIndexCursor;
+import org.neo4j.internal.kernel.api.PropertyCursor;
 import org.neo4j.internal.kernel.api.PropertyIndexQuery;
+import org.neo4j.internal.kernel.api.RelationshipTraversalCursor;
+import org.neo4j.internal.kernel.api.TokenSet;
 import org.neo4j.internal.kernel.api.security.AccessMode;
 import org.neo4j.internal.schema.IndexDescriptor;
+import org.neo4j.internal.schema.IndexRemovalSnapshot;
 import org.neo4j.kernel.api.txstate.TransactionState;
+import org.neo4j.storageengine.api.Degrees;
+import org.neo4j.storageengine.api.LongReference;
 import org.neo4j.storageengine.api.PropertySelection;
+import org.neo4j.storageengine.api.Reference;
+import org.neo4j.storageengine.api.RelationshipSelection;
+import org.neo4j.storageengine.api.StorageProperty;
 
-class DefaultNodeValueIndexCursor extends DefaultEntityValueIndexCursor<DefaultNodeValueIndexCursor>
+public class DefaultNodeValueIndexCursor extends DefaultEntityValueIndexCursor<DefaultNodeValueIndexCursor>
         implements NodeValueIndexCursor {
     private final InternalCursorFactory internalCursors;
-    private final boolean applyAccessModeToTxState;
-    private DefaultNodeCursor securityNodeCursor;
-    private DefaultPropertyCursor securityPropertyCursor;
+    private DefaultNodeCursor internalNodeCursor;
+    private TraceablePropertyCursor propertyCursor;
     private int[] propertyIds;
+    private AccessControlDataProvider accessControlDataProvider;
 
     DefaultNodeValueIndexCursor(
             CursorPool<DefaultNodeValueIndexCursor> pool,
@@ -45,7 +52,6 @@ class DefaultNodeValueIndexCursor extends DefaultEntityValueIndexCursor<DefaultN
             boolean applyAccessModeToTxState) {
         super(pool, applyAccessModeToTxState);
         this.internalCursors = internalCursors;
-        this.applyAccessModeToTxState = applyAccessModeToTxState;
     }
 
     /**
@@ -58,40 +64,7 @@ class DefaultNodeValueIndexCursor extends DefaultEntityValueIndexCursor<DefaultN
     protected boolean canAccessAllDescribedEntities(IndexDescriptor descriptor) {
         propertyIds = descriptor.schema().getPropertyIds();
         int[] labelIds = descriptor.schema().getEntityTokenIds();
-        AccessMode accessMode = accessModeProvider.getAccessMode();
-
-        for (int label : labelIds) {
-            /*
-             * If there can be nodes in the index that that are disallowed to traverse,
-             * post-filtering is needed.
-             */
-            if (!accessMode.allowsTraverseAllNodesWithLabel(label)) {
-                return false;
-            }
-        }
-
-        for (int propId : propertyIds) {
-            /*
-             * If reading the property is denied for some label,
-             * there can be property values in the index that are disallowed,
-             * so post-filtering is needed.
-             */
-            if (accessMode.disallowsReadPropertyForSomeLabel(propId)) {
-                return false;
-            }
-
-            /*
-             * If reading the property is not granted for all labels of the the index,
-             * there can be property values in the index that are disallowed,
-             * so post-filtering is needed.
-             */
-            for (int label : labelIds) {
-                if (!accessMode.allowsReadNodeProperty(() -> Labels.from(label), propId)) {
-                    return false;
-                }
-            }
-        }
-        return true;
+        return accessMode.allowsTraverseAndReadAllMatchingNodeProperties(labelIds, propertyIds);
     }
 
     @Override
@@ -106,30 +79,58 @@ class DefaultNodeValueIndexCursor extends DefaultEntityValueIndexCursor<DefaultN
 
     @Override
     protected final boolean canAccessEntityAndProperties(long reference) {
-        ensureSecurityNodeCursor();
-        readEntity(read -> read.singleNode(reference, securityNodeCursor));
-        if (!securityNodeCursor.next()) {
+        return canAccessEntityAndProperties(reference, accessMode, true);
+    }
+
+    final boolean canAccessEntityAndProperties(long reference, AccessMode accessMode, boolean assertAccessMode) {
+        ensureNodeCursor();
+        read.singleNode(reference, internalNodeCursor);
+        if (!internalNodeCursor.next()) {
             // This node is not visible to this security context
             return false;
         }
 
-        int[] labels = applyAccessModeToTxState
-                ? securityNodeCursor.labels().all()
-                : securityNodeCursor.labelsIgnoringTxStateSetRemove().all();
+        assert !assertAccessMode || accessMode == accessModeProvider.getAccessMode()
+                : "access mode changed while cursor is in use";
+        return accessMode.allowsReadNodeProperties(
+                () -> AccessControlDataProvider.nodeLabels(internalNodeCursor, applyAccessModeToTxState),
+                propertyIds,
+                this::getAccessControlDataProvider);
+    }
 
-        AccessMode accessMode = accessModeProvider.getAccessMode();
-        if (accessMode.hasPropertyReadRules(propertyIds)) {
-            ensureSecurityPropertyCursor();
-            securityNodeCursor.properties(securityPropertyCursor, PropertySelection.selection(propertyIds));
-            return securityPropertyCursor.allowed(propertyIds, labels);
-        } else {
-            return accessMode.allowsReadNodeProperties(() -> Labels.from(labels), propertyIds);
+    /**
+     * AccessControlDataProvider when used as SelectedPropertiesProvider will return properties for the node pointed by {@link #internalNodeCursor}
+     * This indirection is here for the sake of ultimate laziness
+     */
+    private AccessControlDataProvider getAccessControlDataProvider() {
+        if (accessControlDataProvider == null) {
+            accessControlDataProvider = new AccessControlDataProvider(
+                    () -> (propertyCursor, selection) -> {
+                        if (internalNodeCursor.storeCursor.entityReference() != LongReference.NULL) {
+                            propertyCursor.initNodeProperties(internalNodeCursor.storeCursor, selection);
+                        }
+                    },
+                    internalCursors,
+                    applyAccessModeToTxState,
+                    this::txStateProperties,
+                    () -> read);
         }
+        return accessControlDataProvider;
+    }
+
+    private Iterable<StorageProperty> txStateProperties() {
+        if (txStateHolder.hasTxStateWithChanges()) {
+            return txStateHolder
+                    .txState()
+                    .getNodeState(internalNodeCursor.nodeReference())
+                    .addedProperties();
+        }
+        return Iterables.empty();
     }
 
     @Override
     public void node(NodeCursor cursor) {
-        readEntity(read -> read.singleNode(entityReference(), cursor));
+        read.singleNode(entityReference(), cursor);
     }
 
     @Override
@@ -137,48 +138,166 @@ class DefaultNodeValueIndexCursor extends DefaultEntityValueIndexCursor<DefaultN
         return entityReference();
     }
 
+    // NodeCursor interface
     @Override
-    protected LongSet removed(TransactionState txState, LongSet removedFromIndex) {
-        return mergeToSet(txState.addedAndRemovedNodes().getRemoved(), removedFromIndex)
-                .asUnmodifiable();
+    public TokenSet labels() {
+        checkReadFromStore();
+        return internalNodeCursor.labels();
+    }
+
+    @Override
+    public TokenSet labelsIgnoringTxStateSetRemove() {
+        checkReadFromStore();
+        return internalNodeCursor.labelsIgnoringTxStateSetRemove();
+    }
+
+    @Override
+    public boolean hasLabel(int label) {
+        checkReadFromStore();
+        return internalNodeCursor.hasLabel(label);
+    }
+
+    @Override
+    public boolean hasLabel() {
+        checkReadFromStore();
+        return internalNodeCursor.hasLabel();
+    }
+
+    @Override
+    public void relationships(RelationshipTraversalCursor relationships, RelationshipSelection selection) {
+        checkReadFromStore();
+        internalNodeCursor.relationships(relationships, selection);
+    }
+
+    @Override
+    public boolean supportsFastRelationshipsTo() {
+        checkReadFromStore();
+        return internalNodeCursor.supportsFastRelationshipsTo();
+    }
+
+    @Override
+    public void relationshipsTo(
+            RelationshipTraversalCursor relationships, RelationshipSelection selection, long neighbourNodeReference) {
+        checkReadFromStore();
+        internalNodeCursor.relationshipsTo(relationships, selection, neighbourNodeReference);
+    }
+
+    @Override
+    public long relationshipsReference() {
+        checkReadFromStore();
+        return internalNodeCursor.relationshipsReference();
+    }
+
+    @Override
+    public boolean supportsFastDegreeLookup() {
+        checkReadFromStore();
+        return internalNodeCursor.supportsFastDegreeLookup();
+    }
+
+    @Override
+    public int[] relationshipTypes() {
+        checkReadFromStore();
+        return internalNodeCursor.relationshipTypes();
+    }
+
+    @Override
+    public Degrees degrees(RelationshipSelection selection) {
+        checkReadFromStore();
+        return internalNodeCursor.degrees(selection);
+    }
+
+    @Override
+    public long degree(RelationshipSelection selection) {
+        checkReadFromStore();
+        return internalNodeCursor.degree(selection);
+    }
+
+    @Override
+    public long degreeWithMax(long maxDegree, RelationshipSelection selection) {
+        checkReadFromStore();
+        return internalNodeCursor.degreeWithMax(maxDegree, selection);
+    }
+
+    @Override
+    public void properties(PropertyCursor cursor, PropertySelection selection) {
+        checkReadFromStore();
+        internalNodeCursor.properties(cursor, selection);
+    }
+
+    @Override
+    public Reference propertiesReference() {
+        checkReadFromStore();
+        return internalNodeCursor.propertiesReference();
+    }
+
+    @Override
+    public boolean readFromStore() {
+        ensureNodeCursor();
+        if (internalNodeCursor.nodeReference() == entity) {
+            // A security check, or a previous call to this method for this node already seems to have loaded
+            // this node
+            return true;
+        }
+
+        internalNodeCursor.single(entity, read, txStateHolder, accessModeProvider);
+        return internalNodeCursor.next();
+    }
+
+    private void checkReadFromStore() {
+        if (internalNodeCursor.nodeReference() != entity) {
+            throw new IllegalStateException("Node hasn't been read from store");
+        }
+    }
+
+    @Override
+    protected LongSetContains removed(TransactionState txState, IndexRemovalSnapshot removedFromIndex) {
+        var removed = txState.addedAndRemovedNodes().getRemoved().toImmutable();
+        return (value) ->
+                removed.contains(value) || removedFromIndex.isRemoved().test(value);
     }
 
     @Override
     public void release() {
-        if (securityNodeCursor != null) {
-            securityNodeCursor.close();
-            securityNodeCursor.release();
-            securityNodeCursor = null;
+        if (internalNodeCursor != null) {
+            internalNodeCursor.close();
+            internalNodeCursor.release();
+            internalNodeCursor = null;
         }
-        if (securityPropertyCursor != null) {
-            securityPropertyCursor.close();
-            securityPropertyCursor.release();
-            securityPropertyCursor = null;
+        if (propertyCursor != null) {
+            propertyCursor.close();
+            propertyCursor.release();
+            propertyCursor = null;
+        }
+        if (accessControlDataProvider != null) {
+            accessControlDataProvider.close();
+            accessControlDataProvider.release();
+            accessControlDataProvider = null;
         }
     }
 
     @Override
     protected boolean doStoreValuePassesQueryFilter(
             long reference, PropertySelection propertySelection, PropertyIndexQuery[] query) {
-        ensureSecurityNodeCursor();
-        read.singleNode(reference, securityNodeCursor);
-        if (securityNodeCursor.next()) {
-            ensureSecurityPropertyCursor();
-            securityNodeCursor.properties(securityPropertyCursor, propertySelection);
-            return CursorPredicates.propertiesMatch(securityPropertyCursor, query);
+        ensureNodeCursor();
+        read.singleNode(reference, internalNodeCursor);
+        if (internalNodeCursor.next()) {
+            ensurePropertyCursor();
+            internalNodeCursor.properties(propertyCursor, propertySelection);
+            return CursorPredicates.propertiesMatch(propertyCursor, query);
         }
+
         return false;
     }
 
-    private void ensureSecurityNodeCursor() {
-        if (securityNodeCursor == null) {
-            securityNodeCursor = internalCursors.allocateNodeCursor();
+    private void ensureNodeCursor() {
+        if (internalNodeCursor == null) {
+            internalNodeCursor = internalCursors.allocateNodeCursor();
         }
     }
 
-    private void ensureSecurityPropertyCursor() {
-        if (securityPropertyCursor == null) {
-            securityPropertyCursor = internalCursors.allocatePropertyCursor();
+    private void ensurePropertyCursor() {
+        if (propertyCursor == null) {
+            propertyCursor = internalCursors.allocatePropertyCursor();
         }
     }
 }

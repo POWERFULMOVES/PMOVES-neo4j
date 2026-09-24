@@ -29,7 +29,7 @@ statement
 periodicCommitQueryHintFailure
    : USING PERIODIC COMMIT UNSIGNED_DECIMAL_INTEGER?
    ;
-
+   
 regularQuery
    : singleQuery (UNION (ALL | DISTINCT)? singleQuery)*
    ;
@@ -175,7 +175,13 @@ hint
    ) SEEK? variable labelOrRelType LPAREN nonEmptyNameList RPAREN)
    | JOIN ON nonEmptyNameList
    | SCAN variable labelOrRelType
+   | EXPAND expandHintStep (COMMA expandHintStep)*
    )
+   ;
+
+expandHintStep
+   : (ALL | INTO)? FROM from=variable TO to=variable (VIA via=variable)?
+   | (ALL | INTO)? VIA via=variable
    ;
 
 mergeClause
@@ -231,7 +237,12 @@ subqueryInTransactionsBatchParameters
    ;
 
 subqueryInTransactionsErrorParameters
-   : ON ERROR (CONTINUE | BREAK | FAIL)
+   : ON ERROR RETRY (subqueryInTransactionsRetryParameters)? (THEN (CONTINUE | BREAK | FAIL))?
+   | ON ERROR (CONTINUE | BREAK | FAIL)
+   ;
+
+subqueryInTransactionsRetryParameters
+   : FOR? expression secondsToken
    ;
 
 subqueryInTransactionsReportParameters
@@ -548,10 +559,11 @@ expression1
    | parenthesizedExpression
    | functionInvocation
    | variable
+   | obfuscatedLiteral
    ;
 
 literal
-   : numberLiteral # NummericLiteral
+   : numberLiteral # NumericLiteral
    | stringLiteral # StringsLiteral
    | map           # OtherLiteral
    | TRUE          # BooleanLiteral
@@ -717,6 +729,10 @@ variable
    : symbolicVariableNameString
    ;
 
+obfuscatedLiteral
+   : OBFUSCATION
+   ;
+
 // Returns non-list of propertyKeyNames
 nonEmptyNameList
    : symbolicNameString (COMMA symbolicNameString)*
@@ -880,14 +896,7 @@ composableCommandClauses
    ;
 
 composableShowCommandClauses
-   : SHOW (
-      showIndexCommand
-      | showConstraintCommand
-      | showFunctions
-      | showProcedures
-      | showSettings
-      | showTransactions
-   )
+   : SHOW showTransactions
    ;
 
 showBriefAndYield
@@ -909,11 +918,11 @@ showIndexCommand
    ;
 
 showIndexesAllowBrief
-   : indexToken showBriefAndYield? composableCommandClauses?
+   : indexToken showBriefAndYield?
    ;
 
 showIndexesNoBrief
-   : indexToken showCommandYield? composableCommandClauses?
+   : indexToken showCommandYield?
    ;
 
 showConstraintCommand
@@ -947,23 +956,23 @@ constraintBriefAndYieldType
    ;
 
 showConstraintsAllowBriefAndYield
-   : constraintToken showBriefAndYield? composableCommandClauses?
+   : constraintToken showBriefAndYield?
    ;
 
 showConstraintsAllowBrief
-   : constraintToken ((BRIEF | VERBOSE) OUTPUT?)? composableCommandClauses?
+   : constraintToken ((BRIEF | VERBOSE) OUTPUT?)?
    ;
 
 showConstraintsAllowYield
-   : constraintToken showCommandYield? composableCommandClauses?
+   : constraintToken showCommandYield?
    ;
 
 showProcedures
-   : (PROCEDURE | PROCEDURES) executableBy? showCommandYield? composableCommandClauses?
+   : (PROCEDURE | PROCEDURES) executableBy? showCommandYield?
    ;
 
 showFunctions
-   : showFunctionsType? functionToken executableBy? showCommandYield? composableCommandClauses?
+   : showFunctionsType? functionToken executableBy? showCommandYield?
    ;
 
 functionToken
@@ -981,7 +990,7 @@ showFunctionsType
    ;
 
 showTransactions
-   : transactionToken namesAndClauses
+   : transactionToken namesAndClauses? composableCommandClauses?
    ;
 
 terminateTransactions
@@ -989,7 +998,7 @@ terminateTransactions
    ;
 
 showSettings
-   : settingToken namesAndClauses
+   : settingToken namesAndClauses?
    ;
 
 settingToken
@@ -997,7 +1006,8 @@ settingToken
    ;
 
 namesAndClauses
-   : (showCommandYield? | stringsOrExpression showCommandYield?) composableCommandClauses?
+   : showCommandYield
+   | stringsOrExpression showCommandYield?
    ;
 
 stringsOrExpression
@@ -1016,7 +1026,7 @@ commandRelPattern
    ;
 
 createConstraint
-   : CONSTRAINT symbolicNameOrStringParameter? (IF NOT EXISTS)? (ON | FOR) (commandNodePattern | commandRelPattern) constraintType commandOptions?
+   : CONSTRAINT commandNameExpression? (IF NOT EXISTS)? (ON | FOR) (commandNodePattern | commandRelPattern) constraintType commandOptions?
    ;
 
 constraintType
@@ -1028,7 +1038,7 @@ constraintType
    ;
 
 dropConstraint
-   : CONSTRAINT (ON (commandNodePattern | commandRelPattern) ASSERT (EXISTS propertyList | propertyList IS (UNIQUE | NODE KEY | NOT NULL)) | symbolicNameOrStringParameter (IF EXISTS)?)
+   : CONSTRAINT (ON (commandNodePattern | commandRelPattern) ASSERT (EXISTS propertyList | propertyList IS (UNIQUE | NODE KEY | NOT NULL)) | commandNameExpression (IF EXISTS)?)
    ;
 
 createIndex
@@ -1047,11 +1057,11 @@ oldCreateIndex
    ;
 
 createIndex_
-   : symbolicNameOrStringParameter? (IF NOT EXISTS)? FOR (commandNodePattern | commandRelPattern) ON propertyList commandOptions?
+   : commandNameExpression? (IF NOT EXISTS)? FOR (commandNodePattern | commandRelPattern) ON propertyList commandOptions?
    ;
 
 createFulltextIndex
-   : symbolicNameOrStringParameter? (IF NOT EXISTS)? FOR (fulltextNodePattern | fulltextRelPattern) ON EACH LBRACKET enclosedPropertyList RBRACKET commandOptions?
+   : commandNameExpression? (IF NOT EXISTS)? FOR (fulltextNodePattern | fulltextRelPattern) ON EACH LBRACKET enclosedPropertyList RBRACKET commandOptions?
    ;
 
 fulltextNodePattern
@@ -1063,7 +1073,7 @@ fulltextRelPattern
    ;
 
 createLookupIndex
-   : symbolicNameOrStringParameter? (IF NOT EXISTS)? FOR (lookupIndexNodePattern | lookupIndexRelPattern) symbolicNameString LPAREN variable RPAREN commandOptions?
+   : commandNameExpression? (IF NOT EXISTS)? FOR (lookupIndexNodePattern | lookupIndexRelPattern) symbolicNameString LPAREN variable RPAREN commandOptions?
    ;
 
 lookupIndexNodePattern
@@ -1075,7 +1085,7 @@ lookupIndexRelPattern
    ;
 
 dropIndex
-   : INDEX (ON labelType LPAREN nonEmptyNameList RPAREN | symbolicNameOrStringParameter (IF EXISTS)?)
+   : INDEX (ON labelType LPAREN nonEmptyNameList RPAREN | commandNameExpression (IF EXISTS)?)
    ;
 
 propertyList
@@ -1394,10 +1404,9 @@ showPrivilege
 
 setPrivilege
    : SET (
-      (passwordToken | USER (STATUS | HOME DATABASE) | DATABASE ACCESS) ON DBMS
+      (passwordToken | USER (STATUS | HOME DATABASE) | DATABASE (ACCESS | DEFAULT LANGUAGE) | AUTH) ON DBMS
       | LABEL labelsResource ON graphScope
       | PROPERTY propertiesResource ON graphScope graphQualifier
-      | AUTH ON DBMS
    )
    ;
 
@@ -1430,7 +1439,7 @@ databasePrivilege
 
 dbmsPrivilege
    : (
-      ALTER (ALIAS | DATABASE | USER)
+      ALTER (ALIAS | COMPOSITE? DATABASE | USER)
       | ASSIGN (PRIVILEGE | ROLE)
       | (ALIAS | COMPOSITE? DATABASE | PRIVILEGE | ROLE | SERVER | USER) MANAGEMENT
       | dbmsPrivilegeExecute
@@ -1537,6 +1546,11 @@ graphQualifier
    : (
       graphQualifierToken (TIMES | nonEmptyStringList)
       | FOR LPAREN variable? (COLON symbolicNameString (BAR symbolicNameString)*)? (RPAREN WHERE expression | (WHERE expression | map) RPAREN)
+      | FOR (
+        LPAREN variable? (COLON symbolicNameString (BAR symbolicNameString)*)? (RPAREN WHERE expression | (WHERE expression | map) RPAREN)
+        | LPAREN RPAREN leftArrow? arrowLine LBRACKET variable? (COLON symbolicNameString (BAR symbolicNameString)*)?
+            (RBRACKET arrowLine rightArrow? LPAREN RPAREN WHERE expression | (WHERE expression | map) RBRACKET arrowLine rightArrow? LPAREN RPAREN)
+      )
    )?
    ;
 
@@ -1574,11 +1588,11 @@ graphScope
 // Database commands
 
 createCompositeDatabase
-   : COMPOSITE DATABASE symbolicAliasNameOrParameter (IF NOT EXISTS)? commandOptions? waitClause?
+   : COMPOSITE DATABASE symbolicAliasNameOrParameter (IF NOT EXISTS)? defaultLanguageSpecification? commandOptions? waitClause?
    ;
 
 createDatabase
-   : DATABASE symbolicAliasNameOrParameter (IF NOT EXISTS)? (TOPOLOGY (primaryTopology | secondaryTopology)+)? commandOptions? waitClause?
+   : DATABASE symbolicAliasNameOrParameter (IF NOT EXISTS)? defaultLanguageSpecification? (TOPOLOGY (primaryTopology | secondaryTopology)+)? commandOptions? waitClause?
    ;
 
 primaryTopology
@@ -1597,6 +1611,10 @@ secondaryToken
    : SECONDARY | SECONDARIES
    ;
 
+defaultLanguageSpecification
+   : DEFAULT LANGUAGE CYPHER UNSIGNED_DECIMAL_INTEGER
+   ;
+
 dropDatabase
    : COMPOSITE? DATABASE symbolicAliasNameOrParameter (IF EXISTS)? aliasAction? ((DUMP | DESTROY) DATA)? waitClause?
    ;
@@ -1608,7 +1626,7 @@ aliasAction
 
 alterDatabase
    : DATABASE symbolicAliasNameOrParameter (IF EXISTS)? (
-      (SET (alterDatabaseAccess | alterDatabaseTopology | alterDatabaseOption))+
+      (SET (alterDatabaseAccess | alterDatabaseTopology | alterDatabaseOption | defaultLanguageSpecification))+
       | (REMOVE OPTION symbolicNameString)+
    ) waitClause?
    ;
@@ -1657,7 +1675,7 @@ databaseName
    ;
 
 createAlias
-   : ALIAS aliasName (IF NOT EXISTS)? FOR DATABASE databaseName (AT stringOrParameter USER commandNameExpression PASSWORD passwordExpression (DRIVER mapOrParameter)?)? (PROPERTIES mapOrParameter)?
+   : ALIAS aliasName (IF NOT EXISTS)? FOR DATABASE databaseName (AT stringOrParameter USER commandNameExpression PASSWORD passwordExpression (DRIVER mapOrParameter)? defaultLanguageSpecification?)? (PROPERTIES mapOrParameter)?
    ;
 
 dropAlias
@@ -1671,6 +1689,7 @@ alterAlias
       | alterAliasPassword
       | alterAliasDriver
       | alterAliasProperties
+      | defaultLanguageSpecification
    )+
    ;
 
@@ -1700,13 +1719,6 @@ showAliases
 
 // Various strings, symbolic names, lists and maps
 
-// Should return an Either[String, Parameter]
-symbolicNameOrStringParameter
-   : symbolicNameString
-   | parameter["STRING"]
-   ;
-
-// Should return an Expression
 commandNameExpression
    : symbolicNameString
    | parameter["STRING"]
@@ -1866,6 +1878,7 @@ unescapedLabelSymbolicNameString_
    | CREATE
    | CSV
    | CURRENT
+   | CYPHER
    | DATA
    | DATABASE
    | DATABASES
@@ -1903,6 +1916,7 @@ unescapedLabelSymbolicNameString_
    | EXIST
    | EXISTENCE
    | EXISTS
+   | EXPAND
    | FAIL
    | FALSE
    | FIELDTERMINATOR
@@ -1933,11 +1947,13 @@ unescapedLabelSymbolicNameString_
    | INSERT
    | INT
    | INTEGER
+   | INTO
    | IS
    | JOIN
    | KEY
    | LABEL
    | LABELS
+   | LANGUAGE
    | LEADING
    | LIMITROWS
    | LIST
@@ -2002,6 +2018,7 @@ unescapedLabelSymbolicNameString_
    | REQUIRE
    | REQUIRED
    | RESTRICT
+   | RETRY
    | RETURN
    | REVOKE
    | ROLE
@@ -2061,6 +2078,7 @@ unescapedLabelSymbolicNameString_
    | USERS
    | USING
    | VALUE
+   | VIA
    | VECTOR
    | VERBOSE
    | VERTEX

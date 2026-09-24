@@ -40,7 +40,7 @@ public class SslResourceBuilder {
     private static final String CA_CERTIFICATE_NAME = "cluster.crt";
 
     private static final String PRIVATE_KEY_NAME = "private.key";
-    private static final String PUBLIC_CERT_NAME = "public.crt";
+    public static final String PUBLIC_CERT_NAME = "public.crt";
 
     private static final String SELF_SIGNED_NAME = "selfsigned.crt";
     private static final String REVOKED_NAME = "revoked.crl";
@@ -72,10 +72,10 @@ public class SslResourceBuilder {
     private final SignedBy signedBy;
 
     private boolean trustSignedByCA;
-    private Set<Integer> trusted = new HashSet<>();
-    private Set<Integer> revoked = new HashSet<>();
+    private final Set<Integer> trusted = new HashSet<>();
+    private final Set<Integer> revoked = new HashSet<>();
 
-    private FileSystemAbstraction fsa = new DefaultFileSystemAbstraction();
+    private final FileSystemAbstraction fsa = new DefaultFileSystemAbstraction();
 
     private SslResourceBuilder(int keyId, SignedBy signedBy) {
         this.keyId = keyId;

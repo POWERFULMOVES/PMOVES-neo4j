@@ -25,6 +25,7 @@ import org.neo4j.cypher.internal.RuntimeContext
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.TrailParameters
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createNode
 import org.neo4j.cypher.internal.logical.plans.Ascending
+import org.neo4j.cypher.internal.logical.plans.Expand.ExpandAll
 import org.neo4j.cypher.internal.logical.plans.IndexOrderNone
 import org.neo4j.cypher.internal.logical.plans.TransactionConcurrency
 import org.neo4j.cypher.internal.runtime.spec.Edition
@@ -46,6 +47,8 @@ import org.neo4j.kernel.api.procedure.CallableProcedure.BasicProcedure
 import org.neo4j.kernel.api.procedure.Context
 import org.neo4j.procedure.Mode
 import org.neo4j.values.AnyValue
+
+object ProfileRowsTestBase
 
 abstract class ProfileRowsTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
@@ -718,7 +721,7 @@ abstract class ProfileRowsTestBase[CONTEXT <: RuntimeContext](
       .produceResults("x")
       .nonFuseable()
       .expand("(x)-[r2]->(y2)")
-      .directedRelationshipByIdSeek("r", "x", "y", Set.empty, id)
+      .relationshipByIdSeek("(x)-[r]->(y)", Set.empty, id)
       .build()
 
     val runtimeResult = profile(logicalQuery, runtime)
@@ -744,7 +747,7 @@ abstract class ProfileRowsTestBase[CONTEXT <: RuntimeContext](
       .produceResults("x")
       .nonFuseable()
       .expand("(x)-[r2]->(y2)")
-      .directedRelationshipByIdSeek("r", "x", "y", Set.empty, ids.toSeq: _*)
+      .relationshipByIdSeek("(x)-[r]->(y)", Set.empty, ids.toSeq: _*)
       .build()
 
     val runtimeResult = profile(logicalQuery, runtime)
@@ -770,7 +773,7 @@ abstract class ProfileRowsTestBase[CONTEXT <: RuntimeContext](
       .produceResults("x")
       .nonFuseable()
       .expand("(x)-[r2]->(y2)")
-      .undirectedRelationshipByIdSeek("r", "x", "y", Set.empty, id)
+      .relationshipByIdSeek("(x)-[r]-(y)", Set.empty, id)
       .build()
 
     val runtimeResult = profile(logicalQuery, runtime)
@@ -796,7 +799,7 @@ abstract class ProfileRowsTestBase[CONTEXT <: RuntimeContext](
       .produceResults("x")
       .nonFuseable()
       .expand("(x)-[r2]->(y2)")
-      .undirectedRelationshipByIdSeek("r", "x", "y", Set.empty, ids.toSeq: _*)
+      .relationshipByIdSeek("(x)-[r]-(y)", Set.empty, ids.toSeq: _*)
       .build()
 
     val runtimeResult = profile(logicalQuery, runtime)
@@ -1201,8 +1204,6 @@ abstract class ProfileRowsTestBase[CONTEXT <: RuntimeContext](
   }
 
   test("should profile rows with shortest path") {
-    // TODO fails because of shortestPath, uses an ambient cursor via slotted pipe operator
-    assume(!isParallel) // Parallel does not yet support `FindShortestPaths`
     // given
     val nodesPerLabel = 100
     givenGraph {
@@ -2228,6 +2229,8 @@ trait NonParallelProfileRowsTestBase[CONTEXT <: RuntimeContext] {
         ResourceRawIterator.of[Array[AnyValue], ProcedureException](input, input)
       }
     })
+    // Refresh the transaction so its ProcedureView snapshot includes the procedure we just registered.
+    restartTx()
 
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
@@ -2255,7 +2258,7 @@ trait NonParallelProfileRowsTestBase[CONTEXT <: RuntimeContext] {
 
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
-      .orderedDistinct(Seq("x"), "x AS x", "y AS y")
+      .orderedDistinct(Seq("x"), "x AS x", "y AS y").withLeveragedOrder()
       .input(nodes = Seq("x", "y"))
       .build()
 
@@ -2528,7 +2531,9 @@ trait TrailProfileRowsTestBase[CONTEXT <: RuntimeContext] {
         innerRelationships = Set("r_inner"),
         previouslyBoundRelationships = Set.empty,
         previouslyBoundRelationshipGroups = Set.empty,
-        reverseGroupVariableProjections = false
+        reverseGroupVariableProjections = false,
+        expansionMode = ExpandAll,
+        accumulators = Set.empty
       ))
       .|.expandAll("(a_inner)-[r_inner]->(b_inner)")
       .|.argument("me", "a_inner")

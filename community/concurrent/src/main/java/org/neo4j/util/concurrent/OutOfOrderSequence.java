@@ -57,7 +57,7 @@ public interface OutOfOrderSequence {
     long highestEverSeen();
 
     /**
-     * @return {@code long[]} with the highest offered gap-free number and its meta data.
+     * @return {@link NumberWithMeta} with the highest offered gap-free number and its meta data.
      */
     NumberWithMeta get();
 
@@ -67,6 +67,8 @@ public interface OutOfOrderSequence {
     long getHighestGapFreeNumber();
 
     void set(long number, Meta meta);
+
+    void set(long highestObserved, Meta meta, long[] missingNumbers);
 
     Snapshot snapshot();
 

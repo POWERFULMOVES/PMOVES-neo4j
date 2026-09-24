@@ -27,6 +27,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.eclipse.collections.api.set.ImmutableSet;
 import org.neo4j.configuration.Config;
 import org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker;
+import org.neo4j.exceptions.InvalidArgumentException;
 import org.neo4j.internal.kernel.api.InternalIndexState;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexPrototype;
@@ -38,6 +39,7 @@ import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.KernelVersion;
+import org.neo4j.kernel.api.impl.index.DatabaseIndex;
 import org.neo4j.kernel.api.impl.index.LuceneMinimalIndexAccessor;
 import org.neo4j.kernel.api.impl.index.MinimalDatabaseIndex;
 import org.neo4j.kernel.api.impl.index.SchemaIndexMigrator;
@@ -47,6 +49,9 @@ import org.neo4j.kernel.api.impl.index.storage.PartitionedIndexStorage;
 import org.neo4j.kernel.api.index.IndexDirectoryStructure;
 import org.neo4j.kernel.api.index.IndexProvider;
 import org.neo4j.kernel.api.index.MinimalIndexAccessor;
+import org.neo4j.kernel.api.index.ValueIndexReader;
+import org.neo4j.logging.Log;
+import org.neo4j.logging.LogProvider;
 import org.neo4j.monitoring.Monitors;
 import org.neo4j.storageengine.api.StorageEngineFactory;
 import org.neo4j.storageengine.migration.StoreMigrationParticipant;
@@ -56,8 +61,11 @@ public abstract class AbstractLuceneIndexProvider extends IndexProvider {
     private final IndexStorageFactory indexStorageFactory;
     private final Monitor monitor;
     private final IndexType supportedIndexType;
+    private final FileSystemAbstraction fileSystem;
     protected final Config config;
     protected final DatabaseReadOnlyChecker readOnlyChecker;
+    protected final LogProvider logProvider;
+    private final Log log;
 
     public AbstractLuceneIndexProvider(
             KernelVersion minimumRequiredVersion,
@@ -68,31 +76,40 @@ public abstract class AbstractLuceneIndexProvider extends IndexProvider {
             IndexDirectoryStructure.Factory directoryStructureFactory,
             Monitors monitors,
             Config config,
-            DatabaseReadOnlyChecker readOnlyChecker) {
+            DatabaseReadOnlyChecker readOnlyChecker,
+            LogProvider logProvider) {
         super(minimumRequiredVersion, descriptor, directoryStructureFactory);
         this.supportedIndexType = supportedIndexType;
         this.readOnlyChecker = readOnlyChecker;
         this.monitor = monitors.newMonitor(Monitor.class, descriptor.toString());
-        this.indexStorageFactory = buildIndexStorageFactory(fileSystem, directoryFactory);
+        this.indexStorageFactory = buildIndexStorageFactory(fileSystem, directoryFactory, config);
         this.config = config;
+        this.fileSystem = fileSystem;
+        this.logProvider = logProvider;
+        this.log = logProvider.getLog(getClass());
     }
 
     @VisibleForTesting
     protected IndexStorageFactory buildIndexStorageFactory(
-            FileSystemAbstraction fileSystem, DirectoryFactory directoryFactory) {
+            FileSystemAbstraction fileSystem, DirectoryFactory directoryFactory, Config config) {
         return new IndexStorageFactory(directoryFactory, fileSystem, directoryStructure());
     }
 
     @Override
     public IndexPrototype validatePrototype(IndexPrototype prototype) {
-        final var indexType = prototype.getIndexType();
-        final var providerName = getProviderDescriptor().name();
+        IndexType indexType = prototype.getIndexType();
+        String providerName = getProviderDescriptor().name();
         if (indexType != supportedIndexType) {
-            throw new IllegalArgumentException("The '%s' index provider does not support %s indexes: %s"
-                    .formatted(providerName, indexType, prototype));
+            throw InvalidArgumentException.invalidIndexInput(
+                    indexType.toString(),
+                    providerName,
+                    "The '%s' index provider does not support %s indexes: %s"
+                            .formatted(providerName, indexType, prototype));
         }
         if (prototype.isUnique()) {
-            throw new IllegalArgumentException(
+            throw InvalidArgumentException.invalidIndexInput(
+                    indexType.toString(),
+                    providerName,
                     "The '%s' index provider does not support unique indexes: %s".formatted(providerName, prototype));
         }
         return prototype;
@@ -106,20 +123,32 @@ public abstract class AbstractLuceneIndexProvider extends IndexProvider {
     @Override
     public MinimalIndexAccessor getMinimalIndexAccessor(IndexDescriptor descriptor, boolean forRebuildDuringRecovery) {
         PartitionedIndexStorage indexStorage = indexStorageFactory.indexStorageOf(descriptor.getId());
-        final var index = new MinimalDatabaseIndex<>(indexStorage, descriptor, config);
+        DatabaseIndex<ValueIndexReader> index =
+                new MinimalDatabaseIndex<>(indexStorage, descriptor, config, logProvider);
         return new LuceneMinimalIndexAccessor<>(descriptor, index, readOnlyChecker.isReadOnly());
     }
 
     @Override
     public InternalIndexState getInitialState(
             IndexDescriptor descriptor, CursorContext cursorContext, ImmutableSet<OpenOption> openOptions) {
-        final var indexStorage = getIndexStorage(descriptor.getId());
-        final var failure = indexStorage.getStoredIndexFailure();
+        PartitionedIndexStorage indexStorage = getIndexStorage(descriptor.getId());
+        try {
+            fileSystem.mkdirs(indexStorage.getIndexFailureFile().getParent());
+            fileSystem.mkdirs(indexStorage.getIndexFolder());
+        } catch (IOException ex) {
+            ex.addSuppressed(ex);
+            log.warn(
+                    "Failed to create the index folder structure. The exception was added as a suppressed\n"
+                            + "  exception",
+                    ex);
+            return InternalIndexState.FAILED;
+        }
+        String failure = indexStorage.getStoredIndexFailure();
         if (failure != null) {
             return InternalIndexState.FAILED;
         }
         try {
-            return indexIsOnline(indexStorage, descriptor, config)
+            return indexIsOnline(indexStorage, descriptor, config, logProvider)
                     ? InternalIndexState.ONLINE
                     : InternalIndexState.POPULATING;
         } catch (IOException e) {
@@ -132,7 +161,7 @@ public abstract class AbstractLuceneIndexProvider extends IndexProvider {
 
     @Override
     public StoreMigrationParticipant storeMigrationParticipant(
-            final FileSystemAbstraction fs,
+            FileSystemAbstraction fs,
             PageCache pageCache,
             PageCacheTracer pageCacheTracer,
             StorageEngineFactory storageEngineFactory,
@@ -163,9 +192,11 @@ public abstract class AbstractLuceneIndexProvider extends IndexProvider {
         indexStorageFactory.close();
     }
 
-    public static boolean indexIsOnline(PartitionedIndexStorage indexStorage, IndexDescriptor descriptor, Config config)
+    public static boolean indexIsOnline(
+            PartitionedIndexStorage indexStorage, IndexDescriptor descriptor, Config config, LogProvider logProvider)
             throws IOException {
-        try (var index = new MinimalDatabaseIndex<>(indexStorage, descriptor, config)) {
+        try (DatabaseIndex<ValueIndexReader> index =
+                new MinimalDatabaseIndex<>(indexStorage, descriptor, config, logProvider)) {
             if (index.exists()) {
                 index.open();
                 return index.isOnline();

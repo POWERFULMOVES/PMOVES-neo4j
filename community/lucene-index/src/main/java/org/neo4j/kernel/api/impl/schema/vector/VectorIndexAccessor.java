@@ -19,6 +19,7 @@
  */
 package org.neo4j.kernel.api.impl.schema.vector;
 
+import static org.neo4j.kernel.api.impl.index.lucene.LuceneDocumentsFactory.ENTITY_ID_KEY;
 import static org.neo4j.kernel.impl.index.schema.IndexUsageTracking.NO_USAGE_TRACKING;
 
 import java.io.IOException;
@@ -28,23 +29,22 @@ import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.kernel.api.impl.index.AbstractLuceneIndexAccessor;
 import org.neo4j.kernel.api.impl.index.DatabaseIndex;
-import org.neo4j.kernel.api.impl.schema.vector.VectorSimilarityFunctions.LuceneVectorSimilarityFunction;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDocument;
 import org.neo4j.kernel.api.index.IndexUpdater;
-import org.neo4j.kernel.api.vector.VectorCandidate;
 import org.neo4j.kernel.impl.api.index.IndexUpdateMode;
 import org.neo4j.kernel.impl.index.schema.IndexUpdateIgnoreStrategy;
 import org.neo4j.values.storable.Value;
 
 class VectorIndexAccessor extends AbstractLuceneIndexAccessor<VectorIndexReader, DatabaseIndex<VectorIndexReader>> {
     private final VectorDocumentStructure documentStructure;
-    private final LuceneVectorSimilarityFunction similarityFunction;
+    private final Neo4jVectorSimilarityFunction similarityFunction;
 
     protected VectorIndexAccessor(
             DatabaseIndex<VectorIndexReader> luceneIndex,
             IndexDescriptor descriptor,
             IndexUpdateIgnoreStrategy ignoreStrategy,
             VectorDocumentStructure documentStructure,
-            LuceneVectorSimilarityFunction similarityFunction) {
+            Neo4jVectorSimilarityFunction similarityFunction) {
         super(luceneIndex, descriptor, ignoreStrategy);
         this.documentStructure = documentStructure;
         this.similarityFunction = similarityFunction;
@@ -76,9 +76,9 @@ class VectorIndexAccessor extends AbstractLuceneIndexAccessor<VectorIndexReader,
         @Override
         protected void addIdempotent(long entityId, Value[] values) {
             try {
-                final var document = documentStructure.createLuceneDocument(
-                        entityId, VectorCandidate.maybeFrom(values[0]), similarityFunction);
-                writer.updateOrDeleteDocument(VectorDocumentStructure.newTermForChangeOrRemove(entityId), document);
+                LuceneDocument document =
+                        documentsFactory.createVectorDocument(documentStructure, entityId, similarityFunction, values);
+                writer.updateOrDeleteDocument(ENTITY_ID_KEY, entityId, document);
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
             }
@@ -87,8 +87,8 @@ class VectorIndexAccessor extends AbstractLuceneIndexAccessor<VectorIndexReader,
         @Override
         protected void add(long entityId, Value[] values) {
             try {
-                final var document = documentStructure.createLuceneDocument(
-                        entityId, VectorCandidate.maybeFrom(values[0]), similarityFunction);
+                LuceneDocument document =
+                        documentsFactory.createVectorDocument(documentStructure, entityId, similarityFunction, values);
                 writer.nullableAddDocument(document);
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
@@ -98,10 +98,9 @@ class VectorIndexAccessor extends AbstractLuceneIndexAccessor<VectorIndexReader,
         @Override
         protected void change(long entityId, Value[] values) {
             try {
-                final var term = VectorDocumentStructure.newTermForChangeOrRemove(entityId);
-                final var document = documentStructure.createLuceneDocument(
-                        entityId, VectorCandidate.maybeFrom(values[0]), similarityFunction);
-                writer.updateOrDeleteDocument(term, document);
+                LuceneDocument document =
+                        documentsFactory.createVectorDocument(documentStructure, entityId, similarityFunction, values);
+                writer.updateOrDeleteDocument(ENTITY_ID_KEY, entityId, document);
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
             }
@@ -110,8 +109,7 @@ class VectorIndexAccessor extends AbstractLuceneIndexAccessor<VectorIndexReader,
         @Override
         protected void remove(long entityId) {
             try {
-                final var term = VectorDocumentStructure.newTermForChangeOrRemove(entityId);
-                writer.deleteDocuments(term);
+                writer.deleteDocuments(ENTITY_ID_KEY, entityId);
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
             }

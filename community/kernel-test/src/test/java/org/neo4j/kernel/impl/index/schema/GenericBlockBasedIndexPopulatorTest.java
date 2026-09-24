@@ -37,11 +37,12 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.neo4j.index.internal.gbptree.Layout;
 import org.neo4j.index.internal.gbptree.Seeker;
-import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.io.memory.ByteBufferFactory;
 import org.neo4j.io.memory.UnsafeDirectByteBufferAllocator;
 import org.neo4j.kernel.api.exceptions.index.IndexEntryConflictException;
+import org.neo4j.kernel.api.index.IndexPopulator;
 import org.neo4j.kernel.api.index.IndexUpdater;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
 import org.neo4j.test.Race;
 import org.neo4j.values.storable.Value;
@@ -54,12 +55,13 @@ abstract class GenericBlockBasedIndexPopulatorTest<KEY extends GenericKey<KEY>>
         // given
         ByteBufferFactory bufferFactory =
                 new ByteBufferFactory(UnsafeDirectByteBufferAllocator::new, SUFFICIENTLY_LARGE_BUFFER_SIZE);
-        BlockBasedIndexPopulator<KEY> populator = instantiatePopulator(NO_MONITOR, bufferFactory, INSTANCE);
+        BlockBasedIndexPopulator<KEY> populator =
+                instantiatePopulator(NO_MONITOR, bufferFactory, INSTANCE, IndexPopulator.DEFAULT_CONFIGURATION);
         try {
             int size = populator.tree.keyValueSizeCap();
             Layout<KEY, NullValue> layout = layout();
             Value value = generateStringValueResultingInIndexEntrySize(layout, size);
-            IndexEntryUpdate<IndexDescriptor> update = IndexEntryUpdate.add(0, INDEX_DESCRIPTOR, value);
+            IndexEntryUpdate update = EagerValueIndexEntryUpdate.add(0, INDEX_DESCRIPTOR, value);
             Race.ThrowingRunnable updateAction = () -> {
                 try (IndexUpdater updater = populator.newPopulatingUpdater(NULL_CONTEXT)) {
                     updater.process(update);
@@ -88,27 +90,29 @@ abstract class GenericBlockBasedIndexPopulatorTest<KEY extends GenericKey<KEY>>
     @Test
     void shouldAcceptBatchAddedMaxSizeValue() throws IndexEntryConflictException, IOException {
         // given
-        ByteBufferFactory bufferFactory =
-                new ByteBufferFactory(UnsafeDirectByteBufferAllocator::new, SUFFICIENTLY_LARGE_BUFFER_SIZE);
-        BlockBasedIndexPopulator<KEY> populator = instantiatePopulator(NO_MONITOR, bufferFactory, INSTANCE);
-        try {
-            int size = populator.tree.keyValueSizeCap();
-            Layout<KEY, NullValue> layout = layout();
-            Value value = generateStringValueResultingInIndexEntrySize(layout, size);
-            Collection<? extends IndexEntryUpdate<?>> data =
-                    singletonList(IndexEntryUpdate.add(0, INDEX_DESCRIPTOR, value));
-            populator.add(data, NULL_CONTEXT);
-            populator.scanCompleted(nullInstance, populationWorkScheduler, NULL_CONTEXT);
+        try (ByteBufferFactory bufferFactory =
+                new ByteBufferFactory(UnsafeDirectByteBufferAllocator::new, SUFFICIENTLY_LARGE_BUFFER_SIZE)) {
+            BlockBasedIndexPopulator<KEY> populator =
+                    instantiatePopulator(NO_MONITOR, bufferFactory, INSTANCE, IndexPopulator.DEFAULT_CONFIGURATION);
+            try {
+                int size = populator.tree.keyValueSizeCap();
+                Layout<KEY, NullValue> layout = layout();
+                Value value = generateStringValueResultingInIndexEntrySize(layout, size);
+                Collection<? extends IndexEntryUpdate> data =
+                        singletonList(EagerValueIndexEntryUpdate.add(0, INDEX_DESCRIPTOR, value));
+                populator.add(data, NULL_CONTEXT);
+                populator.scanCompleted(nullInstance, populationWorkScheduler, NULL_CONTEXT);
 
-            // when
-            try (Seeker<KEY, NullValue> seek = seek(populator.tree, layout)) {
-                // then
-                assertTrue(seek.next());
-                assertEquals(value, seek.key().asValues()[0]);
-                assertFalse(seek.next());
+                // when
+                try (Seeker<KEY, NullValue> seek = seek(populator.tree, layout)) {
+                    // then
+                    assertTrue(seek.next());
+                    assertEquals(value, seek.key().asValues()[0]);
+                    assertFalse(seek.next());
+                }
+            } finally {
+                populator.close(true, NULL_CONTEXT);
             }
-        } finally {
-            populator.close(true, NULL_CONTEXT);
         }
     }
 

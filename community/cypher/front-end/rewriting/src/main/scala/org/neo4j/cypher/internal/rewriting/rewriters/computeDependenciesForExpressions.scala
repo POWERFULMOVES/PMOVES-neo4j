@@ -18,22 +18,14 @@ package org.neo4j.cypher.internal.rewriting.rewriters
 
 import org.neo4j.cypher.internal.ast.semantics.Scope.DeclarationsAndDependencies
 import org.neo4j.cypher.internal.ast.semantics.SemanticState
-import org.neo4j.cypher.internal.expressions.ExpressionWithComputedDependencies
 import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.StepSequencer
-import org.neo4j.cypher.internal.util.topDown
 
 case class computeDependenciesForExpressions(semanticState: SemanticState) extends Rewriter {
 
   def apply(that: AnyRef): AnyRef = instance.apply(that)
 
-  private val instance: Rewriter = topDown(Rewriter.lift {
-    case x: ExpressionWithComputedDependencies =>
-      val DeclarationsAndDependencies(declarations, dependencies) = semanticState.recordedScopes(x.subqueryAstNode)
-        .declarationsAndDependencies
-      x.withComputedIntroducedVariables(declarations.map(_.asVariable))
-        .withComputedScopeDependencies(dependencies.map(_.asVariable))
-  })
+  private val instance: Rewriter = DeclarationsAndDependencies.rewriter(semanticState)
 }
 
 case object computeDependenciesForExpressions {

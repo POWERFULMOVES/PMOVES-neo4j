@@ -16,14 +16,16 @@
  */
 package org.neo4j.cypher.internal.rewriting.rewriters
 
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.rewriting.RewriteTest
+import org.neo4j.cypher.internal.rewriting.rewriters.astRewriters.MoveWithPastMatch
 import org.neo4j.cypher.internal.util.CancellationChecker
 import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 
 class moveWithPastMatchTest extends CypherFunSuite with RewriteTest {
 
-  val rewriterUnderTest: Rewriter = moveWithPastMatch(CancellationChecker.neverCancelled()).instance
+  val rewriterUnderTest: Rewriter = MoveWithPastMatch(CancellationChecker.neverCancelled()).instance
 
   test("does not move WITH if it is not a simple projection") {
     assertIsNotRewritten("WITH DISTINCT 1 AS foo MATCH (n) RETURN n")
@@ -402,5 +404,29 @@ class moveWithPastMatchTest extends CypherFunSuite with RewriteTest {
            |""".stripMargin
       )
     })
+  }
+
+  test("Moves score variable from search") {
+    assertRewrite(
+      CypherVersion.Cypher25,
+      """WITH 1 AS sq
+        |MATCH (movie:Movie)
+        |  SEARCH movie IN (
+        |    VECTOR INDEX moviePlots
+        |    FOR [1, 2, 3]
+        |    LIMIT 25
+        |  ) SCORE AS similarityScore
+        |RETURN movie.title AS title, similarityScore
+        |""".stripMargin,
+      """MATCH (movie:Movie)
+        |  SEARCH movie IN (
+        |    VECTOR INDEX moviePlots
+        |    FOR [1, 2, 3]
+        |    LIMIT 25
+        |  ) SCORE AS similarityScore
+        |WITH 1 AS sq, movie AS movie, similarityScore AS similarityScore
+        |RETURN movie.title AS title, similarityScore
+        |""".stripMargin
+    )
   }
 }

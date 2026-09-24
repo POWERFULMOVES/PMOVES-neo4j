@@ -79,9 +79,9 @@ public class KernelSchemaRead implements SchemaRead {
                 storageReader, txStateHolder, indexingService, indexStatisticsStore, accessModeProvider);
     }
 
-    static void assertValidIndex(IndexDescriptor index) throws IndexNotFoundKernelException {
+    public static void assertValidIndex(IndexDescriptor index) throws IndexNotFoundKernelException {
         if (index == IndexDescriptor.NO_INDEX) {
-            throw new IndexNotFoundKernelException("No index was found");
+            throw IndexNotFoundKernelException.indexNotFound();
         }
     }
 
@@ -271,9 +271,10 @@ public class KernelSchemaRead implements SchemaRead {
         return !storageReader.indexExists(index);
     }
 
+    @Override
     public void assertIndexExists(IndexDescriptor index) throws IndexNotFoundKernelException {
         if (indexNotExists(index)) {
-            throw new IndexNotFoundKernelException("Index does not exist: ", index);
+            throw IndexNotFoundKernelException.indexNotFound(index);
         }
     }
 

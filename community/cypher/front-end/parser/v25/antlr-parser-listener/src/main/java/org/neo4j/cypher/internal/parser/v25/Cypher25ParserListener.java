@@ -27,7 +27,35 @@ public interface Cypher25ParserListener extends ParseTreeListener {
 
     void exitStatement(Cypher25Parser.StatementContext ctx);
 
+    void exitQueryWithLocalDefinitions(Cypher25Parser.QueryWithLocalDefinitionsContext ctx);
+
+    void exitLocalDefinition(Cypher25Parser.LocalDefinitionContext ctx);
+
+    void exitLocalProcedureDefinition(Cypher25Parser.LocalProcedureDefinitionContext ctx);
+
+    void exitLocalFunctionDefinition(Cypher25Parser.LocalFunctionDefinitionContext ctx);
+
+    void exitLocalInputFieldsSignature(Cypher25Parser.LocalInputFieldsSignatureContext ctx);
+
+    void exitLocalOutputFieldsSignature(Cypher25Parser.LocalOutputFieldsSignatureContext ctx);
+
+    void exitLocalMandatoryFieldSignature(Cypher25Parser.LocalMandatoryFieldSignatureContext ctx);
+
+    void exitLocalOptionalFieldSignature(Cypher25Parser.LocalOptionalFieldSignatureContext ctx);
+
+    void exitLocalFunctionBody(Cypher25Parser.LocalFunctionBodyContext ctx);
+
+    void exitNextStatement(Cypher25Parser.NextStatementContext ctx);
+
     void exitRegularQuery(Cypher25Parser.RegularQueryContext ctx);
+
+    void exitUnion(Cypher25Parser.UnionContext ctx);
+
+    void exitWhen(Cypher25Parser.WhenContext ctx);
+
+    void exitWhenBranch(Cypher25Parser.WhenBranchContext ctx);
+
+    void exitElseBranch(Cypher25Parser.ElseBranchContext ctx);
 
     void exitSingleQuery(Cypher25Parser.SingleQueryContext ctx);
 
@@ -47,6 +75,8 @@ public interface Cypher25ParserListener extends ParseTreeListener {
 
     void exitReturnItems(Cypher25Parser.ReturnItemsContext ctx);
 
+    void exitGroupBy(Cypher25Parser.GroupByContext ctx);
+
     void exitOrderItem(Cypher25Parser.OrderItemContext ctx);
 
     void exitAscToken(Cypher25Parser.AscTokenContext ctx);
@@ -60,6 +90,16 @@ public interface Cypher25ParserListener extends ParseTreeListener {
     void exitLimit(Cypher25Parser.LimitContext ctx);
 
     void exitWhereClause(Cypher25Parser.WhereClauseContext ctx);
+
+    void exitSearchClause(Cypher25Parser.SearchClauseContext ctx);
+
+    void exitIndexSpecificationClause(Cypher25Parser.IndexSpecificationClauseContext ctx);
+
+    void exitForClause(Cypher25Parser.ForClauseContext ctx);
+
+    void exitAnalyzerClause(Cypher25Parser.AnalyzerClauseContext ctx);
+
+    void exitScoreClause(Cypher25Parser.ScoreClauseContext ctx);
 
     void exitWithClause(Cypher25Parser.WithClauseContext ctx);
 
@@ -83,11 +123,21 @@ public interface Cypher25ParserListener extends ParseTreeListener {
 
     void exitHint(Cypher25Parser.HintContext ctx);
 
+    void exitExpandHintStep(Cypher25Parser.ExpandHintStepContext ctx);
+
     void exitMergeClause(Cypher25Parser.MergeClauseContext ctx);
 
     void exitMergeAction(Cypher25Parser.MergeActionContext ctx);
 
+    void exitFilterClause(Cypher25Parser.FilterClauseContext ctx);
+
     void exitUnwindClause(Cypher25Parser.UnwindClauseContext ctx);
+
+    void exitForListClause(Cypher25Parser.ForListClauseContext ctx);
+
+    void exitLetClause(Cypher25Parser.LetClauseContext ctx);
+
+    void exitLetItem(Cypher25Parser.LetItemContext ctx);
 
     void exitCallClause(Cypher25Parser.CallClauseContext ctx);
 
@@ -109,7 +159,15 @@ public interface Cypher25ParserListener extends ParseTreeListener {
 
     void exitSubqueryInTransactionsBatchParameters(Cypher25Parser.SubqueryInTransactionsBatchParametersContext ctx);
 
+    void exitSubqueryInTransactionsDisjointByParameters(
+            Cypher25Parser.SubqueryInTransactionsDisjointByParametersContext ctx);
+
+    void exitSubqueryInTransactionsDisjointByExpressions(
+            Cypher25Parser.SubqueryInTransactionsDisjointByExpressionsContext ctx);
+
     void exitSubqueryInTransactionsErrorParameters(Cypher25Parser.SubqueryInTransactionsErrorParametersContext ctx);
+
+    void exitSubqueryInTransactionsRetryParameters(Cypher25Parser.SubqueryInTransactionsRetryParametersContext ctx);
 
     void exitSubqueryInTransactionsReportParameters(Cypher25Parser.SubqueryInTransactionsReportParametersContext ctx);
 
@@ -131,7 +189,11 @@ public interface Cypher25ParserListener extends ParseTreeListener {
 
     void exitPatternElement(Cypher25Parser.PatternElementContext ctx);
 
-    void exitSelector(Cypher25Parser.SelectorContext ctx);
+    void exitPathPatternPrefix(Cypher25Parser.PathPatternPrefixContext ctx);
+
+    void exitNonNegativeIntegerSpecification(Cypher25Parser.NonNegativeIntegerSpecificationContext ctx);
+
+    void exitPathMode(Cypher25Parser.PathModeContext ctx);
 
     void exitGroupToken(Cypher25Parser.GroupTokenContext ctx);
 
@@ -179,19 +241,11 @@ public interface Cypher25ParserListener extends ParseTreeListener {
 
     void exitLabelExpression4(Cypher25Parser.LabelExpression4Context ctx);
 
-    void exitLabelExpression4Is(Cypher25Parser.LabelExpression4IsContext ctx);
-
     void exitLabelExpression3(Cypher25Parser.LabelExpression3Context ctx);
-
-    void exitLabelExpression3Is(Cypher25Parser.LabelExpression3IsContext ctx);
 
     void exitLabelExpression2(Cypher25Parser.LabelExpression2Context ctx);
 
-    void exitLabelExpression2Is(Cypher25Parser.LabelExpression2IsContext ctx);
-
     void exitLabelExpression1(Cypher25Parser.LabelExpression1Context ctx);
-
-    void exitLabelExpression1Is(Cypher25Parser.LabelExpression1IsContext ctx);
 
     void exitInsertNodeLabelExpression(Cypher25Parser.InsertNodeLabelExpressionContext ctx);
 
@@ -229,10 +283,6 @@ public interface Cypher25ParserListener extends ParseTreeListener {
 
     void exitDynamicProperty(Cypher25Parser.DynamicPropertyContext ctx);
 
-    void exitPropertyExpression(Cypher25Parser.PropertyExpressionContext ctx);
-
-    void exitDynamicPropertyExpression(Cypher25Parser.DynamicPropertyExpressionContext ctx);
-
     void exitExpression1(Cypher25Parser.Expression1Context ctx);
 
     void exitLiteral(Cypher25Parser.LiteralContext ctx);
@@ -249,13 +299,31 @@ public interface Cypher25ParserListener extends ParseTreeListener {
 
     void exitListComprehension(Cypher25Parser.ListComprehensionContext ctx);
 
+    void exitMapComprehension(Cypher25Parser.MapComprehensionContext ctx);
+
     void exitPatternComprehension(Cypher25Parser.PatternComprehensionContext ctx);
 
     void exitReduceExpression(Cypher25Parser.ReduceExpressionContext ctx);
 
+    void exitAllReduceExpression(Cypher25Parser.AllReduceExpressionContext ctx);
+
+    void exitAllReduceExpressionValidArguments(Cypher25Parser.AllReduceExpressionValidArgumentsContext ctx);
+
+    void exitAllReduceExpressionInvalidArguments(Cypher25Parser.AllReduceExpressionInvalidArgumentsContext ctx);
+
     void exitListItemsPredicate(Cypher25Parser.ListItemsPredicateContext ctx);
 
     void exitNormalizeFunction(Cypher25Parser.NormalizeFunctionContext ctx);
+
+    void exitVectorFunction(Cypher25Parser.VectorFunctionContext ctx);
+
+    void exitVectorDistanceFunction(Cypher25Parser.VectorDistanceFunctionContext ctx);
+
+    void exitVectorNormFunction(Cypher25Parser.VectorNormFunctionContext ctx);
+
+    void exitVectorDistanceMetric(Cypher25Parser.VectorDistanceMetricContext ctx);
+
+    void exitVectorNormDistanceMetric(Cypher25Parser.VectorNormDistanceMetricContext ctx);
 
     void exitTrimFunction(Cypher25Parser.TrimFunctionContext ctx);
 
@@ -272,6 +340,8 @@ public interface Cypher25ParserListener extends ParseTreeListener {
     void exitCountStar(Cypher25Parser.CountStarContext ctx);
 
     void exitExistsExpression(Cypher25Parser.ExistsExpressionContext ctx);
+
+    void exitPropertyExistsPredicate(Cypher25Parser.PropertyExistsPredicateContext ctx);
 
     void exitCountExpression(Cypher25Parser.CountExpressionContext ctx);
 
@@ -299,6 +369,8 @@ public interface Cypher25ParserListener extends ParseTreeListener {
 
     void exitVariable(Cypher25Parser.VariableContext ctx);
 
+    void exitObfuscatedLiteral(Cypher25Parser.ObfuscatedLiteralContext ctx);
+
     void exitNonEmptyNameList(Cypher25Parser.NonEmptyNameListContext ctx);
 
     void exitType(Cypher25Parser.TypeContext ctx);
@@ -311,15 +383,21 @@ public interface Cypher25ParserListener extends ParseTreeListener {
 
     void exitTypeListSuffix(Cypher25Parser.TypeListSuffixContext ctx);
 
+    void exitVectorCoordinateType(Cypher25Parser.VectorCoordinateTypeContext ctx);
+
     void exitCommand(Cypher25Parser.CommandContext ctx);
 
     void exitCreateCommand(Cypher25Parser.CreateCommandContext ctx);
 
+    void exitAlterCommand(Cypher25Parser.AlterCommandContext ctx);
+
     void exitDropCommand(Cypher25Parser.DropCommandContext ctx);
 
-    void exitShowCommand(Cypher25Parser.ShowCommandContext ctx);
+    void exitShowAdminCommand(Cypher25Parser.ShowAdminCommandContext ctx);
 
     void exitShowCommandYield(Cypher25Parser.ShowCommandYieldContext ctx);
+
+    void exitShowCommandYieldWhere(Cypher25Parser.ShowCommandYieldWhereContext ctx);
 
     void exitYieldItem(Cypher25Parser.YieldItemContext ctx);
 
@@ -350,6 +428,8 @@ public interface Cypher25ParserListener extends ParseTreeListener {
     void exitConstraintExistType(Cypher25Parser.ConstraintExistTypeContext ctx);
 
     void exitShowConstraintsEnd(Cypher25Parser.ShowConstraintsEndContext ctx);
+
+    void exitShowCurrentGraphTypeCommand(Cypher25Parser.ShowCurrentGraphTypeCommandContext ctx);
 
     void exitShowProcedures(Cypher25Parser.ShowProceduresContext ctx);
 
@@ -389,9 +469,11 @@ public interface Cypher25ParserListener extends ParseTreeListener {
 
     void exitCreateFulltextIndex(Cypher25Parser.CreateFulltextIndexContext ctx);
 
-    void exitFulltextNodePattern(Cypher25Parser.FulltextNodePatternContext ctx);
+    void exitCreateVectorIndex(Cypher25Parser.CreateVectorIndexContext ctx);
 
-    void exitFulltextRelPattern(Cypher25Parser.FulltextRelPatternContext ctx);
+    void exitMultiLabelNodePattern(Cypher25Parser.MultiLabelNodePatternContext ctx);
+
+    void exitMultiRelTypeRelPattern(Cypher25Parser.MultiRelTypeRelPatternContext ctx);
 
     void exitCreateLookupIndex(Cypher25Parser.CreateLookupIndexContext ctx);
 
@@ -405,7 +487,61 @@ public interface Cypher25ParserListener extends ParseTreeListener {
 
     void exitEnclosedPropertyList(Cypher25Parser.EnclosedPropertyListContext ctx);
 
-    void exitAlterCommand(Cypher25Parser.AlterCommandContext ctx);
+    void exitWithProperties(Cypher25Parser.WithPropertiesContext ctx);
+
+    void exitAlterCurrentGraphType(Cypher25Parser.AlterCurrentGraphTypeContext ctx);
+
+    void exitGraphTypeSpecification(Cypher25Parser.GraphTypeSpecificationContext ctx);
+
+    void exitGraphTypeDropSpecification(Cypher25Parser.GraphTypeDropSpecificationContext ctx);
+
+    void exitGraphTypeSpecificationBody(Cypher25Parser.GraphTypeSpecificationBodyContext ctx);
+
+    void exitGraphTypeDropSpecificationBody(Cypher25Parser.GraphTypeDropSpecificationBodyContext ctx);
+
+    void exitGraphTypeElement(Cypher25Parser.GraphTypeElementContext ctx);
+
+    void exitGraphTypeDropElement(Cypher25Parser.GraphTypeDropElementContext ctx);
+
+    void exitNodeTypeInlineConstraintList(Cypher25Parser.NodeTypeInlineConstraintListContext ctx);
+
+    void exitEdgeTypeInlineConstraintList(Cypher25Parser.EdgeTypeInlineConstraintListContext ctx);
+
+    void exitImplies(Cypher25Parser.ImpliesContext ctx);
+
+    void exitNodeTypeSpecification(Cypher25Parser.NodeTypeSpecificationContext ctx);
+
+    void exitImpliedLabelSet(Cypher25Parser.ImpliedLabelSetContext ctx);
+
+    void exitIdentifyingLabel(Cypher25Parser.IdentifyingLabelContext ctx);
+
+    void exitNodeTypeReference(Cypher25Parser.NodeTypeReferenceContext ctx);
+
+    void exitNodeTypeAliasReference(Cypher25Parser.NodeTypeAliasReferenceContext ctx);
+
+    void exitNodeTypeInSituReference(Cypher25Parser.NodeTypeInSituReferenceContext ctx);
+
+    void exitEdgeTypeSpecification(Cypher25Parser.EdgeTypeSpecificationContext ctx);
+
+    void exitArcTypePointingRight(Cypher25Parser.ArcTypePointingRightContext ctx);
+
+    void exitIdentifyingRelationship(Cypher25Parser.IdentifyingRelationshipContext ctx);
+
+    void exitEdgeTypeReference(Cypher25Parser.EdgeTypeReferenceContext ctx);
+
+    void exitEdgeTypeAliasReference(Cypher25Parser.EdgeTypeAliasReferenceContext ctx);
+
+    void exitEdgeTypeInSituReference(Cypher25Parser.EdgeTypeInSituReferenceContext ctx);
+
+    void exitPropertyTypeList(Cypher25Parser.PropertyTypeListContext ctx);
+
+    void exitPropertyType(Cypher25Parser.PropertyTypeContext ctx);
+
+    void exitPropertyTypeInlineConstraint(Cypher25Parser.PropertyTypeInlineConstraintContext ctx);
+
+    void exitTyped(Cypher25Parser.TypedContext ctx);
+
+    void exitConstraintSpecification(Cypher25Parser.ConstraintSpecificationContext ctx);
 
     void exitRenameCommand(Cypher25Parser.RenameCommandContext ctx);
 
@@ -419,7 +555,15 @@ public interface Cypher25ParserListener extends ParseTreeListener {
 
     void exitRoleNames(Cypher25Parser.RoleNamesContext ctx);
 
+    void exitAuthRuleNames(Cypher25Parser.AuthRuleNamesContext ctx);
+
     void exitRoleToken(Cypher25Parser.RoleTokenContext ctx);
+
+    void exitTagToken(Cypher25Parser.TagTokenContext ctx);
+
+    void exitAuthRuleKeywords(Cypher25Parser.AuthRuleKeywordsContext ctx);
+
+    void exitCommandToken(Cypher25Parser.CommandTokenContext ctx);
 
     void exitEnableServerCommand(Cypher25Parser.EnableServerCommandContext ctx);
 
@@ -449,6 +593,8 @@ public interface Cypher25ParserListener extends ParseTreeListener {
 
     void exitRevokeRole(Cypher25Parser.RevokeRoleContext ctx);
 
+    void exitUsersOrAuthRule(Cypher25Parser.UsersOrAuthRuleContext ctx);
+
     void exitCreateUser(Cypher25Parser.CreateUserContext ctx);
 
     void exitDropUser(Cypher25Parser.DropUserContext ctx);
@@ -459,7 +605,17 @@ public interface Cypher25ParserListener extends ParseTreeListener {
 
     void exitAlterUser(Cypher25Parser.AlterUserContext ctx);
 
+    void exitAlterUsers(Cypher25Parser.AlterUsersContext ctx);
+
     void exitRemoveNamedProvider(Cypher25Parser.RemoveNamedProviderContext ctx);
+
+    void exitUserSetTagsClause(Cypher25Parser.UserSetTagsClauseContext ctx);
+
+    void exitUserAddTagsClause(Cypher25Parser.UserAddTagsClauseContext ctx);
+
+    void exitUserRemoveTagsClause(Cypher25Parser.UserRemoveTagsClauseContext ctx);
+
+    void exitExplicitUserTags(Cypher25Parser.ExplicitUserTagsContext ctx);
 
     void exitPassword(Cypher25Parser.PasswordContext ctx);
 
@@ -488,6 +644,8 @@ public interface Cypher25ParserListener extends ParseTreeListener {
     void exitShowRolePrivileges(Cypher25Parser.ShowRolePrivilegesContext ctx);
 
     void exitShowUserPrivileges(Cypher25Parser.ShowUserPrivilegesContext ctx);
+
+    void exitShowAuthRulePrivileges(Cypher25Parser.ShowAuthRulePrivilegesContext ctx);
 
     void exitPrivilegeAsCommand(Cypher25Parser.PrivilegeAsCommandContext ctx);
 
@@ -543,6 +701,10 @@ public interface Cypher25ParserListener extends ParseTreeListener {
 
     void exitTransactionToken(Cypher25Parser.TransactionTokenContext ctx);
 
+    void exitSecretToken(Cypher25Parser.SecretTokenContext ctx);
+
+    void exitSecretQualifier(Cypher25Parser.SecretQualifierContext ctx);
+
     void exitUserQualifier(Cypher25Parser.UserQualifierContext ctx);
 
     void exitExecuteFunctionQualifier(Cypher25Parser.ExecuteFunctionQualifierContext ctx);
@@ -558,8 +720,6 @@ public interface Cypher25ParserListener extends ParseTreeListener {
     void exitGlobRecursive(Cypher25Parser.GlobRecursiveContext ctx);
 
     void exitGlobPart(Cypher25Parser.GlobPartContext ctx);
-
-    void exitQualifiedGraphPrivilegesWithProperty(Cypher25Parser.QualifiedGraphPrivilegesWithPropertyContext ctx);
 
     void exitQualifiedGraphPrivileges(Cypher25Parser.QualifiedGraphPrivilegesContext ctx);
 
@@ -583,9 +743,35 @@ public interface Cypher25ParserListener extends ParseTreeListener {
 
     void exitGraphScope(Cypher25Parser.GraphScopeContext ctx);
 
+    void exitCreateAuthRule(Cypher25Parser.CreateAuthRuleContext ctx);
+
+    void exitAuthRuleSetClause(Cypher25Parser.AuthRuleSetClauseContext ctx);
+
+    void exitAuthRuleSetCondition(Cypher25Parser.AuthRuleSetConditionContext ctx);
+
+    void exitAuthRuleSetEnabled(Cypher25Parser.AuthRuleSetEnabledContext ctx);
+
+    void exitRenameAuthRule(Cypher25Parser.RenameAuthRuleContext ctx);
+
+    void exitAlterAuthRule(Cypher25Parser.AlterAuthRuleContext ctx);
+
+    void exitDropAuthRule(Cypher25Parser.DropAuthRuleContext ctx);
+
+    void exitShowAuthRules(Cypher25Parser.ShowAuthRulesContext ctx);
+
     void exitCreateCompositeDatabase(Cypher25Parser.CreateCompositeDatabaseContext ctx);
 
     void exitCreateDatabase(Cypher25Parser.CreateDatabaseContext ctx);
+
+    void exitCreateReplicaDatabase(Cypher25Parser.CreateReplicaDatabaseContext ctx);
+
+    void exitShards(Cypher25Parser.ShardsContext ctx);
+
+    void exitGraphShard(Cypher25Parser.GraphShardContext ctx);
+
+    void exitPropertyShard(Cypher25Parser.PropertyShardContext ctx);
+
+    void exitTopology(Cypher25Parser.TopologyContext ctx);
 
     void exitPrimaryTopology(Cypher25Parser.PrimaryTopologyContext ctx);
 
@@ -594,6 +780,10 @@ public interface Cypher25ParserListener extends ParseTreeListener {
     void exitSecondaryTopology(Cypher25Parser.SecondaryTopologyContext ctx);
 
     void exitSecondaryToken(Cypher25Parser.SecondaryTokenContext ctx);
+
+    void exitReplicaToken(Cypher25Parser.ReplicaTokenContext ctx);
+
+    void exitDefaultLanguageSpecification(Cypher25Parser.DefaultLanguageSpecificationContext ctx);
 
     void exitDropDatabase(Cypher25Parser.DropDatabaseContext ctx);
 
@@ -607,6 +797,12 @@ public interface Cypher25ParserListener extends ParseTreeListener {
 
     void exitAlterDatabaseOption(Cypher25Parser.AlterDatabaseOptionContext ctx);
 
+    void exitAlterGraphShard(Cypher25Parser.AlterGraphShardContext ctx);
+
+    void exitAlterPropertyShards(Cypher25Parser.AlterPropertyShardsContext ctx);
+
+    void exitAlterReplicaTopology(Cypher25Parser.AlterReplicaTopologyContext ctx);
+
     void exitStartDatabase(Cypher25Parser.StartDatabaseContext ctx);
 
     void exitStopDatabase(Cypher25Parser.StopDatabaseContext ctx);
@@ -619,9 +815,11 @@ public interface Cypher25ParserListener extends ParseTreeListener {
 
     void exitAliasName(Cypher25Parser.AliasNameContext ctx);
 
-    void exitDatabaseName(Cypher25Parser.DatabaseNameContext ctx);
+    void exitAliasTargetName(Cypher25Parser.AliasTargetNameContext ctx);
 
     void exitCreateAlias(Cypher25Parser.CreateAliasContext ctx);
+
+    void exitRemoteTargetConnectionCredentials(Cypher25Parser.RemoteTargetConnectionCredentialsContext ctx);
 
     void exitDropAlias(Cypher25Parser.DropAliasContext ctx);
 
@@ -639,8 +837,6 @@ public interface Cypher25ParserListener extends ParseTreeListener {
 
     void exitShowAliases(Cypher25Parser.ShowAliasesContext ctx);
 
-    void exitSymbolicNameOrStringParameter(Cypher25Parser.SymbolicNameOrStringParameterContext ctx);
-
     void exitCommandNameExpression(Cypher25Parser.CommandNameExpressionContext ctx);
 
     void exitSymbolicNameOrStringParameterList(Cypher25Parser.SymbolicNameOrStringParameterListContext ctx);
@@ -657,6 +853,16 @@ public interface Cypher25ParserListener extends ParseTreeListener {
 
     void exitStringLiteral(Cypher25Parser.StringLiteralContext ctx);
 
+    void exitInterpolatedStringLiteral(Cypher25Parser.InterpolatedStringLiteralContext ctx);
+
+    void exitInterpolatedStringLiteralSingle(Cypher25Parser.InterpolatedStringLiteralSingleContext ctx);
+
+    void exitInterpolatedStringLiteralDouble(Cypher25Parser.InterpolatedStringLiteralDoubleContext ctx);
+
+    void exitInterpolatedElementSingle(Cypher25Parser.InterpolatedElementSingleContext ctx);
+
+    void exitInterpolatedElementDouble(Cypher25Parser.InterpolatedElementDoubleContext ctx);
+
     void exitStringOrParameterExpression(Cypher25Parser.StringOrParameterExpressionContext ctx);
 
     void exitStringOrParameter(Cypher25Parser.StringOrParameterContext ctx);
@@ -667,17 +873,19 @@ public interface Cypher25ParserListener extends ParseTreeListener {
 
     void exitMap(Cypher25Parser.MapContext ctx);
 
+    void exitSymbolicVariableNameString(Cypher25Parser.SymbolicVariableNameStringContext ctx);
+
+    void exitEscapedSymbolicVariableNameString(Cypher25Parser.EscapedSymbolicVariableNameStringContext ctx);
+
+    void exitUnescapedSymbolicVariableNameString(Cypher25Parser.UnescapedSymbolicVariableNameStringContext ctx);
+
     void exitSymbolicNameString(Cypher25Parser.SymbolicNameStringContext ctx);
 
     void exitEscapedSymbolicNameString(Cypher25Parser.EscapedSymbolicNameStringContext ctx);
 
     void exitUnescapedSymbolicNameString(Cypher25Parser.UnescapedSymbolicNameStringContext ctx);
 
-    void exitSymbolicLabelNameString(Cypher25Parser.SymbolicLabelNameStringContext ctx);
-
-    void exitUnescapedLabelSymbolicNameString(Cypher25Parser.UnescapedLabelSymbolicNameStringContext ctx);
-
-    void exitUnescapedLabelSymbolicNameString_(Cypher25Parser.UnescapedLabelSymbolicNameString_Context ctx);
+    void exitUnescapedSymbolicNameString_(Cypher25Parser.UnescapedSymbolicNameString_Context ctx);
 
     void exitEndOfFile(Cypher25Parser.EndOfFileContext ctx);
 }

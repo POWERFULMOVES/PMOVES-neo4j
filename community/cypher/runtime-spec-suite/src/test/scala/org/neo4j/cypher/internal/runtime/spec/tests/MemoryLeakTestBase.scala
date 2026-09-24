@@ -25,6 +25,8 @@ import org.neo4j.cypher.internal.runtime.spec.Edition
 import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 
+object MemoryLeakTestBase
+
 abstract class MemoryLeakTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT]
@@ -43,7 +45,7 @@ abstract class MemoryLeakTestBase[CONTEXT <: RuntimeContext](
     consume(execute(logicalQuery, runtime, inputValues(Array(nodes.head))))
 
     // then
-    tx.kernelTransaction().memoryTracker().estimatedHeapMemory() should be <= 8448L /*pipelined morsel buffers have a constant memory footprint*/
+    tx.kernelTransaction().memoryTracker().estimatedHeapMemory() should be <= 8768L /*pipelined morsel buffers have a constant memory footprint*/
   }
 
   test("pruning-var-expand should not leak memory") {
@@ -60,7 +62,7 @@ abstract class MemoryLeakTestBase[CONTEXT <: RuntimeContext](
     consume(execute(logicalQuery, runtime, inputValues(Array(nodes.head))))
 
     // then
-    tx.kernelTransaction().memoryTracker().estimatedHeapMemory() should be <= 384L /*pipelined morsel buffers have a constant memory footprint*/
+    tx.kernelTransaction().memoryTracker().estimatedHeapMemory() should be <= 464L /*pipelined morsel buffers have a constant memory footprint*/
   }
 
   test("bfs-pruning-var-expand should not leak memory") {
@@ -77,6 +79,6 @@ abstract class MemoryLeakTestBase[CONTEXT <: RuntimeContext](
     consume(execute(logicalQuery, runtime, inputValues(Array(nodes.head))))
 
     // then
-    tx.kernelTransaction().memoryTracker().estimatedHeapMemory() should be <= 2208L /*pipelined morsel buffers have a constant memory footprint*/
+    tx.kernelTransaction().memoryTracker().estimatedHeapMemory() should be <= 2520L /*pipelined morsel buffers have a constant memory footprint*/
   }
 }

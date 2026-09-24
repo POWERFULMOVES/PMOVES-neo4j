@@ -20,7 +20,7 @@
 package org.neo4j.kernel.impl.query;
 
 import org.neo4j.collection.Dependencies;
-import org.neo4j.configuration.Config;
+import org.neo4j.configuration.DatabaseConfig;
 import org.neo4j.kernel.api.Kernel;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.kernel.lifecycle.LifeSupport;
@@ -30,7 +30,7 @@ import org.neo4j.scheduler.JobScheduler;
 
 public abstract class QueryEngineProvider {
     protected abstract QueryExecutionEngine createEngine(
-            Dependencies deps, GraphDatabaseAPI graphAPI, boolean isSystemDatabase, SPI spi);
+            Dependencies deps, GraphDatabaseAPI graphAPI, boolean isSystemDatabase, SPI spi, boolean multiVersion);
 
     protected abstract int enginePriority();
 
@@ -39,11 +39,12 @@ public abstract class QueryEngineProvider {
             GraphDatabaseAPI graphAPI,
             QueryEngineProvider provider,
             boolean isSystemDatabase,
-            SPI spi) {
+            SPI spi,
+            boolean multiVersion) {
         if (provider == null) {
             return noEngine();
         }
-        QueryExecutionEngine engine = provider.createEngine(deps, graphAPI, isSystemDatabase, spi);
+        QueryExecutionEngine engine = provider.createEngine(deps, graphAPI, isSystemDatabase, spi, multiVersion);
         return deps.satisfyDependency(engine);
     }
 
@@ -62,7 +63,7 @@ public abstract class QueryEngineProvider {
 
         Kernel kernel();
 
-        Config config();
+        DatabaseConfig databaseConfig();
     }
 
     public static SPI spi(
@@ -71,7 +72,7 @@ public abstract class QueryEngineProvider {
             JobScheduler jobScheduler,
             LifeSupport lifeSupport,
             Kernel kernel,
-            Config config) {
+            DatabaseConfig databaseConfig) {
         return new SPI() {
             @Override
             public InternalLogProvider logProvider() {
@@ -99,8 +100,8 @@ public abstract class QueryEngineProvider {
             }
 
             @Override
-            public Config config() {
-                return config;
+            public DatabaseConfig databaseConfig() {
+                return databaseConfig;
             }
         };
     }

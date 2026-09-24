@@ -20,11 +20,12 @@
 package org.neo4j.cypher.internal.runtime.interpreted.profiler
 
 import org.neo4j.common.Edition
+import org.neo4j.cypher.internal.logical.plans.IndexOrder
 import org.neo4j.cypher.internal.profiling.OperatorProfileEvent
 import org.neo4j.cypher.internal.runtime.ClosingIterator
 import org.neo4j.cypher.internal.runtime.ClosingLongIterator
+import org.neo4j.cypher.internal.runtime.ClosingRelationshipIterator
 import org.neo4j.cypher.internal.runtime.CypherRow
-import org.neo4j.cypher.internal.runtime.ExpressionCursors
 import org.neo4j.cypher.internal.runtime.NodeOperations
 import org.neo4j.cypher.internal.runtime.NodeReadOperations
 import org.neo4j.cypher.internal.runtime.Operations
@@ -34,6 +35,7 @@ import org.neo4j.cypher.internal.runtime.ReadOperations
 import org.neo4j.cypher.internal.runtime.RelationshipIterator
 import org.neo4j.cypher.internal.runtime.RelationshipOperations
 import org.neo4j.cypher.internal.runtime.RelationshipReadOperations
+import org.neo4j.cypher.internal.runtime.cursors.ExpressionCursors
 import org.neo4j.cypher.internal.runtime.interpreted.DelegatingOperations
 import org.neo4j.cypher.internal.runtime.interpreted.DelegatingQueryContext
 import org.neo4j.cypher.internal.runtime.interpreted.DelegatingReadOperations
@@ -42,22 +44,22 @@ import org.neo4j.cypher.internal.runtime.interpreted.pipes.QueryState
 import org.neo4j.cypher.internal.util.attribution.Id
 import org.neo4j.cypher.result.OperatorProfile
 import org.neo4j.internal.kernel.api.Cursor
-import org.neo4j.internal.kernel.api.DefaultCloseListenable
-import org.neo4j.internal.kernel.api.KernelReadTracer
+import org.neo4j.internal.kernel.api.IndexQueryConstraints
+import org.neo4j.internal.kernel.api.IndexReadSession
 import org.neo4j.internal.kernel.api.NodeCursor
 import org.neo4j.internal.kernel.api.NodeLabelIndexCursor
 import org.neo4j.internal.kernel.api.NodeValueIndexCursor
 import org.neo4j.internal.kernel.api.PropertyCursor
+import org.neo4j.internal.kernel.api.PropertyIndexQuery
 import org.neo4j.internal.kernel.api.RelationshipScanCursor
 import org.neo4j.internal.kernel.api.RelationshipTraversalCursor
 import org.neo4j.internal.kernel.api.RelationshipTypeIndexCursor
 import org.neo4j.internal.kernel.api.RelationshipValueIndexCursor
+import org.neo4j.internal.schema.IndexDescriptor
 import org.neo4j.kernel.impl.factory.DbmsInfo
 import org.neo4j.kernel.impl.query.statistic.StatisticProvider
-import org.neo4j.storageengine.api.PropertySelection
-import org.neo4j.storageengine.api.Reference
 import org.neo4j.storageengine.api.RelationshipVisitor
-import org.neo4j.values.storable.Value
+import org.neo4j.values.storable.TextValue
 
 import scala.collection.mutable
 
@@ -141,9 +143,10 @@ class Profiler(val dbmsInfo: DbmsInfo, stats: InterpretedProfileInformation) ext
   override def decorate(planId: Id, state: QueryState): QueryState = {
     stats.setQueryMemoryTracker(state.queryMemoryTracker)
     val counter = stats.dbHitsMap.getOrElseUpdate(planId, Counter())
+    val seeks = stats.indexSeeksMap.getOrElseUpdate(planId, mutable.Map.empty)
     val decoratedContext = state.query match {
-      case p: ProfilingPipeQueryContext => new ProfilingPipeQueryContext(p.inner, counter)
-      case _                            => new ProfilingPipeQueryContext(state.query, counter)
+      case p: ProfilingPipeQueryContext => new ProfilingPipeQueryContext(p.inner, counter, seeks)
+      case _                            => new ProfilingPipeQueryContext(state.query, counter, seeks)
     }
 
     if (trackPageCacheStats) {
@@ -205,44 +208,47 @@ object Counter {
   }
 }
 
-final class ProfilingPipeQueryContext(inner: QueryContext, counter: Counter)
-    extends DelegatingQueryContext(inner) {
+final class ProfilingPipeQueryContext(
+  inner: QueryContext,
+  dbHitsCounter: Counter,
+  indexSeeks: mutable.Map[IndexDescriptor, Int]
+) extends DelegatingQueryContext(inner) {
   self =>
 
-  def count: Long = counter.count
+  def count: Long = dbHitsCounter.count
 
   override protected def singleDbHit[A](value: A): A = {
-    counter.increment()
+    dbHitsCounter.increment()
     value
   }
 
   override protected def unknownDbHits[A](value: A): A = {
-    counter.invalidate()
+    dbHitsCounter.invalidate()
     value
   }
 
   override protected def manyDbHits[A](value: ClosingIterator[A]): ClosingIterator[A] = {
-    counter.increment()
+    dbHitsCounter.increment()
     value.map {
       v =>
-        counter.increment()
+        dbHitsCounter.increment()
         v
     }
   }
 
   override protected def manyDbHits(value: ClosingLongIterator): ClosingLongIterator = {
-    counter.increment()
+    dbHitsCounter.increment()
     PrimitiveLongHelper.mapPrimitive(
       value,
       { x =>
-        counter.increment()
+        dbHitsCounter.increment()
         x
       }
     )
   }
 
   override protected def manyDbHits(inner: RelationshipIterator): RelationshipIterator = new RelationshipIterator {
-    counter.increment()
+    dbHitsCounter.increment()
 
     override def relationshipVisit[EXCEPTION <: Exception](
       relationshipId: Long,
@@ -251,7 +257,7 @@ final class ProfilingPipeQueryContext(inner: QueryContext, counter: Counter)
       inner.relationshipVisit(relationshipId, visitor)
 
     override def next(): Long = {
-      counter.increment()
+      dbHitsCounter.increment()
       inner.next()
     }
 
@@ -264,10 +270,10 @@ final class ProfilingPipeQueryContext(inner: QueryContext, counter: Counter)
     override def typeId(): Int = inner.typeId()
   }
 
-  override protected def manyDbHitsCliRi(inner: ClosingLongIterator with RelationshipIterator)
-    : ClosingLongIterator with RelationshipIterator =
-    new ClosingLongIterator with RelationshipIterator {
-      counter.increment()
+  override protected def manyDbHitsCliRi(inner: ClosingRelationshipIterator)
+    : ClosingRelationshipIterator =
+    new ClosingRelationshipIterator {
+      dbHitsCounter.increment()
 
       override def relationshipVisit[EXCEPTION <: Exception](
         relationshipId: Long,
@@ -276,7 +282,7 @@ final class ProfilingPipeQueryContext(inner: QueryContext, counter: Counter)
         inner.relationshipVisit(relationshipId, visitor)
 
       override def next(): Long = {
-        counter.increment()
+        dbHitsCounter.increment()
         inner.next()
       }
 
@@ -292,120 +298,185 @@ final class ProfilingPipeQueryContext(inner: QueryContext, counter: Counter)
     }
 
   override protected def manyDbHits(nodeCursor: NodeCursor): NodeCursor = {
-
-    val tracer = new PipeTracer
-    nodeCursor.setTracer(tracer)
-    nodeCursor
+    trace(nodeCursor)
   }
 
   override protected def manyDbHits(nodeCursor: NodeLabelIndexCursor): NodeLabelIndexCursor = {
-    val tracer = new PipeTracer
-    nodeCursor.setTracer(tracer)
-    nodeCursor
+    trace(nodeCursor)
+  }
+
+  override protected def manyDbHits(nodeCursor: NodeValueIndexCursor): NodeValueIndexCursor = {
+    trace(nodeCursor)
   }
 
   override protected def manyDbHits(relCursor: RelationshipTypeIndexCursor): RelationshipTypeIndexCursor = {
-    val tracer = new PipeTracer
-    relCursor.setTracer(tracer)
-    relCursor
+    trace(relCursor)
   }
 
   override protected def manyDbHits(propertyCursor: PropertyCursor): PropertyCursor = {
-    val tracer = new PipeTracer
-    propertyCursor.setTracer(tracer)
-    propertyCursor
+    trace(propertyCursor)
   }
 
   override protected def manyDbHits(relationshipScanCursor: RelationshipScanCursor): RelationshipScanCursor = {
-    val tracer = new PipeTracer
-    relationshipScanCursor.setTracer(tracer)
-    relationshipScanCursor
+    trace(relationshipScanCursor)
   }
 
-  override protected def manyDbHits(inner: NodeValueIndexCursor): NodeValueIndexCursor =
-    new ProfilingCursor(inner) with NodeValueIndexCursor {
-
-      override def numberOfProperties(): Int = inner.numberOfProperties()
-
-      override def hasValue: Boolean = inner.hasValue
-
-      override def propertyValue(offset: Int): Value = inner.propertyValue(offset)
-
-      override def node(cursor: NodeCursor): Unit = inner.node(cursor)
-
-      override def nodeReference(): Long = inner.nodeReference()
-
-      override def score(): Float = inner.score()
-    }
-
-  override protected def manyDbHits(inner: RelationshipValueIndexCursor): RelationshipValueIndexCursor =
-    new ProfilingCursor(inner) with RelationshipValueIndexCursor {
-      override def numberOfProperties(): Int = inner.numberOfProperties()
-      override def hasValue: Boolean = inner.hasValue
-      override def propertyValue(offset: Int): Value = inner.propertyValue(offset)
-      override def source(cursor: NodeCursor): Unit = inner.source(cursor)
-      override def target(cursor: NodeCursor): Unit = inner.target(cursor)
-      override def `type`(): Int = inner.`type`()
-      override def sourceNodeReference(): Long = inner.sourceNodeReference()
-      override def targetNodeReference(): Long = inner.targetNodeReference()
-      override def relationshipReference(): Long = inner.relationshipReference()
-      override def score(): Float = inner.score()
-
-      override def properties(cursor: PropertyCursor, selection: PropertySelection): Unit =
-        inner.properties(cursor, selection)
-      override def propertiesReference(): Reference = inner.propertiesReference()
-      override def readFromStore(): Boolean = inner.readFromStore()
-    }
-
   override protected def manyDbHits(inner: RelationshipTraversalCursor): RelationshipTraversalCursor = {
-    val tracer = new PipeTracer
-    inner.setTracer(tracer)
-    inner
+    trace(inner)
   }
 
   override protected def manyDbHits(count: Int): Int = {
-    counter.increment(count)
+    dbHitsCounter.increment(count)
     count
   }
 
   override def createExpressionCursors(): ExpressionCursors = {
     val expressionCursors = super.createExpressionCursors()
-    val tracer = new PipeTracer
-    expressionCursors.setKernelTracer(tracer)
+    expressionCursors.setKernelTracer(PipeTracer)
     expressionCursors
   }
 
-  abstract class ProfilingCursor(inner: Cursor) extends DefaultCloseListenable with Cursor {
-
-    override def next(): Boolean = {
-      counter.increment()
-      inner.next()
-    }
-
-    override def closeInternal(): Unit = inner.close()
-
-    override def isClosed: Boolean = inner.isClosed
-
-    override def setTracer(tracer: KernelReadTracer): Unit = inner.setTracer(tracer)
-
-    override def removeTracer(): Unit = inner.removeTracer()
+  private def trace[C <: Cursor](c: C): C = {
+    c.setTracer(PipeTracer)
+    c
   }
 
-  class PipeTracer() extends OperatorProfileEvent {
+  override def nodeIndexSeek(
+    index: IndexReadSession,
+    needsValues: Boolean,
+    indexOrder: IndexOrder,
+    queries: Seq[PropertyIndexQuery],
+    includeChangesFromThisTransaction: Boolean
+  ): NodeValueIndexCursor = {
+    PipeTracer.onIndexSeek(index.reference())
+    trace(super.nodeIndexSeek(index, needsValues, indexOrder, queries, includeChangesFromThisTransaction))
+  }
+
+  override def nodeFulltextIndexSeek(
+    index: IndexReadSession,
+    constraints: IndexQueryConstraints,
+    query: PropertyIndexQuery.FulltextSearchPredicate
+  ): NodeValueIndexCursor = {
+    PipeTracer.onIndexSeek(index.reference())
+    trace(super.nodeFulltextIndexSeek(index, constraints, query))
+  }
+
+  override def relationshipFulltextIndexSeek(
+    index: IndexReadSession,
+    constraints: IndexQueryConstraints,
+    query: PropertyIndexQuery.FulltextSearchPredicate
+  ): RelationshipValueIndexCursor = {
+    PipeTracer.onIndexSeek(index.reference())
+    trace(super.relationshipFulltextIndexSeek(index, constraints, query))
+  }
+
+  override def nodeIndexScan(
+    index: IndexReadSession,
+    needsValues: Boolean,
+    indexOrder: IndexOrder,
+    includeChangesFromThisTransaction: Boolean
+  ): NodeValueIndexCursor = {
+    PipeTracer.onIndexSeek(index.reference())
+    trace(super.nodeIndexScan(index, needsValues, indexOrder, includeChangesFromThisTransaction))
+  }
+
+  override def nodeIndexSeekByContains(
+    index: IndexReadSession,
+    needsValues: Boolean,
+    indexOrder: IndexOrder,
+    value: TextValue,
+    includeChangesFromThisTransaction: Boolean
+  ): NodeValueIndexCursor = {
+    PipeTracer.onIndexSeek(index.reference())
+    trace(super.nodeIndexSeekByContains(index, needsValues, indexOrder, value, includeChangesFromThisTransaction))
+  }
+
+  override def nodeIndexSeekByEndsWith(
+    index: IndexReadSession,
+    needsValues: Boolean,
+    indexOrder: IndexOrder,
+    value: TextValue,
+    includeChangesFromThisTransaction: Boolean
+  ): NodeValueIndexCursor = {
+    PipeTracer.onIndexSeek(index.reference())
+    trace(super.nodeIndexSeekByEndsWith(index, needsValues, indexOrder, value, includeChangesFromThisTransaction))
+  }
+
+  override def relationshipIndexSeek(
+    index: IndexReadSession,
+    needsValues: Boolean,
+    indexOrder: IndexOrder,
+    queries: Seq[PropertyIndexQuery],
+    includeChangesFromThisTransaction: Boolean
+  ): RelationshipValueIndexCursor = {
+    PipeTracer.onIndexSeek(index.reference())
+    trace(super.relationshipIndexSeek(index, needsValues, indexOrder, queries, includeChangesFromThisTransaction))
+  }
+
+  override def relationshipIndexSeekByContains(
+    index: IndexReadSession,
+    needsValues: Boolean,
+    indexOrder: IndexOrder,
+    value: TextValue,
+    includeChangesFromThisTransaction: Boolean
+  ): RelationshipValueIndexCursor = {
+    PipeTracer.onIndexSeek(index.reference())
+    trace(super.relationshipIndexSeekByContains(
+      index,
+      needsValues,
+      indexOrder,
+      value,
+      includeChangesFromThisTransaction
+    ))
+  }
+
+  override def relationshipIndexSeekByEndsWith(
+    index: IndexReadSession,
+    needsValues: Boolean,
+    indexOrder: IndexOrder,
+    value: TextValue,
+    includeChangesFromThisTransaction: Boolean
+  ): RelationshipValueIndexCursor = {
+    PipeTracer.onIndexSeek(index.reference())
+    trace(super.relationshipIndexSeekByEndsWith(
+      index,
+      needsValues,
+      indexOrder,
+      value,
+      includeChangesFromThisTransaction
+    ))
+  }
+
+  override def relationshipIndexScan(
+    index: IndexReadSession,
+    needsValues: Boolean,
+    indexOrder: IndexOrder,
+    includeChangesFromThisTransaction: Boolean
+  ): RelationshipValueIndexCursor = {
+    PipeTracer.onIndexSeek(index.reference())
+    trace(super.relationshipIndexScan(index, needsValues, indexOrder, includeChangesFromThisTransaction))
+  }
+
+  private object PipeTracer extends OperatorProfileEvent {
 
     override def dbHit(): Unit = {
-      counter.increment()
+      dbHitsCounter.increment()
     }
 
     override def dbHits(hits: Long): Unit = {
-      counter.increment(hits)
+      dbHitsCounter.increment(hits)
     }
 
     override def row(): Unit = {}
 
-    override def row(hasRow: Boolean): Unit = {}
-
     override def rows(n: Long): Unit = {}
+
+    override def indexHit(index: IndexDescriptor): Unit = {
+      indexSeeks.updateWith(index) {
+        case Some(count) => Some(count + 1)
+        case None        => Some(1)
+      }
+    }
 
     override def close(): Unit = {}
   }

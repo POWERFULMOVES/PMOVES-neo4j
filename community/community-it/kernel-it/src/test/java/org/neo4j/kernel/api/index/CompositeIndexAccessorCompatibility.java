@@ -24,8 +24,8 @@ import static java.util.Arrays.asList;
 import static java.util.Collections.emptyList;
 import static java.util.Collections.singletonList;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.neo4j.internal.helpers.collection.Iterables.single;
 import static org.neo4j.internal.helpers.collection.Pair.of;
@@ -66,18 +66,17 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.function.Supplier;
-import java.util.stream.Collectors;
 import java.util.stream.LongStream;
-import java.util.stream.Stream;
+import org.assertj.core.api.AbstractThrowableAssert;
 import org.junit.jupiter.api.Test;
 import org.neo4j.internal.helpers.collection.Pair;
 import org.neo4j.internal.kernel.api.PropertyIndexQuery;
+import org.neo4j.internal.kernel.api.exceptions.schema.IndexNotApplicableKernelException;
+import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexOrder;
 import org.neo4j.internal.schema.IndexPrototype;
-import org.neo4j.internal.schema.SchemaDescriptor;
-import org.neo4j.internal.schema.SchemaDescriptorSupplier;
-import org.neo4j.storageengine.api.IndexEntryUpdate;
-import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
+import org.neo4j.io.pagecache.context.CursorContext;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.storageengine.api.schema.SimpleEntityValueClient;
 import org.neo4j.test.InMemoryTokens;
 import org.neo4j.values.storable.ArrayValue;
@@ -88,6 +87,7 @@ import org.neo4j.values.storable.DateValue;
 import org.neo4j.values.storable.LocalDateTimeValue;
 import org.neo4j.values.storable.LocalTimeValue;
 import org.neo4j.values.storable.PointValue;
+import org.neo4j.values.storable.RandomValues;
 import org.neo4j.values.storable.TextValue;
 import org.neo4j.values.storable.TimeValue;
 import org.neo4j.values.storable.Value;
@@ -104,11 +104,16 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
     @Test
     void testIndexScan() throws Exception {
         List<Long> ids = LongStream.rangeClosed(1L, 10L).boxed().toList();
-        Supplier<Value> randomValue = () -> random.randomValues().nextValueOfTypes(testSuite.supportedValueTypes());
+        RandomValues rv = RandomValues.create(
+                random.random(),
+                RandomValues.newConfigurationBuilder()
+                        .maxVectorNumBytes(RandomValues.MAX_NUM_BYTES_IN_INDEX_KEY / 2)
+                        .build());
+        Supplier<Value> randomValue = () -> rv.nextValueOfTypes(testSuite.supportedValueTypes());
 
         updateAndCommit(ids.stream()
-                .map(id -> add(id, descriptor.schema(), randomValue.get(), randomValue.get()))
-                .collect(Collectors.toUnmodifiableList()));
+                .map(id -> add(id, descriptor, randomValue.get(), randomValue.get()))
+                .toList());
 
         assertThat(query(allEntries())).isEqualTo(ids);
     }
@@ -160,15 +165,12 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
     }
 
     private void testIndexScanAndSeekExactWithExact(Value a, Value b) throws Exception {
-        updateAndCommit(asList(
-                add(1L, descriptor.schema(), a, a),
-                add(2L, descriptor.schema(), b, b),
-                add(3L, descriptor.schema(), a, b)));
+        updateAndCommit(asList(add(1L, descriptor, a, a), add(2L, descriptor, b, b), add(3L, descriptor, a, b)));
 
         assertThat(query(exact(0, a), exact(1, a))).isEqualTo(singletonList(1L));
         assertThat(query(exact(0, b), exact(1, b))).isEqualTo(singletonList(2L));
         assertThat(query(exact(0, a), exact(1, b))).isEqualTo(singletonList(3L));
-        assertThat(query(exists(1))).isEqualTo(asList(1L, 2L, 3L));
+        assertThat(query(exists(0), exists(1))).isEqualTo(asList(1L, 2L, 3L));
     }
 
     @Test
@@ -181,12 +183,12 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
         PointValue car3d = pointValue(CoordinateReferenceSystem.CARTESIAN_3D, 12.6, 56.7, 100.0);
 
         updateAndCommit(asList(
-                add(1L, descriptor.schema(), gps, gps),
-                add(2L, descriptor.schema(), car, car),
-                add(3L, descriptor.schema(), gps, car),
-                add(4L, descriptor.schema(), gps3d, gps3d),
-                add(5L, descriptor.schema(), car3d, car3d),
-                add(6L, descriptor.schema(), gps, car3d)));
+                add(1L, descriptor, gps, gps),
+                add(2L, descriptor, car, car),
+                add(3L, descriptor, gps, car),
+                add(4L, descriptor, gps3d, gps3d),
+                add(5L, descriptor, car3d, car3d),
+                add(6L, descriptor, gps, car3d)));
 
         assertThat(query(exact(0, gps), exact(1, gps))).isEqualTo(singletonList(1L));
         assertThat(query(exact(0, car), exact(1, car))).isEqualTo(singletonList(2L));
@@ -194,7 +196,7 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
         assertThat(query(exact(0, gps3d), exact(1, gps3d))).isEqualTo(singletonList(4L));
         assertThat(query(exact(0, car3d), exact(1, car3d))).isEqualTo(singletonList(5L));
         assertThat(query(exact(0, gps), exact(1, car3d))).isEqualTo(singletonList(6L));
-        assertThat(query(exists(1))).isEqualTo(asList(1L, 2L, 3L, 4L, 5L, 6L));
+        assertThat(query(exists(0), exists(1))).isEqualTo(asList(1L, 2L, 3L, 4L, 5L, 6L));
     }
 
     /* testIndexExactAndRangeExact_Range */
@@ -294,11 +296,11 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
         testIndexSeekExactWithBoundingBox(
                 intValue(100),
                 intValue(10),
-                pointValue(WGS_84, -10D, -10D),
-                pointValue(WGS_84, -1D, -1D),
-                pointValue(WGS_84, 0D, 0D),
-                pointValue(WGS_84, 1D, 1D),
-                pointValue(WGS_84, 10D, 10D));
+                pointValue(WGS_84, -10.0, -10.0),
+                pointValue(WGS_84, -1.0, -1.0),
+                pointValue(WGS_84, 0.0, 0.0),
+                pointValue(WGS_84, 1.0, 1.0),
+                pointValue(WGS_84, 10.0, 10.0));
     }
 
     private void testIndexSeekExactWithRange(
@@ -306,16 +308,16 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
         assumeTrue(testSuite.supportsGranularCompositeQueries(), "Assume support for granular composite queries");
 
         updateAndCommit(asList(
-                add(1L, descriptor.schema(), base1, obj1),
-                add(2L, descriptor.schema(), base1, obj2),
-                add(3L, descriptor.schema(), base1, obj3),
-                add(4L, descriptor.schema(), base1, obj4),
-                add(5L, descriptor.schema(), base1, obj5),
-                add(6L, descriptor.schema(), base2, obj1),
-                add(7L, descriptor.schema(), base2, obj2),
-                add(8L, descriptor.schema(), base2, obj3),
-                add(9L, descriptor.schema(), base2, obj4),
-                add(10L, descriptor.schema(), base2, obj5)));
+                add(1L, descriptor, base1, obj1),
+                add(2L, descriptor, base1, obj2),
+                add(3L, descriptor, base1, obj3),
+                add(4L, descriptor, base1, obj4),
+                add(5L, descriptor, base1, obj5),
+                add(6L, descriptor, base2, obj1),
+                add(7L, descriptor, base2, obj2),
+                add(8L, descriptor, base2, obj3),
+                add(9L, descriptor, base2, obj4),
+                add(10L, descriptor, base2, obj5)));
 
         assertThat(query(exact(0, base1), range(1, obj2, true, obj4, false))).containsExactly(2L, 3L);
         assertThat(query(exact(0, base1), range(1, obj4, true, null, false))).containsExactly(4L, 5L);
@@ -349,16 +351,16 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
         assumeTrue(testSuite.supportsBoundingBoxQueries(), "Assume support for bounding box queries");
 
         updateAndCommit(asList(
-                add(1L, descriptor.schema(), base1, obj1),
-                add(2L, descriptor.schema(), base1, obj2),
-                add(3L, descriptor.schema(), base1, obj3),
-                add(4L, descriptor.schema(), base1, obj4),
-                add(5L, descriptor.schema(), base1, obj5),
-                add(6L, descriptor.schema(), base2, obj1),
-                add(7L, descriptor.schema(), base2, obj2),
-                add(8L, descriptor.schema(), base2, obj3),
-                add(9L, descriptor.schema(), base2, obj4),
-                add(10L, descriptor.schema(), base2, obj5)));
+                add(1L, descriptor, base1, obj1),
+                add(2L, descriptor, base1, obj2),
+                add(3L, descriptor, base1, obj3),
+                add(4L, descriptor, base1, obj4),
+                add(5L, descriptor, base1, obj5),
+                add(6L, descriptor, base2, obj1),
+                add(7L, descriptor, base2, obj2),
+                add(8L, descriptor, base2, obj3),
+                add(9L, descriptor, base2, obj4),
+                add(10L, descriptor, base2, obj5)));
 
         assertThat(query(exact(0, base1), boundingBox(1, obj2, obj4))).containsExactly(2L, 3L, 4L);
         assertThat(query(exact(0, base1), boundingBox(1, obj5, obj2))).isEmpty();
@@ -375,10 +377,10 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
         assumeTrue(testSuite.supportsBooleanRangeQueries(), "Assume support for boolean range queries");
 
         updateAndCommit(asList(
-                add(1L, descriptor.schema(), base1, obj1),
-                add(2L, descriptor.schema(), base1, obj2),
-                add(3L, descriptor.schema(), base2, obj1),
-                add(4L, descriptor.schema(), base2, obj2)));
+                add(1L, descriptor, base1, obj1),
+                add(2L, descriptor, base1, obj2),
+                add(3L, descriptor, base2, obj1),
+                add(4L, descriptor, base2, obj2)));
 
         assertThat(query(exact(0, base1), range(1, obj1, true, obj2, true))).containsExactly(1L, 2L);
         assertThat(query(exact(0, base1), range(1, obj1, false, obj2, true))).containsExactly(2L);
@@ -403,16 +405,16 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
         assumeTrue(testSuite.supportsGranularCompositeQueries(), "Assume support for granular composite queries");
 
         updateAndCommit(asList(
-                add(1L, descriptor.schema(), "a", "a"),
-                add(2L, descriptor.schema(), "a", "A"),
-                add(3L, descriptor.schema(), "a", "apa"),
-                add(4L, descriptor.schema(), "a", "apA"),
-                add(5L, descriptor.schema(), "a", "b"),
-                add(6L, descriptor.schema(), "b", "a"),
-                add(7L, descriptor.schema(), "b", "A"),
-                add(8L, descriptor.schema(), "b", "apa"),
-                add(9L, descriptor.schema(), "b", "apA"),
-                add(10L, descriptor.schema(), "b", "b")));
+                add(1L, descriptor, "a", "a"),
+                add(2L, descriptor, "a", "A"),
+                add(3L, descriptor, "a", "apa"),
+                add(4L, descriptor, "a", "apA"),
+                add(5L, descriptor, "a", "b"),
+                add(6L, descriptor, "b", "a"),
+                add(7L, descriptor, "b", "A"),
+                add(8L, descriptor, "b", "apa"),
+                add(9L, descriptor, "b", "apA"),
+                add(10L, descriptor, "b", "b")));
 
         assertThat(query(exact(0, "a"), stringPrefix(1, stringValue("a")))).containsExactly(1L, 3L, 4L);
         assertThat(query(exact(0, "a"), stringPrefix(1, stringValue("A")))).containsExactly(2L);
@@ -429,16 +431,16 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
         assumeTrue(testSuite.supportsGranularCompositeQueries(), "Assume support for granular composite queries");
 
         updateAndCommit(asList(
-                add(1L, descriptor.schema(), "a", 1),
-                add(2L, descriptor.schema(), "A", epochDate(2)),
-                add(3L, descriptor.schema(), "apa", "..."),
-                add(4L, descriptor.schema(), "apA", "someString"),
-                add(5L, descriptor.schema(), "b", true),
-                add(6L, descriptor.schema(), "a", 100),
-                add(7L, descriptor.schema(), "A", epochDate(200)),
-                add(8L, descriptor.schema(), "apa", "!!!"),
-                add(9L, descriptor.schema(), "apA", "someOtherString"),
-                add(10L, descriptor.schema(), "b", false)));
+                add(1L, descriptor, "a", 1),
+                add(2L, descriptor, "A", epochDate(2)),
+                add(3L, descriptor, "apa", "..."),
+                add(4L, descriptor, "apA", "someString"),
+                add(5L, descriptor, "b", true),
+                add(6L, descriptor, "a", 100),
+                add(7L, descriptor, "A", epochDate(200)),
+                add(8L, descriptor, "apa", "!!!"),
+                add(9L, descriptor, "apA", "someOtherString"),
+                add(10L, descriptor, "b", false)));
 
         assertThat(query(stringPrefix(0, stringValue("a")), exists(1))).containsExactly(1L, 3L, 4L, 6L, 8L, 9L);
         assertThat(query(stringPrefix(0, stringValue("A")), exists(1))).containsExactly(2L, 7L);
@@ -491,14 +493,14 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
 
     @Test
     void testIndexSeekExactWithExistsBySpatial() throws Exception {
-        testIndexSeekExactWithExists(pointValue(WGS_84, 100D, 90D), pointValue(WGS_84, 0D, 0D));
+        testIndexSeekExactWithExists(pointValue(WGS_84, 100.0, 90.0), pointValue(WGS_84, 0.0, 0.0));
     }
 
     @Test
     void testIndexSeekExactWithExistsBySpatialArray() throws Exception {
         testIndexSeekExactWithExists(
-                pointArray(new PointValue[] {pointValue(CARTESIAN, 100D, 100D), pointValue(CARTESIAN, 101D, 101D)}),
-                pointArray(new PointValue[] {pointValue(CARTESIAN, 0D, 0D), pointValue(CARTESIAN, 1D, 1D)}));
+                pointArray(new PointValue[] {pointValue(CARTESIAN, 100.0, 100.0), pointValue(CARTESIAN, 101.0, 101.0)}),
+                pointArray(new PointValue[] {pointValue(CARTESIAN, 0.0, 0.0), pointValue(CARTESIAN, 1.0, 1.0)}));
     }
 
     private void testIndexSeekExactWithExists(Object a, Object b) throws Exception {
@@ -508,9 +510,9 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
     private void testIndexSeekExactWithExists(Value a, Value b) throws Exception {
         assumeTrue(testSuite.supportsGranularCompositeQueries(), "Assume support for granular composite queries");
         updateAndCommit(asList(
-                add(1L, descriptor.schema(), a, Values.of(1)),
-                add(2L, descriptor.schema(), b, Values.of("abv")),
-                add(3L, descriptor.schema(), a, Values.of(false))));
+                add(1L, descriptor, a, Values.of(1)),
+                add(2L, descriptor, b, Values.of("abv")),
+                add(3L, descriptor, a, Values.of(false))));
 
         assertThat(query(exact(0, a), exists(1))).containsExactly(1L, 3L);
         assertThat(query(exact(0, b), exists(1))).containsExactly(2L);
@@ -543,8 +545,7 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
         assumeTrue(testSuite.supportsGranularCompositeQueries(), "Assume support for granular composite queries");
         assumeTrue(testSuite.supportsBooleanRangeQueries(), "Assume support for boolean range queries");
 
-        updateAndCommit(
-                asList(add(1L, descriptor.schema(), false, "someString"), add(2L, descriptor.schema(), true, 1000)));
+        updateAndCommit(asList(add(1L, descriptor, false, "someString"), add(2L, descriptor, true, 1000)));
 
         assertThat(query(range(0, BooleanValue.FALSE, true, BooleanValue.TRUE, true), exists(1)))
                 .containsExactly(1L, 2L);
@@ -603,27 +604,25 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
     @Test
     void testIndexSeekRangeWithExistsBySpatial() throws Exception {
         testIndexSeekBoundingBoxWithExists(
-                pointValue(CARTESIAN, 0D, 0D),
-                pointValue(CARTESIAN, 1D, 1D),
-                pointValue(CARTESIAN, 2D, 2D),
-                pointValue(CARTESIAN, 3D, 3D),
-                pointValue(CARTESIAN, 4D, 4D));
+                pointValue(CARTESIAN, 0.0, 0.0),
+                pointValue(CARTESIAN, 1.0, 1.0),
+                pointValue(CARTESIAN, 2.0, 2.0),
+                pointValue(CARTESIAN, 3.0, 3.0),
+                pointValue(CARTESIAN, 4.0, 4.0));
     }
 
     @Test
     void testExactMatchOnRandomCompositeValues() throws Exception {
         // given
         ValueType[] types = randomSetOfSupportedTypes();
-        List<ValueIndexEntryUpdate<?>> updates = new ArrayList<>();
+        RandomValues randomValues = randomValues(2);
+        List<EagerValueIndexEntryUpdate> updates = new ArrayList<>();
         Set<ValueTuple> duplicateChecker = new HashSet<>();
         for (long id = 0; id < 10_000; id++) {
-            ValueIndexEntryUpdate<?> update;
+            EagerValueIndexEntryUpdate update;
             do {
-                update = add(
-                        id,
-                        descriptor.schema(),
-                        random.randomValues().nextValueOfTypes(types),
-                        random.randomValues().nextValueOfTypes(types));
+                update =
+                        add(id, descriptor, randomValues.nextValueOfTypes(types), randomValues.nextValueOfTypes(types));
             } while (!duplicateChecker.add(ValueTuple.of(update.values())));
             updates.add(update);
         }
@@ -631,7 +630,7 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
 
         // when
         InMemoryTokens tokenNameLookup = new InMemoryTokens();
-        for (ValueIndexEntryUpdate<?> update : updates) {
+        for (EagerValueIndexEntryUpdate update : updates) {
             // then
             List<Long> hits = query(exact(0, update.values()[0]), exact(1, update.values()[1]));
             assertEquals(1, hits.size(), update.describe(tokenNameLookup) + " " + hits);
@@ -650,11 +649,11 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
         assumeTrue(testSuite.supportsGranularCompositeQueries(), "Assume support for granular composite queries");
 
         updateAndCommit(asList(
-                add(1L, descriptor.schema(), obj1, Values.of(100)),
-                add(2L, descriptor.schema(), obj2, Values.of("someString")),
-                add(3L, descriptor.schema(), obj3, Values.of(epochDate(300))),
-                add(4L, descriptor.schema(), obj4, Values.of(true)),
-                add(5L, descriptor.schema(), obj5, Values.of(42))));
+                add(1L, descriptor, obj1, Values.of(100)),
+                add(2L, descriptor, obj2, Values.of("someString")),
+                add(3L, descriptor, obj3, Values.of(epochDate(300))),
+                add(4L, descriptor, obj4, Values.of(true)),
+                add(5L, descriptor, obj5, Values.of(42))));
 
         assertThat(query(range(0, obj2, true, obj4, false), exists(1))).containsExactly(2L, 3L);
         assertThat(query(range(0, obj4, true, null, false), exists(1))).containsExactly(4L, 5L);
@@ -673,11 +672,11 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
         assumeTrue(testSuite.supportsBoundingBoxQueries(), "Assume support for bounding box queries");
 
         updateAndCommit(asList(
-                add(1L, descriptor.schema(), obj1, Values.of(100)),
-                add(2L, descriptor.schema(), obj2, Values.of("someString")),
-                add(3L, descriptor.schema(), obj3, Values.of(epochDate(300))),
-                add(4L, descriptor.schema(), obj4, Values.of(true)),
-                add(5L, descriptor.schema(), obj5, Values.of(42))));
+                add(1L, descriptor, obj1, Values.of(100)),
+                add(2L, descriptor, obj2, Values.of("someString")),
+                add(3L, descriptor, obj3, Values.of(epochDate(300))),
+                add(4L, descriptor, obj4, Values.of(true)),
+                add(5L, descriptor, obj5, Values.of(42))));
 
         assertThat(query(boundingBox(0, obj2, obj4), exists(1))).containsExactly(2L, 3L, 4L);
         assertThat(query(boundingBox(0, obj5, obj2), exists(1))).isEmpty();
@@ -1020,24 +1019,24 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
     private void shouldSeekInOrderExactWithRange(
             IndexOrder order, Object o0, Object o1, Object o2, Object o3, Object o4, Object o5) throws Exception {
         Object baseValue = 1; // Todo use random value instead
-        PropertyIndexQuery exact = exact(100, baseValue);
-        PropertyIndexQuery range = range(200, Values.of(o0), true, Values.of(o5), true);
+        PropertyIndexQuery exact = exact(0, baseValue);
+        PropertyIndexQuery range = range(1, Values.of(o0), true, Values.of(o5), true);
         if (order == IndexOrder.ASCENDING || order == IndexOrder.DESCENDING) {
             assumeTrue(descriptor.getCapability().supportsOrdering(), "Assume support for order " + order);
         }
 
         updateAndCommit(asList(
-                add(1, descriptor.schema(), baseValue, o0),
-                add(1, descriptor.schema(), baseValue, o5),
-                add(1, descriptor.schema(), baseValue, o1),
-                add(1, descriptor.schema(), baseValue, o4),
-                add(1, descriptor.schema(), baseValue, o2),
-                add(1, descriptor.schema(), baseValue, o3)));
+                add(1, descriptor, baseValue, o0),
+                add(1, descriptor, baseValue, o5),
+                add(1, descriptor, baseValue, o1),
+                add(1, descriptor, baseValue, o4),
+                add(1, descriptor, baseValue, o2),
+                add(1, descriptor, baseValue, o3)));
 
-        SimpleEntityValueClient client = new SimpleEntityValueClient();
-        try (AutoCloseable ignored = query(client, order, exact, range)) {
+        try (SimpleEntityValueClient client = new SimpleEntityValueClient();
+                AutoCloseable ignored = query(client, order, exact, range)) {
             List<Long> seenIds = assertClientReturnValuesInOrder(client, order);
-            assertThat(seenIds.size()).isEqualTo(6);
+            assertThat(seenIds).hasSize(6);
         }
     }
 
@@ -1079,18 +1078,18 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
         Value someValue = Values.of(true);
         TextValue someString = stringValue("");
         PropertyIndexQuery allEntries = allEntries();
-        PropertyIndexQuery firstExact = exact(100, someValue);
-        PropertyIndexQuery firstRange = range(100, someValue, true, someValue, true);
-        PropertyIndexQuery firstPrefix = stringPrefix(100, someString);
-        PropertyIndexQuery firstExist = exists(100);
-        PropertyIndexQuery firstSuffix = stringSuffix(100, someString);
-        PropertyIndexQuery firstContains = stringContains(100, someString);
-        PropertyIndexQuery secondExact = exact(200, someValue);
-        PropertyIndexQuery secondRange = range(200, someValue, true, someValue, true);
-        PropertyIndexQuery secondExist = exists(200);
-        PropertyIndexQuery secondPrefix = stringPrefix(100, someString);
-        PropertyIndexQuery secondSuffix = stringSuffix(100, someString);
-        PropertyIndexQuery secondContains = stringContains(100, someString);
+        PropertyIndexQuery firstExact = exact(0, someValue);
+        PropertyIndexQuery firstRange = range(0, someValue, true, someValue, true);
+        PropertyIndexQuery firstPrefix = stringPrefix(0, someString);
+        PropertyIndexQuery firstExist = exists(0);
+        PropertyIndexQuery firstSuffix = stringSuffix(0, someString);
+        PropertyIndexQuery firstContains = stringContains(0, someString);
+        PropertyIndexQuery secondExact = exact(1, someValue);
+        PropertyIndexQuery secondRange = range(1, someValue, true, someValue, true);
+        PropertyIndexQuery secondExist = exists(1);
+        PropertyIndexQuery secondPrefix = stringPrefix(1, someString);
+        PropertyIndexQuery secondSuffix = stringSuffix(1, someString);
+        PropertyIndexQuery secondContains = stringContains(1, someString);
 
         List<Pair<PropertyIndexQuery[], Boolean>> queries = Arrays.asList(
                 of(new PropertyIndexQuery[] {allEntries, allEntries}, false),
@@ -1143,29 +1142,29 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
                 of(new PropertyIndexQuery[] {firstContains, secondSuffix}, false),
                 of(new PropertyIndexQuery[] {firstContains, secondContains}, false));
 
-        SimpleEntityValueClient client = new SimpleEntityValueClient();
-        try (ValueIndexReader reader = accessor.newValueReader(NO_USAGE_TRACKING)) {
+        try (SimpleEntityValueClient client = new SimpleEntityValueClient();
+                ValueIndexReader reader = accessor.newValueReader(NO_USAGE_TRACKING)) {
             for (Pair<PropertyIndexQuery[], Boolean> pair : queries) {
                 PropertyIndexQuery[] theQuery = pair.first();
                 Boolean legal = pair.other();
                 if (legal) {
                     // when
-                    reader.query(client, NULL_CONTEXT, unconstrained(), theQuery);
+                    reader.query(client, NULL_CONTEXT, CursorContext.NULL_CONTEXT, unconstrained(), theQuery);
 
                     // then should not throw
                 } else {
-                    try {
-                        // when
-                        reader.query(client, NULL_CONTEXT, unconstrained(), theQuery);
-                        fail("Expected index reader to throw for illegal composite query. Query was, "
-                                + Arrays.toString(theQuery));
-                    } catch (IllegalArgumentException e) {
-                        // then
-                        if (!testSuite.supportsContainsAndEndsWithQueries() && hasContainsOrEndsWithQuery(theQuery)) {
-                            assertThat(e.getMessage()).contains("Tried to query index with illegal query.");
-                        } else {
-                            assertThat(e.getMessage()).contains("Tried to query index with illegal composite query.");
-                        }
+                    AbstractThrowableAssert<? extends AbstractThrowableAssert<?, ?>, ?> exceptionAssert =
+                            assertThatThrownBy(() -> reader.query(
+                                            client,
+                                            NULL_CONTEXT,
+                                            CursorContext.NULL_CONTEXT,
+                                            unconstrained(),
+                                            theQuery))
+                                    .isInstanceOf(IndexNotApplicableKernelException.class);
+                    if (!testSuite.supportsContainsAndEndsWithQueries() && hasContainsOrEndsWithQuery(theQuery)) {
+                        exceptionAssert.hasMessageContaining("Tried to query index with illegal query.");
+                    } else {
+                        exceptionAssert.hasMessageContaining("Tried to query index with illegal composite query.");
                     }
                 }
             }
@@ -1173,7 +1172,7 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
     }
 
     private boolean hasContainsOrEndsWithQuery(PropertyIndexQuery... query) {
-        for (final var predicate : query) {
+        for (PropertyIndexQuery predicate : query) {
             switch (predicate.type()) {
                 case STRING_CONTAINS, STRING_SUFFIX:
                     return true;
@@ -1187,19 +1186,22 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
     @Test
     void shouldUpdateEntries() throws Exception {
         ValueType[] valueTypes = testSuite.supportedValueTypes();
+        RandomValues randomValues = randomValues(2);
         long entityId = random.nextLong(1_000_000_000);
         for (ValueType valueType : valueTypes) {
             // given
-            Value[] value = new Value[] {random.nextValue(valueType), random.nextValue(valueType)};
-            updateAndCommit(singletonList(IndexEntryUpdate.add(entityId, descriptor, value)));
+            Value[] value =
+                    new Value[] {randomValues.nextValueOfType(valueType), randomValues.nextValueOfType(valueType)};
+            updateAndCommit(singletonList(EagerValueIndexEntryUpdate.add(entityId, descriptor, value)));
             assertEquals(singletonList(entityId), query(exactQuery(value)));
 
             // when
             Value[] newValue;
             do {
-                newValue = new Value[] {random.nextValue(valueType), random.nextValue(valueType)};
+                newValue =
+                        new Value[] {randomValues.nextValueOfType(valueType), randomValues.nextValueOfType(valueType)};
             } while (ValueTuple.of(value).equals(ValueTuple.of(newValue)));
-            updateAndCommit(singletonList(IndexEntryUpdate.change(entityId, descriptor, value, newValue)));
+            updateAndCommit(singletonList(EagerValueIndexEntryUpdate.change(entityId, descriptor, value, newValue)));
 
             // then
             assertEquals(emptyList(), query(exactQuery(value)));
@@ -1210,15 +1212,17 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
     @Test
     void shouldRemoveEntries() throws Exception {
         ValueType[] valueTypes = testSuite.supportedValueTypes();
+        RandomValues randomValues = randomValues(2);
         long entityId = random.nextLong(1_000_000_000);
         for (ValueType valueType : valueTypes) {
             // given
-            Value[] value = new Value[] {random.nextValue(valueType), random.nextValue(valueType)};
-            updateAndCommit(singletonList(IndexEntryUpdate.add(entityId, descriptor, value)));
+            Value[] value =
+                    new Value[] {randomValues.nextValueOfType(valueType), randomValues.nextValueOfType(valueType)};
+            updateAndCommit(singletonList(EagerValueIndexEntryUpdate.add(entityId, descriptor, value)));
             assertEquals(singletonList(entityId), query(exactQuery(value)));
 
             // when
-            updateAndCommit(singletonList(IndexEntryUpdate.remove(entityId, descriptor, value)));
+            updateAndCommit(singletonList(EagerValueIndexEntryUpdate.remove(entityId, descriptor, value)));
 
             // then
             assertEquals(emptyList(), query(exactQuery(value)));
@@ -1226,13 +1230,17 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
     }
 
     private static PropertyIndexQuery[] exactQuery(Value[] values) {
-        return Stream.of(values).map(v -> exact(0, v)).toArray(PropertyIndexQuery[]::new);
+        PropertyIndexQuery[] queries = new PropertyIndexQuery[values.length];
+        for (int i = 0; i < values.length; i++) {
+            queries[i] = exact(i, values[i]);
+        }
+        return queries;
     }
 
     // This behaviour is expected by General indexes
     abstract static class General extends CompositeIndexAccessorCompatibility {
         General(PropertyIndexProviderCompatibilityTestSuite testSuite) {
-            super(testSuite, IndexPrototype.forSchema(forLabel(1000, 100, 200)));
+            super(testSuite, IndexPrototype.forSchema(forLabel(1000, 0, 1)));
         }
 
         @Test
@@ -1294,8 +1302,7 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
         }
 
         private void testDuplicatesInIndexSeek(Value value) throws Exception {
-            updateAndCommit(
-                    asList(add(1L, descriptor.schema(), value, value), add(2L, descriptor.schema(), value, value)));
+            updateAndCommit(asList(add(1L, descriptor, value, value), add(2L, descriptor, value, value)));
 
             assertThat(query(exact(0, value), exact(1, value))).containsExactly(1L, 2L);
         }
@@ -1304,7 +1311,7 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
     // This behaviour is expected by Unique indexes
     abstract static class Unique extends CompositeIndexAccessorCompatibility {
         Unique(PropertyIndexProviderCompatibilityTestSuite testSuite) {
-            super(testSuite, IndexPrototype.uniqueForSchema(forLabel(1000, 100, 200)));
+            super(testSuite, IndexPrototype.uniqueForSchema(forLabel(1000, 0, 1)));
         }
 
         @Test
@@ -1315,7 +1322,7 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
             // Conflicting data can happen because of faulty data coercion. These faults are resolved by
             // the exact-match filtering we do on index seeks.
 
-            updateAndCommit(asList(add(1L, descriptor.schema(), "a", "a"), add(2L, descriptor.schema(), "a", "a")));
+            updateAndCommit(asList(add(1L, descriptor, "a", "a"), add(2L, descriptor, "a", "a")));
 
             assertThat(query(exact(0, "a"), exact(1, "a"))).containsExactly(1L, 2L);
         }
@@ -1329,13 +1336,13 @@ abstract class CompositeIndexAccessorCompatibility extends IndexAccessorCompatib
         return Values.dateArray(localDates);
     }
 
-    private static ValueIndexEntryUpdate<SchemaDescriptorSupplier> add(
-            long nodeId, SchemaDescriptor schema, Object value1, Object value2) {
-        return add(nodeId, schema, Values.of(value1), Values.of(value2));
+    private static EagerValueIndexEntryUpdate add(
+            long nodeId, IndexDescriptor indexDescriptor, Object value1, Object value2) {
+        return add(nodeId, indexDescriptor, Values.of(value1), Values.of(value2));
     }
 
-    private static ValueIndexEntryUpdate<SchemaDescriptorSupplier> add(
-            long nodeId, SchemaDescriptor schema, Value value1, Value value2) {
-        return IndexEntryUpdate.add(nodeId, () -> schema, value1, value2);
+    private static EagerValueIndexEntryUpdate add(
+            long nodeId, IndexDescriptor indexDescriptor, Value value1, Value value2) {
+        return EagerValueIndexEntryUpdate.add(nodeId, indexDescriptor, value1, value2);
     }
 }

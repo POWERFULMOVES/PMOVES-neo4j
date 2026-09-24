@@ -28,12 +28,12 @@ import org.neo4j.cypher.internal.expressions.NilPathStep
 import org.neo4j.cypher.internal.expressions.NodePathStep
 import org.neo4j.cypher.internal.expressions.PathExpression
 import org.neo4j.cypher.internal.expressions.SemanticDirection.OUTGOING
+import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.column
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createNode
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createNodeWithProperties
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createPattern
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createRelationship
-import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.delete
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.removeDynamicLabel
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.removeLabel
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setDynamicLabel
@@ -58,6 +58,8 @@ import org.neo4j.graphdb.schema.IndexType
 import org.neo4j.kernel.api.KernelTransaction
 import org.neo4j.values.virtual.NodeValue.DirectNodeValue
 import org.neo4j.values.virtual.RelationshipValue.DirectRelationshipValue
+
+object ProfileDbHitsTestBase
 
 abstract class ProfileDbHitsTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
@@ -86,7 +88,8 @@ abstract class ProfileDbHitsTestBase[CONTEXT <: RuntimeContext](
   }
 
   test("HasLabel on top of LabelScan") {
-    hasLabelOnTopOfLeaf(_.nodeByLabelScan("n", "Label"), expression = "n:Label", costOfLabelCheck)
+    val cost = if (canReuseAllScanLookup) 0 else costOfLabelCheck
+    hasLabelOnTopOfLeaf(_.nodeByLabelScan("n", "Label"), expression = "n:Label", cost)
   }
 
   test("IS NOT NULL on top of AllNodesScan") {
@@ -95,7 +98,8 @@ abstract class ProfileDbHitsTestBase[CONTEXT <: RuntimeContext](
   }
 
   test("IS NOT NULL on top of LabelScan") {
-    hasLabelOnTopOfLeaf(_.nodeByLabelScan("n", "Label"), expression = "n.prop IS NOT NULL", costOfPropertyExists)
+    val cost = if (canReuseAllScanLookup) costOfPropertyExists - 1 else costOfPropertyExists
+    hasLabelOnTopOfLeaf(_.nodeByLabelScan("n", "Label"), expression = "n.prop IS NOT NULL", cost)
   }
 
   private def hasLabelOnTopOfLeaf(
@@ -684,7 +688,7 @@ abstract class ProfileDbHitsTestBase[CONTEXT <: RuntimeContext](
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("r", "x", "y")
-      .directedRelationshipByIdSeek("r", "x", "y", Set.empty, rels(13).getId)
+      .relationshipByIdSeek("(x)-[r]->(y)", Set.empty, rels(13).getId)
       .build()
 
     val result = profile(logicalQuery, runtime)
@@ -739,7 +743,8 @@ abstract class ProfileDbHitsTestBase[CONTEXT <: RuntimeContext](
     consume(runtimeResult)
 
     // then
-    val expectedOptionalExpandAllDbHits = sizeHint * (costOfExpandGetRelCursor + costOfExpandOneRel) + extraNodes
+    val expectedOptionalExpandAllDbHits = if (canReuseAllScanLookup && canFuseOverPipelines) sizeHint
+    else sizeHint * (costOfExpandGetRelCursor + costOfExpandOneRel) + extraNodes
     val expectedNodeByLabelScanDbHits = sizeHint + extraNodes + 1 + costOfLabelLookup
     val queryProfile = runtimeResult.runtimeResult.queryProfile()
     queryProfile.operatorProfile(1).dbHits() shouldBe expectedOptionalExpandAllDbHits // optional expand all
@@ -810,9 +815,11 @@ abstract class ProfileDbHitsTestBase[CONTEXT <: RuntimeContext](
       1
     ).dbHits() shouldBe ((n + extraNodes) * expandConstantCost + n * costOfExpandOneRel) // optional expand into
     queryProfile.operatorProfile(2).dbHits() shouldBe 0 // apply
+    val costPerPropRead = if (canReuseAllScanLookup) 2 * (costOfGetPropertyChain + costOfProperty) - 1
+    else 2 * (costOfGetPropertyChain + costOfProperty)
     queryProfile.operatorProfile(
       3
-    ).dbHits() shouldBe ((n + extraNodes) * (n + extraNodes) * 2 * (costOfGetPropertyChain + costOfProperty)) // filter (reads 2 properties))
+    ).dbHits() shouldBe ((n + extraNodes) * (n + extraNodes) * costPerPropRead) // filter (reads 2 properties))
     queryProfile.operatorProfile(4).dbHits() should expectedLabelScanRHS // label scan Y
     queryProfile.operatorProfile(5).dbHits() shouldBe expectedLabelScanLHS // // label scan X
   }
@@ -1332,7 +1339,7 @@ abstract class ProfileDbHitsTestBase[CONTEXT <: RuntimeContext](
       .build()
 
     val runtimeResult = profile(logicalQuery, runtime)
-    val consumed = consume(runtimeResult)
+    consume(runtimeResult)
 
     // then
     val queryProfile = runtimeResult.runtimeResult.queryProfile()
@@ -2163,7 +2170,7 @@ trait WriteOperatorsDbHitsTestBase[CONTEXT <: RuntimeContext] {
 
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("x")
-      .foreach("n", "[x]", Seq(delete("n")))
+      .foreach("n", "[x]", Seq(AbstractLogicalPlanBuilder.delete("n")))
       .nodeByLabelScan("x", "A")
       .build()
 

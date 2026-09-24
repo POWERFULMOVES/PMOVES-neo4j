@@ -25,7 +25,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker.readOnly;
 import static org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker.writable;
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
-import static org.neo4j.io.memory.ByteBufferFactory.heapBufferFactory;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
 import static org.neo4j.kernel.api.index.IndexDirectoryStructure.directoriesByProvider;
@@ -41,6 +40,8 @@ import org.junit.jupiter.api.Test;
 import org.neo4j.common.TokenNameLookup;
 import org.neo4j.configuration.Config;
 import org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker;
+import org.neo4j.exceptions.InvalidArgumentException;
+import org.neo4j.graphdb.WriteOperationsNotAllowedException;
 import org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector;
 import org.neo4j.internal.kernel.api.InternalIndexState;
 import org.neo4j.internal.schema.IndexCapability;
@@ -92,7 +93,7 @@ abstract class IndexProviderTests {
     private final AssertableLogProvider logging;
     private final Monitors monitors;
     private final ProviderFactory factory;
-    final TokenNameLookup tokenNameLookup = SchemaTestUtil.SIMPLE_NAME_LOOKUP;
+    static final TokenNameLookup TOKEN_NAME_LOOKUP = SchemaTestUtil.SIMPLE_NAME_LOOKUP;
     IndexProvider provider;
 
     IndexProviderTests(ProviderFactory factory) {
@@ -143,7 +144,7 @@ abstract class IndexProviderTests {
 
         // then
         for (IndexPrototype invalidPrototype : invalidPrototypes) {
-            assertThrows(IllegalArgumentException.class, () -> provider.validatePrototype(invalidPrototype));
+            assertThrows(InvalidArgumentException.class, () -> provider.validatePrototype(invalidPrototype));
         }
     }
 
@@ -171,13 +172,13 @@ abstract class IndexProviderTests {
         provider = newReadOnlyProvider();
 
         assertThrows(
-                UnsupportedOperationException.class,
+                WriteOperationsNotAllowedException.class,
                 () -> provider.getPopulator(
                         descriptor(),
                         samplingConfig(),
-                        heapBufferFactory(1024),
+                        SchemaTestUtil.defaultHeapBufferFactory(),
                         INSTANCE,
-                        tokenNameLookup,
+                        TOKEN_NAME_LOOKUP,
                         ElementIdMapper.PLACEHOLDER,
                         Sets.immutable.empty(),
                         StorageEngineIndexingBehaviour.EMPTY));
@@ -192,9 +193,9 @@ abstract class IndexProviderTests {
         IndexPopulator populator = provider.getPopulator(
                 descriptor(),
                 samplingConfig(),
-                heapBufferFactory(1024),
+                SchemaTestUtil.defaultHeapBufferFactory(),
                 INSTANCE,
-                tokenNameLookup,
+                TOKEN_NAME_LOOKUP,
                 ElementIdMapper.PLACEHOLDER,
                 Sets.immutable.empty(),
                 StorageEngineIndexingBehaviour.EMPTY);
@@ -216,9 +217,9 @@ abstract class IndexProviderTests {
         IndexPopulator nonFailedPopulator = provider.getPopulator(
                 descriptor(),
                 samplingConfig(),
-                heapBufferFactory(1024),
+                SchemaTestUtil.defaultHeapBufferFactory(),
                 INSTANCE,
-                tokenNameLookup,
+                TOKEN_NAME_LOOKUP,
                 ElementIdMapper.PLACEHOLDER,
                 Sets.immutable.empty(),
                 StorageEngineIndexingBehaviour.EMPTY);
@@ -228,9 +229,9 @@ abstract class IndexProviderTests {
         IndexPopulator failedPopulator = provider.getPopulator(
                 otherDescriptor(),
                 samplingConfig(),
-                heapBufferFactory(1024),
+                SchemaTestUtil.defaultHeapBufferFactory(),
                 INSTANCE,
-                tokenNameLookup,
+                TOKEN_NAME_LOOKUP,
                 ElementIdMapper.PLACEHOLDER,
                 Sets.immutable.empty(),
                 StorageEngineIndexingBehaviour.EMPTY);
@@ -240,7 +241,7 @@ abstract class IndexProviderTests {
         failedPopulator.markAsFailed("failure");
         failedPopulator.close(false, NULL_CONTEXT);
 
-        var populationFailure = provider.getPopulationFailure(descriptor(), NULL_CONTEXT, Sets.immutable.empty());
+        String populationFailure = provider.getPopulationFailure(descriptor(), NULL_CONTEXT, Sets.immutable.empty());
         assertEquals(StringUtils.EMPTY, populationFailure);
     }
 
@@ -251,9 +252,9 @@ abstract class IndexProviderTests {
         IndexPopulator populator = provider.getPopulator(
                 descriptor(),
                 samplingConfig(),
-                heapBufferFactory(1024),
+                SchemaTestUtil.defaultHeapBufferFactory(),
                 INSTANCE,
-                tokenNameLookup,
+                TOKEN_NAME_LOOKUP,
                 ElementIdMapper.PLACEHOLDER,
                 Sets.immutable.empty(),
                 StorageEngineIndexingBehaviour.EMPTY);
@@ -276,9 +277,9 @@ abstract class IndexProviderTests {
         IndexPopulator firstPopulator = provider.getPopulator(
                 descriptor(),
                 samplingConfig(),
-                heapBufferFactory(1024),
+                SchemaTestUtil.defaultHeapBufferFactory(),
                 INSTANCE,
-                tokenNameLookup,
+                TOKEN_NAME_LOOKUP,
                 ElementIdMapper.PLACEHOLDER,
                 Sets.immutable.empty(),
                 StorageEngineIndexingBehaviour.EMPTY);
@@ -286,9 +287,9 @@ abstract class IndexProviderTests {
         IndexPopulator secondPopulator = provider.getPopulator(
                 otherDescriptor(),
                 samplingConfig(),
-                heapBufferFactory(1024),
+                SchemaTestUtil.defaultHeapBufferFactory(),
                 INSTANCE,
-                tokenNameLookup,
+                TOKEN_NAME_LOOKUP,
                 ElementIdMapper.PLACEHOLDER,
                 Sets.immutable.empty(),
                 StorageEngineIndexingBehaviour.EMPTY);
@@ -316,9 +317,9 @@ abstract class IndexProviderTests {
         IndexPopulator populator = provider.getPopulator(
                 descriptor(),
                 samplingConfig(),
-                heapBufferFactory(1024),
+                SchemaTestUtil.defaultHeapBufferFactory(),
                 INSTANCE,
-                tokenNameLookup,
+                TOKEN_NAME_LOOKUP,
                 ElementIdMapper.PLACEHOLDER,
                 Sets.immutable.empty(),
                 StorageEngineIndexingBehaviour.EMPTY);
@@ -358,9 +359,9 @@ abstract class IndexProviderTests {
         IndexPopulator populator = provider.getPopulator(
                 descriptor(),
                 samplingConfig(),
-                heapBufferFactory(1024),
+                SchemaTestUtil.defaultHeapBufferFactory(),
                 INSTANCE,
-                tokenNameLookup,
+                TOKEN_NAME_LOOKUP,
                 ElementIdMapper.PLACEHOLDER,
                 Sets.immutable.empty(),
                 StorageEngineIndexingBehaviour.EMPTY);
@@ -381,9 +382,9 @@ abstract class IndexProviderTests {
         IndexPopulator populator = provider.getPopulator(
                 descriptor(),
                 samplingConfig(),
-                heapBufferFactory(1024),
+                SchemaTestUtil.defaultHeapBufferFactory(),
                 INSTANCE,
-                tokenNameLookup,
+                TOKEN_NAME_LOOKUP,
                 ElementIdMapper.PLACEHOLDER,
                 Sets.immutable.empty(),
                 StorageEngineIndexingBehaviour.EMPTY);
@@ -405,9 +406,9 @@ abstract class IndexProviderTests {
         IndexPopulator populator = provider.getPopulator(
                 descriptor(),
                 samplingConfig(),
-                heapBufferFactory(1024),
+                SchemaTestUtil.defaultHeapBufferFactory(),
                 INSTANCE,
-                tokenNameLookup,
+                TOKEN_NAME_LOOKUP,
                 ElementIdMapper.PLACEHOLDER,
                 Sets.immutable.empty(),
                 StorageEngineIndexingBehaviour.EMPTY);

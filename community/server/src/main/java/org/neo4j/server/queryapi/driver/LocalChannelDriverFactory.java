@@ -19,22 +19,13 @@
  */
 package org.neo4j.server.queryapi.driver;
 
+import io.netty.channel.MultiThreadIoEventLoopGroup;
 import io.netty.channel.local.LocalAddress;
+import io.netty.channel.local.LocalIoHandler;
 import java.net.URI;
-import java.net.URISyntaxException;
-import java.time.Clock;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
-import java.util.concurrent.ScheduledExecutorService;
-import org.neo4j.bolt.connection.AuthToken;
-import org.neo4j.bolt.connection.BoltAgent;
-import org.neo4j.bolt.connection.BoltConnection;
-import org.neo4j.bolt.connection.BoltConnectionProvider;
-import org.neo4j.bolt.connection.BoltProtocolVersion;
-import org.neo4j.bolt.connection.LoggingProvider;
-import org.neo4j.bolt.connection.NotificationConfig;
-import org.neo4j.bolt.connection.SecurityPlan;
-import org.neo4j.bolt.connection.observation.ImmutableObservation;
+import java.util.concurrent.TimeUnit;
+import org.neo4j.configuration.GraphDatabaseInternalSettings;
+import org.neo4j.configuration.connectors.BoltConnectorInternalSettings;
 import org.neo4j.driver.AuthTokens;
 import org.neo4j.driver.Config;
 import org.neo4j.driver.Driver;
@@ -46,30 +37,26 @@ import org.neo4j.logging.InternalLogProvider;
  * A custom {@link DriverFactory} that uses netty's {@link io.netty.channel.local.LocalChannel} to connect to the
  * bolt server.
  */
-public final class LocalChannelDriverFactory extends DriverFactory {
+public final class LocalChannelDriverFactory extends DriverFactory implements AutoCloseable {
 
-    public static final URI IGNORED_HTTP_DRIVER_URI = URI.create("bolt://http-driver.com:0");
+    public static final URI IGNORED_HTTP_DRIVER_URI =
+            URI.create(QueryApiBoltConnectionProviderFactory.SCHEME + "://http-driver.com:0");
     private final LocalAddress localAddress;
     private final InternalLogProvider internalLogProvider;
+    private final org.neo4j.configuration.Config config;
+    private final MultiThreadIoEventLoopGroup localGroup;
 
-    public LocalChannelDriverFactory(LocalAddress localAddress, InternalLogProvider internalLogProvider) {
+    public LocalChannelDriverFactory(
+            LocalAddress localAddress, InternalLogProvider internalLogProvider, org.neo4j.configuration.Config config) {
         this.localAddress = localAddress;
         this.internalLogProvider = internalLogProvider;
+        this.config = config;
+        this.localGroup = new MultiThreadIoEventLoopGroup(LocalIoHandler.newFactory());
     }
 
     @Override
     protected LocalAddress localAddress() {
         return localAddress;
-    }
-
-    @Override
-    protected BoltConnectionProvider createBoltConnectionProvider(
-            ScheduledExecutorService eventLoopGroup,
-            Clock clock,
-            LoggingProvider loggingProvider,
-            int eventLoopThreads) {
-        return new BoltConnectionProviderWithRoutingContext(
-                super.createBoltConnectionProvider(eventLoopGroup, clock, loggingProvider, eventLoopThreads));
     }
 
     public Driver createLocalDriver() {
@@ -80,58 +67,35 @@ public final class LocalChannelDriverFactory extends DriverFactory {
                 Config.builder()
                         .withLogging(new DriverToInternalLogProvider(internalLogProvider))
                         .withUserAgent("neo4j-query-api/v2")
-                        .build());
+                        .withAutoCommitRetriesDisabled(true)
+                        .build(),
+                null,
+                localGroup,
+                null);
     }
 
-    /**
-     * A delegating {@link BoltConnectionProvider} responsible for ensuring that 'neo4j' scheme is used, this makes sure
-     * that routing context is used.
-     * @param delegate the {@link BoltConnectionProvider} that it delegates to
-     */
-    private record BoltConnectionProviderWithRoutingContext(BoltConnectionProvider delegate)
-            implements BoltConnectionProvider {
-        @Override
-        public CompletionStage<BoltConnection> connect(
-                URI uri,
-                String routingContextAddress,
-                BoltAgent boltAgent,
-                String userAgent,
-                int connectTimeoutMillis,
-                long initialisationTimeoutMillis,
-                SecurityPlan securityPlan,
-                AuthToken authToken,
-                BoltProtocolVersion minVersion,
-                NotificationConfig notificationConfig,
-                ImmutableObservation parentObservation) {
-            try {
-                uri = new URI(
-                        "neo4j",
-                        uri.getUserInfo(),
-                        uri.getHost(),
-                        uri.getPort(),
-                        uri.getPath(),
-                        uri.getQuery(),
-                        uri.getFragment());
-            } catch (URISyntaxException e) {
-                return CompletableFuture.failedStage(e);
-            }
-            return delegate.connect(
-                    uri,
-                    routingContextAddress,
-                    boltAgent,
-                    userAgent,
-                    connectTimeoutMillis,
-                    initialisationTimeoutMillis,
-                    securityPlan,
-                    authToken,
-                    minVersion,
-                    notificationConfig,
-                    parentObservation);
-        }
+    @Override
+    public void close() throws Exception {
+        var workerTerminationFuture = localGroup.shutdownGracefully(
+                config.get(GraphDatabaseInternalSettings.netty_server_shutdown_quiet_period)
+                        .toMillis(),
+                config.get(GraphDatabaseInternalSettings.netty_server_shutdown_timeout)
+                        .toMillis(),
+                TimeUnit.MILLISECONDS);
 
-        @Override
-        public CompletionStage<Void> close() {
-            return delegate.close();
+        var workerTerminationCompleted = workerTerminationFuture.awaitUninterruptibly(
+                config.get(BoltConnectorInternalSettings.thread_pool_shutdown_wait_time)
+                        .toSeconds(),
+                TimeUnit.SECONDS);
+        if (!workerTerminationCompleted) {
+            var log = internalLogProvider.getLog(LocalChannelDriverFactory.class);
+            log.warn(
+                    "Termination of local driver factory worker event loop group has exceeded maximum permitted duration - Remaining jobs will be forcefully terminated");
+        } else if (!workerTerminationFuture.isSuccess()) {
+            var log = internalLogProvider.getLog(LocalChannelDriverFactory.class);
+            log.warn(
+                    "Termination of local driver factory worker event loop group has failed",
+                    workerTerminationFuture.cause());
         }
     }
 }

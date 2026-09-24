@@ -113,24 +113,29 @@ public final class VirtualValues {
 
     public static MapValue map(String[] keys, AnyValue[] values) {
         assert keys.length == values.length;
-        long payloadSize = 0;
-        Map<String, AnyValue> map = new HashMap<>((int) ((float) keys.length / 0.75f + 1.0f));
-        for (int i = 0; i < keys.length; i++) {
-            String key = keys[i];
-            AnyValue value = values[i];
-            map.put(key, value);
-            payloadSize += sizeOf(key) + value.estimatedHeapUsage();
+        if (keys.length == 0) {
+            return MapValue.EMPTY;
+        } else if (keys.length == 1) {
+            return new SingletonMapValue(keys[0], values[0]);
+        } else {
+            long payloadSize = 0;
+            Map<String, AnyValue> map = HashMap.newHashMap(keys.length);
+            for (int i = 0; i < keys.length; i++) {
+                String key = keys[i];
+                AnyValue value = values[i];
+                map.put(key, value);
+                payloadSize += sizeOf(key) + value.estimatedHeapUsage();
+            }
+            return new MapValue.MapWrappingMapValue(map, payloadSize);
         }
-        return new MapValue.MapWrappingMapValue(map, payloadSize);
+    }
+
+    public static MapValue singletonMap(String key, AnyValue value) {
+        return new SingletonMapValue(key, value);
     }
 
     public static MapValue fromMap(Map<String, AnyValue> map, long mapSize, long payloadSize) {
         return new MapValue.MapWrappingMapValue(map, mapSize, payloadSize);
-    }
-
-    @Deprecated
-    public static ErrorValue error(Exception e) {
-        return new ErrorValue(e);
     }
 
     public static ErrorValue error(ErrorGqlStatusObject gqlStatusObject, Exception e) {
@@ -183,6 +188,21 @@ public final class VirtualValues {
 
     public static PathReference pathReference(
             List<VirtualNodeValue> nodes, List<VirtualRelationshipValue> relationships) {
+        checkPathReferenceInput(nodes, relationships);
+        return PathReference.path(nodes, relationships);
+    }
+
+    /**
+     * @param elementsHeapSize the combined {@link AnyValue#estimatedHeapUsage()} of the given nodes and relationships
+     */
+    public static PathReference pathReference(
+            List<VirtualNodeValue> nodes, List<VirtualRelationshipValue> relationships, long elementsHeapSize) {
+        checkPathReferenceInput(nodes, relationships);
+        return PathReference.path(nodes, relationships, elementsHeapSize);
+    }
+
+    private static void checkPathReferenceInput(
+            List<VirtualNodeValue> nodes, List<VirtualRelationshipValue> relationships) {
         assert nodes != null;
         assert relationships != null;
         if ((nodes.size() + relationships.size()) % 2 == 0) {
@@ -194,8 +214,6 @@ public final class VirtualValues {
         // This is to catch if we have a use case where the relationship list does not support random access,
         // because then we may need to optimize PathReferenceReferences.
         assert relationships instanceof RandomAccess;
-
-        return PathReference.path(nodes, relationships);
     }
 
     public static PathValue path(NodeValue[] nodes, RelationshipValue[] relationships) {
@@ -216,7 +234,7 @@ public final class VirtualValues {
         return new DirectPathValue(nodes, relationships, payloadSize);
     }
 
-    public static PathValue path(NodeValue[] nodes, RelationshipValue[] relationships, long payloadSize) {
+    public static DirectPathValue path(NodeValue[] nodes, RelationshipValue[] relationships, long payloadSize) {
         assert nodes != null;
         assert relationships != null;
         if ((nodes.length + relationships.length) % 2 == 0) {

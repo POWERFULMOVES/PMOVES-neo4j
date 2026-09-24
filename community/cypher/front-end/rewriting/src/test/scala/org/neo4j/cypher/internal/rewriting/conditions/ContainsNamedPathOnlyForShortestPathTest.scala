@@ -18,6 +18,7 @@ package org.neo4j.cypher.internal.rewriting.conditions
 
 import org.neo4j.cypher.internal.ast.AliasedReturnItem
 import org.neo4j.cypher.internal.ast.AstConstructionTestSupport
+import org.neo4j.cypher.internal.ast.FreeProjection
 import org.neo4j.cypher.internal.ast.Match
 import org.neo4j.cypher.internal.ast.Return
 import org.neo4j.cypher.internal.ast.ReturnItems
@@ -33,7 +34,7 @@ import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 class ContainsNamedPathOnlyForShortestPathTest extends CypherFunSuite with AstConstructionTestSupport {
 
   private val condition: Any => Seq[String] =
-    containsNamedPathOnlyForShortestPath(_)(CancellationChecker.NeverCancelled)
+    ContainsNamedPathOnlyForShortestPath.check(_)(CancellationChecker.NeverCancelled)
 
   test("happy when we have no named paths") {
     val ast = SingleQuery(Seq(
@@ -42,14 +43,16 @@ class ContainsNamedPathOnlyForShortestPathTest extends CypherFunSuite with AstCo
         matchMode = MatchMode.default(pos),
         patternForMatch(NodePattern(Some(varFor("n")), None, None, None)(pos)),
         Seq.empty,
+        None,
         None
       )(pos),
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(AliasedReturnItem(varFor("n"), varFor("n"))(pos))
         )(pos),
+        None,
         None,
         None,
         None
@@ -68,6 +71,7 @@ class ContainsNamedPathOnlyForShortestPathTest extends CypherFunSuite with AstCo
         matchMode = MatchMode.default(pos),
         patternForMatch(namedPattern),
         Seq.empty,
+        None,
         None
       )(
         pos
@@ -75,9 +79,10 @@ class ContainsNamedPathOnlyForShortestPathTest extends CypherFunSuite with AstCo
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(AliasedReturnItem(varFor("n"), varFor("n"))(pos))
         )(pos),
+        None,
         None,
         None,
         None
@@ -97,14 +102,16 @@ class ContainsNamedPathOnlyForShortestPathTest extends CypherFunSuite with AstCo
           ShortestPathsPatternPart(NodePattern(Some(varFor("n")), None, None, None)(pos), single = true)(pos)
         )(pos)),
         Seq.empty,
+        None,
         None
       )(pos),
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(AliasedReturnItem(varFor("n"), varFor("n"))(pos))
         )(pos),
+        None,
         None,
         None,
         None

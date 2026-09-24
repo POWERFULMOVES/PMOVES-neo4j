@@ -26,6 +26,7 @@ import static org.neo4j.shell.terminal.CypherShellTerminal.PROMPT_MAX_LENGTH;
 import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.neo4j.driver.exceptions.Neo4jException;
 import org.neo4j.shell.Connector;
 import org.neo4j.shell.DatabaseManager;
 import org.neo4j.shell.Historian;
@@ -99,11 +100,14 @@ public class InteractiveShellRunner implements ShellRunner, UserInterruptHandler
         printer.printIfVerbose(userMessagesHandler.getWelcomeMessage());
 
         while (running) {
+            String currentStatement = null;
             try {
                 for (ParsedStatement statement : readUntilStatement()) {
                     currentlyExecuting.set(true);
+                    currentStatement = statement.statement();
                     executer.execute(statement);
                     currentlyExecuting.set(false);
+                    currentStatement = null;
                 }
             } catch (ExitException e) {
                 log.info("ExitException code=" + e.getCode() + ", message=" + e.getMessage());
@@ -114,8 +118,21 @@ public class InteractiveShellRunner implements ShellRunner, UserInterruptHandler
                 // User pressed Ctrl-D and wants to exit
                 running = false;
             } catch (Throwable e) {
+                if (e instanceof Neo4jException ex
+                        && "system".equals(databaseManager.getActiveDatabaseAsSetByUser())
+                        && "Neo.ClientError.Security.CredentialsExpired".equalsIgnoreCase(ex.code())) {
+                    var message =
+                            "Password change required. To change your password use `:exit` and then `cypher-shell --change-password`.";
+                    log.info(message);
+                    terminal.write().println(message);
+                }
+
                 log.error(e);
-                printer.printError(e);
+                if (currentStatement != null) {
+                    printer.printError(e, currentStatement);
+                } else {
+                    printer.printError(e);
+                }
             } finally {
                 currentlyExecuting.set(false);
             }
@@ -194,9 +211,10 @@ public class InteractiveShellRunner implements ShellRunner, UserInterruptHandler
 
         if (connector.isConnected()) {
             prompt.bold(connector.username());
-            connector.impersonatedUser().ifPresent(impersonated -> prompt.append("(")
-                    .bold(impersonated)
-                    .append(")"));
+            connector
+                    .impersonatedUser()
+                    .ifPresent(impersonated ->
+                            prompt.append("(").bold(impersonated).append(")"));
             prompt.bold("@" + databaseName);
         } else {
             prompt.append("Disconnected");

@@ -32,11 +32,10 @@ import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
-import org.neo4j.kernel.KernelVersion;
+import org.neo4j.kernel.KernelVersionProviders;
 import org.neo4j.kernel.database.DatabaseTracers;
 import org.neo4j.kernel.impl.pagecache.ConfiguringPageCacheFactory;
 import org.neo4j.kernel.impl.scheduler.JobSchedulerFactory;
-import org.neo4j.kernel.impl.transaction.log.entry.UnsupportedLogVersionException;
 import org.neo4j.kernel.recovery.LogTailExtractor;
 import org.neo4j.logging.NullLog;
 import org.neo4j.logging.internal.NullLogService;
@@ -47,6 +46,7 @@ import org.neo4j.storageengine.api.StorageEngineFactory;
 import org.neo4j.storageengine.api.StoreVersionCheck;
 import org.neo4j.storageengine.api.StoreVersionIdentifier;
 import org.neo4j.time.Clocks;
+import org.neo4j.wal.entry.UnsupportedLogVersionException;
 
 public class StoreVersionLoader implements AutoCloseable {
     private final FileSystemAbstraction fs;
@@ -95,6 +95,16 @@ public class StoreVersionLoader implements AutoCloseable {
                         "Can not read store version of database " + layout.getDatabaseName(), checkResult.cause());
             }
 
+            if (checkResult.outcome() == StoreVersionCheck.UpgradeOutcome.UPGRADE_POSSIBLE) {
+                // Upgrade on start up is not supported anymore - this should never happen unless we accidentally
+                // introduce a new minor version, but let's throw something to discover if it does.
+                throw new IllegalStateException(
+                        "Current store version has a descendant which is not supported. Seen versions %s -> %s."
+                                .formatted(
+                                        checkResult.versionToUpgradeFrom().getStoreVersionUserString(),
+                                        checkResult.versionToUpgradeTo().getStoreVersionUserString()));
+            }
+
             checkDowngrade(sef, layout);
 
             return new Result(
@@ -113,7 +123,8 @@ public class StoreVersionLoader implements AutoCloseable {
                     // We don't really care about the situation when there are no TX logs,
                     // so the latest kernel version as a fallback is fine. We just don't want this check to blow up when
                     // there are no TX logs.
-                    .getTailMetadata(layout, EmptyMemoryTracker.INSTANCE, () -> KernelVersion.getLatestVersion(config));
+                    .getTailMetadata(
+                            layout, EmptyMemoryTracker.INSTANCE, KernelVersionProviders.latestFromConfig(config));
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         } catch (RuntimeException e) {

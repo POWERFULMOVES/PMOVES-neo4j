@@ -25,7 +25,6 @@ import static org.neo4j.memory.HeapEstimator.LOCAL_DATE_SIZE;
 import static org.neo4j.memory.HeapEstimator.shallowSizeOfInstance;
 import static org.neo4j.util.FeatureToggles.flag;
 import static org.neo4j.values.storable.DateTimeValue.parseZoneName;
-import static org.neo4j.values.storable.IntegralValue.safeCastIntegral;
 
 import java.time.Clock;
 import java.time.DayOfWeek;
@@ -35,6 +34,7 @@ import java.time.OffsetTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoField;
 import java.time.temporal.ChronoUnit;
 import java.time.temporal.IsoFields;
@@ -55,6 +55,7 @@ public final class DateValue extends TemporalValue<LocalDate, DateValue> {
 
     public static final DateValue MIN_VALUE = new DateValue(LocalDate.MIN);
     public static final DateValue MAX_VALUE = new DateValue(LocalDate.MAX);
+    public static final String CYPHER_TYPE_NAME = "DATE";
 
     private final LocalDate value;
 
@@ -66,20 +67,24 @@ public final class DateValue extends TemporalValue<LocalDate, DateValue> {
         return new DateValue(requireNonNull(value, "LocalDate"));
     }
 
+    // Only used in tests
     public static DateValue date(int year, int month, int day) {
-        return new DateValue(assertValidArgument(() -> LocalDate.of(year, month, day)));
+        return new DateValue(LocalDate.of(year, month, day));
     }
 
+    // Only used in tests
     public static DateValue weekDate(int year, int week, int dayOfWeek) {
-        return new DateValue(assertValidArgument(() -> localWeekDate(year, week, dayOfWeek)));
+        return new DateValue(localWeekDate(year, week, dayOfWeek));
     }
 
+    // Only used in tests
     public static DateValue quarterDate(int year, int quarter, int dayOfQuarter) {
-        return new DateValue(assertValidArgument(() -> localQuarterDate(year, quarter, dayOfQuarter)));
+        return new DateValue(localQuarterDate(year, quarter, dayOfQuarter));
     }
 
+    // Only used in tests
     public static DateValue ordinalDate(int year, int dayOfYear) {
-        return new DateValue(assertValidArgument(() -> LocalDate.ofYearDay(year, dayOfYear)));
+        return new DateValue(LocalDate.ofYearDay(year, dayOfYear));
     }
 
     public static DateValue epochDate(long epochDay) {
@@ -87,7 +92,7 @@ public final class DateValue extends TemporalValue<LocalDate, DateValue> {
     }
 
     public static LocalDate epochDateRaw(long epochDay) {
-        return assertValidArgument(() -> LocalDate.ofEpochDay(epochDay));
+        return assertValidArgument("epochDay", () -> LocalDate.ofEpochDay(epochDay));
     }
 
     public static DateValue parse(CharSequence text) {
@@ -96,6 +101,16 @@ public final class DateValue extends TemporalValue<LocalDate, DateValue> {
 
     public static DateValue parse(TextValue text) {
         return parse(DateValue.class, PATTERN, DateValue::parse, text);
+    }
+
+    public static DateValue parsePattern(TextValue text, TextValue pattern) {
+        try {
+            DateTimeFormatter dtf = DateTimeFormatter.ofPattern(pattern.stringValue());
+            LocalDate ld = dtf.parse(text.stringValue(), LocalDate::from);
+            return new DateValue(ld);
+        } catch (IllegalArgumentException | DateTimeParseException e) {
+            throw TemporalParseException.mismatchedPattern(pattern.stringValue(), text.stringValue(), CYPHER_TYPE_NAME);
+        }
     }
 
     public static DateValue now(Clock clock) {
@@ -122,7 +137,7 @@ public final class DateValue extends TemporalValue<LocalDate, DateValue> {
             TemporalUnit unit, TemporalValue input, MapValue fields, Supplier<ZoneId> defaultZone) {
         LocalDate localDate = input.getDatePart();
         DateValue truncated = date(truncateTo(localDate, unit));
-        if (fields.size() == 0) {
+        if (fields.isEmpty()) {
             return truncated;
         } else {
             MapValue updatedFields = fields.updatedWith("date", truncated);
@@ -150,7 +165,8 @@ public final class DateValue extends TemporalValue<LocalDate, DateValue> {
         } else if (unit == ChronoUnit.DAYS) {
             return value;
         } else {
-            throw new UnsupportedTemporalUnitException("Unit too small for truncation: " + unit);
+
+            throw UnsupportedTemporalUnitException.tooSmallUnitForTruncate(String.valueOf(unit), String.valueOf(value));
         }
     }
 
@@ -170,6 +186,11 @@ public final class DateValue extends TemporalValue<LocalDate, DateValue> {
     }
 
     @Override
+    public String getTemporalCypherTypeName() {
+        return CYPHER_TYPE_NAME;
+    }
+
+    @Override
     LocalDate temporal() {
         return value;
     }
@@ -181,22 +202,22 @@ public final class DateValue extends TemporalValue<LocalDate, DateValue> {
 
     @Override
     LocalTime getLocalTimePart() {
-        throw new UnsupportedTemporalUnitException(String.format("Cannot get the time of: %s", this));
+        throw UnsupportedTemporalUnitException.cannotGetLocalTime(String.valueOf(this));
     }
 
     @Override
     OffsetTime getTimePart(Supplier<ZoneId> defaultZone) {
-        throw new UnsupportedTemporalUnitException(String.format("Cannot get the time of: %s", this));
+        throw UnsupportedTemporalUnitException.cannotGetZonedTime(String.valueOf(this));
     }
 
     @Override
     ZoneId getZoneId(Supplier<ZoneId> defaultZone) {
-        throw new UnsupportedTemporalUnitException(String.format("Cannot get the time zone of: %s", this));
+        throw UnsupportedTemporalUnitException.cannotGetTimezone(String.valueOf(this));
     }
 
     @Override
     ZoneOffset getZoneOffset() {
-        throw new UnsupportedTemporalUnitException(String.format("Cannot get the offset of: %s", this));
+        throw UnsupportedTemporalUnitException.cannotGetZoneOffset(String.valueOf(this));
     }
 
     @Override
@@ -242,13 +263,17 @@ public final class DateValue extends TemporalValue<LocalDate, DateValue> {
     @Override
     public DateValue add(DurationValue duration) {
         return replacement(assertValidArithmetic(
-                () -> value.plusMonths(duration.totalMonths()).plusDays(duration.totalDays())));
+                () -> value.plusMonths(duration.totalMonths()).plusDays(duration.totalDays()),
+                value + " + " + duration,
+                "+"));
     }
 
     @Override
     public DateValue sub(DurationValue duration) {
         return replacement(assertValidArithmetic(
-                () -> value.minusMonths(duration.totalMonths()).minusDays(duration.totalDays())));
+                () -> value.minusMonths(duration.totalMonths()).minusDays(duration.totalDays()),
+                value + " - " + duration,
+                "-"));
     }
 
     @Override
@@ -460,7 +485,7 @@ public final class DateValue extends TemporalValue<LocalDate, DateValue> {
         }
 
         DateBuilder(Supplier<ZoneId> defaultZone) {
-            super(defaultZone);
+            super(defaultZone, "DATE");
         }
 
         @Override
@@ -488,15 +513,17 @@ public final class DateValue extends TemporalValue<LocalDate, DateValue> {
                 result = getDateOf(fields.get(TemporalFields.date));
             } else if (fields.containsKey(TemporalFields.week)) {
                 // Be sure to be in the start of the week based year (which can be later than 1st Jan)
-                result = DEFAULT_CALENDER_DATE
-                        .with(
-                                IsoFields.WEEK_BASED_YEAR,
-                                safeCastIntegral(
-                                        TemporalFields.year.name(),
-                                        fields.get(TemporalFields.year),
-                                        TemporalFields.year.defaultValue))
-                        .with(IsoFields.WEEK_OF_WEEK_BASED_YEAR, 1)
-                        .with(ChronoField.DAY_OF_WEEK, 1);
+                result = assertValidArgument(
+                        "year",
+                        () -> DEFAULT_CALENDER_DATE
+                                .with(
+                                        IsoFields.WEEK_BASED_YEAR,
+                                        safeCastAssignableIntegral(
+                                                TemporalFields.year.name(),
+                                                fields.get(TemporalFields.year),
+                                                TemporalFields.year.defaultValue))
+                                .with(IsoFields.WEEK_OF_WEEK_BASED_YEAR, 1)
+                                .with(ChronoField.DAY_OF_WEEK, 1));
             } else {
                 result = DEFAULT_CALENDER_DATE;
             }

@@ -19,9 +19,11 @@
  */
 package org.neo4j.kernel.impl.transaction;
 
+import static org.neo4j.kernel.impl.api.LeaseService.NO_LEASE;
 import static org.neo4j.storageengine.AppendIndexProvider.UNKNOWN_APPEND_INDEX;
 import static org.neo4j.storageengine.api.TransactionIdStore.BASE_CHUNK_ID;
-import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_CONSENSUS_INDEX;
+import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_TX_ID;
+import static org.neo4j.wal.LogIndexEncoding.decodeLogIndex;
 
 import java.io.IOException;
 import java.util.List;
@@ -31,40 +33,47 @@ import org.neo4j.io.fs.WritableChannel;
 import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.impl.api.chunk.ChunkMetadata;
 import org.neo4j.kernel.impl.api.chunk.ChunkedCommandBatch;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntry;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntryCommit;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntryStart;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntryWriter;
-import org.neo4j.kernel.impl.transaction.log.entry.v520.LogEntryChunkStartV5_20;
-import org.neo4j.kernel.impl.transaction.log.entry.v57.LogEntryChunkEnd;
-import org.neo4j.kernel.impl.transaction.log.entry.v57.LogEntryChunkStart;
 import org.neo4j.storageengine.api.CommandBatch;
 import org.neo4j.storageengine.api.StorageCommand;
+import org.neo4j.wal.entry.LogEntry;
+import org.neo4j.wal.entry.LogEntryCommit;
+import org.neo4j.wal.entry.LogEntryStart;
+import org.neo4j.wal.entry.LogEntryWriter;
+import org.neo4j.wal.entry.v520.LogEntryChunkEnd;
+import org.neo4j.wal.entry.v520.LogEntryChunkStart;
 
 public record ChunkedBatchRepresentation(
-        LogEntryChunkStart chunkStart, CommandBatch commandBatch, LogEntryChunkEnd chunkEnd)
+        LogEntryChunkStart chunkStart, CommandBatch commandBatch, LogEntryChunkEnd chunkEnd, int previousChecksum)
         implements CommittedCommandBatchRepresentation {
 
     public static ChunkedBatchRepresentation createChunkRepresentation(
-            LogEntry start, List<StorageCommand> commands, LogEntry end) {
+            LogEntry start, List<StorageCommand> commands, LogEntry end, int previousChecksum) {
+        return createChunkRepresentation(start, commands, end, previousChecksum, NO_LEASE);
+    }
+
+    public static ChunkedBatchRepresentation createChunkRepresentation(
+            LogEntry start, List<StorageCommand> commands, LogEntry end, int previousChecksum, int leaseId) {
         LogEntryChunkStart logEntryChunkStart = createChunkStart(start);
         LogEntryChunkEnd logEntryChunkEnd = createChunkEnd(end, logEntryChunkStart);
         ChunkMetadata chunkMetadata = new ChunkMetadata(
-                start instanceof LogEntryStart,
+                logEntryChunkStart.getChunkId() == BASE_CHUNK_ID,
                 end instanceof LogEntryCommit,
                 false,
                 logEntryChunkStart.getPreviousBatchAppendIndex(),
                 logEntryChunkStart.getChunkId(),
-                new MutableLong(UNKNOWN_CONSENSUS_INDEX),
+                new MutableLong(decodeLogIndex(logEntryChunkStart.getAdditionalHeader())),
                 new MutableLong(logEntryChunkStart.getAppendIndex()),
                 logEntryChunkStart.getTimeWritten(),
-                -1,
-                logEntryChunkStart.getTimeWritten(),
-                -1,
+                (start instanceof LogEntryStart es) ? es.getLastCommittedTxWhenTransactionStarted() : UNKNOWN_TX_ID,
+                (end instanceof LogEntryCommit ec) ? ec.getTimeWritten() : logEntryChunkStart.getTimeWritten(),
+                leaseId,
                 logEntryChunkStart.kernelVersion(),
                 Subject.AUTH_DISABLED);
         return new ChunkedBatchRepresentation(
-                logEntryChunkStart, new ChunkedCommandBatch(commands, chunkMetadata), logEntryChunkEnd);
+                logEntryChunkStart,
+                new ChunkedCommandBatch(commands, chunkMetadata),
+                logEntryChunkEnd,
+                previousChecksum);
     }
 
     @Override
@@ -75,14 +84,25 @@ public record ChunkedBatchRepresentation(
                 chunkStart.getTimeWritten(),
                 chunkStart.getChunkId(),
                 chunkStart.getAppendIndex(),
-                chunkStart.getPreviousBatchAppendIndex());
+                chunkStart.getPreviousBatchAppendIndex(),
+                chunkStart.getTransactionSequenceNumber(),
+                chunkStart.getAdditionalHeader());
         writer.serialize(commandBatch);
-        return writer.writeChunkEndEntry(kernelVersion, chunkEnd.getTransactionId(), chunkEnd.getChunkId());
+        if (commandBatch.isLast()) {
+            return writer.writeCommitEntry(kernelVersion, chunkEnd.getTransactionId(), commandBatch.getTimeCommitted());
+        } else {
+            return writer.writeChunkEndEntry(kernelVersion, chunkEnd.getTransactionId(), chunkEnd.getChunkId());
+        }
     }
 
     @Override
     public long appendIndex() {
         return chunkStart.getAppendIndex();
+    }
+
+    @Override
+    public long transactionSequenceNumber() {
+        return chunkStart.getTransactionSequenceNumber();
     }
 
     @Override
@@ -114,12 +134,14 @@ public record ChunkedBatchRepresentation(
         if (start instanceof LogEntryChunkStart chunkStart) {
             return chunkStart;
         } else if (start instanceof LogEntryStart entryStart) {
-            return new LogEntryChunkStartV5_20(
+            return new LogEntryChunkStart(
                     entryStart.kernelVersion(),
                     entryStart.getTimeWritten(),
                     BASE_CHUNK_ID,
                     entryStart.getAppendIndex(),
-                    UNKNOWN_APPEND_INDEX);
+                    UNKNOWN_APPEND_INDEX,
+                    entryStart.getTransactionSequenceNumber(),
+                    entryStart.getAdditionalHeader());
         } else {
             throw new IllegalArgumentException("Was expecting start record. Actual entry: " + start);
         }

@@ -19,13 +19,20 @@
  */
 package org.neo4j.server.queryapi.response.error;
 
+import static org.neo4j.server.queryapi.response.error.HttpErrorResponse.singleError;
+
 import javax.ws.rs.WebApplicationException;
 import javax.ws.rs.core.Response;
 import javax.ws.rs.ext.ExceptionMapper;
+import org.neo4j.kernel.api.exceptions.Status;
 
 public class WebApplicationExceptionMapper implements ExceptionMapper<WebApplicationException> {
     @Override
     public Response toResponse(WebApplicationException e) {
-        return e.getResponse();
+        return Response.status(e.getResponse().getStatus())
+                .entity(singleError(
+                        Status.Request.Invalid.code().serialize(),
+                        e.getResponse().getStatusInfo().getReasonPhrase()))
+                .build();
     }
 }

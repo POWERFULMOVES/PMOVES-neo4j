@@ -30,9 +30,11 @@ import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.KernelVersionProvider;
 import org.neo4j.kernel.api.index.IndexProvider;
 import org.neo4j.kernel.api.index.LoggingMonitor;
 import org.neo4j.logging.InternalLog;
+import org.neo4j.logging.InternalLogProvider;
 import org.neo4j.logging.internal.LogService;
 import org.neo4j.monitoring.Monitors;
 import org.neo4j.scheduler.JobScheduler;
@@ -46,6 +48,7 @@ public abstract class AbstractIndexProviderFactory<T extends IndexProvider> {
             LogService logService,
             Monitors monitors,
             Config config,
+            KernelVersionProvider kernelVersionProvider,
             DatabaseReadOnlyChecker readOnlyChecker,
             HostedOnMode mode,
             RecoveryCleanupWorkCollector recoveryCleanupWorkCollector,
@@ -68,10 +71,11 @@ public abstract class AbstractIndexProviderFactory<T extends IndexProvider> {
                 monitors,
                 monitorTag,
                 config,
+                kernelVersionProvider,
                 readOnlyChecker,
                 recoveryCleanupWorkCollector,
                 databaseLayout,
-                log,
+                logService.getInternalLogProvider(),
                 tokenHolders,
                 scheduler,
                 contextFactory,
@@ -89,10 +93,11 @@ public abstract class AbstractIndexProviderFactory<T extends IndexProvider> {
             Monitors monitors,
             String monitorTag,
             Config config,
+            KernelVersionProvider kernelVersionProvider,
             DatabaseReadOnlyChecker readOnlyDatabaseChecker,
             RecoveryCleanupWorkCollector recoveryCleanupWorkCollector,
             DatabaseLayout databaseLayout,
-            InternalLog log,
+            InternalLogProvider logProvider,
             TokenHolders tokenHolders,
             JobScheduler scheduler,
             CursorContextFactory contextFactory,

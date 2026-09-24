@@ -20,6 +20,12 @@
 package org.neo4j.io.fs;
 
 import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
+import static java.nio.file.StandardOpenOption.APPEND;
+import static java.nio.file.StandardOpenOption.CREATE;
+import static java.nio.file.StandardOpenOption.CREATE_NEW;
+import static java.nio.file.StandardOpenOption.READ;
+import static java.nio.file.StandardOpenOption.TRUNCATE_EXISTING;
+import static java.nio.file.StandardOpenOption.WRITE;
 import static java.util.stream.Collectors.toSet;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -828,6 +834,33 @@ public abstract class FileSystemAbstractionTest {
     }
 
     @Test
+    void mustRenameDirectoryRecursively() throws IOException {
+        Path from = path.resolve("from");
+        Path to = path.resolve("to");
+
+        Path a = Path.of("a");
+        Path a1 = a.resolve("1");
+        Path b = a.resolve("b");
+        Path b1 = b.resolve("1");
+        ensureDirectoryExists(from.resolve(a));
+        ensureDirectoryExists(from.resolve(b));
+        ensureExists(from.resolve(a1));
+        ensureExists(from.resolve(b1));
+
+        fsa.renameFile(from, to);
+
+        assertThat(fsa.isDirectory(from.resolve(a))).isFalse();
+        assertThat(fsa.isDirectory(from.resolve(b))).isFalse();
+        assertThat(fsa.fileExists(from.resolve(a1))).isFalse();
+        assertThat(fsa.fileExists(from.resolve(b1))).isFalse();
+
+        assertThat(fsa.isDirectory(to.resolve(a))).isTrue();
+        assertThat(fsa.isDirectory(to.resolve(b))).isTrue();
+        assertThat(fsa.fileExists(to.resolve(a1))).isTrue();
+        assertThat(fsa.fileExists(to.resolve(b1))).isTrue();
+    }
+
+    @Test
     void nonAppendModeImpliesTruncation() throws IOException {
         // The documentation of nonAppendMode implies truncation
         ensureDirectoryExists(path);
@@ -843,6 +876,214 @@ public abstract class FileSystemAbstractionTest {
             // noop
         }
         assertThat(fsa.getFileSize(target)).isEqualTo(0);
+    }
+
+    @Test
+    void openAsOutputStreamWithTruncateExistingTruncatesFile() throws IOException {
+        ensureDirectoryExists(path);
+        Path target = path.resolve("target");
+
+        try (var os = fsa.openAsOutputStream(target, false)) {
+            byte[] data = new byte[1024];
+            Arrays.fill(data, (byte) 'a');
+            os.write(data);
+        }
+        try (var os = fsa.openAsOutputStream(target, Set.of(WRITE, TRUNCATE_EXISTING))) {
+            // noop
+        }
+        assertThat(fsa.getFileSize(target)).isEqualTo(0);
+    }
+
+    @Test
+    void openAsOutputStreamWithAppendOptionAppendsToExistingFile() throws IOException {
+        ensureDirectoryExists(path);
+        Path target = path.resolve("target");
+
+        byte[] initial = {1, 2, 3};
+        try (var os = fsa.openAsOutputStream(target, false)) {
+            os.write(initial);
+        }
+
+        byte[] more = {4, 5};
+        try (var os = fsa.openAsOutputStream(target, Set.of(CREATE, APPEND))) {
+            os.write(more);
+        }
+        assertThat(fsa.getFileSize(target)).isEqualTo(initial.length + more.length);
+
+        try (InputStream is = fsa.openAsInputStream(target)) {
+            byte[] read = is.readAllBytes();
+            assertThat(read).containsExactly(1, 2, 3, 4, 5);
+        }
+    }
+
+    @Test
+    void openAsOutputStreamWithoutTruncateExistingOverwritesInPlace() throws IOException {
+        ensureDirectoryExists(path);
+        Path target = path.resolve("target");
+
+        try (var os = fsa.openAsOutputStream(target, false)) {
+            os.write(new byte[] {1, 2, 3, 4, 5});
+        }
+        try (var os = fsa.openAsOutputStream(target, Set.of(CREATE, WRITE))) {
+            os.write(new byte[] {9, 9});
+        }
+
+        try (InputStream is = fsa.openAsInputStream(target)) {
+            assertThat(is.readAllBytes()).containsExactly(9, 9, 3, 4, 5);
+        }
+    }
+
+    @Test
+    void openAsOutputStreamWithCreateNewFailsIfFileExists() throws IOException {
+        ensureDirectoryExists(path);
+        Path target = path.resolve("target");
+        fsa.write(target).close();
+
+        assertThrows(
+                FileAlreadyExistsException.class,
+                () -> fsa.openAsOutputStream(target, Set.of(CREATE_NEW, WRITE)).close());
+    }
+
+    @Test
+    void openWithTruncateExistingTruncatesFile() throws IOException {
+        ensureDirectoryExists(path);
+        Path target = path.resolve("target");
+
+        try (var os = fsa.openAsOutputStream(target, false)) {
+            byte[] data = new byte[1024];
+            Arrays.fill(data, (byte) 'a');
+            os.write(data);
+        }
+
+        try (StoreChannel channel = fsa.open(target, Set.of(WRITE, CREATE, TRUNCATE_EXISTING))) {
+            assertThat(channel.size()).isZero();
+            assertThat(channel.position()).isZero();
+        }
+        assertThat(fsa.getFileSize(target)).isZero();
+    }
+
+    @Test
+    void openWithTruncateExistingLeavesNoStaleTailBehindShorterWrite() throws IOException {
+        ensureDirectoryExists(path);
+        Path target = path.resolve("target");
+
+        byte[] longContent = {1, 2, 3, 4, 5, 6, 7, 8};
+        try (StoreChannel channel = fsa.open(target, Set.of(WRITE, CREATE, TRUNCATE_EXISTING))) {
+            channel.writeAll(ByteBuffer.wrap(longContent));
+        }
+
+        byte[] shortContent = {9, 9};
+        try (StoreChannel channel = fsa.open(target, Set.of(WRITE, CREATE, TRUNCATE_EXISTING))) {
+            channel.writeAll(ByteBuffer.wrap(shortContent));
+        }
+
+        try (InputStream is = fsa.openAsInputStream(target)) {
+            assertThat(is.readAllBytes()).containsExactly(9, 9);
+        }
+    }
+
+    @Test
+    void openWithAppendPositionsChannelAtEndOfFile() throws IOException {
+        ensureDirectoryExists(path);
+        Path target = path.resolve("target");
+
+        byte[] initial = {1, 2, 3};
+        try (var os = fsa.openAsOutputStream(target, false)) {
+            os.write(initial);
+        }
+
+        try (StoreChannel channel = fsa.open(target, Set.of(CREATE, APPEND))) {
+            assertThat(channel.position()).isEqualTo(initial.length);
+            channel.writeAll(ByteBuffer.wrap(new byte[] {4, 5}));
+        }
+
+        try (InputStream is = fsa.openAsInputStream(target)) {
+            assertThat(is.readAllBytes()).containsExactly(1, 2, 3, 4, 5);
+        }
+    }
+
+    @Test
+    void openForReadingOfNonExistingFileThrowsAndDoesNotCreateIt() throws IOException {
+        ensureDirectoryExists(path);
+        Path target = path.resolve("target");
+
+        assertThrows(
+                NoSuchFileException.class, () -> fsa.open(target, Set.of(READ)).close());
+        assertFalse(fsa.fileExists(target));
+    }
+
+    @Test
+    void openForReadingIgnoresCreateAndDoesNotCreateMissingFile() throws IOException {
+        ensureDirectoryExists(path);
+        Path target = path.resolve("target");
+
+        assertThrows(
+                NoSuchFileException.class,
+                () -> fsa.open(target, Set.of(READ, CREATE)).close());
+        assertFalse(fsa.fileExists(target));
+    }
+
+    @Test
+    void openForReadingIgnoresCreateNewOnExistingFile() throws IOException {
+        ensureDirectoryExists(path);
+        Path target = path.resolve("target");
+        fsa.write(target).close();
+
+        assertDoesNotThrow(() -> fsa.open(target, Set.of(READ, CREATE_NEW)).close());
+    }
+
+    @Test
+    void openRejectsReadCombinedWithAppend() throws IOException {
+        ensureDirectoryExists(path);
+        Path target = path.resolve("target");
+        fsa.write(target).close();
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> fsa.open(target, Set.of(READ, APPEND)).close());
+    }
+
+    @Test
+    void openRejectsAppendCombinedWithTruncateExisting() throws IOException {
+        ensureDirectoryExists(path);
+        Path target = path.resolve("target");
+        fsa.write(target).close();
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> fsa.open(target, Set.of(WRITE, APPEND, TRUNCATE_EXISTING)).close());
+    }
+
+    @Test
+    void readOfNonExistingFileThrowsAndDoesNotCreateIt() throws IOException {
+        ensureDirectoryExists(path);
+        Path target = path.resolve("target");
+
+        assertThrows(NoSuchFileException.class, () -> fsa.read(target).close());
+        assertFalse(fsa.fileExists(target));
+    }
+
+    @Test
+    void openAsInputStreamOfNonExistingFileThrowsAndDoesNotCreateIt() throws IOException {
+        ensureDirectoryExists(path);
+        Path target = path.resolve("target");
+
+        assertThrows(
+                NoSuchFileException.class, () -> fsa.openAsInputStream(target).close());
+        assertFalse(fsa.fileExists(target));
+    }
+
+    @Test
+    void openAsOutputStreamWithBufferSizeWritesContents() throws IOException {
+        ensureDirectoryExists(path);
+        Path target = path.resolve("target");
+
+        byte[] data = new byte[2048];
+        Arrays.fill(data, (byte) 'b');
+        try (var os = fsa.openAsOutputStream(target, Set.of(CREATE, WRITE, TRUNCATE_EXISTING), 256)) {
+            os.write(data);
+        }
+        assertThat(fsa.getFileSize(target)).isEqualTo(data.length);
     }
 
     private void generateFileWithRecords(Path file, int recordCount) throws IOException {

@@ -23,7 +23,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.neo4j.kernel.internal.Version.CUSTOM_VERSION_SETTING;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
 
+@Isolated
 class VersionTest {
     @Test
     void shouldExposeCleanAndDetailedVersions() {

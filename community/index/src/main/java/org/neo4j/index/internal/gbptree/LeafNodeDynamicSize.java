@@ -27,6 +27,7 @@ import static org.neo4j.index.internal.gbptree.DynamicSizeUtil.extractKeySize;
 import static org.neo4j.index.internal.gbptree.DynamicSizeUtil.extractOffload;
 import static org.neo4j.index.internal.gbptree.DynamicSizeUtil.extractTombstone;
 import static org.neo4j.index.internal.gbptree.DynamicSizeUtil.extractValueSize;
+import static org.neo4j.index.internal.gbptree.DynamicSizeUtil.getAllocOffset;
 import static org.neo4j.index.internal.gbptree.DynamicSizeUtil.getAllocSpace;
 import static org.neo4j.index.internal.gbptree.DynamicSizeUtil.getDeadSpace;
 import static org.neo4j.index.internal.gbptree.DynamicSizeUtil.getOverhead;
@@ -87,24 +88,35 @@ class LeafNodeDynamicSize<KEY, VALUE> implements LeafNodeBehaviour<KEY, VALUE> {
 
     private final int totalSpace;
     private final int halfSpace;
-    final OffloadStore<KEY, VALUE> offloadStore;
+    protected final int headerSize;
+    protected final OffloadStore<KEY, VALUE> offloadStore;
     private final int maxKeyCount;
 
-    final Layout<KEY, VALUE> layout;
-    final int payloadSize;
+    protected final Layout<KEY, VALUE> layout;
+    protected final int payloadSize;
 
     LeafNodeDynamicSize(int payloadSize, Layout<KEY, VALUE> layout, OffloadStore<KEY, VALUE> offloadStore) {
+        this(payloadSize, layout, offloadStore, 0);
+    }
+
+    LeafNodeDynamicSize(
+            int payloadSize,
+            Layout<KEY, VALUE> layout,
+            OffloadStore<KEY, VALUE> offloadStore,
+            int additionalHeaderSize) {
         this.payloadSize = payloadSize;
         this.layout = layout;
 
         assert payloadSize < SUPPORTED_PAGE_SIZE_LIMIT
                 : "Only payload size less then " + SUPPORTED_PAGE_SIZE_LIMIT + " bytes supported";
-        this.totalSpace = payloadSize - DynamicSizeUtil.HEADER_LENGTH_DYNAMIC;
+
+        this.headerSize = DynamicSizeUtil.HEADER_LENGTH_DYNAMIC + additionalHeaderSize;
+        this.totalSpace = payloadSize - headerSize;
         this.maxKeyCount = totalSpace / (DynamicSizeUtil.OFFSET_SIZE + MIN_SIZE_KEY_VALUE_SIZE);
         this.offloadStore = offloadStore;
         this.halfSpace = totalSpace >> 1;
 
-        this.inlineKeyValueSizeCap = DynamicSizeUtil.inlineKeyValueSizeCapLeafNode(payloadSize);
+        this.inlineKeyValueSizeCap = DynamicSizeUtil.inlineKeyValueSizeCapLeafNode(payloadSize, headerSize);
         this.keyValueSizeCap = keyValueSizeCapFromPageSize(payloadSize);
 
         validateInlineCap(inlineKeyValueSizeCap, payloadSize);
@@ -140,7 +152,7 @@ class LeafNodeDynamicSize<KEY, VALUE> implements LeafNodeBehaviour<KEY, VALUE> {
             throws IOException {
         placeCursorAtActualKey(cursor, pos);
 
-        intoValue.defined = true;
+        intoValue.deleted = false;
         long keyValueSize = readKeyValueSize(cursor);
         int keySize = extractKeySize(keyValueSize);
         int valueSize = extractValueSize(keyValueSize);
@@ -204,8 +216,7 @@ class LeafNodeDynamicSize<KEY, VALUE> implements LeafNodeBehaviour<KEY, VALUE> {
 
         // Write to offset array
         TreeNodeUtil.insertSlotsAt(cursor, pos, 1, keyCount, keyPosOffsetLeaf(0), DynamicSizeUtil.OFFSET_SIZE);
-        cursor.setOffset(keyPosOffsetLeaf(pos));
-        putUnsignedShort(cursor, newKeyValueOffset);
+        resetOffsetAtPos(cursor, pos, newKeyValueOffset);
     }
 
     @Override
@@ -249,7 +260,7 @@ class LeafNodeDynamicSize<KEY, VALUE> implements LeafNodeBehaviour<KEY, VALUE> {
         placeCursorAtActualKey(cursor, pos);
 
         // Read value
-        into.defined = true;
+        into.deleted = false;
         long keyValueSize = readKeyValueSize(cursor);
         int keySize = extractKeySize(keyValueSize);
         int valueSize = extractValueSize(keyValueSize);
@@ -277,23 +288,133 @@ class LeafNodeDynamicSize<KEY, VALUE> implements LeafNodeBehaviour<KEY, VALUE> {
             PageCursor cursor,
             VALUE value,
             int pos,
+            int keyCount,
             CursorContext cursorContext,
             long stableGeneration,
             long unstableGeneration)
             throws IOException {
         placeCursorAtActualKey(cursor, pos);
-
         long keyValueSize = readKeyValueSize(cursor);
         int keySize = extractKeySize(keyValueSize);
         int oldValueSize = extractValueSize(keyValueSize);
         int newValueSize = layout.valueSize(value);
+
         if (oldValueSize == newValueSize) {
             // Fine we can just overwrite
             progressCursor(cursor, keySize);
             layout.writeValue(cursor, value);
             return true;
         }
+
+        boolean oldValueOffloaded = extractOffload(keyValueSize);
+        if (oldValueOffloaded) {
+            assert keySize == 0 && oldValueSize == 0;
+            return setOffloadedValue(pos, value, keyCount, cursor, cursorContext, stableGeneration, unstableGeneration);
+        }
+
+        KEY key = layout.newKey();
+        layout.readKey(cursor, key, keySize);
+        var oldKeyValueSize = keySize + oldValueSize + getOverhead(keySize, oldValueSize, false);
+        return setNewValue(
+                pos,
+                key,
+                value,
+                oldKeyValueSize,
+                keyCount,
+                cursor,
+                stableGeneration,
+                unstableGeneration,
+                cursorContext);
+    }
+
+    private boolean setOffloadedValue(
+            int pos,
+            VALUE newValue,
+            int keyCount,
+            PageCursor cursor,
+            CursorContext cursorContext,
+            long stableGeneration,
+            long unstableGeneration)
+            throws IOException {
+        KEY key = layout.newKey();
+        long offloadId = readOffloadId(cursor);
+        offloadStore.readKey(offloadId, key, cursorContext);
+        var oldKeyValueSize = getOverhead(0, 0, true);
+        if (setNewValue(
+                pos,
+                key,
+                newValue,
+                oldKeyValueSize,
+                keyCount,
+                cursor,
+                stableGeneration,
+                unstableGeneration,
+                cursorContext)) {
+            offloadStore.free(offloadId, stableGeneration, unstableGeneration, cursorContext);
+            return true;
+        }
         return false;
+    }
+
+    private boolean setNewValue(
+            int pos,
+            KEY key,
+            VALUE newValue,
+            int oldKeyValueSize,
+            int keyCount,
+            PageCursor cursor,
+            long stableGeneration,
+            long unstableGeneration,
+            CursorContext cursorContext)
+            throws IOException {
+        var keySize = layout.keySize(key);
+        var newValueSize = layout.valueSize(newValue);
+        var inline = canInline(keySize + newValueSize);
+        var newSize =
+                inline ? keySize + newValueSize + getOverhead(keySize, newValueSize, false) : getOverhead(0, 0, true);
+        if (availableSpace(cursor, keyCount) + oldKeyValueSize < newSize) {
+            // No space even when reusing old space
+            return false;
+        }
+
+        // Make up more space
+        killOldValue(cursor, pos, oldKeyValueSize);
+        if (newSize > getAllocSpace(cursor, keyPosOffsetLeaf(keyCount))) {
+            doDefragment(cursor, keyCount - 1, keyCount);
+        }
+
+        // Insert new value
+        int newKeyValueOffset = getAllocOffset(cursor) - newSize;
+        cursor.setOffset(newKeyValueOffset);
+        if (inline) {
+            putKeyValueSize(cursor, keySize, newValueSize);
+            layout.writeKey(cursor, key);
+            layout.writeValue(cursor, newValue);
+        } else {
+            putOffloadMarker(cursor);
+            long newOffloadId =
+                    offloadStore.writeKeyValue(key, newValue, stableGeneration, unstableGeneration, cursorContext);
+            DynamicSizeUtil.putOffloadId(cursor, newOffloadId);
+        }
+        setAllocOffset(cursor, newKeyValueOffset);
+        resetOffsetAtPos(cursor, pos, newKeyValueOffset);
+        return true;
+    }
+
+    private void resetOffsetAtPos(PageCursor cursor, int pos, int newKeyValueOffset) {
+        // Write to offset array
+        cursor.setOffset(keyPosOffsetLeaf(pos));
+        putUnsignedShort(cursor, newKeyValueOffset);
+    }
+
+    private void killOldValue(PageCursor cursor, int pos, int oldKeyValueSize) {
+        // Kill old value
+        placeCursorAtActualKey(cursor, pos);
+        putTombstone(cursor);
+
+        // Update dead space
+        int deadSpace = getDeadSpace(cursor) + oldKeyValueSize;
+        setDeadSpace(cursor, deadSpace);
     }
 
     static void progressCursor(PageCursor cursor, int delta) {
@@ -316,7 +437,8 @@ class LeafNodeDynamicSize<KEY, VALUE> implements LeafNodeBehaviour<KEY, VALUE> {
         int valueSize = layout.valueSize(value);
         if (keyValueSizeTooLarge(keySize, valueSize)) {
             throw new IllegalArgumentException(
-                    "Index key-value size it too large. Please see index documentation for limitations.");
+                    "Index key-value size it too large. Please see index documentation for limitations. Key size: "
+                            + keySize + ", value size: " + valueSize + ", cap: " + keyValueSizeCap);
         }
     }
 
@@ -354,18 +476,27 @@ class LeafNodeDynamicSize<KEY, VALUE> implements LeafNodeBehaviour<KEY, VALUE> {
     }
 
     @Override
-    public int defragment(PageCursor cursor, int keyCount, CursorContext cursorContext) throws IOException {
+    public int defragment(
+            PageCursor cursor,
+            int keyCount,
+            long stableGeneration,
+            long unstableGeneration,
+            CursorContext cursorContext)
+            throws IOException {
         doDefragment(cursor, keyCount);
         return keyCount;
     }
 
     private void doDefragment(PageCursor cursor, int keyCount) {
+        doDefragment(cursor, keyCount, keyCount);
+    }
+
+    void doDefragment(PageCursor cursor, int keyCount, int offsetCount) {
         var offsets = new int[keyCount];
         var sizes = new int[keyCount];
         // collect alive offsets and sizes
         recordAliveBlocks(cursor, keyCount, offsets, sizes, payloadSize, true);
-
-        compactToRight(cursor, keyCount, offsets, sizes, payloadSize, LeafNodeDynamicSize::keyPosOffsetLeaf);
+        compactToRight(cursor, keyCount, offsetCount, offsets, sizes, payloadSize, this::keyPosOffsetLeaf);
         // Update dead space
         setDeadSpace(cursor, 0);
     }
@@ -427,8 +558,36 @@ class LeafNodeDynamicSize<KEY, VALUE> implements LeafNodeBehaviour<KEY, VALUE> {
         return totalSpace >= leftActiveSpace + rightActiveSpace;
     }
 
+    /**
+     * Calculates a valid and as optimal as possible position where to split a leaf if inserting a key overflows, trying to come as close as possible to
+     * ratioToKeepInLeftOnSplit. There are a couple of goals/conditions which drives the search for it:
+     * <ul>
+     *     <li>The returned position will be one where the keys ending up in the left and right leaves respectively are guaranteed to fit.</li>
+     *     <li>Out of those possible positions the one will be selected which leaves left node filled with with space closest to "targetLeftSpace".</li>
+     * </ul>
+     *
+     * We loop over an imaginary range of keys where newKey has already been inserted at insertPos in the current node. splitPos point to position in the
+     * imaginary range while currentPos point to the node. In the loop we "move" splitPos from left to right, accumulating space for left node as we go and
+     * calculate delta towards targetLeftSpace. We want to continue loop as long as:
+     * <ul>
+     *     <li>We are still moving closer to optimal divide (currentDelta < prevDelta) and</li>
+     *     <li>We are still inside end of range (splitPost < keyCountAfterInsert) and</li>
+     *     <li>We have not accumulated to much space to fit in left node (accumulatedLeftSpace <= totalSpace).</li>
+     * </ul>
+     * But we also have to force loop to continue if the current position does not give a possible divide because right node will be given to much data to
+     * fit (!thisPosPossible). Exiting loop means we've gone too far and thus we move one step back after loop, but only if the previous position gave us a
+     * possible divide.
+     *
+     * @param cursor {@link PageCursor} to use for reading sizes of existing entries.
+     * @param insertPos the pos which the new key will be inserted at.
+     * @param newKey key to be inserted.
+     * @param newValue value to be inserted.
+     * @param keyCount key count excluding the new key.
+     * @param ratioToKeepInLeftOnSplit What ratio of keys to try and keep in left node, 1=keep as much as possible, 0=move as much as possible to right
+     * @return the pos where to split.
+     */
     @Override
-    public int findSplitter(
+    public int findSplitterForInsert(
             PageCursor cursor,
             int keyCount,
             KEY newKey,
@@ -439,8 +598,11 @@ class LeafNodeDynamicSize<KEY, VALUE> implements LeafNodeBehaviour<KEY, VALUE> {
             CursorContext cursorContext) {
         // Find middle
         int keyCountAfterInsert = keyCount + 1;
-        int splitPos =
-                splitPosInLeaf(cursor, insertPos, newKey, newValue, keyCountAfterInsert, ratioToKeepInLeftOnSplit);
+        int targetLeftSpace = (int) (this.totalSpace * ratioToKeepInLeftOnSplit);
+        int newKeyValueSpace = totalSpaceOfKeyValue(newKey, newValue);
+        int activeSpace = totalActiveSpace(cursor, keyCount);
+        int splitPos = splitPosInLeaf(
+                cursor, insertPos, activeSpace, newKeyValueSpace, 0, keyCountAfterInsert, targetLeftSpace);
 
         KEY leftInSplit;
         KEY rightInSplit;
@@ -462,17 +624,67 @@ class LeafNodeDynamicSize<KEY, VALUE> implements LeafNodeBehaviour<KEY, VALUE> {
         return splitPos;
     }
 
+    /**
+     * Calculates a valid and as optimal as possible position where to split a leaf if updating a value of an existing key overflows, trying to come as close as possible to
+     * an even split (totalSize / 2). There are a couple of goals/conditions which drives the search for it:
+     * <ul>
+     *     <li>The returned position will be one where the key with the updated value ending up in the left and right leaves respectively are guaranteed to fit.</li>
+     *     <li>Out of those possible positions the one will be selected which leaves left node filled with space closest to "targetLeftSpace".</li>
+     * </ul>
+     *
+     * We loop over an imaginary range of keys where the new value has already been inserted at the updatePos in the current node, and the old value subtracted (this is because we will replace it later anyway). splitPos point to position in the
+     * imaginary range while currentPos point to the node. In the loop we "move" splitPos from left to right, accumulating space for left node as we go and
+     * calculate delta towards targetLeftSpace. We want to continue loop as long as:
+     * <ul>
+     *     <li>We are still moving closer to optimal divide (currentDelta < prevDelta) and</li>
+     *     <li>We are still inside end of range (splitPost < keyCount) and</li>
+     *     <li>We have not accumulated too much space to fit in left node (accumulatedLeftSpace <= totalSpace).</li>
+     * </ul>
+     * But we also have to force loop to continue if the current position does not give a possible divide because right node will be given too much data to
+     * fit (!thisPosPossible). Exiting loop means we've gone too far, and thus we move one step back after loop, but only if the previous position gave us a
+     * possible divide.
+     *
+     * @param cursor {@link PageCursor} to use for reading sizes of existing entries.
+     * @param updatePos the pos which the new value will be inserted at.
+     * @param key key whose value is to be updated.
+     * @param newValue the new value to be inserted.
+     * @param keyCount the current key count.
+     * @return the pos where to split.
+     */
     @Override
-    public void doSplit(
+    public int findSplitterForUpdate(
+            PageCursor cursor,
+            int keyCount,
+            KEY key,
+            VALUE newValue,
+            VALUE oldValue,
+            int updatePos,
+            KEY newSplitter,
+            CursorContext cursorContext) {
+        // Find middle
+        int targetLeftSpace = this.totalSpace / 2;
+        int newKeyValueSpace = totalSpaceOfKeyValue(key, newValue);
+        int oldKeyValueSpace = totalSpaceOfKeyValue(key, oldValue);
+        int activeSpace = totalActiveSpace(cursor, keyCount);
+        int splitPos = splitPosInLeaf(
+                cursor, updatePos, activeSpace, newKeyValueSpace, oldKeyValueSpace, keyCount, targetLeftSpace);
+
+        KEY leftInSplit = keyAt(cursor, layout.newKey(), splitPos - 1, cursorContext);
+        KEY rightInSplit = keyAt(cursor, layout.newKey(), splitPos, cursorContext);
+
+        layout.minimalSplitter(leftInSplit, rightInSplit, newSplitter);
+        return splitPos;
+    }
+
+    @Override
+    public void doSplitAndInsert(
             PageCursor leftCursor,
             int leftKeyCount,
             PageCursor rightCursor,
             int insertPos,
             KEY newKey,
             VALUE newValue,
-            KEY newSplitter,
             int splitPos,
-            double ratioToKeepInLeftOnSplit,
             long stableGeneration,
             long unstableGeneration,
             CursorContext cursorContext)
@@ -486,7 +698,7 @@ class LeafNodeDynamicSize<KEY, VALUE> implements LeafNodeBehaviour<KEY, VALUE> {
             // before _,_,_,_,_,_,_,_,_,_
             // insert _,_,_,X,_,_,_,_,_,_,_
             // split            ^
-            moveKeysAndValues(leftCursor, splitPos - 1, rightCursor, 0, rightKeyCount);
+            moveKeysAndValues(leftCursor, splitPos - 1, rightCursor, 0, rightKeyCount, 0, cursorContext);
             doDefragment(leftCursor, splitPos - 1);
             insertKeyValueAt(
                     leftCursor,
@@ -507,8 +719,10 @@ class LeafNodeDynamicSize<KEY, VALUE> implements LeafNodeBehaviour<KEY, VALUE> {
             // Copy everything in one go
             int newInsertPos = insertPos - splitPos;
             int keysToMove = leftKeyCount - splitPos;
-            moveKeysAndValues(leftCursor, splitPos, rightCursor, 0, keysToMove);
-            doDefragment(leftCursor, splitPos);
+            if (keysToMove > 0) {
+                moveKeysAndValues(leftCursor, splitPos, rightCursor, 0, keysToMove, 0, cursorContext);
+                doDefragment(leftCursor, splitPos);
+            }
             insertKeyValueAt(
                     rightCursor,
                     newKey,
@@ -524,37 +738,88 @@ class LeafNodeDynamicSize<KEY, VALUE> implements LeafNodeBehaviour<KEY, VALUE> {
     }
 
     @Override
+    public void doSplitAndUpdate(
+            PageCursor leftCursor,
+            PageCursor rightCursor,
+            int keyCount,
+            int splitPos,
+            int updatePos,
+            VALUE newValue,
+            long stableGeneration,
+            long unstableGeneration,
+            CursorContext cursorContext)
+            throws IOException {
+        int rightKeyCount = keyCount - splitPos;
+        moveKeysAndValues(leftCursor, splitPos, rightCursor, 0, rightKeyCount, 0, cursorContext);
+
+        if (updatePos >= splitPos) {
+            if (!setValueAt(
+                    rightCursor,
+                    newValue,
+                    updatePos - splitPos,
+                    keyCount - splitPos,
+                    cursorContext,
+                    stableGeneration,
+                    unstableGeneration)) {
+                throw new IllegalStateException(
+                        "Expected new value " + newValue + " to fit in right leaf after split, but it didn't.");
+            }
+        } else {
+            if (!setValueAt(
+                    leftCursor, newValue, updatePos, splitPos, cursorContext, stableGeneration, unstableGeneration)) {
+                throw new IllegalStateException(
+                        "Expected new value " + newValue + " to fit in left leaf after split, but it didn't.");
+            }
+        }
+
+        TreeNodeUtil.setKeyCount(leftCursor, splitPos);
+        TreeNodeUtil.setKeyCount(rightCursor, rightKeyCount);
+    }
+
+    @Override
     public void moveKeyValuesFromLeftToRight(
             PageCursor leftCursor,
             int leftKeyCount,
             PageCursor rightCursor,
             int rightKeyCount,
             int fromPosInLeftNode,
-            CursorContext cursorContext) {
-        doDefragment(rightCursor, rightKeyCount);
+            long stableGeneration,
+            long unstableGeneration,
+            CursorContext cursorContext)
+            throws IOException {
+        int newRightKeyCount =
+                defragment(rightCursor, rightKeyCount, stableGeneration, unstableGeneration, cursorContext);
         int numberOfKeysToMove = leftKeyCount - fromPosInLeftNode;
 
         // Push keys and values in right sibling to the right
         TreeNodeUtil.insertSlotsAt(
-                rightCursor, 0, numberOfKeysToMove, rightKeyCount, keyPosOffsetLeaf(0), DynamicSizeUtil.OFFSET_SIZE);
+                rightCursor, 0, numberOfKeysToMove, newRightKeyCount, keyPosOffsetLeaf(0), DynamicSizeUtil.OFFSET_SIZE);
 
         // Move (also updates keyCount of left)
-        moveKeysAndValues(leftCursor, fromPosInLeftNode, rightCursor, 0, numberOfKeysToMove);
+        moveKeysAndValues(
+                leftCursor, fromPosInLeftNode, rightCursor, 0, numberOfKeysToMove, newRightKeyCount, cursorContext);
 
         // Right keyCount
-        TreeNodeUtil.setKeyCount(rightCursor, rightKeyCount + numberOfKeysToMove);
+        TreeNodeUtil.setKeyCount(rightCursor, newRightKeyCount + numberOfKeysToMove);
     }
 
     // NOTE: Does update keyCount
-    private void moveKeysAndValues(PageCursor fromCursor, int fromPos, PageCursor toCursor, int toPos, int count) {
-        int firstAllocOffset = DynamicSizeUtil.getAllocOffset(toCursor);
+    protected void moveKeysAndValues(
+            PageCursor fromCursor,
+            int fromPos,
+            PageCursor targetCursor,
+            int targetPos,
+            int countToMove,
+            int targetExistingKeyCount,
+            CursorContext cursorContext)
+            throws IOException {
+        int firstAllocOffset = DynamicSizeUtil.getAllocOffset(targetCursor);
         int toAllocOffset = firstAllocOffset;
-        for (int i = 0; i < count; i++, toPos++) {
-            toAllocOffset = copyRawKeyValue(fromCursor, fromPos + i, toCursor, toAllocOffset, true);
-            toCursor.setOffset(keyPosOffsetLeaf(toPos));
-            putUnsignedShort(toCursor, toAllocOffset);
+        for (int i = 0; i < countToMove; i++, targetPos++) {
+            toAllocOffset = copyRawKeyValue(fromCursor, fromPos + i, targetCursor, toAllocOffset, true);
+            resetOffsetAtPos(targetCursor, targetPos, toAllocOffset);
         }
-        setAllocOffset(toCursor, toAllocOffset);
+        setAllocOffset(targetCursor, toAllocOffset);
 
         // Update deadSpace
         int deadSpace = getDeadSpace(fromCursor);
@@ -599,6 +864,8 @@ class LeafNodeDynamicSize<KEY, VALUE> implements LeafNodeBehaviour<KEY, VALUE> {
             int leftKeyCount,
             PageCursor rightCursor,
             int rightKeyCount,
+            long stableGeneration,
+            long unstableGeneration,
             CursorContext cursorContext) {
         doDefragment(rightCursor, rightKeyCount);
 
@@ -617,63 +884,33 @@ class LeafNodeDynamicSize<KEY, VALUE> implements LeafNodeBehaviour<KEY, VALUE> {
         int toAllocOffset = DynamicSizeUtil.getAllocOffset(toCursor);
         for (int i = 0; i < count; i++, toPos++) {
             toAllocOffset = copyRawKeyValue(fromCursor, fromPos + i, toCursor, toAllocOffset, false);
-            toCursor.setOffset(keyPosOffsetLeaf(toPos));
-            putUnsignedShort(toCursor, toAllocOffset);
+            resetOffsetAtPos(toCursor, toPos, toAllocOffset);
         }
         setAllocOffset(toCursor, toAllocOffset);
     }
 
-    /**
-     * Calculates a valid and as optimal as possible position where to split a leaf if inserting a key overflows, trying to come as close as possible to
-     * ratioToKeepInLeftOnSplit. There are a couple of goals/conditions which drives the search for it:
-     * <ul>
-     *     <li>The returned position will be one where the keys ending up in the left and right leaves respectively are guaranteed to fit.</li>
-     *     <li>Out of those possible positions the one will be selected which leaves left node filled with with space closest to "targetLeftSpace".</li>
-     * </ul>
-     *
-     * We loop over an imaginary range of keys where newKey has already been inserted at insertPos in the current node. splitPos point to position in the
-     * imaginary range while currentPos point to the node. In the loop we "move" splitPos from left to right, accumulating space for left node as we go and
-     * calculate delta towards targetLeftSpace. We want to continue loop as long as:
-     * <ul>
-     *     <li>We are still moving closer to optimal divide (currentDelta < prevDelta) and</li>
-     *     <li>We are still inside end of range (splitPost < keyCountAfterInsert) and</li>
-     *     <li>We have not accumulated to much space to fit in left node (accumulatedLeftSpace <= totalSpace).</li>
-     * </ul>
-     * But we also have to force loop to continue if the current position does not give a possible divide because right node will be given to much data to
-     * fit (!thisPosPossible). Exiting loop means we've gone too far and thus we move one step back after loop, but only if the previous position gave us a
-     * possible divide.
-     *
-     * @param cursor {@link PageCursor} to use for reading sizes of existing entries.
-     * @param insertPos the pos which the new key will be inserted at.
-     * @param newKey key to be inserted.
-     * @param newValue value to be inserted.
-     * @param keyCountAfterInsert key count including the new key.
-     * @param ratioToKeepInLeftOnSplit What ratio of keys to try and keep in left node, 1=keep as much as possible, 0=move as much as possible to right
-     * @return the pos where to split.
-     */
     private int splitPosInLeaf(
             PageCursor cursor,
-            int insertPos,
-            KEY newKey,
-            VALUE newValue,
-            int keyCountAfterInsert,
-            double ratioToKeepInLeftOnSplit) {
-        int targetLeftSpace = (int) (this.totalSpace * ratioToKeepInLeftOnSplit);
+            int pos,
+            int activeSpace,
+            int newKeyValueSpace,
+            int oldKeyValueSpace,
+            int keyCount,
+            int targetLeftSpace) {
         int splitPos = 0;
         int currentPos = 0;
         int accumulatedLeftSpace = 0;
         int currentDelta = targetLeftSpace;
         int prevDelta;
-        int spaceOfNewKey = totalSpaceOfKeyValue(newKey, newValue);
-        int totalSpaceIncludingNewKey = totalActiveSpace(cursor, keyCountAfterInsert - 1) + spaceOfNewKey;
         boolean includedNew = false;
         boolean prevPosPossible;
         boolean thisPosPossible = false;
 
-        if (totalSpaceIncludingNewKey > totalSpace * 2) {
+        int totalSpaceIncludingNewValue = activeSpace - oldKeyValueSpace + newKeyValueSpace;
+        if (totalSpaceIncludingNewValue > totalSpace * 2) {
             throw new IllegalStateException(format(
                     "There's not enough space to insert new key, even when splitting the leaf. Space needed:%d, max space allowed:%d",
-                    totalSpaceIncludingNewKey, totalSpace * 2));
+                    totalSpaceIncludingNewValue, totalSpace * 2));
         }
 
         do {
@@ -681,10 +918,14 @@ class LeafNodeDynamicSize<KEY, VALUE> implements LeafNodeBehaviour<KEY, VALUE> {
 
             // We may come closer to split by keeping one more in left
             int currentSpace;
-            if (currentPos == insertPos && !includedNew) {
-                currentSpace = spaceOfNewKey;
+            if (currentPos == pos && !includedNew) {
+                currentSpace = newKeyValueSpace;
                 includedNew = true;
-                currentPos--;
+                // For INSERT (oldKeyValueSpace == 0) the old entry at pos shifts right, so we re-read it.
+                // For UPDATE the old entry is replaced, not shifted, so advance normally.
+                if (oldKeyValueSpace == 0) {
+                    currentPos--;
+                }
             } else {
                 currentSpace = totalSpaceOfKeyValue(cursor, currentPos);
             }
@@ -693,8 +934,8 @@ class LeafNodeDynamicSize<KEY, VALUE> implements LeafNodeBehaviour<KEY, VALUE> {
             currentDelta = Math.abs(accumulatedLeftSpace - targetLeftSpace);
             currentPos++;
             splitPos++;
-            thisPosPossible = totalSpaceIncludingNewKey - accumulatedLeftSpace <= totalSpace;
-        } while ((currentDelta < prevDelta && splitPos < keyCountAfterInsert && accumulatedLeftSpace <= totalSpace)
+            thisPosPossible = totalSpaceIncludingNewValue - accumulatedLeftSpace <= totalSpace;
+        } while ((currentDelta < prevDelta && splitPos < keyCount && accumulatedLeftSpace <= totalSpace)
                 || !thisPosPossible);
         // If previous position is possible then step back one pos since it divides the space most equally
         if (prevPosPossible) {
@@ -733,15 +974,15 @@ class LeafNodeDynamicSize<KEY, VALUE> implements LeafNodeBehaviour<KEY, VALUE> {
     void placeCursorAtActualKey(PageCursor cursor, int pos) {
         // Set cursor to correct place in offset array
         int keyPosOffset = keyPosOffsetLeaf(pos);
-        DynamicSizeUtil.redirectCursor(cursor, keyPosOffset, DynamicSizeUtil.HEADER_LENGTH_DYNAMIC, payloadSize);
+        DynamicSizeUtil.redirectCursor(cursor, keyPosOffset, headerSize, payloadSize);
     }
 
     boolean keyValueSizeTooLarge(int keySize, int valueSize) {
         return keySize + valueSize > keyValueSizeCap;
     }
 
-    protected static int keyPosOffsetLeaf(int pos) {
-        return DynamicSizeUtil.HEADER_LENGTH_DYNAMIC + pos * DynamicSizeUtil.OFFSET_SIZE;
+    protected int keyPosOffsetLeaf(int pos) {
+        return headerSize + pos * DynamicSizeUtil.OFFSET_SIZE;
     }
 
     @Override
@@ -896,9 +1137,10 @@ class LeafNodeDynamicSize<KEY, VALUE> implements LeafNodeBehaviour<KEY, VALUE> {
     }
 
     @Override
-    public <ROOT_KEY> void deepVisitValue(PageCursor cursor, int pos, GBPTreeVisitor<ROOT_KEY, KEY, VALUE> visitor) {}
+    public <ROOT_KEY> void deepVisitValue(PageCursor cursor, int pos, GBPTreeVisitor<ROOT_KEY, KEY, VALUE> visitor)
+            throws IOException {}
 
-    protected static int lowestActiveKeyOffset(PageCursor cursor, int keyCount, int payloadSize) {
+    protected int lowestActiveKeyOffset(PageCursor cursor, int keyCount, int payloadSize) {
         int lowestOffsetSoFar = payloadSize;
         for (int pos = 0; pos < keyCount; pos++) {
             // Set cursor to correct place in offset array
@@ -915,7 +1157,7 @@ class LeafNodeDynamicSize<KEY, VALUE> implements LeafNodeBehaviour<KEY, VALUE> {
     // Calculated by reading data instead of extrapolate from allocSpace and deadSpace
     private int totalActiveSpaceRaw(PageCursor cursor, int keyCount) {
         // Offset array
-        int offsetArrayStart = DynamicSizeUtil.HEADER_LENGTH_DYNAMIC;
+        int offsetArrayStart = headerSize;
         int offsetArrayEnd = keyPosOffsetLeaf(keyCount);
         int offsetArraySize = offsetArrayEnd - offsetArrayStart;
 

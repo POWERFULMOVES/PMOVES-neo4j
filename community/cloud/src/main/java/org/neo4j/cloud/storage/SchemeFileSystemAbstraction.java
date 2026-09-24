@@ -19,7 +19,6 @@
  */
 package org.neo4j.cloud.storage;
 
-import static java.lang.ClassLoader.getSystemClassLoader;
 import static java.util.Objects.requireNonNull;
 import static org.neo4j.cloud.storage.StorageUtils.APPEND_OPTIONS;
 import static org.neo4j.cloud.storage.StorageUtils.READ_OPTIONS;
@@ -31,6 +30,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
 import java.nio.file.CopyOption;
 import java.nio.file.DirectoryStream.Filter;
@@ -38,17 +38,20 @@ import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.ProviderMismatchException;
 import java.util.Collection;
+import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Predicate;
-import java.util.function.Supplier;
 import org.eclipse.collections.api.factory.Maps;
 import org.eclipse.collections.api.factory.Sets;
 import org.eclipse.collections.api.map.MutableMap;
 import org.neo4j.cloud.storage.StorageSystemProviderFactory.ChunkChannel;
 import org.neo4j.configuration.Config;
+import org.neo4j.function.ThrowingSupplier;
 import org.neo4j.io.IOUtils;
 import org.neo4j.io.fs.FileSystemAbstraction;
+import org.neo4j.io.fs.PathWithMetadata;
 import org.neo4j.io.fs.StoreChannel;
 import org.neo4j.io.fs.watcher.FileWatcher;
 import org.neo4j.logging.InternalLogProvider;
@@ -61,6 +64,9 @@ import org.neo4j.memory.MemoryTracker;
  * {@link StoragePath} objects.
  */
 public class SchemeFileSystemAbstraction implements FileSystemAbstraction, StorageSchemeResolver {
+    public interface Factory {
+        SchemeFileSystemAbstraction create();
+    }
 
     private final MutableMap<String, StorageSystemProvider> schemesToProvider = Maps.mutable.empty();
 
@@ -139,7 +145,13 @@ public class SchemeFileSystemAbstraction implements FileSystemAbstraction, Stora
     public Path resolve(String resource) throws IOException {
         final var matcher = SCHEME.matcher(resource);
         if (matcher.matches()) {
-            return internalResolve(matcher.group(1), () -> URI.create(resource));
+            return internalResolve(matcher.group(1), () -> {
+                try {
+                    return new URI(resource);
+                } catch (URISyntaxException ex) {
+                    throw new IOException("Invalid URI provided: " + resource, ex);
+                }
+            });
         }
 
         return Path.of(resource);
@@ -173,14 +185,24 @@ public class SchemeFileSystemAbstraction implements FileSystemAbstraction, Stora
     }
 
     @Override
-    public OutputStream openAsOutputStream(Path fileName, boolean append) throws IOException {
+    public OutputStream openAsOutputStream(Path fileName, boolean append, int bufferSize) throws IOException {
         if (fileName instanceof StoragePath path) {
             final var options = append ? APPEND_OPTIONS : WRITE_OPTIONS;
             //noinspection resource
             return provider(path).newOutputStream(fileName, options.toArray(OpenOption[]::new));
         }
 
-        return fs.openAsOutputStream(fileName, append);
+        return fs.openAsOutputStream(fileName, append, bufferSize);
+    }
+
+    @Override
+    public OutputStream openAsOutputStream(Path fileName, Set<OpenOption> options, int bufferSize) throws IOException {
+        if (fileName instanceof StoragePath path) {
+            //noinspection resource
+            return provider(path).newOutputStream(fileName, options.toArray(OpenOption[]::new));
+        }
+
+        return fs.openAsOutputStream(fileName, options, bufferSize);
     }
 
     @Override
@@ -273,6 +295,16 @@ public class SchemeFileSystemAbstraction implements FileSystemAbstraction, Stora
     }
 
     @Override
+    public List<PathWithMetadata> listFilesWithMetadata(Path directory, Filter<Path> filter) throws IOException {
+        if (directory instanceof StoragePath storageDir) {
+            try (var paths = provider(storageDir).newDirectoryStreamWithMetadata(directory, filter)) {
+                return paths.toList();
+            }
+        }
+        return fs.listFilesWithMetadata(directory, filter);
+    }
+
+    @Override
     public boolean isDirectory(Path file) {
         return fs.isDirectory(file);
     }
@@ -343,6 +375,14 @@ public class SchemeFileSystemAbstraction implements FileSystemAbstraction, Stora
     }
 
     @Override
+    public boolean supportsDirectoryChannel(Path directory) {
+        if (directory instanceof StoragePath) {
+            return false;
+        }
+        return fs.supportsDirectoryChannel(directory);
+    }
+
+    @Override
     public void close() throws IOException {
         try {
             IOUtils.closeAll(schemesToProvider.values());
@@ -364,7 +404,7 @@ public class SchemeFileSystemAbstraction implements FileSystemAbstraction, Stora
         return false;
     }
 
-    private Path internalResolve(String scheme, Supplier<URI> resource) throws IOException {
+    private Path internalResolve(String scheme, ThrowingSupplier<URI, IOException> resource) throws IOException {
         if (scheme == null || "file".equalsIgnoreCase(scheme)) {
             return Path.of(resource.get());
         }
@@ -373,6 +413,8 @@ public class SchemeFileSystemAbstraction implements FileSystemAbstraction, Stora
         for (var factory : factories) {
             if (factory.matches(schemeToResolve)) {
                 try {
+                    final var classLoader = Objects.requireNonNullElseGet(
+                            Thread.currentThread().getContextClassLoader(), ClassLoader::getSystemClassLoader);
                     final var provider = schemesToProvider.getIfAbsentPut(
                             schemeToResolve,
                             () -> factory.createStorageSystemProvider(
@@ -380,7 +422,7 @@ public class SchemeFileSystemAbstraction implements FileSystemAbstraction, Stora
                                     config,
                                     logProvider,
                                     memoryTracker,
-                                    getSystemClassLoader()));
+                                    classLoader));
                     final var uri = resource.get();
                     provider.getStorageSystem(uri);
                     return provider.getPath(uri);
@@ -394,7 +436,8 @@ public class SchemeFileSystemAbstraction implements FileSystemAbstraction, Stora
     }
 
     private ChunkChannel tempChannel(String prefix, String scheme) throws IOException {
-        final var path = fs.createTempFile(prefix, scheme);
+        final var baseChunkPath = config.get(SharedStorageSettingsDeclaration.temp_chunk_path);
+        final var path = fs.createTempFile(baseChunkPath, prefix, scheme);
         final var channel = fs.write(path);
         return new ChunkChannel() {
             @Override

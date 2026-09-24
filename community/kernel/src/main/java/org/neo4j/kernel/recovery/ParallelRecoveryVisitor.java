@@ -20,6 +20,7 @@
 package org.neo4j.kernel.recovery;
 
 import static java.lang.Integer.max;
+import static java.lang.Math.min;
 import static org.neo4j.util.Preconditions.checkState;
 
 import java.util.concurrent.Callable;
@@ -35,9 +36,9 @@ import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.kernel.impl.api.CompleteTransaction;
 import org.neo4j.kernel.impl.transaction.CommittedCommandBatchRepresentation;
-import org.neo4j.lock.LockGroup;
 import org.neo4j.lock.LockService;
 import org.neo4j.lock.ReentrantLockService;
+import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.StorageEngine;
 import org.neo4j.storageengine.api.TransactionApplicationMode;
 
@@ -63,7 +64,7 @@ final class ParallelRecoveryVisitor implements RecoveryApplier {
                 mode,
                 contextFactory,
                 tracerTag,
-                max(1, Runtime.getRuntime().availableProcessors() - 1));
+                max(1, min(Runtime.getRuntime().availableProcessors() - 1, 16)));
     }
 
     ParallelRecoveryVisitor(
@@ -105,8 +106,8 @@ final class ParallelRecoveryVisitor implements RecoveryApplier {
                 }
                 checkFailure();
             }
-            try (LockGroup locks = new LockGroup()) {
-                storageEngine.lockRecoveryCommands(commandBatch.commandBatch(), lockService, locks, mode);
+            try (var locks = lockService.newClient()) {
+                storageEngine.lockRecoveryCommands(commandBatch.commandBatch(), locks, mode);
                 boolean myTurn = prevLockedTxId.compareAndSet(txId - stride, txId);
                 checkState(
                         myTurn,
@@ -161,7 +162,10 @@ final class ParallelRecoveryVisitor implements RecoveryApplier {
         try (CursorContext cursorContext = contextFactory.create(tracerTag);
                 var storeCursors = storageEngine.createStorageCursors(cursorContext)) {
             var tx = new CompleteTransaction(transaction, cursorContext, storeCursors);
-            storageEngine.apply(tx, mode);
+            var versionContext = cursorContext.getVersionContext();
+            versionContext.initWrite(tx.transactionId());
+            versionContext.initChunkId(transaction.commandBatch().chunkId());
+            storageEngine.apply(tx, mode, EmptyMemoryTracker.INSTANCE);
         }
     }
 

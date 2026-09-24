@@ -19,15 +19,21 @@
  */
 package org.neo4j.fabric.planning
 
+import org.neo4j.configuration.GraphDatabaseSettings
+import org.neo4j.configuration.helpers.QueryLanguageConverter
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.AstConstructionTestSupport
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsParameters
 import org.neo4j.cypher.internal.ast.UnresolvedCall
 import org.neo4j.cypher.internal.ast.With
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
 import org.neo4j.cypher.internal.expressions.NodePattern
-import org.neo4j.cypher.internal.frontend.phases.ResolvedCall
 import org.neo4j.cypher.internal.frontend.phases.ResolvedFunctionInvocation
+import org.neo4j.cypher.internal.frontend.phases.ResolvedNonLocalCall
+import org.neo4j.cypher.internal.frontend.phases.ScopedProcedureSignatureResolver
 import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.cypher.internal.util.test_helpers.GqlExceptionMatchers.gqlException
+import org.neo4j.cypher.internal.util.test_helpers.GqlExceptionMatchers.gqlStatus
 import org.neo4j.exceptions.SyntaxException
 import org.neo4j.fabric.FabricTest
 import org.neo4j.fabric.FragmentTestUtils
@@ -36,6 +42,7 @@ import org.neo4j.fabric.planning.Fragment.Apply
 import org.neo4j.fabric.planning.Fragment.Leaf
 import org.neo4j.fabric.planning.Use.Declared
 import org.neo4j.fabric.planning.Use.Inherited
+import org.neo4j.gqlstatus.GqlStatusInfoCodes
 import org.scalatest.Inside
 
 class FabricFragmenterTest
@@ -45,10 +52,15 @@ class FabricFragmenterTest
     with FragmentTestUtils
     with AstConstructionTestSupport {
 
+  val systemDefaultLanguage: CypherVersion =
+    QueryLanguageConverter.toInternal(GraphDatabaseSettings.default_language.defaultValue)
+  val resolveStrictly: Boolean = systemDefaultLanguage != CypherVersion.Cypher5
+
   "USE handling: " - {
 
     "disallow USE inside fragment" in {
-      the[SyntaxException]
+
+      val e = the[SyntaxException]
         .thrownBy(
           fragment(
             """WITH 1 AS x
@@ -57,11 +69,18 @@ class FabricFragmenterTest
               |""".stripMargin
           )
         )
-        .getMessage
-        .should(include(
-          "USE clause must be either the first clause in a (sub-)query or preceded by an importing WITH clause in a sub-query."
-        ))
 
+      e should be(gqlException(
+        "USE clause must be either the first clause in a (sub-)query or preceded by an importing WITH clause in a sub-query.",
+        gqlStatus(
+          GqlStatusInfoCodes.STATUS_42001,
+          "error: syntax error or access rule violation - invalid syntax"
+        ).withCause(
+          GqlStatusInfoCodes.STATUS_42N73,
+          "error: syntax error or access rule violation - invalid placement of USE clause. The USE clause must be the first clause of a query or an operand to '... UNION ...' . In a CALL sub-query, it can also be the second clause if the first clause is an importing WITH."
+        ),
+        fuzzyMsg = true
+      ))
     }
 
     "not propagate USE out" in {
@@ -83,7 +102,7 @@ class FabricFragmenterTest
         .inner
         .as[Fragment.Leaf]
         .use
-        .shouldEqual(Declared(use("g")))
+        .shouldEqual(Declared(use("g", resolveStrictly)))
       frag
         .as[Fragment.Leaf]
         .input
@@ -124,7 +143,7 @@ class FabricFragmenterTest
         .inner
         .as[Fragment.Leaf]
         .use
-        .shouldEqual(Declared(use("x")))
+        .shouldEqual(Declared(use("x", resolveStrictly)))
       frag
         .as[Fragment.Leaf]
         .input
@@ -136,7 +155,56 @@ class FabricFragmenterTest
         .inner
         .as[Fragment.Leaf]
         .use
-        .shouldEqual(Inherited(Declared(use("x")))(pos))
+        .shouldEqual(Inherited(Declared(use("x", resolveStrictly)))(pos))
+    }
+
+    "scope-clause import is not threaded into an aggregating inner WITH" in {
+      val frag = fragment(
+        """WITH 1 AS big
+          |CALL (big) {
+          |  UNWIND range(1, 1000) AS i
+          |  WITH i % 10 AS k, count(*) AS c
+          |  RETURN k, c
+          |}
+          |RETURN k, c
+          |""".stripMargin
+      )
+
+      val innerWithItems = frag
+        .as[Fragment.Leaf]
+        .input
+        .as[Fragment.Apply]
+        .inner
+        .as[Fragment.Leaf]
+        .clauses
+        .collectFirst { case w: With => w.returnItems.items.map(_.name) }
+
+      innerWithItems.shouldEqual(Some(Seq("k", "c")))
+    }
+
+    "tags Apply.importMode according to the subquery call flavor" in {
+      def importModeOf(query: String): Fragment.SubqueryImport =
+        fragment(query).as[Fragment.Leaf].input.as[Fragment.Apply].importMode
+
+      importModeOf(
+        """WITH 1 AS x
+          |CALL (x) { RETURN x AS y }
+          |RETURN y
+          |""".stripMargin
+      ).shouldEqual(Fragment.SubqueryImport.ScopeClause)
+
+      importModeOf(
+        """WITH 1 AS x
+          |CALL { WITH x RETURN x AS y }
+          |RETURN y
+          |""".stripMargin
+      ).shouldEqual(Fragment.SubqueryImport.ImportingWith)
+
+      importModeOf(
+        """CALL { RETURN 1 AS y }
+          |RETURN y
+          |""".stripMargin
+      ).shouldEqual(Fragment.SubqueryImport.ImportingWith)
     }
 
     "declared with imported variable with a nested subquery" in {
@@ -170,7 +238,7 @@ class FabricFragmenterTest
         .inner
         .as[Fragment.Leaf]
         .use
-        .shouldEqual(Declared(use("x")))
+        .shouldEqual(Declared(use("x", resolveStrictly)))
       frag
         .as[Fragment.Leaf]
         .input
@@ -182,7 +250,7 @@ class FabricFragmenterTest
         .inner
         .as[Fragment.Leaf]
         .use
-        .shouldEqual(Inherited(Declared(use("x")))(pos))
+        .shouldEqual(Inherited(Declared(use("x", resolveStrictly)))(pos))
     }
 
     "inherited from default in subquery" in {
@@ -229,7 +297,7 @@ class FabricFragmenterTest
           |""".stripMargin
       )
 
-      frag.as[Fragment.Leaf].use.shouldEqual(Declared(use("g")))
+      frag.as[Fragment.Leaf].use.shouldEqual(Declared(use("g", resolveStrictly)))
       frag
         .as[Fragment.Leaf]
         .input
@@ -239,7 +307,7 @@ class FabricFragmenterTest
         .use
         .shouldEqual(
           Inherited(
-            Declared(use("g"))
+            Declared(use("g", resolveStrictly))
           )(pos)
         )
       frag
@@ -249,11 +317,11 @@ class FabricFragmenterTest
         .input
         .as[Fragment.Leaf]
         .use
-        .shouldEqual(Declared(use("g")))
+        .shouldEqual(Declared(use("g", resolveStrictly)))
     }
 
     "disallow USE at start of non-initial fragment" in {
-      the[SyntaxException]
+      val e = the[SyntaxException]
         .thrownBy(
           fragment(
             """WITH 1 AS x
@@ -265,10 +333,18 @@ class FabricFragmenterTest
               |""".stripMargin
           )
         )
-        .getMessage
-        .should(include(
-          "USE clause must be either the first clause in a (sub-)query or preceded by an importing WITH clause in a sub-query."
-        ))
+
+      e should be(gqlException(
+        "USE clause must be either the first clause in a (sub-)query or preceded by an importing WITH clause in a sub-query.",
+        gqlStatus(
+          GqlStatusInfoCodes.STATUS_42001,
+          "error: syntax error or access rule violation - invalid syntax"
+        ).withCause(
+          GqlStatusInfoCodes.STATUS_42N73,
+          "error: syntax error or access rule violation - invalid placement of USE clause. The USE clause must be the first clause of a query or an operand to '... UNION ...' . In a CALL sub-query, it can also be the second clause if the first clause is an importing WITH."
+        ),
+        fuzzyMsg = true
+      ))
     }
 
     "allow USE to reference outer variable" in {
@@ -283,8 +359,11 @@ class FabricFragmenterTest
       )
 
       inside(frag) {
-        case Leaf(Apply(_, inner: Leaf, _), _, _) =>
-          inner.use.shouldEqual(Declared(use(useClauseFunction(Seq("graph"), "byName", varFor("x")))))
+        case Leaf(Apply(_, inner: Leaf, _, _, _), _, _) =>
+          inner.use.shouldEqual(Declared(use(
+            useClauseFunction(Seq("graph"), "byName", varFor("x")),
+            parseStringGraphReferences = resolveStrictly
+          )))
       }
     }
 
@@ -301,8 +380,11 @@ class FabricFragmenterTest
       )
 
       inside(frag) {
-        case Leaf(Apply(_, inner: Leaf, _), _, _) =>
-          inner.use.shouldEqual(Declared(use(useClauseFunction(Seq("graph"), "byName", varFor("x")))))
+        case Leaf(Apply(_, inner: Leaf, _, _, _), _, _) =>
+          inner.use.shouldEqual(Declared(use(
+            useClauseFunction(Seq("graph"), "byName", varFor("x")),
+            parseStringGraphReferences = resolveStrictly
+          )))
       }
     }
 
@@ -371,6 +453,37 @@ class FabricFragmenterTest
     }
   }
 
+  "OPTIONAL CALL: " - {
+
+    "carries the OPTIONAL flag onto the Apply fragment" in {
+      val frag = fragment(
+        """MATCH (a)
+          |OPTIONAL CALL (a) {
+          |  MATCH (a)-->(b)
+          |  RETURN b
+          |}
+          |RETURN a, b
+          |""".stripMargin
+      )
+
+      frag.as[Fragment.Leaf].input.as[Fragment.Apply].optional.shouldEqual(true)
+    }
+
+    "leaves a plain CALL non-optional" in {
+      val frag = fragment(
+        """MATCH (a)
+          |CALL (a) {
+          |  MATCH (a)-->(b)
+          |  RETURN b
+          |}
+          |RETURN a, b
+          |""".stripMargin
+      )
+
+      frag.as[Fragment.Leaf].input.as[Fragment.Apply].optional.shouldEqual(false)
+    }
+  }
+
   "Full queries:" - {
 
     "plain query" in {
@@ -391,8 +504,8 @@ class FabricFragmenterTest
           |RETURN a
           |""".stripMargin
       ).shouldEqual(
-        init(Declared(use("bar")))
-          .leaf(Seq(use("bar"), withLit(1, "a"), returnVars("a")), Seq("a"))
+        init(Declared(use("bar", resolveStrictly)))
+          .leaf(Seq(use("bar", resolveStrictly), withLit(1, "a"), returnVars("a")), Seq("a"))
       )
     }
 
@@ -409,8 +522,8 @@ class FabricFragmenterTest
         init(defaultUse)
           .leaf(Seq(withLit(1, "a")), Seq("a"))
           .apply(_ =>
-            init(Declared(use("g")), Seq("a"), Seq())
-              .leaf(Seq(use("g"), returnLit(2 -> "b")), Seq("b"))
+            init(Declared(use("g", resolveStrictly)), Seq("a"), Seq())
+              .leaf(Seq(use("g", resolveStrictly), returnLit(2 -> "b")), Seq("b"))
           )
           .leaf(Seq(returnVars("a", "b")), Seq("a", "b"))
       )
@@ -460,8 +573,8 @@ class FabricFragmenterTest
             init(Inherited(u)(pos), Seq("x"))
               .leaf(Seq(withLit(2, "y")), Seq("y"))
               .apply(_ =>
-                init(Declared(use("foo")), Seq("y"))
-                  .leaf(Seq(use("foo"), returnLit(3 -> "z")), Seq("z"))
+                init(Declared(use("foo", resolveStrictly)), Seq("y"))
+                  .leaf(Seq(use("foo", resolveStrictly), returnLit(3 -> "z")), Seq("z"))
               )
               .apply(u =>
                 init(Inherited(u)(pos), Seq("y", "z"), Seq("y"))
@@ -482,8 +595,8 @@ class FabricFragmenterTest
           |RETURN a
           |""".stripMargin
       ).shouldEqual(
-        init(Declared(use("foo")))
-          .leaf(Seq(use("foo")), Seq())
+        init(Declared(use("foo", resolveStrictly)))
+          .leaf(Seq(use("foo", resolveStrictly)), Seq())
           .apply(use =>
             init(Inherited(use)(pos))
               .leaf(Seq(returnLit(1 -> "a")), Seq("a"))
@@ -502,8 +615,14 @@ class FabricFragmenterTest
           |""".stripMargin
       ).shouldEqual(
         init(defaultUse).union(
-          init(Declared(use("foo"))).leaf(Seq(use("foo"), returnLit(1 -> "y")), Seq("y")),
-          init(Declared(use("bar"))).leaf(Seq(use("bar"), returnLit(2 -> "y")), Seq("y"))
+          init(Declared(use("foo", resolveStrictly))).leaf(
+            Seq(use("foo", resolveStrictly), returnLit(1 -> "y")),
+            Seq("y")
+          ),
+          init(Declared(use("bar", resolveStrictly))).leaf(
+            Seq(use("bar", resolveStrictly), returnLit(2 -> "y")),
+            Seq("y")
+          )
         )
       )
     }
@@ -525,8 +644,8 @@ class FabricFragmenterTest
           .leaf(Seq(withLit(1, "x")), Seq("x"))
           .apply(u =>
             init(Inherited(defaultUse)(pos), Seq("x")).union(
-              init(Declared(use("foo")), Seq("x"))
-                .leaf(Seq(use("foo"), returnLit(1 -> "y")), Seq("y")),
+              init(Declared(use("foo", resolveStrictly)), Seq("x"))
+                .leaf(Seq(use("foo", resolveStrictly), returnLit(1 -> "y")), Seq("y")),
               init(Inherited(u)(pos), Seq("x"), Seq("x"))
                 .leaf(Seq(withVar("x"), returnLit(2 -> "y")), Seq("y"))
             )
@@ -549,10 +668,10 @@ class FabricFragmenterTest
         init(defaultUse)
           .leaf(Seq(withLit(1, "x")), Seq("x"))
           .apply(_ =>
-            init(Declared(use("g")), Seq("x"))
+            init(Declared(use("g", resolveStrictly)), Seq("x"))
               .leaf(
                 Seq(
-                  use("g"),
+                  use("g", resolveStrictly),
                   call(Seq("some"), "procedure", yields = Some(Seq(varFor("z"), varFor("y")))),
                   returnVars("z", "y")
                 ),
@@ -638,7 +757,7 @@ class FabricFragmenterTest
       )
     }
 
-    val inTransactionParameters = Some(InTransactionsParameters(None, None, None, None)(pos))
+    val inTransactionParameters = Some(InTransactionsParameters(None, None, None, None, None)(pos))
 
     "Call in tx" in {
       fragment(
@@ -681,10 +800,10 @@ class FabricFragmenterTest
         init(defaultUse)
           .apply(
             _ =>
-              init(Declared(use("x")))
+              init(Declared(use("x", resolveStrictly)))
                 .leaf(
                   Seq(
-                    use("x"),
+                    use("x", resolveStrictly),
                     match_(NodePattern(Some(varFor("n")), None, None, None)(pos)),
                     returnVars("n")
                   ),
@@ -694,6 +813,19 @@ class FabricFragmenterTest
           )
           .leaf(Seq(returnVars("n")), Seq("n"))
       )
+    }
+
+    "a query ending in a unit subquery call produces no result columns" in {
+      val f = fragment(
+        """MATCH (n)
+          |CALL {
+          |  CREATE (a)
+          |}
+          |""".stripMargin
+      )
+      f.producesResults shouldEqual false
+      f.outputColumns shouldEqual Seq("n")
+      f.resultColumns shouldEqual Seq.empty
     }
   }
 
@@ -792,7 +924,7 @@ class FabricFragmenterTest
       ).shouldEqual(
         init(defaultUse)
           .leaf(
-            Seq(call(Seq(), "unknownProcedure", Some(Seq()), Some(Seq(varFor("x"), varFor("y"))))),
+            Seq(call(Seq(), "unknownProcedure", Some(Seq()), Some(Seq(varFor("x"), varFor("y"))), standalone = true)),
             Seq("x", "y")
           )
       )
@@ -818,6 +950,23 @@ class FabricFragmenterTest
             Seq(
               return_(
                 resolved(function(Seq("my", "ns"), "const0", literal(1))).as("x")
+              )
+            ),
+            Seq("x")
+          )
+      )
+    }
+
+    "a known aggregation function" in {
+      fragment(
+        """RETURN my.ns.myAgg(1) AS x
+          |""".stripMargin
+      ).shouldEqual(
+        init(defaultUse)
+          .leaf(
+            Seq(
+              return_(
+                resolved(function(Seq("my", "ns"), "myAgg", literal(1))).as("x")
               )
             ),
             Seq("x")
@@ -886,9 +1035,11 @@ class FabricFragmenterTest
   private def returnAliased(vars: (String, String)*) =
     return_(vars.map(v => varFor(v._1).as(v._2)): _*)
 
-  private def resolved(unresolved: UnresolvedCall): ResolvedCall =
-    ResolvedCall(scopedSignatures.procedureSignature)(unresolved)
+  private def resolved(unresolved: UnresolvedCall): ResolvedNonLocalCall =
+    ResolvedNonLocalCall(scopedSignatures.procedureSignature)(unresolved)
 
   private def resolved(unresolved: FunctionInvocation): ResolvedFunctionInvocation =
-    ResolvedFunctionInvocation(scopedSignatures.functionSignature)(unresolved)
+    ResolvedFunctionInvocation.fromUnresolved(scopedSignatures.functionSignature)(unresolved)
+
+  override def scopedSignatures: ScopedProcedureSignatureResolver = scopedSignatures(systemDefaultLanguage)
 }

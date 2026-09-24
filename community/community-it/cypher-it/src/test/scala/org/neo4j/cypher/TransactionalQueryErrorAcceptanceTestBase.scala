@@ -21,8 +21,8 @@ package org.neo4j.cypher
 
 import org.neo4j.configuration.Config
 import org.neo4j.configuration.GraphDatabaseSettings
+import org.neo4j.cypher.CypherITTestSuite
 import org.neo4j.cypher.internal.runtime.CreateTempFileTestSupport
-import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 import org.neo4j.cypher.testing.api.CypherExecutorException
 import org.neo4j.cypher.testing.api.StatementResult
 import org.neo4j.cypher.testing.impl.FeatureDatabaseManagementService
@@ -30,6 +30,7 @@ import org.neo4j.cypher.testing.impl.FeatureDatabaseManagementService.TestApiKin
 import org.neo4j.dbms.api.DatabaseManagementService
 import org.neo4j.kernel.api.exceptions.Status
 import org.neo4j.test.TestDatabaseManagementServiceBuilder
+import org.scalatest.BeforeAndAfterAll
 
 import java.time.Duration
 
@@ -43,12 +44,18 @@ class TransactionalQueryErrorHttpAcceptanceTest extends TransactionalQueryErrorA
     with FeatureDatabaseManagementService.TestUsingHttp
 
 abstract class TransactionalQueryErrorAcceptanceTestBase
-    extends CypherFunSuite
+    extends CypherITTestSuite
     with FeatureDatabaseManagementService.TestBase
-    with CreateTempFileTestSupport {
+    with CreateTempFileTestSupport
+    with BeforeAndAfterAll {
+
+  val db: FeatureDatabaseManagementService = dbms
+
+  override def afterAll(): Unit = {
+    db.shutdown()
+  }
 
   // This is an absolute mess...
-
   test("disallows CALL IN TRANSACTIONS in explicit transaction") {
     def code = executeInExplicitTx("CALL { CREATE () } IN TRANSACTIONS")
 
@@ -82,7 +89,7 @@ abstract class TransactionalQueryErrorAcceptanceTestBase
   }
 
   def executeInExplicitTx(statement: String): StatementResult = {
-    val tx = dbms.begin()
+    val tx = db.begin()
     try {
       tx.execute(statement)
     } finally {
@@ -91,7 +98,7 @@ abstract class TransactionalQueryErrorAcceptanceTestBase
   }
 
   def executeInImplicitTx(statement: String): StatementResult =
-    dbms.execute(statement, Map.empty, identity)
+    db.execute(statement, Map.empty, identity)
 
   def expectNoError(code: => Any): Unit =
     noException.shouldBe(thrownBy(code))

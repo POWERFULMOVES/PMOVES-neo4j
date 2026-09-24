@@ -29,6 +29,8 @@ import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.graphdb.RelationshipType
 import org.neo4j.graphdb.schema.IndexType
 
+object RelationshipIndexScanTestBase
+
 abstract class RelationshipIndexScanTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
@@ -176,7 +178,7 @@ abstract class RelationshipIndexScanTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("r", "foo")
       .projection("cacheR[r.prop] AS foo")
-      .relationshipIndexOperator("(x)-[r:R(prop)]->(y)", _ => GetValue, indexType = IndexType.RANGE)
+      .relationshipIndexOperator("()-[r:R(prop)]->()", _ => GetValue, indexType = IndexType.RANGE)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
@@ -205,7 +207,7 @@ abstract class RelationshipIndexScanTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("r", "foo")
       .projection("cacheR[r.prop] AS foo")
-      .relationshipIndexOperator("(x)-[r:R(prop)]-(y)", _ => GetValue, indexType = IndexType.RANGE)
+      .relationshipIndexOperator("()-[r:R(prop)]-()", _ => GetValue, indexType = IndexType.RANGE)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
@@ -299,8 +301,8 @@ abstract class RelationshipIndexScanTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("r1", "r2")
       .cartesianProduct()
-      .|.relationshipIndexOperator("(x2)-[r2:R(prop)]->(y2)", indexType = IndexType.RANGE)
-      .relationshipIndexOperator("(x1)-[r1:R(prop)]->(y1)", indexType = IndexType.RANGE)
+      .|.relationshipIndexOperator("()-[r2:R(prop)]->()", indexType = IndexType.RANGE)
+      .relationshipIndexOperator("()-[r1:R(prop)]->()", indexType = IndexType.RANGE)
       .build()
     val runtimeResult = execute(logicalQuery, runtime)
 
@@ -330,8 +332,8 @@ abstract class RelationshipIndexScanTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("r1", "r2")
       .cartesianProduct()
-      .|.relationshipIndexOperator("(x2)-[r2:R(prop)]-(y2)", indexType = IndexType.RANGE)
-      .relationshipIndexOperator("(x1)-[r1:R(prop)]-(y1)", indexType = IndexType.RANGE)
+      .|.relationshipIndexOperator("()-[r2:R(prop)]-()", indexType = IndexType.RANGE)
+      .relationshipIndexOperator("()-[r1:R(prop)]-()", indexType = IndexType.RANGE)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
@@ -363,7 +365,7 @@ abstract class RelationshipIndexScanTestBase[CONTEXT <: RuntimeContext](
       .produceResults("c")
       .aggregation(Seq.empty, Seq("count(*) AS c"))
       .limit(limit)
-      .relationshipIndexOperator("(x)-[r:R(prop)]->(y)", indexType = IndexType.RANGE)
+      .relationshipIndexOperator("()-[r:R(prop)]->()", indexType = IndexType.RANGE)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
@@ -391,7 +393,7 @@ abstract class RelationshipIndexScanTestBase[CONTEXT <: RuntimeContext](
       .produceResults("c")
       .aggregation(Seq.empty, Seq("count(*) AS c"))
       .limit(limit)
-      .relationshipIndexOperator("(x)-[r:R(prop)]-(y)", indexType = IndexType.RANGE)
+      .relationshipIndexOperator("()-[r:R(prop)]-()", indexType = IndexType.RANGE)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
@@ -419,7 +421,7 @@ abstract class RelationshipIndexScanTestBase[CONTEXT <: RuntimeContext](
       .apply()
       .|.projection("r.prop AS value")
       .|.limit(limit)
-      .|.relationshipIndexOperator("(x)-[r:R(prop)]->(y)", argumentIds = Set("i"), indexType = IndexType.RANGE)
+      .|.relationshipIndexOperator("()-[r:R(prop)]->()", argumentIds = Set("i"), indexType = IndexType.RANGE)
       .input(variables = Seq("i"))
       .build()
 
@@ -449,7 +451,7 @@ abstract class RelationshipIndexScanTestBase[CONTEXT <: RuntimeContext](
       .apply()
       .|.projection("r.prop AS value")
       .|.limit(limit)
-      .|.relationshipIndexOperator("(x)-[r:R(prop)]-(y)", argumentIds = Set("i"), indexType = IndexType.RANGE)
+      .|.relationshipIndexOperator("()-[r:R(prop)]-()", argumentIds = Set("i"), indexType = IndexType.RANGE)
       .input(variables = Seq("i"))
       .build()
 
@@ -479,7 +481,7 @@ abstract class RelationshipIndexScanTestBase[CONTEXT <: RuntimeContext](
       .limit(limit)
       .apply()
       .|.projection("r.prop AS value")
-      .|.relationshipIndexOperator("(x)-[r:R(prop)]->(y)", argumentIds = Set("i"), indexType = IndexType.RANGE)
+      .|.relationshipIndexOperator("()-[r:R(prop)]->()", argumentIds = Set("i"), indexType = IndexType.RANGE)
       .input(variables = Seq("i"))
       .build()
 
@@ -509,7 +511,7 @@ abstract class RelationshipIndexScanTestBase[CONTEXT <: RuntimeContext](
       .limit(limit)
       .apply()
       .|.projection("r.prop AS value")
-      .|.relationshipIndexOperator("(x)-[r:R(prop)]-(y)", argumentIds = Set("i"), indexType = IndexType.RANGE)
+      .|.relationshipIndexOperator("()-[r:R(prop)]-()", argumentIds = Set("i"), indexType = IndexType.RANGE)
       .input(variables = Seq("i"))
       .build()
 
@@ -536,7 +538,7 @@ abstract class RelationshipIndexScanTestBase[CONTEXT <: RuntimeContext](
       .produceResults("r")
       .nonFuseable()
       .unwind(s"range(1, 10) AS r2")
-      .relationshipIndexOperator("(n)-[r:R(prop)]-(m)", indexType = IndexType.RANGE)
+      .relationshipIndexOperator("()-[r:R(prop)]-()", indexType = IndexType.RANGE)
       .build()
 
     // then
@@ -557,7 +559,7 @@ abstract class RelationshipIndexScanTestBase[CONTEXT <: RuntimeContext](
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("r")
-      .relationshipIndexOperator("(n)-[r:R(prop)]-(m)", indexType = IndexType.RANGE)
+      .relationshipIndexOperator("()-[r:R(prop)]-()", indexType = IndexType.RANGE)
       .build()
 
     execute(logicalQuery, runtime) should beColumns("r").withSingleRow(rel)

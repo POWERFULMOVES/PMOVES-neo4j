@@ -46,7 +46,7 @@ import static org.neo4j.values.storable.ValueCategory.UNKNOWN;
 
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.List;
+import java.util.Collection;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -56,13 +56,15 @@ import org.neo4j.graphdb.schema.IndexSettingUtil;
 import org.neo4j.graphdb.schema.IndexType;
 import org.neo4j.internal.schema.IndexCapability;
 import org.neo4j.internal.schema.IndexQuery.IndexQueryType;
-import org.neo4j.kernel.api.impl.fulltext.FulltextIndexCapability;
+import org.neo4j.kernel.api.impl.schema.fulltext.FulltextIndexCapability;
+import org.neo4j.kernel.api.impl.schema.text.TextIndexProvider;
 import org.neo4j.kernel.api.impl.schema.trigram.TrigramIndexProvider;
 import org.neo4j.kernel.api.impl.schema.vector.VectorIndexProvider;
 import org.neo4j.kernel.api.impl.schema.vector.VectorIndexVersion;
 import org.neo4j.kernel.impl.index.schema.PointIndexProvider;
 import org.neo4j.kernel.impl.index.schema.RangeIndexProvider;
 import org.neo4j.kernel.impl.index.schema.TokenIndexProvider;
+import org.neo4j.test.LatestVersions;
 import org.neo4j.values.storable.ValueCategory;
 
 class IndexCapabilityTest {
@@ -74,9 +76,17 @@ class IndexCapabilityTest {
     private static final IndexCapability TRIGRAM = TrigramIndexProvider.CAPABILITY;
     private static final IndexCapability FULLTEXT = new FulltextIndexCapability(false);
     private static final IndexCapability VECTOR_V1 = VectorIndexProvider.capability(
-            VectorIndexVersion.V1_0, IndexSettingUtil.defaultConfigForTest(IndexType.VECTOR));
+            VectorIndexVersion.V1_0,
+            IndexSettingUtil.defaultConfigForTest(IndexType.VECTOR),
+            LatestVersions.LATEST_KERNEL_VERSION);
     private static final IndexCapability VECTOR_V2 = VectorIndexProvider.capability(
-            VectorIndexVersion.V2_0, IndexSettingUtil.defaultConfigForTest(IndexType.VECTOR));
+            VectorIndexVersion.V2_0,
+            IndexSettingUtil.defaultConfigForTest(IndexType.VECTOR),
+            LatestVersions.LATEST_KERNEL_VERSION);
+    private static final IndexCapability VECTOR_V3 = VectorIndexProvider.capability(
+            VectorIndexVersion.V3_0,
+            IndexSettingUtil.defaultConfigForTest(IndexType.VECTOR),
+            LatestVersions.LATEST_KERNEL_VERSION);
     private static final IndexCapability[] NONE = of();
     private static final IndexCapability[] ALL_PROPERTY =
             of(RANGE, POINT, TEXT, TRIGRAM, FULLTEXT, VECTOR_V1, VECTOR_V2);
@@ -93,6 +103,7 @@ class IndexCapabilityTest {
         assertThat(FULLTEXT.supportsOrdering()).isFalse();
         assertThat(VECTOR_V1.supportsOrdering()).isFalse();
         assertThat(VECTOR_V2.supportsOrdering()).isFalse();
+        assertThat(VECTOR_V3.supportsOrdering()).isFalse();
     }
 
     @Test
@@ -105,13 +116,14 @@ class IndexCapabilityTest {
         assertThat(FULLTEXT.supportsReturningValues()).isFalse();
         assertThat(VECTOR_V1.supportsReturningValues()).isFalse();
         assertThat(VECTOR_V2.supportsReturningValues()).isFalse();
+        assertThat(VECTOR_V3.supportsReturningValues()).isFalse();
     }
 
     @ParameterizedTest
     @MethodSource("supportedValueCategories")
     void testAreValueCategoriesAcceptedRange(IndexCapability capability, ValueCategory[] supportedValueCategory) {
         for (ValueCategory valueCategory : ValueCategory.values()) {
-            var expected = Arrays.asList(supportedValueCategory).contains(valueCategory);
+            boolean expected = Arrays.asList(supportedValueCategory).contains(valueCategory);
             assertThat(capability.areValueCategoriesAccepted(valueCategory)).isEqualTo(expected);
         }
     }
@@ -120,14 +132,14 @@ class IndexCapabilityTest {
     @MethodSource("supportedQueries")
     void testIsQuerySupported(
             IndexQueryType queryType, ValueCategory valueCategory, IndexCapability[] expectedToSupport) {
-        List<IndexCapability> expectedNotToSupport = new ArrayList<>(Arrays.asList(ALL));
+        Collection<IndexCapability> expectedNotToSupport = new ArrayList<>(Arrays.asList(ALL));
         for (IndexCapability indexCapability : expectedToSupport) {
-            var actual = indexCapability.isQuerySupported(queryType, valueCategory);
+            boolean actual = indexCapability.isQuerySupported(queryType, valueCategory);
             assertThat(actual).as("expect " + indexCapability + " to support").isTrue();
             expectedNotToSupport.remove(indexCapability);
         }
         for (IndexCapability indexCapability : expectedNotToSupport) {
-            var actual = indexCapability.isQuerySupported(queryType, valueCategory);
+            boolean actual = indexCapability.isQuerySupported(queryType, valueCategory);
             assertThat(actual)
                     .as("expect " + indexCapability + " to not support")
                     .isFalse();
@@ -301,7 +313,7 @@ class IndexCapabilityTest {
                 Arguments.of(FULLTEXT_SEARCH, ANYTHING, NONE),
                 // NEAREST_NEIGHBORS
                 Arguments.of(NEAREST_NEIGHBORS, NUMBER, NONE),
-                Arguments.of(NEAREST_NEIGHBORS, NUMBER_ARRAY, of(VECTOR_V1, VECTOR_V2)),
+                Arguments.of(NEAREST_NEIGHBORS, NUMBER_ARRAY, of(VECTOR_V1, VECTOR_V2, VECTOR_V3)),
                 Arguments.of(NEAREST_NEIGHBORS, ValueCategory.TEXT, NONE),
                 Arguments.of(NEAREST_NEIGHBORS, TEXT_ARRAY, NONE),
                 Arguments.of(NEAREST_NEIGHBORS, GEOMETRY, NONE),
@@ -324,7 +336,8 @@ class IndexCapabilityTest {
                 Arguments.of(TRIGRAM, new ValueCategory[] {ValueCategory.TEXT}),
                 Arguments.of(FULLTEXT, new ValueCategory[] {ValueCategory.TEXT, TEXT_ARRAY}),
                 Arguments.of(VECTOR_V1, new ValueCategory[] {NUMBER_ARRAY}),
-                Arguments.of(VECTOR_V2, new ValueCategory[] {NUMBER_ARRAY}));
+                Arguments.of(VECTOR_V2, new ValueCategory[] {NUMBER_ARRAY}),
+                Arguments.of(VECTOR_V3, new ValueCategory[] {NUMBER_ARRAY}));
     }
 
     private static IndexCapability[] of(IndexCapability... capabilities) {

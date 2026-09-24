@@ -21,7 +21,7 @@ package org.neo4j.bolt.protocol;
 
 import java.util.List;
 import java.util.Optional;
-import org.neo4j.bolt.negotiation.ProtocolVersion;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 import org.neo4j.bolt.protocol.common.BoltProtocol;
 
 /**
@@ -60,6 +60,12 @@ public interface BoltProtocolRegistry {
      * @return Empty if none.
      */
     List<ProtocolVersion> versionsAvailable();
+
+    /**
+     * Returns the latest BoltProtocol version available in the server
+     * @return Empty if none
+     */
+    Optional<BoltProtocol> getLatest();
 
     interface Builder {
 

@@ -22,6 +22,7 @@ package org.neo4j.cypher.internal.runtime.interpreted.pipes.aggregation
 import org.neo4j.cypher.internal.runtime.IsNoValue
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Expression
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.QueryState
+import org.neo4j.cypher.operations.CypherTypeValueMapper
 import org.neo4j.exceptions.CypherTypeException
 import org.neo4j.values.AnyValue
 import org.neo4j.values.storable.DurationValue
@@ -51,7 +52,11 @@ trait NumericOrDurationAggregationExpression extends AggregationFunction {
           case None =>
             aggregatingType = Some(AggregatingNumbers)
           case Some(AggregatingDurations) =>
-            throw new CypherTypeException("%s(%s) cannot mix number and duration".format(name, value))
+            throw CypherTypeException.onlyDurationValuesAllowed(
+              "%s(%s)".format(name, value),
+              vl.prettify(),
+              CypherTypeValueMapper.valueType(vl)
+            )
           case _ =>
         }
         aggNumber(number)
@@ -60,12 +65,21 @@ trait NumericOrDurationAggregationExpression extends AggregationFunction {
           case None =>
             aggregatingType = Some(AggregatingDurations)
           case Some(AggregatingNumbers) =>
-            throw new CypherTypeException("%s(%s) cannot mix number and duration".format(name, value))
+            throw CypherTypeException.onlyNumericalValuesAllowed(
+              "%s(%s)".format(name, value),
+              vl.prettify(),
+              CypherTypeValueMapper.valueType(vl)
+            )
           case _ =>
         }
         aggDuration(dur)
       case _ =>
-        throw new CypherTypeException("%s(%s) can only handle numerical values, duration, or null.".format(name, value))
+        throw CypherTypeException.onlyNumericalValuesDurationsOrNullAllowed(
+          "%s(%s)".format(name, value),
+          vl.prettify(),
+          vl.getTypeName,
+          CypherTypeValueMapper.valueType(vl)
+        )
     }
   }
 }

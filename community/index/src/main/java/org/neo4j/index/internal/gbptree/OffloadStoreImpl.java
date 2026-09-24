@@ -155,6 +155,7 @@ public class OffloadStoreImpl<KEY, VALUE> implements OffloadStore<KEY, VALUE> {
             cursor.setOffset(SIZE_HEADER);
             putKeyValueSize(cursor, keySize, 0);
             layout.writeKey(cursor, key);
+            PointerChecking.checkOutOfBounds(cursor);
             return newId;
         }
     }
@@ -166,7 +167,7 @@ public class OffloadStoreImpl<KEY, VALUE> implements OffloadStore<KEY, VALUE> {
         int keySize = layout.keySize(key);
         int valueSize = layout.valueSize(value);
         long newId = acquireNewId(stableGeneration, unstableGeneration, cursorContext);
-        try (PageCursor cursor = pcFactory.create(newId, PagedFile.PF_SHARED_WRITE_LOCK, cursorContext)) {
+        try (var cursor = pcFactory.create(newId, PagedFile.PF_SHARED_WRITE_LOCK, cursorContext)) {
             placeCursorAtOffloadId(cursor, newId);
 
             writeHeader(cursor);
@@ -174,6 +175,7 @@ public class OffloadStoreImpl<KEY, VALUE> implements OffloadStore<KEY, VALUE> {
             putKeyValueSize(cursor, keySize, valueSize);
             layout.writeKey(cursor, key);
             layout.writeValue(cursor, value);
+            PointerChecking.checkOutOfBounds(cursor);
             return newId;
         }
     }
@@ -217,7 +219,7 @@ public class OffloadStoreImpl<KEY, VALUE> implements OffloadStore<KEY, VALUE> {
     private long acquireNewId(long stableGeneration, long unstableGeneration, CursorContext cursorContext)
             throws IOException {
         return idProvider.acquireNewId(
-                stableGeneration, unstableGeneration, bind(pcFactory, PagedFile.PF_SHARED_WRITE_LOCK, cursorContext));
+                stableGeneration, bind(pcFactory, PagedFile.PF_SHARED_WRITE_LOCK, cursorContext), cursorContext);
     }
 
     private static void placeCursorAtOffloadId(PageCursor cursor, long offloadId) throws IOException {

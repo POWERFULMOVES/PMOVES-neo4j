@@ -20,7 +20,6 @@
 package org.neo4j.internal.recordstorage;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.eclipse.collections.api.factory.Sets.immutable;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -65,9 +64,8 @@ import static org.neo4j.kernel.impl.store.record.RecordLoad.NORMAL;
 import static org.neo4j.lock.LockTracer.NONE;
 import static org.neo4j.lock.LockType.EXCLUSIVE;
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
-import static org.neo4j.storageengine.api.IndexEntryUpdate.add;
-import static org.neo4j.storageengine.api.IndexEntryUpdate.change;
-import static org.neo4j.storageengine.api.IndexEntryUpdate.remove;
+import static org.neo4j.storageengine.api.EagerValueIndexEntryUpdate.add;
+import static org.neo4j.storageengine.api.EagerValueIndexEntryUpdate.remove;
 import static org.neo4j.storageengine.api.TransactionApplicationMode.INTERNAL;
 
 import java.io.IOException;
@@ -109,10 +107,11 @@ import org.neo4j.io.fs.FlushableChannel;
 import org.neo4j.io.fs.ReadPastEndException;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
+import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.KernelVersionProvider;
-import org.neo4j.kernel.database.MetadataCache;
 import org.neo4j.kernel.impl.api.FlatRelationshipModifications;
 import org.neo4j.kernel.impl.api.FlatRelationshipModifications.RelationshipData;
 import org.neo4j.kernel.impl.store.DynamicAllocatorProvider;
@@ -134,15 +133,16 @@ import org.neo4j.kernel.impl.store.record.PropertyRecord;
 import org.neo4j.kernel.impl.store.record.Record;
 import org.neo4j.kernel.impl.store.record.RelationshipGroupRecord;
 import org.neo4j.kernel.impl.store.record.RelationshipRecord;
-import org.neo4j.kernel.impl.transaction.log.EmptyLogTailMetadata;
-import org.neo4j.kernel.impl.transaction.log.InMemoryVersionableReadableClosablePositionAwareChannel;
-import org.neo4j.kernel.impl.transaction.log.ReadableLogChannel;
 import org.neo4j.lock.LockService;
 import org.neo4j.lock.ResourceLocker;
+import org.neo4j.lock.ResourceType;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.CommandReader;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
+import org.neo4j.storageengine.api.IndexUpdateListener;
+import org.neo4j.storageengine.api.LogMetadataProviderImpl;
 import org.neo4j.storageengine.api.RelationshipDirection;
 import org.neo4j.storageengine.api.StandardConstraintRuleAccessor;
 import org.neo4j.storageengine.api.StorageCommand;
@@ -150,12 +150,16 @@ import org.neo4j.storageengine.api.StorageEngineTransaction;
 import org.neo4j.storageengine.api.StorageReader;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.storageengine.util.IdGeneratorUpdatesWorkSync;
+import org.neo4j.storageengine.util.IndexUpdatesWorkSync;
 import org.neo4j.test.LatestVersions;
 import org.neo4j.test.extension.EphemeralNeo4jLayoutExtension;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.pagecache.EphemeralPageCacheExtension;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.Values;
+import org.neo4j.wal.EmptyLogTailMetadata;
+import org.neo4j.wal.InMemoryVersionableReadableClosablePositionAwareChannel;
+import org.neo4j.wal.ReadableLogChannel;
 
 @EphemeralNeo4jLayoutExtension
 @EphemeralPageCacheExtension
@@ -209,7 +213,7 @@ class TransactionRecordStateTest {
 
     private void createStores(Config config, RecordFormats formats) {
         var logTailMetadata = new EmptyLogTailMetadata(config);
-        kernelVersionProvider = new MetadataCache(logTailMetadata);
+        kernelVersionProvider = new LogMetadataProviderImpl(logTailMetadata);
         var pageCacheTracer = PageCacheTracer.NULL;
         idGeneratorFactory =
                 new DefaultIdGeneratorFactory(fs, immediate(), pageCacheTracer, databaseLayout.getDatabaseName());
@@ -224,8 +228,7 @@ class TransactionRecordStateTest {
                 NullLogProvider.getInstance(),
                 new CursorContextFactory(pageCacheTracer, EMPTY_CONTEXT_SUPPLIER),
                 false,
-                logTailMetadata,
-                immutable.empty());
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
         neoStores = storeFactory.openAllNeoStores();
         allocatorProvider = DynamicAllocatorProviders.nonTransactionalAllocator(neoStores);
 
@@ -375,7 +378,7 @@ class TransactionRecordStateTest {
         // WHEN
         StorageEngineTransaction transaction = transaction(storeCursors, recordState);
         IndexUpdatesExtractor extractor = new IndexUpdatesExtractor(CommandSelector.NORMAL);
-        transaction.commandBatch().accept(extractor);
+        transaction.commandBatch().accept(new SingleApplierDispatcher(extractor));
 
         // THEN
         // -- later recovering that tx, there should be only one update for each type
@@ -424,23 +427,25 @@ class TransactionRecordStateTest {
 
         // THEN
         StorageEngineTransaction representation = transaction(storeCursors, recordState);
-        representation.commandBatch().accept(command -> ((Command) command).handle(new CommandVisitor.Adapter() {
-            @Override
-            public boolean visitPropertyCommand(PropertyCommand command) {
-                // THEN
-                verifyPropertyRecord(command.getBefore());
-                verifyPropertyRecord(command.getAfter());
-                return false;
-            }
-
-            private void verifyPropertyRecord(PropertyRecord record) {
-                if (record.getPrevProp() != Record.NO_NEXT_PROPERTY.intValue()) {
-                    for (PropertyBlock block : record.propertyBlocks()) {
-                        assertTrue(block.isLight());
+        representation
+                .commandBatch()
+                .accept(command -> ((Command) command).handle(new CommandVisitor.Adapter() {
+                    @Override
+                    public boolean visitPropertyCommand(PropertyCommand command) {
+                        // THEN
+                        verifyPropertyRecord(command.getBefore());
+                        verifyPropertyRecord(command.getAfter());
+                        return false;
                     }
-                }
-            }
-        }));
+
+                    private void verifyPropertyRecord(PropertyRecord record) {
+                        if (record.getPrevProp() != Record.NO_NEXT_PROPERTY.intValue()) {
+                            for (PropertyBlock block : record.propertyBlocks()) {
+                                assertTrue(block.isLight());
+                            }
+                        }
+                    }
+                }));
     }
 
     @Test
@@ -464,7 +469,7 @@ class TransactionRecordStateTest {
         var indexUpdates = indexUpdatesOf(neoStores, recordState);
 
         // THEN
-        assertEquals(asSet(add(nodeId, rule1, value1), add(nodeId, rule2, value2)), asSet(single(indexUpdates)));
+        assertEquals(asSet(add(nodeId, rule1, value1), add(nodeId, rule2, value2)), asSet(indexUpdates));
     }
 
     @Test
@@ -487,8 +492,7 @@ class TransactionRecordStateTest {
         var indexUpdates = indexUpdatesOf(neoStores, recordState);
 
         // THEN
-        assertEquals(
-                asSet(add(nodeId, rule1, value2), add(nodeId, rule2, value1, value2)), asSet(single(indexUpdates)));
+        assertEquals(asSet(add(nodeId, rule1, value2), add(nodeId, rule2, value1, value2)), asSet(indexUpdates));
     }
 
     @Test
@@ -510,7 +514,7 @@ class TransactionRecordStateTest {
         var indexUpdates = indexUpdatesOf(neoStores, recordState);
 
         // THEN
-        assertEquals(asSet(remove(nodeId, rule, value1)), asSet(single(indexUpdates)));
+        assertEquals(asSet(remove(nodeId, rule, value1)), asSet(indexUpdates));
     }
 
     @Test
@@ -533,7 +537,7 @@ class TransactionRecordStateTest {
         var indexUpdates = indexUpdatesOf(neoStores, recordState);
 
         // THEN
-        assertEquals(asSet(remove(nodeId, rule1, value1), remove(nodeId, rule2, value1)), asSet(single(indexUpdates)));
+        assertEquals(asSet(remove(nodeId, rule1, value1), remove(nodeId, rule2, value1)), asSet(indexUpdates));
     }
 
     @Test
@@ -556,7 +560,7 @@ class TransactionRecordStateTest {
         var indexUpdates = indexUpdatesOf(neoStores, recordState);
 
         // THEN
-        assertEquals(asSet(add(nodeId, rule2, value2), remove(nodeId, rule3, value1)), asSet(single(indexUpdates)));
+        assertEquals(asSet(add(nodeId, rule2, value2), remove(nodeId, rule3, value1)), asSet(indexUpdates));
     }
 
     @Test
@@ -578,17 +582,18 @@ class TransactionRecordStateTest {
         Value newValue1 = Values.of("new");
         Value newValue2 = Values.of("new 2");
         recordState = newTransactionRecordState();
-        recordState.nodeChangeProperty(nodeId, propertyId1, newValue1);
-        recordState.nodeChangeProperty(nodeId, propertyId2, newValue2);
+        recordState.nodeAddProperty(nodeId, propertyId1, newValue1);
+        recordState.nodeAddProperty(nodeId, propertyId2, newValue2);
         var indexUpdates = indexUpdatesOf(neoStores, recordState);
 
         // THEN
         assertEquals(
                 asSet(
-                        change(nodeId, rule1, value1, newValue1),
-                        change(nodeId, rule2, value2, newValue2),
-                        change(nodeId, rule3, array(value1, value2), array(newValue1, newValue2))),
-                asSet(single(indexUpdates)));
+                        EagerValueIndexEntryUpdate.change(nodeId, rule1, value1, newValue1),
+                        EagerValueIndexEntryUpdate.change(nodeId, rule2, value2, newValue2),
+                        EagerValueIndexEntryUpdate.change(
+                                nodeId, rule3, array(value1, value2), array(newValue1, newValue2))),
+                asSet(indexUpdates));
     }
 
     @Test
@@ -618,7 +623,7 @@ class TransactionRecordStateTest {
                         remove(nodeId, rule1, value1),
                         remove(nodeId, rule2, value2),
                         remove(nodeId, rule3, value1, value2)),
-                asSet(single(indexUpdates)));
+                asSet(indexUpdates));
     }
 
     @Test
@@ -732,7 +737,7 @@ class TransactionRecordStateTest {
         apply(transaction(storeCursors, recordState));
 
         recordState = newTransactionRecordState();
-        recordState.nodeChangeProperty(nodeId, 0, Values.of(102));
+        recordState.nodeAddProperty(nodeId, 0, Values.of(102));
         recordState.relModify(singleCreate(relId3, 0, nodeId, nodeId));
         recordState.relAddProperty(relId1, 0, Values.of(123));
 
@@ -884,7 +889,7 @@ class TransactionRecordStateTest {
         // THEN
         assertEquals(
                 asSet(add(nodeId, rule1, value1), add(nodeId, rule2, value2), add(nodeId, rule3, value1, value2)),
-                asSet(single(updates)));
+                asSet(updates));
     }
 
     @Test
@@ -921,7 +926,7 @@ class TransactionRecordStateTest {
         tx.nodeCreate(nodes[0]);
         tx.addLabelToNode(0, nodes[1]);
         tx.nodeAddProperty(nodes[2], 0, Values.of("value"));
-        tx.nodeChangeProperty(nodes[3], 0, Values.of("value"));
+        tx.nodeAddProperty(nodes[3], 0, Values.of("value"));
         tx.nodeRemoveProperty(nodes[4], 0);
         tx.nodeDelete(nodes[5]);
 
@@ -984,19 +989,20 @@ class TransactionRecordStateTest {
         // The dynamic label record in before should be the same id as in after, and should be in use
         final AtomicBoolean foundRelationshipGroupInUse = new AtomicBoolean();
 
-        ptx.commandBatch().accept(command -> ((Command) command).handle(new CommandVisitor.Adapter() {
-            @Override
-            public boolean visitRelationshipGroupCommand(Command.RelationshipGroupCommand command) {
-                if (command.getAfter().inUse()) {
-                    if (!foundRelationshipGroupInUse.get()) {
-                        foundRelationshipGroupInUse.set(true);
-                    } else {
-                        fail();
+        ptx.commandBatch()
+                .accept(command -> ((Command) command).handle(new CommandVisitor.Adapter() {
+                    @Override
+                    public boolean visitRelationshipGroupCommand(Command.RelationshipGroupCommand command) {
+                        if (command.getAfter().inUse()) {
+                            if (!foundRelationshipGroupInUse.get()) {
+                                foundRelationshipGroupInUse.set(true);
+                            } else {
+                                fail();
+                            }
+                        }
+                        return false;
                     }
-                }
-                return false;
-            }
-        }));
+                }));
         assertTrue(foundRelationshipGroupInUse.get(), "Did not create relationship group command");
     }
 
@@ -1329,7 +1335,7 @@ class TransactionRecordStateTest {
         List<StorageCommand> commands = new ArrayList<>();
         state.extractCommands(commands, INSTANCE);
 
-        assertThat(commands.size()).isEqualTo(1);
+        assertThat(commands).hasSize(1);
         SchemaRuleCommand command = (SchemaRuleCommand) commands.get(0);
         assertThat(command.getMode()).isEqualTo(Command.Mode.CREATE);
         assertThat(command.getSchemaRule()).isEqualTo(rule);
@@ -1353,7 +1359,7 @@ class TransactionRecordStateTest {
         List<StorageCommand> commands = new ArrayList<>();
         state.extractCommands(commands, INSTANCE);
 
-        assertThat(commands.size()).isEqualTo(1);
+        assertThat(commands).hasSize(1);
         SchemaRuleCommand command = (SchemaRuleCommand) commands.get(0);
         assertThat(command.getMode()).isEqualTo(Command.Mode.CREATE);
         assertThat(command.getSchemaRule()).isEqualTo(rule);
@@ -1382,7 +1388,7 @@ class TransactionRecordStateTest {
         List<StorageCommand> commands = new ArrayList<>();
         state.extractCommands(commands, INSTANCE);
 
-        assertThat(commands.size()).isEqualTo(2);
+        assertThat(commands).hasSize(2);
 
         PropertyCommand propCmd = (PropertyCommand) commands.get(0); // Order matters. Props added before schema.
         assertThat(propCmd.getSchemaRuleId()).isEqualTo(ruleId);
@@ -1406,7 +1412,7 @@ class TransactionRecordStateTest {
         commands.clear();
         state.extractCommands(commands, INSTANCE);
 
-        assertThat(commands.size()).isEqualTo(1);
+        assertThat(commands).hasSize(1);
 
         propCmd = (PropertyCommand) commands.get(0);
         assertThat(propCmd.getSchemaRuleId()).isEqualTo(ruleId);
@@ -1434,7 +1440,7 @@ class TransactionRecordStateTest {
         List<StorageCommand> commands = new ArrayList<>();
         state.extractCommands(commands, INSTANCE);
 
-        assertThat(commands.size()).isEqualTo(2);
+        assertThat(commands).hasSize(2);
         SchemaRuleCommand schemaCmd =
                 (SchemaRuleCommand) commands.get(0); // Order matters. Rule deletes before property deletes.
         assertThat(schemaCmd.getKey()).isEqualTo(ruleId);
@@ -1464,7 +1470,7 @@ class TransactionRecordStateTest {
         List<StorageCommand> commands = new ArrayList<>();
         state.extractCommands(commands, INSTANCE);
 
-        assertThat(commands.size()).isEqualTo(2);
+        assertThat(commands).hasSize(2);
 
         PropertyCommand propCmd = (PropertyCommand) commands.get(0); // Order matters. Props added before schema.
         assertThat(propCmd.getSchemaRuleId()).isEqualTo(ruleId);
@@ -1506,7 +1512,7 @@ class TransactionRecordStateTest {
         List<StorageCommand> commands = new ArrayList<>();
         state.extractCommands(commands, INSTANCE);
 
-        assertThat(commands.size()).isEqualTo(2);
+        assertThat(commands).hasSize(2);
 
         PropertyCommand propCmd = (PropertyCommand) commands.get(0); // Order matters. Props added before schema.
         assertThat(propCmd.getSchemaRuleId()).isEqualTo(ruleId);
@@ -1763,18 +1769,27 @@ class TransactionRecordStateTest {
         assertEquals(types.length, cursor, "Not enough relationship group records found in chain for " + node);
     }
 
-    private Iterable<Iterable<IndexEntryUpdate<IndexDescriptor>>> indexUpdatesOf(
-            NeoStores neoStores, TransactionRecordState state) throws IOException, TransactionFailureException {
+    private Iterable<IndexEntryUpdate> indexUpdatesOf(NeoStores neoStores, TransactionRecordState state)
+            throws IOException, TransactionFailureException {
         return indexUpdatesOf(neoStores, transaction(storeCursors, state));
     }
 
-    private Iterable<Iterable<IndexEntryUpdate<IndexDescriptor>>> indexUpdatesOf(
-            NeoStores neoStores, StorageEngineTransaction transaction) throws IOException {
+    private Iterable<IndexEntryUpdate> indexUpdatesOf(NeoStores neoStores, StorageEngineTransaction transaction)
+            throws IOException {
         IndexUpdatesExtractor extractor = new IndexUpdatesExtractor(CommandSelector.NORMAL);
-        transaction.commandBatch().accept(extractor);
+        transaction.commandBatch().accept(new SingleApplierDispatcher(extractor));
 
         StorageReader reader = new RecordStorageReader(neoStores);
-        List<Iterable<IndexEntryUpdate<IndexDescriptor>>> updates = new ArrayList<>();
+        List<IndexEntryUpdate> updates = new ArrayList<>();
+        IndexUpdatesWorkSync indexUpdatesWorkSync = new IndexUpdatesWorkSync(
+                new IndexUpdateListener.Adapter() {
+                    @Override
+                    public void applyUpdates(
+                            Iterator<IndexEntryUpdate> indexUpdates, CursorContext cursorContext, boolean parallel) {
+                        indexUpdates.forEachRemaining(updates::add);
+                    }
+                },
+                false);
         OnlineIndexUpdates onlineIndexUpdates = new OnlineIndexUpdates(
                 neoStores.getNodeStore(),
                 schemaCache,
@@ -1783,10 +1798,11 @@ class TransactionRecordStateTest {
                 reader,
                 NULL_CONTEXT,
                 INSTANCE,
-                storeCursors);
+                storeCursors,
+                indexUpdatesWorkSync);
         onlineIndexUpdates.feed(
                 extractor.getNodeCommands(), extractor.getRelationshipCommands(), CommandSelector.NORMAL);
-        updates.add(onlineIndexUpdates);
+        onlineIndexUpdates.apply();
         reader.close();
         return updates;
     }
@@ -1806,7 +1822,7 @@ class TransactionRecordStateTest {
         List<StorageCommand> commands = new ArrayList<>();
         try {
             while (true) {
-                commands.add(reader.read(channel));
+                commands.add(reader.read(channel, EmptyMemoryTracker.INSTANCE));
             }
         } catch (ReadPastEndException e) {
             // reached the end
@@ -1883,27 +1899,33 @@ class TransactionRecordStateTest {
         PropertyDeleter propertyDeleter = new PropertyDeleter(
                 propertyTraverser, neoStores, null, logProvider, Config.defaults(), NULL_CONTEXT, storeCursors);
         var allocatorProvider = DynamicAllocatorProviders.nonTransactionalAllocator(neoStores);
+        var resourceLocker = new ResourceLocker.IgnoreResourceLocker() {
+            @Override
+            public boolean tryExclusiveLock(ResourceType resourceType, long resourceId) {
+                return true;
+            }
+        };
         return new TransactionRecordState(
                 kernelVersionProvider,
                 recordChangeSet,
                 neoStores,
-                ResourceLocker.IGNORE,
+                resourceLocker,
                 NONE,
                 new RelationshipModifier(
                         relationshipGroupGetter,
                         propertyDeleter,
                         neoStores.getRelationshipGroupStore().getStoreHeaderInt(),
-                        ResourceLocker.IGNORE,
+                        resourceLocker,
                         NONE,
                         NULL_CONTEXT,
-                        EmptyMemoryTracker.INSTANCE,
-                        false),
+                        EmptyMemoryTracker.INSTANCE),
                 new PropertyCreator(
                         allocatorProvider.allocator(StoreType.PROPERTY_STRING),
                         allocatorProvider.allocator(StoreType.PROPERTY_ARRAY),
                         propertyTraverser,
                         new TransactionIdSequenceProvider(neoStores),
-                        NULL_CONTEXT),
+                        NULL_CONTEXT,
+                        "db-format-2000"),
                 propertyDeleter,
                 NULL_CONTEXT,
                 storeCursors,
@@ -1946,11 +1968,11 @@ class TransactionRecordStateTest {
     }
 
     private static PropertyCommand singlePropertyCommand(Collection<StorageCommand> commands) {
-        return (PropertyCommand) single(filter(t -> t instanceof PropertyCommand, commands));
+        return (PropertyCommand) single(filter(commands, t -> t instanceof PropertyCommand));
     }
 
     private static RelationshipGroupCommand singleRelationshipGroupCommand(Collection<StorageCommand> commands) {
-        return (RelationshipGroupCommand) single(filter(t -> t instanceof RelationshipGroupCommand, commands));
+        return (RelationshipGroupCommand) single(filter(commands, t -> t instanceof RelationshipGroupCommand));
     }
 
     private IndexDescriptor createIndex(int labelId, int... propertyKeyIds) {

@@ -20,8 +20,6 @@
 package org.neo4j.internal.recordstorage;
 
 import static java.util.function.Predicate.not;
-import static org.eclipse.collections.api.factory.Sets.immutable;
-import static org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker.writable;
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
 import static org.neo4j.internal.recordstorage.RecordCursorTypes.DYNAMIC_LABEL_TOKEN_CURSOR;
 import static org.neo4j.internal.recordstorage.RecordCursorTypes.DYNAMIC_PROPERTY_KEY_TOKEN_CURSOR;
@@ -29,13 +27,12 @@ import static org.neo4j.internal.recordstorage.RecordCursorTypes.DYNAMIC_REL_TYP
 import static org.neo4j.internal.recordstorage.RecordCursorTypes.LABEL_TOKEN_CURSOR;
 import static org.neo4j.internal.recordstorage.RecordCursorTypes.PROPERTY_KEY_TOKEN_CURSOR;
 import static org.neo4j.internal.recordstorage.RecordCursorTypes.REL_TYPE_TOKEN_CURSOR;
+import static org.neo4j.io.pagecache.PageCacheOpenOptions.MULTI_VERSIONED;
 import static org.neo4j.io.pagecache.context.CursorContextFactory.NULL_CONTEXT_FACTORY;
 import static org.neo4j.kernel.impl.store.StoreType.LABEL_TOKEN_NAME;
 import static org.neo4j.kernel.impl.store.StoreType.META_DATA;
 import static org.neo4j.kernel.impl.store.StoreType.PROPERTY_KEY_TOKEN_NAME;
 import static org.neo4j.kernel.impl.store.StoreType.RELATIONSHIP_TYPE_TOKEN_NAME;
-import static org.neo4j.kernel.impl.store.format.RecordFormatSelector.selectForStore;
-import static org.neo4j.kernel.impl.store.format.RecordFormatSelector.selectForStoreOrConfigForNewDbs;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -52,11 +49,13 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import org.eclipse.collections.api.set.ImmutableSet;
 import org.neo4j.annotations.service.ServiceProvider;
 import org.neo4j.batchimport.api.AdditionalInitialIds;
 import org.neo4j.batchimport.api.BatchImporter;
+import org.neo4j.batchimport.api.BatchImporter.HardwareValidation;
 import org.neo4j.batchimport.api.Configuration;
 import org.neo4j.batchimport.api.IncrementalBatchImporter;
 import org.neo4j.batchimport.api.IndexImporterFactory;
@@ -64,15 +63,16 @@ import org.neo4j.batchimport.api.Monitor;
 import org.neo4j.batchimport.api.ReadBehaviour;
 import org.neo4j.batchimport.api.input.Collector;
 import org.neo4j.batchimport.api.input.Input;
+import org.neo4j.common.DependencyResolver;
 import org.neo4j.configuration.Config;
 import org.neo4j.consistency.checker.EntityBasedMemoryLimiter;
 import org.neo4j.consistency.checker.RecordStorageConsistencyChecker;
 import org.neo4j.consistency.checking.ByteArrayBitsManipulator;
 import org.neo4j.consistency.checking.ConsistencyCheckIncompleteException;
+import org.neo4j.consistency.checking.ConsistencyCheckMonitor;
 import org.neo4j.consistency.checking.ConsistencyFlags;
 import org.neo4j.consistency.report.ConsistencySummaryStatistics;
 import org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker;
-import org.neo4j.function.ThrowingSupplier;
 import org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector;
 import org.neo4j.internal.batchimport.BatchImporterFactory;
 import org.neo4j.internal.batchimport.IncrementalBatchImporterFactory;
@@ -85,25 +85,28 @@ import org.neo4j.internal.helpers.progress.ProgressMonitorFactory;
 import org.neo4j.internal.id.DefaultIdGeneratorFactory;
 import org.neo4j.internal.id.IdGeneratorFactory;
 import org.neo4j.internal.id.ScanOnOpenReadOnlyIdGeneratorFactory;
-import org.neo4j.internal.id.SchemaIdType;
 import org.neo4j.internal.schema.IndexConfigCompleter;
 import org.neo4j.internal.schema.SchemaRule;
 import org.neo4j.internal.schema.SchemaState;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.layout.Neo4jLayout;
+import org.neo4j.io.layout.recordstorage.RecordDatabaseFile;
 import org.neo4j.io.layout.recordstorage.RecordDatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.PageCursor;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.impl.muninn.VersionStorage;
 import org.neo4j.io.pagecache.prefetch.PagePrefetcher;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
-import org.neo4j.kernel.KernelVersionRepository;
+import org.neo4j.kernel.DatabaseCreationOptions;
+import org.neo4j.kernel.KernelVersionProvider;
 import org.neo4j.kernel.api.index.IndexProvidersAccess;
 import org.neo4j.kernel.impl.api.index.IndexProviderMap;
 import org.neo4j.kernel.impl.locking.LockManager;
+import org.neo4j.kernel.impl.locking.LockMonitor;
 import org.neo4j.kernel.impl.locking.forseti.ForsetiLockManager;
 import org.neo4j.kernel.impl.store.AbstractDynamicStore;
 import org.neo4j.kernel.impl.store.DynamicAllocatorProvider;
@@ -127,9 +130,6 @@ import org.neo4j.kernel.impl.storemigration.RecordStorageMigrator;
 import org.neo4j.kernel.impl.storemigration.RecordStoreVersion;
 import org.neo4j.kernel.impl.storemigration.RecordStoreVersionCheck;
 import org.neo4j.kernel.impl.storemigration.legacy.SchemaStore44Reader;
-import org.neo4j.kernel.impl.transaction.log.EmptyLogTailMetadata;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
 import org.neo4j.lock.LockService;
 import org.neo4j.lock.ResourceType;
 import org.neo4j.logging.InternalLog;
@@ -138,11 +138,17 @@ import org.neo4j.logging.NullLogProvider;
 import org.neo4j.logging.internal.LogService;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.monitoring.DatabaseHealth;
+import org.neo4j.monitoring.ExceptionHandlerService;
 import org.neo4j.scheduler.JobScheduler;
+import org.neo4j.storageengine.DefaultRecoveryBehavior;
+import org.neo4j.storageengine.OperationMode;
+import org.neo4j.storageengine.VectorStoreCreator;
 import org.neo4j.storageengine.api.CommandReaderFactory;
 import org.neo4j.storageengine.api.ConstraintRuleAccessor;
 import org.neo4j.storageengine.api.LogFilesInitializer;
+import org.neo4j.storageengine.api.LogMetadataProvider;
 import org.neo4j.storageengine.api.MetadataProvider;
+import org.neo4j.storageengine.api.RecoveryBehavior;
 import org.neo4j.storageengine.api.SchemaRule44;
 import org.neo4j.storageengine.api.StorageEngine;
 import org.neo4j.storageengine.api.StorageEngineFactory;
@@ -167,6 +173,10 @@ import org.neo4j.token.TokenHolders;
 import org.neo4j.token.api.NamedToken;
 import org.neo4j.token.api.TokenHolder;
 import org.neo4j.token.api.TokensLoader;
+import org.neo4j.wal.EmptyLogTailMetadata;
+import org.neo4j.wal.LogTailLogVersionsMetadata;
+import org.neo4j.wal.LogTailMetadata;
+import org.neo4j.wal.LogTailMetadataFactory;
 
 @ServiceProvider
 public class RecordStorageEngineFactory implements StorageEngineFactory {
@@ -226,7 +236,8 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
             MemoryTracker memoryTracker,
             PageCacheTracer pageCacheTracer,
             CursorContextFactory contextFactory,
-            boolean forceBtreeIndexesToRange) {
+            boolean forceBtreeIndexesToRange,
+            long maxOffHeapMemory) {
         BatchImporterFactory batchImporterFactory = BatchImporterFactory.withHighestPriority();
         RecordStorageMigrator recordStorageMigrator = new RecordStorageMigrator(
                 fs,
@@ -238,7 +249,8 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
                 contextFactory,
                 batchImporterFactory,
                 memoryTracker,
-                forceBtreeIndexesToRange);
+                forceBtreeIndexesToRange,
+                maxOffHeapMemory);
         return List.of(recordStorageMigrator);
     }
 
@@ -256,16 +268,22 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
             LockService lockService,
             IdGeneratorFactory idGeneratorFactory,
             DatabaseHealth databaseHealth,
+            JobScheduler jobScheduler,
             InternalLogProvider internalLogProvider,
             InternalLogProvider userLogProvider,
             RecoveryCleanupWorkCollector recoveryCleanupWorkCollector,
-            LogTailMetadata logTailMetadata,
-            KernelVersionRepository kernelVersionRepository,
+            LogMetadataProvider logMetadataProvider,
             MemoryTracker memoryTracker,
             CursorContextFactory contextFactory,
             PageCacheTracer pageCacheTracer,
             VersionStorage versionStorage,
-            PagePrefetcher pagePrefetcher) {
+            PagePrefetcher pagePrefetcher,
+            DependencyResolver databaseDependencies,
+            ExceptionHandlerService exceptionHandlerService,
+            OperationMode mode,
+            VectorStoreCreator vectorStoreCreator,
+            DatabaseCreationOptions databaseCreationOptions,
+            boolean singleThreadedApply) {
         return new RecordStorageEngine(
                 formatSpecificDatabaseLayout(databaseLayout),
                 config,
@@ -282,24 +300,24 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
                 idGeneratorFactory,
                 recoveryCleanupWorkCollector,
                 memoryTracker,
-                logTailMetadata,
-                kernelVersionRepository,
-                LockVerificationFactory.select(config),
+                logMetadataProvider,
                 contextFactory,
                 pageCacheTracer,
                 versionStorage,
-                pagePrefetcher);
+                pagePrefetcher,
+                databaseCreationOptions);
     }
 
     @Override
     public List<Path> listStorageFiles(FileSystemAbstraction fileSystem, DatabaseLayout databaseLayout)
             throws IOException {
-        if (!fileSystem.fileExists(formatSpecificDatabaseLayout(databaseLayout).metadataStore())) {
+        if (!fileSystem.fileExists(formatSpecificDatabaseLayout(databaseLayout).pathForExistsMarker())) {
             throw new IOException("No storage present at " + databaseLayout + " on " + fileSystem);
         }
 
-        return Arrays.stream(StoreType.STORE_TYPES)
-                .map(t -> databaseLayout.file(t.getDatabaseFile()))
+        return Arrays.stream(RecordDatabaseFile.values())
+                .flatMap(databaseLayout::allFiles)
+                .flatMap(storePath -> storePath.allSegments(fileSystem).stream())
                 .filter(fileSystem::fileExists)
                 .toList();
     }
@@ -310,9 +328,9 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
     }
 
     @Override
-    public Set<String> supportedFormats(boolean includeFormatsUnderDevelopment) {
+    public Set<String> supportedFormats(boolean includeDevelopmentFormats) {
         return Iterables.stream(RecordFormatSelector.allFormats())
-                .filter(f -> includeFormatsUnderDevelopment || !f.formatUnderDevelopment())
+                .filter(f -> includeDevelopmentFormats || !f.formatUnderDevelopment())
                 .filter(not(RecordFormats::onlyForMigration))
                 .map(RecordFormats::name)
                 .collect(Collectors.toUnmodifiableSet());
@@ -329,10 +347,9 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
     }
 
     @Override
-    public StoreFormatLimits limitsForFormat(String formatName, boolean includeFormatsUnderDevelopment) {
+    public StoreFormatLimits limitsForFormat(String formatName) {
         // Including only for migration formats
         Optional<RecordFormats> format = Iterables.stream(RecordFormatSelector.allFormats())
-                .filter(f -> includeFormatsUnderDevelopment || !f.formatUnderDevelopment())
                 .filter(formats -> formats.name().equals(formatName))
                 .findFirst();
 
@@ -348,11 +365,8 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
             PageCache pageCache,
             DatabaseReadOnlyChecker readOnlyChecker,
             CursorContextFactory contextFactory,
-            LogTailLogVersionsMetadata logTailMetadata,
             PageCacheTracer pageCacheTracer) {
         RecordDatabaseLayout databaseLayout = formatSpecificDatabaseLayout(layout);
-        RecordFormats recordFormats = selectForStoreOrConfigForNewDbs(
-                config, databaseLayout, fs, pageCache, NullLogProvider.getInstance(), contextFactory);
         var idGeneratorFactory = readOnlyChecker.isReadOnly()
                 ? new ScanOnOpenReadOnlyIdGeneratorFactory()
                 : new DefaultIdGeneratorFactory(fs, immediate(), pageCacheTracer, databaseLayout.getDatabaseName());
@@ -363,39 +377,12 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
                         pageCache,
                         pageCacheTracer,
                         fs,
-                        recordFormats,
                         NullLogProvider.getInstance(),
                         contextFactory,
                         readOnlyChecker.isReadOnly(),
-                        logTailMetadata,
-                        immutable.empty())
+                        DatabaseCreationOptions.EMPTY_CREATION_OPTIONS)
                 .openNeoStores(META_DATA)
                 .getMetaDataStore();
-    }
-
-    @Override
-    public void resetMetadata(
-            FileSystemAbstraction fs,
-            DatabaseLayout databaseLayout,
-            Config config,
-            PageCache pageCache,
-            CursorContextFactory contextFactory,
-            PageCacheTracer pageCacheTracer,
-            StoreId storeId,
-            UUID externalStoreId)
-            throws IOException {
-        try (var metadataProvider = transactionMetaDataStore(
-                        fs,
-                        databaseLayout,
-                        config,
-                        pageCache,
-                        writable(),
-                        contextFactory,
-                        LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
-                        pageCacheTracer);
-                var cursorContext = contextFactory.create("resetMetadata")) {
-            metadataProvider.regenerateMetadata(storeId, externalStoreId, cursorContext);
-        }
     }
 
     @Override
@@ -445,7 +432,7 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
                 NullLogProvider.getInstance(),
                 contextFactory,
                 true,
-                logTailMetadata);
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
         try (var cursorContext = contextFactory.create("loadSchemaRules");
                 var stores = factory.openNeoStores(
                         StoreType.SCHEMA,
@@ -471,7 +458,7 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
                     recordDatabaseLayout.schemaStore(),
                     recordDatabaseLayout.idSchemaStore(),
                     config,
-                    SchemaIdType.SCHEMA,
+                    RecordIdType.SCHEMA,
                     idGeneratorFactory,
                     pageCache,
                     pageCacheTracer,
@@ -510,7 +497,7 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
                 NullLogProvider.getInstance(),
                 contextFactory,
                 true,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL);
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
         try (var cursorContext = contextFactory.create("loadSchemaRules");
                 var stores = factory.openAllNeoStores();
                 var storeCursors = new CachedStoreCursors(stores, cursorContext)) {
@@ -551,7 +538,7 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
                 NullLogProvider.getInstance(),
                 contextFactory,
                 true,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL);
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
         try (NeoStores stores = factory.openNeoStores(
                 StoreType.PROPERTY_KEY_TOKEN,
                 StoreType.PROPERTY_KEY_TOKEN_NAME,
@@ -586,7 +573,7 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
                 NullLogProvider.getInstance(),
                 contextFactory,
                 false,
-                logTail);
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
 
         CursorContext cursorContext = contextFactory.create("schemaStoreMigration");
         NeoStores dstStore = dstFactory.openNeoStores(
@@ -671,7 +658,7 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
 
     private static List<NamedToken> unique(List<NamedToken> tokens) {
         if (!tokens.isEmpty()) {
-            Set<String> names = new HashSet<>(tokens.size());
+            Set<String> names = HashSet.newHashSet(tokens.size());
             int i = 0;
             while (i < tokens.size()) {
                 if (names.add(tokens.get(i).name())) {
@@ -711,16 +698,29 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
 
     @Override
     public StorageFilesState checkStoreFileState(
-            FileSystemAbstraction fs, DatabaseLayout databaseLayout, PageCache pageCache) {
+            FileSystemAbstraction fs,
+            DatabaseLayout databaseLayout,
+            PageCache pageCache,
+            KernelVersionProvider kernelVersionProvider,
+            boolean isDirty) {
         RecordDatabaseLayout recordLayout = formatSpecificDatabaseLayout(databaseLayout);
-        Set<Path> storeFiles = recordLayout.mandatoryStoreFiles();
-        boolean allStoreFilesExist = storeFiles.stream().allMatch(fs::fileExists);
+
+        Set<StoreFile> storeFiles = Arrays.stream(RecordDatabaseFile.values())
+                .filter(f -> !recordLayout.isRecoverableStore(f))
+                .map(recordLayout::file)
+                .collect(Collectors.toSet());
+        boolean allStoreFilesExist = storeFiles.stream().allMatch(sf -> sf.exists(fs));
         if (!allStoreFilesExist) {
             return StorageFilesState.unrecoverableState(
-                    storeFiles.stream().filter(file -> !fs.fileExists(file)).toList());
+                    storeFiles.stream().filter(sp -> !sp.exists(fs)).toList());
         }
 
-        boolean allIdFilesExist = recordLayout.idFiles().stream().allMatch(fs::fileExists);
+        Set<StoreFile> idFiles = Arrays.stream(RecordDatabaseFile.values())
+                .map(recordLayout::idFile)
+                .filter(Optional::isPresent)
+                .map(Optional::get)
+                .collect(Collectors.toSet());
+        boolean allIdFilesExist = idFiles.stream().allMatch(sf -> sf.exists(fs));
         if (!allIdFilesExist) {
             return StorageFilesState.recoverableState();
         }
@@ -732,12 +732,14 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
     public BatchImporter batchImporter(
             DatabaseLayout databaseLayout,
             FileSystemAbstraction fileSystem,
+            boolean overwriteExistingDatabases,
             PageCacheTracer pageCacheTracer,
             Configuration config,
             LogService logService,
             PrintStream progressOutput,
             boolean verboseProgressOutput,
             AdditionalInitialIds additionalInitialIds,
+            LogTailMetadataFactory logTailMetadataFactory,
             Config dbConfig,
             Monitor monitor,
             JobScheduler jobScheduler,
@@ -745,7 +747,12 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
             LogFilesInitializer logFilesInitializer,
             IndexImporterFactory indexImporterFactory,
             MemoryTracker memoryTracker,
-            CursorContextFactory contextFactory) {
+            CursorContextFactory contextFactory,
+            Supplier<IndexProvidersAccess> indexProvidersAccess,
+            int numShards,
+            DependencyResolver storageSpecificArguments,
+            DatabaseCreationOptions databaseCreationOptions,
+            HardwareValidation hardwareValidation) {
         ExecutionMonitor executionMonitor = progressOutput != null
                 ? verboseProgressOutput
                         ? new SpectrumExecutionMonitor(progressOutput)
@@ -768,7 +775,8 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
                         logFilesInitializer,
                         indexImporterFactory,
                         memoryTracker,
-                        contextFactory);
+                        contextFactory,
+                        databaseCreationOptions);
     }
 
     @Override
@@ -796,7 +804,7 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
                         NullLogProvider.getInstance(),
                         contextFactory,
                         true,
-                        logTailMetadata)
+                        DatabaseCreationOptions.EMPTY_CREATION_OPTIONS)
                 .openNeoStores(storesToOpen);
         return new LenientStoreInput(
                 neoStores,
@@ -816,8 +824,7 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
             LogService logService,
             PrintStream progressOutput,
             boolean verboseProgressOutput,
-            AdditionalInitialIds additionalInitialIds,
-            ThrowingSupplier<LogTailMetadata, IOException> logTailMetadataSupplier,
+            LogTailMetadataFactory logTailMetadataFactory,
             Config dbConfig,
             Monitor monitor,
             JobScheduler jobScheduler,
@@ -826,7 +833,9 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
             IndexImporterFactory indexImporterFactory,
             MemoryTracker memoryTracker,
             CursorContextFactory contextFactory,
-            IndexProvidersAccess indexProvidersAccess) {
+            Supplier<IndexProvidersAccess> indexProvidersAccess,
+            int numShards,
+            DependencyResolver storageSpecificArguments) {
         return IncrementalBatchImporterFactory.withHighestPriority()
                 .instantiate(
                         databaseLayout,
@@ -836,8 +845,7 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
                         logService,
                         progressOutput,
                         verboseProgressOutput,
-                        additionalInitialIds,
-                        logTailMetadataSupplier,
+                        () -> logTailMetadataFactory.getLogTailMetadata(dbConfig, databaseLayout, this),
                         dbConfig,
                         monitor,
                         jobScheduler,
@@ -850,17 +858,19 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
     }
 
     @Override
-    public LockManager createLockManager(Config config, SystemNanoClock clock) {
-        return new ForsetiLockManager(config, clock, ResourceType.values());
+    public boolean supportsVectorData() {
+        return false;
+    }
+
+    @Override
+    public LockManager createLockManager(Config config, SystemNanoClock clock, LockMonitor lockMonitor) {
+        return new ForsetiLockManager(config, clock, lockMonitor, ResourceType.values());
     }
 
     @Override
     public long optimalAvailableConsistencyCheckerMemory(
             FileSystemAbstraction fs, DatabaseLayout layout, Config config, PageCache pageCache) {
         RecordDatabaseLayout databaseLayout = formatSpecificDatabaseLayout(layout);
-        CursorContextFactory contextFactory = NULL_CONTEXT_FACTORY;
-        RecordFormats recordFormats =
-                selectForStore(databaseLayout, fs, pageCache, NullLogProvider.getInstance(), contextFactory);
         var idGeneratorFactory = new DefaultIdGeneratorFactory(
                 fs, immediate(), false, PageCacheTracer.NULL, layout.getDatabaseName(), true, true, null);
         try (NeoStores neoStores = new StoreFactory(
@@ -870,12 +880,10 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
                         pageCache,
                         PageCacheTracer.NULL,
                         fs,
-                        recordFormats,
                         NullLogProvider.getInstance(),
-                        contextFactory,
+                        NULL_CONTEXT_FACTORY,
                         true,
-                        LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
-                        immutable.empty())
+                        DatabaseCreationOptions.EMPTY_CREATION_OPTIONS)
                 .openNeoStores(StoreType.NODE_LABEL, StoreType.NODE, StoreType.RELATIONSHIP)) {
             var highId = Math.max(
                     neoStores.getNodeStore().getIdGenerator().getHighId(),
@@ -902,7 +910,8 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
             CursorContextFactory contextFactory,
             PageCacheTracer pageCacheTracer,
             LogTailMetadata logTailMetadata,
-            MemoryTracker memoryTracker)
+            MemoryTracker memoryTracker,
+            ConsistencyCheckMonitor monitor)
             throws ConsistencyCheckIncompleteException {
         IdGeneratorFactory idGeneratorFactory = new DefaultIdGeneratorFactory(
                 fileSystem, RecoveryCleanupWorkCollector.ignore(), pageCacheTracer, layout.getDatabaseName());
@@ -916,7 +925,7 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
                         NullLogProvider.getInstance(),
                         contextFactory,
                         true,
-                        logTailMetadata)
+                        DatabaseCreationOptions.EMPTY_CREATION_OPTIONS)
                 .openAllNeoStores()) {
             neoStores.start(CursorContext.NULL_CONTEXT);
             ProgressMonitorFactory progressMonitorFactory = progressOutput != null
@@ -940,12 +949,18 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
                     EntityBasedMemoryLimiter.defaultMemoryLimiter(maxOffHeapCachingMemory),
                     memoryTracker,
                     contextFactory,
-                    pageCacheTracer)) {
+                    pageCacheTracer,
+                    logTailMetadata.getLastCommittedTransaction().id())) {
                 checker.check();
             }
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
+    }
+
+    @Override
+    public boolean multiVersioned() {
+        return false;
     }
 
     @Override
@@ -962,8 +977,11 @@ public class RecordStorageEngineFactory implements StorageEngineFactory {
     }
 
     @Override
-    public StorageEngineFactory unwrap() {
-        return this;
+    public RecoveryBehavior recoveryBehavior(
+            FileSystemAbstraction fs, PageCache pageCache, DatabaseLayout layout, CursorContextFactory contextFactory) {
+        boolean multiversion =
+                getStoreOpenOptions(fs, pageCache, layout, contextFactory).contains(MULTI_VERSIONED);
+        return new DefaultRecoveryBehavior(multiversion);
     }
 
     @Override

@@ -36,8 +36,8 @@ import java.util.Map;
 import java.util.Set;
 import org.eclipse.collections.api.map.primitive.MutableIntObjectMap;
 import org.eclipse.collections.impl.factory.primitive.IntObjectMaps;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.Relationship;
 import org.neo4j.graphdb.RelationshipType;
@@ -51,17 +51,26 @@ import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.test.Race;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.values.storable.RandomValuesUtils;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.ValueTuple;
+import org.neo4j.values.storable.Values;
 
 @SuppressWarnings("Duplicates")
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 public abstract class RelationshipWriteTestBase<G extends KernelAPIWriteTestSupport> extends KernelAPIWriteTestBase<G> {
     protected static final RelationshipType TYPE = RelationshipType.withName("R");
 
     @Inject
     private RandomSupport random;
+
+    @BeforeEach
+    void setup() {
+        /* Not all storage engines support vectors. */
+        random.withConfiguration(RandomValuesUtils.selectStorageEngineDependentConfiguration(graphDb))
+                .reset();
+    }
 
     @Test
     void shouldCreateRelationship() throws Exception {
@@ -245,6 +254,22 @@ public abstract class RelationshipWriteTestBase<G extends KernelAPIWriteTestSupp
     }
 
     @Test
+    void shouldWriteWhenSettingPropertyToSameValue() throws Exception {
+        // Given
+        String propertyKey = "key";
+        Value theValue = stringValue("The Value");
+        long relationshipId = createRelationshipWithProperty(TYPE, propertyKey, theValue.asObject());
+
+        // When
+        try (KernelTransaction tx = beginTransaction()) {
+            int property = tx.token().propertyKeyGetOrCreateForName(propertyKey);
+            tx.dataWrite().relationshipSetProperty(relationshipId, property, theValue);
+            // Then
+            assertThat(tx.commit()).isNotEqualTo(KernelTransaction.READ_ONLY_ID);
+        }
+    }
+
+    @Test
     void shouldRemovePropertyFromRelationship() throws Exception {
         // Given
         long relationshipId;
@@ -264,6 +289,65 @@ public abstract class RelationshipWriteTestBase<G extends KernelAPIWriteTestSupp
             int token = tx.token().propertyKeyGetOrCreateForName(propertyKey);
             assertThat(tx.dataWrite().relationshipRemoveProperty(relationshipId, token))
                     .isEqualTo(intValue(42));
+            tx.commit();
+        }
+
+        // Then
+        try (org.neo4j.graphdb.Transaction transaction = graphDb.beginTx()) {
+            assertFalse(transaction.getRelationshipById(relationshipId).hasProperty("prop"));
+        }
+    }
+
+    @Test
+    void shouldRemoveAddedPropertyFromRelationship() throws Exception {
+        // Given
+        long relationshipId;
+        String propertyKey = "prop";
+        try (org.neo4j.graphdb.Transaction tx = graphDb.beginTx()) {
+            Node node1 = tx.createNode();
+            Node node2 = tx.createNode();
+
+            Relationship proxy = node1.createRelationshipTo(node2, TYPE);
+            relationshipId = proxy.getId();
+            tx.commit();
+        }
+
+        // When
+        try (KernelTransaction tx = beginTransaction()) {
+            int token = tx.token().propertyKeyGetOrCreateForName(propertyKey);
+            tx.dataWrite().relationshipSetProperty(relationshipId, token, Values.intValue(42));
+            assertThat(tx.dataWrite().relationshipRemoveProperty(relationshipId, token))
+                    .isEqualTo(intValue(42));
+            tx.commit();
+        }
+
+        // Then
+        try (org.neo4j.graphdb.Transaction transaction = graphDb.beginTx()) {
+            assertFalse(transaction.getRelationshipById(relationshipId).hasProperty("prop"));
+        }
+    }
+
+    @Test
+    void shouldRemoveChangedPropertyFromRelationship() throws Exception {
+        // Given
+        long relationshipId;
+        String propertyKey = "prop";
+        try (org.neo4j.graphdb.Transaction tx = graphDb.beginTx()) {
+            Node node1 = tx.createNode();
+            Node node2 = tx.createNode();
+
+            Relationship proxy = node1.createRelationshipTo(node2, TYPE);
+            relationshipId = proxy.getId();
+            proxy.setProperty(propertyKey, 42);
+            tx.commit();
+        }
+
+        // When
+        try (KernelTransaction tx = beginTransaction()) {
+            int token = tx.token().propertyKeyGetOrCreateForName(propertyKey);
+            tx.dataWrite().relationshipSetProperty(relationshipId, token, Values.intValue(24));
+            assertThat(tx.dataWrite().relationshipRemoveProperty(relationshipId, token))
+                    .isEqualTo(intValue(24));
             tx.commit();
         }
 
@@ -362,32 +446,6 @@ public abstract class RelationshipWriteTestBase<G extends KernelAPIWriteTestSupp
     }
 
     @Test
-    void shouldNotWriteWhenSettingPropertyToSameValue() throws Exception {
-        // Given
-        long relationshipId;
-        String propertyKey = "prop";
-        Value theValue = stringValue("The Value");
-
-        try (org.neo4j.graphdb.Transaction ctx = graphDb.beginTx()) {
-            Node node1 = ctx.createNode();
-            Node node2 = ctx.createNode();
-
-            Relationship r = node1.createRelationshipTo(node2, TYPE);
-
-            r.setProperty(propertyKey, theValue.asObject());
-            relationshipId = r.getId();
-            ctx.commit();
-        }
-
-        // When
-        KernelTransaction tx = beginTransaction();
-        int property = tx.token().propertyKeyGetOrCreateForName(propertyKey);
-        tx.dataWrite().relationshipSetProperty(relationshipId, property, theValue);
-
-        assertThat(tx.commit()).isEqualTo(KernelTransaction.READ_ONLY_ID);
-    }
-
-    @Test
     void relationshipApplyChangesShouldAddProperty() throws Exception {
         // Given
         long relationship = createRelationship(TYPE);
@@ -441,6 +499,22 @@ public abstract class RelationshipWriteTestBase<G extends KernelAPIWriteTestSupp
                 assertProperties(relationshipCursor, propertyCursor, IntObjectMaps.immutable.of(key, changedValue));
             }
         });
+    }
+
+    @Test
+    void relationshipApplyChangesShouldWriteIfPropertyIsSameValue() throws Exception {
+        // Given
+        String propertyKey = "key";
+        Value theValue = stringValue("The Value");
+        long relationshipId = createRelationshipWithProperty(TYPE, propertyKey, theValue.asObject());
+
+        // When
+        try (KernelTransaction tx = beginTransaction()) {
+            int key = tx.token().propertyKeyGetOrCreateForName(propertyKey);
+            tx.dataWrite().relationshipApplyChanges(relationshipId, IntObjectMaps.immutable.of(key, theValue));
+            // Then
+            assertThat(tx.commit()).isNotEqualTo(KernelTransaction.READ_ONLY_ID);
+        }
     }
 
     @Test
@@ -570,9 +644,9 @@ public abstract class RelationshipWriteTestBase<G extends KernelAPIWriteTestSupp
         try (Transaction tx = graphDb.beginTx()) {
             try (ResourceIterator<Relationship> relationships =
                     tx.findRelationships(type, map(key1Name, "D", key2Name, "C"))) {
-                assertThat(relationships.hasNext()).isTrue();
+                assertThat(relationships).hasNext();
                 assertThat(relationships.next().getId()).isEqualTo(rel);
-                assertThat(relationships.hasNext()).isFalse();
+                assertThat(relationships).isExhausted();
             }
         }
     }
@@ -688,7 +762,7 @@ public abstract class RelationshipWriteTestBase<G extends KernelAPIWriteTestSupp
         }
     }
 
-    private long createRelationshipWithProperty(RelationshipType type, String key, Object value) {
+    protected long createRelationshipWithProperty(RelationshipType type, String key, Object value) {
         try (var ctx = graphDb.beginTx()) {
             var relationship = ctx.createNode().createRelationshipTo(ctx.createNode(), type);
             relationship.setProperty(key, value);

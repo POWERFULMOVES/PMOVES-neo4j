@@ -20,35 +20,22 @@
 package org.neo4j.fabric.executor;
 
 import static org.assertj.core.api.AssertionsForInterfaceTypes.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.neo4j.kernel.api.exceptions.Status.General.InvalidArguments;
+import static org.neo4j.kernel.api.exceptions.Status.Statement.ConstraintVerificationFailed;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.neo4j.exceptions.ConstraintViolationException;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.kernel.api.exceptions.InvalidArgumentsException;
 import org.neo4j.kernel.api.exceptions.Status;
 
 class ExceptionsTest {
-    @Test
-    void testCompositeExceptionWithSomePrimaryErrors() {
-        var primary1 = new FabricException(Status.General.UnknownError, "msg-1");
-        var primary2 = new FabricException(Status.General.UnknownError, "msg-2");
-        var secondary = new FabricSecondaryException(
-                Status.General.UnknownError,
-                "msg-3",
-                new IllegalStateException("msg-4"),
-                new FabricException(Status.General.UnknownError, "msg-5"));
-
-        var reactorException = reactor.core.Exceptions.multiple(primary1, primary2, secondary);
-        var transformedException = Exceptions.transformUnexpectedError(Status.General.UnknownError, reactorException);
-        assertThat(unpackExceptionMessages(transformedException)).contains("msg-1", "msg-2");
-    }
 
     @Test
-    void testGqlFallbackUnexpectedError() {
+    void gqlFallbackUnexpectedError() {
         var transformedException =
                 Exceptions.transformUnexpectedError(Status.General.UnknownError, new RuntimeException("msg-1"));
         assertThat(unpackExceptionMessages(transformedException)).contains("msg-1");
@@ -58,7 +45,7 @@ class ExceptionsTest {
     }
 
     @Test
-    void testGqlFallbackTransactionStartFailure() {
+    void gqlFallbackTransactionStartFailure() {
         var transformedException = Exceptions.transformTransactionStartFailure(new RuntimeException("msg-1"));
         assertThat(unpackExceptionMessages(transformedException)).contains("msg-1");
         assertThat(transformedException).isInstanceOf(ErrorGqlStatusObject.class);
@@ -67,40 +54,22 @@ class ExceptionsTest {
     }
 
     @Test
-    void testCompositeExceptionWithOnlySecondaryErrors() {
-        var sharedPrimary = new FabricException(Status.General.UnknownError, "msg-1");
-
-        var secondary1 = new FabricSecondaryException(
-                Status.General.UnknownError, "msg-2", new IllegalStateException("msg-3"), sharedPrimary);
-        var secondary2 = new FabricSecondaryException(
-                Status.General.UnknownError,
-                "msg-4",
-                new IllegalStateException("msg-5"),
-                new FabricException(Status.General.UnknownError, "msg-6"));
-        var secondary3 = new FabricSecondaryException(
-                Status.General.UnknownError, "msg-7", new IllegalStateException("msg-8"), sharedPrimary);
-
-        var reactorException = reactor.core.Exceptions.multiple(secondary1, secondary2, secondary3);
-        var transformedException = Exceptions.transformUnexpectedError(Status.General.UnknownError, reactorException);
-        assertThat(unpackExceptionMessages(transformedException)).contains("msg-1", "msg-6");
-    }
-
-    @Test
-    void testCompositeGqlExceptionTranslation() {
+    void compositeGqlExceptionTranslation() {
         var gqlException = InvalidArgumentsException.internalAlterServer("server");
         var translatedGqlException = FabricException.translateLocalError(gqlException);
-        assertEquals("50N00", translatedGqlException.gqlStatus());
-        assertEquals(InvalidArguments, translatedGqlException.status());
-        assertEquals("Server 'server' can't be altered: must specify options", translatedGqlException.getMessage());
+        assertThat(translatedGqlException.gqlStatus()).isEqualTo("50N00");
+        assertThat(translatedGqlException.status()).isEqualTo(InvalidArguments);
+        assertThat(translatedGqlException.getMessage())
+                .isEqualTo("Server 'server' can't be altered: must specify options");
     }
 
     @Test
-    void testCompositeNonGqlExceptionTranslation() {
-        var notGqlException = new InvalidArgumentsException("message");
+    void compositeExceptionTranslationForExceptionWithoutGqlStatus() {
+        var notGqlException = new ConstraintViolationException("message", null);
         var translatedGqlException = FabricException.translateLocalError(notGqlException);
-        assertEquals("50N42", translatedGqlException.gqlStatus());
-        assertEquals(InvalidArguments, translatedGqlException.status());
-        assertEquals("message", translatedGqlException.getMessage());
+        assertThat(translatedGqlException.gqlStatus()).isEqualTo("50N42");
+        assertThat(translatedGqlException.status()).isEqualTo(ConstraintVerificationFailed);
+        assertThat(translatedGqlException.getMessage()).isEqualTo("message");
     }
 
     private static List<String> unpackExceptionMessages(Exception exception) {

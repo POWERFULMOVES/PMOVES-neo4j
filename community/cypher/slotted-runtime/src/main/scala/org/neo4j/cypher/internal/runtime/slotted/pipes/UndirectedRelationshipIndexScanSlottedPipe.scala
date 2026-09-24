@@ -21,7 +21,6 @@ package org.neo4j.cypher.internal.runtime.slotted.pipes
 
 import org.neo4j.cypher.internal.expressions.RelationshipTypeToken
 import org.neo4j.cypher.internal.logical.plans.IndexOrder
-import org.neo4j.cypher.internal.physicalplanning.SlotConfiguration
 import org.neo4j.cypher.internal.physicalplanning.SlottedIndexedProperty
 import org.neo4j.cypher.internal.runtime.ClosingIterator
 import org.neo4j.cypher.internal.runtime.CypherRow
@@ -30,17 +29,15 @@ import org.neo4j.cypher.internal.runtime.interpreted.pipes.QueryState
 import org.neo4j.cypher.internal.util.attribution.Id
 
 case class UndirectedRelationshipIndexScanSlottedPipe(
-  ident: String,
-  startNode: String,
-  endNode: String,
+  offset: Option[Int],
+  startNode: Option[Int],
+  endNode: Option[Int],
   relType: RelationshipTypeToken,
   properties: IndexedSeq[SlottedIndexedProperty],
   queryIndexId: Int,
   indexOrder: IndexOrder,
-  slots: SlotConfiguration
+  includeChangesFromThisTransaction: Boolean
 )(val id: Id = Id.INVALID_ID) extends Pipe with IndexSlottedPipeWithValues {
-
-  override val offset: Int = slots.longOffset(ident)
 
   override val indexPropertyIndices: Array[Int] =
     properties.zipWithIndex.filter(_._1.getValueFromIndex).map(_._2).toArray
@@ -50,12 +47,17 @@ case class UndirectedRelationshipIndexScanSlottedPipe(
   private val needsValues: Boolean = indexPropertyIndices.nonEmpty
 
   protected def internalCreateResults(state: QueryState): ClosingIterator[CypherRow] = {
-    val cursor = state.query.relationshipIndexScan(state.queryIndexes(queryIndexId), needsValues, indexOrder)
+    val cursor = state.query.relationshipIndexScan(
+      state.queryIndexes(queryIndexId),
+      needsValues,
+      indexOrder,
+      includeChangesFromThisTransaction
+    )
 
     new SlottedUndirectedRelationshipIndexIterator(
       state,
-      slots.longOffset(startNode),
-      slots.longOffset(endNode),
+      startNode,
+      endNode,
       cursor
     )
   }

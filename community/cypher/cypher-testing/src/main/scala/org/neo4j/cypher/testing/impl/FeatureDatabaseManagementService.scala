@@ -33,18 +33,21 @@ import org.neo4j.cypher.testing.impl.driver.DriverCypherExecutorFactory
 import org.neo4j.cypher.testing.impl.embedded.EmbeddedCypherExecutorFactory
 import org.neo4j.cypher.testing.impl.http.HttpCypherExecutorFactory
 import org.neo4j.dbms.api.DatabaseManagementService
+import org.neo4j.driver.AuthTokens
 import org.neo4j.driver.NotificationConfig
 import org.neo4j.fabric.executor.FabricExecutor
+import org.neo4j.function.ThrowingFunction
 import org.neo4j.graphdb.schema.IndexDefinition
 import org.neo4j.graphdb.schema.IndexType
+import org.neo4j.internal.kernel.api.exceptions.ProcedureException
 import org.neo4j.internal.kernel.api.procs.QualifiedName
-import org.neo4j.kernel.api.Kernel
-import org.neo4j.kernel.api.procedure.CallableProcedure.BasicProcedure
+import org.neo4j.kernel.api.procedure.CallableProcedure
 import org.neo4j.kernel.api.procedure.CallableUserAggregationFunction
+import org.neo4j.kernel.api.procedure.Context
 import org.neo4j.kernel.api.procedure.GlobalProcedures
-import org.neo4j.kernel.impl.api.KernelTransactions
-import org.neo4j.kernel.impl.factory.GraphDatabaseFacade
+import org.neo4j.kernel.impl.api.TransactionRegistry
 import org.neo4j.kernel.impl.query.QueryExecutionEngine
+import org.neo4j.kernel.internal.GraphDatabaseAPI
 
 import scala.util.Using
 
@@ -55,6 +58,7 @@ object FeatureDatabaseManagementService {
     def createBackingDbms(config: Config): DatabaseManagementService
     def baseConfig: Config.Builder = Config.newBuilder()
     def testApiKind: TestApiKind
+    def runOnSpd: Boolean = "spd".equals(System.getProperty("NEO4J_OVERRIDE_DBMS_TEST_FACTORY_SUPPLIER"))
   }
 
   sealed trait TestApiKind
@@ -74,7 +78,8 @@ object FeatureDatabaseManagementService {
         .set(BoltConnector.listen_address, new SocketAddress("localhost", 0))
         .build()
       val managementService = createBackingDbms(config)
-      val executorFactory = DriverCypherExecutorFactory(managementService, config)
+      val executorFactory =
+        DriverCypherExecutorFactory(managementService, config, Some(AuthTokens.basic("neo4j", "neo4j")))
       FeatureDatabaseManagementService(managementService, executorFactory)
     }
   }
@@ -106,55 +111,71 @@ object FeatureDatabaseManagementService {
 }
 
 case class FeatureDatabaseManagementService(
-  private val databaseManagementService: DatabaseManagementService,
-  val executorFactory: CypherExecutorFactory,
+  databaseManagementService: DatabaseManagementService,
+  executorFactory: CypherExecutorFactory,
   private val databaseName: Option[String] = None,
-  private val notificationConfig: NotificationConfig = NotificationConfig.defaultConfig()
+  private val notificationConfig: NotificationConfig = NotificationConfig.defaultConfig(),
+  private val sessionDatabaseName: Option[String] = None
 ) {
 
-  private val droppableIndexTypes = Set(
-    IndexType.TEXT,
-    IndexType.POINT,
-    IndexType.RANGE,
-    IndexType.FULLTEXT
-  )
-  def closeFactory(): Unit = executorFactory.close()
+  val database: GraphDatabaseAPI =
+    databaseManagementService.database(databaseName.getOrElse(DEFAULT_DATABASE_NAME)).asInstanceOf[GraphDatabaseAPI]
 
-  private val database: GraphDatabaseFacade =
-    databaseManagementService.database(databaseName.getOrElse(DEFAULT_DATABASE_NAME)).asInstanceOf[GraphDatabaseFacade]
+  // The database the executor connects to. Defaults to `databaseName`, but composite configs set this to
+  // the composite database while `database` stays the constituent that actually holds the data (so cleanup,
+  // side-effect kernel scans and procedure registration keep targeting the constituent).
+  private val sessionName: Option[String] = sessionDatabaseName.orElse(databaseName)
 
-  private val cypherExecutor = createExecutor()
+  private lazy val sessionDatabase: GraphDatabaseAPI =
+    databaseManagementService.database(sessionName.getOrElse(DEFAULT_DATABASE_NAME)).asInstanceOf[GraphDatabaseAPI]
+
+  private val cypherExecutor: CypherExecutor = createExecutor()
+  val restrictedCypherExecutor: CypherExecutor = createRestrictedExecutor()
 
   private lazy val maybeFabricExecutor = {
-    val resolver = database.getDependencyResolver
+    val resolver = sessionDatabase.getDependencyResolver
     // Fabric executor is present only in composite databases
     if (resolver.containsDependency(classOf[FabricExecutor]))
       Option(resolver.resolveDependency(classOf[FabricExecutor]))
     else Option.empty
   }
 
-  private lazy val kernel = database.getDependencyResolver.resolveDependency(classOf[Kernel])
   private lazy val globalProcedures = database.getDependencyResolver.provideDependency(classOf[GlobalProcedures]).get()
   private lazy val executionEngine = database.getDependencyResolver.resolveDependency(classOf[QueryExecutionEngine])
 
-  private def createExecutor() = databaseName match {
+  private def createExecutor() = sessionName match {
     case Some(name) => executorFactory.executor(name)
     case None       => executorFactory.executor()
   }
 
-  def registerProcedure(procedure: BasicProcedure): Unit = kernel.registerProcedure(procedure)
+  private def createRestrictedExecutor() = sessionName match {
+    case Some(name) => executorFactory.restrictedExecutor(name)
+    case None       => executorFactory.restrictedExecutor()
+  }
 
-  def registerProcedure(procedure: Class[_]): Unit = globalProcedures.registerProcedure(procedure)
+  def registerProcedure(procedure: CallableProcedure): Unit = globalProcedures.register(procedure)
 
-  def registerFunction(function: Class[_]): Unit = globalProcedures.registerFunction(function)
+  def registerProcedure(procedure: Class[?]): Unit = globalProcedures.registerProcedure(procedure)
 
-  def registerAggregationFunction(function: Class[_]): Unit = globalProcedures.registerAggregationFunction(function)
+  def registerFunction(function: Class[?]): Unit = globalProcedures.registerFunction(function)
+
+  def registerAggregationFunction(function: Class[?]): Unit = globalProcedures.registerAggregationFunction(function)
 
   def registerUserAggregation(function: CallableUserAggregationFunction): Unit =
-    kernel.registerUserAggregationFunction(function)
+    globalProcedures.register(function)
+
+  def registerComponent[T](
+    cls: Class[T],
+    provider: ThrowingFunction[Context, T, ProcedureException],
+    safe: Boolean
+  ): Unit =
+    globalProcedures.registerComponent[T](cls, provider, safe)
 
   def clearFabricQueryCache(dbName: String): Unit =
     maybeFabricExecutor.map(fe => fe.clearQueryCachesForDatabase(dbName))
+
+  /** Clears the fabric query cache for the session (composite) database. No-op for non-composite databases. */
+  def clearFabricQueryCacheForSession(): Unit = sessionName.foreach(clearFabricQueryCache)
 
   def clearQueryCaches(): Unit = executionEngine.clearQueryCaches()
   def clearExecutableQueryCache(): Unit = executionEngine.clearExecutableQueryCache()
@@ -162,25 +183,25 @@ case class FeatureDatabaseManagementService(
   def clearCompilerCaches(): Unit = executionEngine.clearCompilerCache()
 
   def terminateAllTransactions(): Unit = {
-    database.getDependencyResolver.resolveDependency(classOf[KernelTransactions]).terminateTransactions()
+    database.getDependencyResolver.resolveDependency(classOf[TransactionRegistry]).terminateTransactions()
   }
 
-  def dropIndexesAndConstraints(): Unit = {
-    val tx = database.beginTx()
-    try {
-      val schema = tx.schema()
-      schema.getConstraints.forEach(c => c.drop());
-      schema.getIndexes.forEach(i => if (shouldDrop(i)) i.drop());
-      tx.commit()
-    } finally {
-      tx.close()
-    }
+  def dropIndexesAndConstraints(): Unit = Using.resource(database.beginTx()) { tx =>
+    val schema = tx.schema()
+    schema.getConstraints.forEach(c => c.drop())
+    schema.getIndexes.forEach(i => if (shouldDrop(i)) i.drop())
+    tx.commit()
   }
 
-  private def shouldDrop(index: IndexDefinition): Boolean = {
-    // Avoid dropping indexes that are part of the default installation
-    // Like the node label index and relationship type index.
-    droppableIndexTypes.contains(index.getIndexType)
+  // Avoid dropping indexes that are part of the default installation
+  // Like the node label index and relationship type index.
+  private def shouldDrop(index: IndexDefinition): Boolean = index.getIndexType match {
+    case IndexType.LOOKUP   => false
+    case IndexType.FULLTEXT => true
+    case IndexType.TEXT     => true
+    case IndexType.RANGE    => true
+    case IndexType.POINT    => true
+    case IndexType.VECTOR   => true
   }
 
   def unregisterProcedures(procedures: Seq[QualifiedName]): Unit = {
@@ -200,7 +221,12 @@ case class FeatureDatabaseManagementService(
    */
   def withNewSession(): CypherExecutor = if (cypherExecutor.sessionBased) createExecutor() else cypherExecutor
 
-  def execute[T](statement: String, parameters: Map[String, Object], converter: StatementResult => T): T =
+  def execute[T](
+    statement: String,
+    parameters: Map[String, Object],
+    converter: StatementResult => T,
+    cypherExecutor: CypherExecutor = this.cypherExecutor
+  ): T =
     cypherExecutor.execute(statement, parameters, converter)
 
   def execute[T](statement: String, converter: StatementResult => T): T =
@@ -214,8 +240,31 @@ case class FeatureDatabaseManagementService(
     }
   }
 
+  /**
+   * Returns a new [[FeatureDatabaseManagementService]] towards the same dbms but with a new executor.
+   * Driver executors (sessions) are not thread safe, this is needed to re-use from different threads.
+   */
+  def withNewExecutor(): FeatureDatabaseManagementService = {
+    cypherExecutor.close()
+    restrictedCypherExecutor.close()
+    FeatureDatabaseManagementService(
+      databaseManagementService,
+      executorFactory,
+      databaseName,
+      notificationConfig,
+      sessionDatabaseName
+    )
+  }
+
+  def closeExecutor(): Unit = {
+    cypherExecutor.close()
+    restrictedCypherExecutor.close()
+  }
+  def closeExecutorFactory(): Unit = executorFactory.close()
+
   def shutdown(): Unit = {
     cypherExecutor.close()
+    restrictedCypherExecutor.close()
     executorFactory.close()
     databaseManagementService.shutdown()
   }

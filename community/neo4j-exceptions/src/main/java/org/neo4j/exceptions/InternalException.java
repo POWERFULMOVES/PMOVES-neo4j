@@ -21,52 +21,59 @@ package org.neo4j.exceptions;
 
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
+import org.neo4j.gqlstatus.GqlHelper;
+import org.neo4j.gqlstatus.GqlParams;
 import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.kernel.api.exceptions.Status;
 
 public class InternalException extends Neo4jException {
-    @Deprecated
-    public InternalException(String message, Throwable cause) {
-        super(message, cause);
-    }
 
     private InternalException(ErrorGqlStatusObject gqlStatusObject, String message, Throwable cause) {
         super(gqlStatusObject, message, cause);
-    }
-
-    @Deprecated
-    public InternalException(String message) {
-        super(message);
     }
 
     protected InternalException(ErrorGqlStatusObject gqlStatusObject, String message) {
         super(gqlStatusObject, message);
     }
 
+    public static InternalException internalError(String msgTitle, String message) {
+        return internalError(msgTitle, message, message);
+    }
+
+    public static InternalException internalError(String msgTitle, String gqlMessage, String oldMessage) {
+        var gql = GqlHelper.get50N00(msgTitle, gqlMessage);
+        return new InternalException(gql, oldMessage);
+    }
+
+    public static InternalException internalError(String msgTitle, String message, Throwable cause) {
+        var gql = GqlHelper.get50N00(msgTitle, message);
+        return new InternalException(gql, message, cause);
+    }
+
     public static InternalException foundNoSolutionForBlock(int blockSize, String blockCandidates, String table) {
         var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N24)
                 .build();
-        return new InternalException(
-                gql,
-                String.format(
-                        """
+        return new InternalException(gql, String.format("""
                                 Found no solution for block with size %d,
-                                |%s were the selected candidates from the table %s""",
-                        blockSize, blockCandidates, table));
+                                |%s were the selected candidates from the table %s""", blockSize, blockCandidates, table));
     }
 
     public static InternalException foundNoPlanWithinConstraints(String setting1, String setting2) {
         var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N24)
                 .build();
-        return new InternalException(
-                gql,
-                String.format(
-                        """
+        return new InternalException(gql, String.format("""
              Unfortunately, the planner was unable to find a plan within the constraints provided.
              |Try increasing the config values `%s`
              |and `%s` to allow
-             |for a larger sub-plan table and longer planning time.""",
-                        setting1, setting2));
+             |for a larger sub-plan table and longer planning time.""", setting1, setting2));
+    }
+
+    public static InternalException indexNotApplicable(String indexName, String msg) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_50N15)
+                .withParam(GqlParams.StringParam.idx, indexName)
+                .build();
+
+        return new InternalException(gql, msg);
     }
 
     @Override

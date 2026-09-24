@@ -64,12 +64,36 @@ public class InputStreamReadableChannel implements ReadableChannel {
 
     @Override
     public void get(byte[] bytes, int length) throws IOException {
-        dataInputStream.read(bytes, 0, length);
+        var bytesRead = 0;
+        // Mismatch of API - we may not get all the bytes requested from the stream, so may need to retry.
+        while (bytesRead < length) {
+            var bytesThisTime = dataInputStream.read(bytes, bytesRead, length - bytesRead);
+            if (bytesThisTime == -1) {
+                throw ReadPastEndException.INSTANCE;
+            } else {
+                bytesRead += bytesThisTime;
+            }
+        }
     }
 
     @Override
     public byte getVersion() throws IOException {
         return dataInputStream.readByte();
+    }
+
+    @Override
+    public long getAppendIndex() throws IOException {
+        return getLong();
+    }
+
+    @Override
+    public byte getContentType() {
+        return UNSPECIFIED_CONTENT_TYPE;
+    }
+
+    @Override
+    public long getTerm() throws IOException {
+        return BASE_TERM;
     }
 
     @Override

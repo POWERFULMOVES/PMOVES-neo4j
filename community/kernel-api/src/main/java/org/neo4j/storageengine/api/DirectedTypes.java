@@ -220,8 +220,9 @@ public final class DirectedTypes {
                 case OUTGOING -> Direction.OUTGOING;
                 case INCOMING -> Direction.INCOMING;
                 case BOTH -> Direction.BOTH;
-                case NEITHER -> throw new IllegalStateException(
-                        "The numberOfCriteria returned from Neither is 0 so this should never happen");
+                case NEITHER ->
+                    throw new IllegalStateException(
+                            "The numberOfCriteria returned from Neither is 0 so this should never happen");
             };
         }
 
@@ -275,7 +276,7 @@ public final class DirectedTypes {
         }
     }
 
-    private void addType(int newType, Direction direction) {
+    public void addType(int newType, Direction direction) {
         int insertionIndex = -1;
         for (int i = 0; i < this.types.size(); i++) {
             int type = this.types.get(i);
@@ -405,13 +406,15 @@ public final class DirectedTypes {
 
     public LongIterator addedRelationships(NodeState transactionState) {
         return switch (untyped) {
-            case OUTGOING -> PrimitiveLongCollections.concat(
-                    transactionState.getAddedRelationships(Direction.OUTGOING),
-                    addedRelationshipsInner(transactionState, RelationshipDirection.INCOMING));
+            case OUTGOING ->
+                PrimitiveLongCollections.concat(
+                        transactionState.getAddedRelationships(Direction.OUTGOING),
+                        addedRelationshipsInner(transactionState, RelationshipDirection.INCOMING));
 
-            case INCOMING -> PrimitiveLongCollections.concat(
-                    transactionState.getAddedRelationships(Direction.INCOMING),
-                    addedRelationshipsInner(transactionState, RelationshipDirection.OUTGOING));
+            case INCOMING ->
+                PrimitiveLongCollections.concat(
+                        transactionState.getAddedRelationships(Direction.INCOMING),
+                        addedRelationshipsInner(transactionState, RelationshipDirection.OUTGOING));
 
             case BOTH -> transactionState.getAddedRelationships();
 

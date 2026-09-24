@@ -26,6 +26,7 @@ import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.neo4j.configuration.GraphDatabaseInternalSettings.automatic_upgrade_enabled;
 import static org.neo4j.dbms.database.ComponentVersion.DBMS_RUNTIME_COMPONENT;
 import static org.neo4j.dbms.database.SystemGraphComponent.VERSION_LABEL;
+import static org.neo4j.test.LatestVersions.LATEST_KERNEL_VERSION;
 import static org.neo4j.test.Race.throwing;
 import static org.neo4j.test.UpgradeTestUtil.assertUpgradeTransactionInOrder;
 
@@ -73,6 +74,7 @@ import org.neo4j.test.LatestVersions;
 import org.neo4j.test.OtherThreadExecutor;
 import org.neo4j.test.Race;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
+import org.neo4j.test.UpgradeTestUtil;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
@@ -143,8 +145,8 @@ public class DatabaseUpgradeTransactionIT {
         createWriteTransaction();
 
         // Then
-        assertThat(kernelVersion()).isEqualTo(LatestVersions.LATEST_KERNEL_VERSION);
-        assertUpgradeTransactionInOrder(oldKernelVersion, LatestVersions.LATEST_KERNEL_VERSION, startTransaction, db);
+        assertThat(kernelVersion()).isEqualTo(LATEST_KERNEL_VERSION);
+        assertUpgradeTransactionInOrder(oldKernelVersion, LATEST_KERNEL_VERSION, startTransaction, db);
     }
 
     @ParameterizedTest
@@ -189,8 +191,8 @@ public class DatabaseUpgradeTransactionIT {
         // When
         Race race = new Race()
                 .withRandomStartDelays()
-                .withEndCondition(() -> LatestVersions.LATEST_KERNEL_VERSION.equals(kernelVersion()));
-        race.addContestant(() -> systemDb.executeTransactionally("CALL dbms.upgrade()"), 1);
+                .withEndCondition(() -> LATEST_KERNEL_VERSION.equals(kernelVersion()));
+        race.addContestant(() -> UpgradeTestUtil.upgradeDbms(dbms), 1);
         race.addContestants(max(Runtime.getRuntime().availableProcessors() - 1, 2), Race.throwing(() -> {
             createWriteTransaction();
             Thread.sleep(ThreadLocalRandom.current().nextInt(0, 2));
@@ -198,9 +200,9 @@ public class DatabaseUpgradeTransactionIT {
         race.go(1, TimeUnit.MINUTES);
 
         // Then
-        assertThat(kernelVersion()).isEqualTo(LatestVersions.LATEST_KERNEL_VERSION);
+        assertThat(kernelVersion()).isEqualTo(LATEST_KERNEL_VERSION);
         assertThat(dbmsRuntimeVersion()).isEqualTo(LatestVersions.LATEST_RUNTIME_VERSION);
-        assertUpgradeTransactionInOrder(oldKernelVersion, LatestVersions.LATEST_KERNEL_VERSION, startTransaction, db);
+        assertUpgradeTransactionInOrder(oldKernelVersion, LATEST_KERNEL_VERSION, startTransaction, db);
     }
 
     @Test
@@ -218,7 +220,7 @@ public class DatabaseUpgradeTransactionIT {
 
             @Override
             public boolean getAsBoolean() {
-                if (LatestVersions.LATEST_KERNEL_VERSION.equals(kernelVersion())) {
+                if (LATEST_KERNEL_VERSION.equals(kernelVersion())) {
                     // Notice the time of upgrade...
                     timeOfUpgrade.compareAndSet(0, currentTimeMillis());
                 }
@@ -231,7 +233,7 @@ public class DatabaseUpgradeTransactionIT {
                     while (true) {
                         try {
                             Thread.sleep(ThreadLocalRandom.current().nextInt(0, 1_000));
-                            systemDb.executeTransactionally("CALL dbms.upgrade()");
+                            UpgradeTestUtil.upgradeDbms(dbms);
                             return;
                         } catch (DeadlockDetectedException de) {
                             // retry
@@ -258,9 +260,9 @@ public class DatabaseUpgradeTransactionIT {
         race.go(10, TimeUnit.MINUTES);
 
         // Then
-        assertThat(kernelVersion()).isEqualTo(LatestVersions.LATEST_KERNEL_VERSION);
+        assertThat(kernelVersion()).isEqualTo(LATEST_KERNEL_VERSION);
         assertThat(dbmsRuntimeVersion()).isEqualTo(LatestVersions.LATEST_RUNTIME_VERSION);
-        assertUpgradeTransactionInOrder(oldKernelVersion, LatestVersions.LATEST_KERNEL_VERSION, startTransaction, db);
+        assertUpgradeTransactionInOrder(oldKernelVersion, LATEST_KERNEL_VERSION, startTransaction, db);
         assertDegrees(nodeId);
     }
 
@@ -330,14 +332,19 @@ public class DatabaseUpgradeTransactionIT {
             executor.awaitFuture(f1);
         }
 
+        var dbLogPrefix = "["
+                + db.getDependencyResolver()
+                        .resolveDependency(Database.class)
+                        .getNamedDatabaseId()
+                        .logPrefix() + "]";
+
         // Then
         LogAssertions.assertThat(logProvider)
-                .containsMessageWithArguments(
-                        "Upgrade transaction from %s to %s not possible right now due to conflicting transaction, will retry on next write",
-                        oldKernelVersion, LatestVersions.LATEST_KERNEL_VERSION)
-                .doesNotContainMessageWithArguments(
-                        "Upgrade transaction from %s to %s started",
-                        oldKernelVersion, LatestVersions.LATEST_KERNEL_VERSION);
+                .containsMessages(
+                        "%s Upgrade transaction from %s to %s not possible right now due to conflicting transaction, will retry on next write"
+                                .formatted(dbLogPrefix, oldKernelVersion, LATEST_KERNEL_VERSION))
+                .doesNotContainMessage("%s Upgrade transaction from %s to %s started"
+                        .formatted(dbLogPrefix, oldKernelVersion, LATEST_KERNEL_VERSION));
 
         assertThat(getNodeCount()).as("Both transactions succeeded").isEqualTo(numNodesBefore + 2);
         assertThat(kernelVersion()).isEqualTo(oldKernelVersion);
@@ -346,14 +353,13 @@ public class DatabaseUpgradeTransactionIT {
         createWriteTransaction();
 
         // Then
-        assertThat(kernelVersion()).isEqualTo(LatestVersions.LATEST_KERNEL_VERSION);
+        assertThat(kernelVersion()).isEqualTo(LATEST_KERNEL_VERSION);
         LogAssertions.assertThat(logProvider)
-                .containsMessageWithArguments(
-                        "Upgrade transaction from %s to %s started",
-                        oldKernelVersion, LatestVersions.LATEST_KERNEL_VERSION)
-                .containsMessageWithArguments(
-                        "Upgrade transaction from %s to %s completed",
-                        oldKernelVersion, LatestVersions.LATEST_KERNEL_VERSION);
+                .containsMessages(
+                        "%s Upgrade transaction from %s to %s started"
+                                .formatted(dbLogPrefix, oldKernelVersion, LATEST_KERNEL_VERSION),
+                        "%s Upgrade transaction from %s to %s completed"
+                                .formatted(dbLogPrefix, oldKernelVersion, LATEST_KERNEL_VERSION));
     }
 
     private long getNodeCount() {
@@ -443,10 +449,12 @@ public class DatabaseUpgradeTransactionIT {
         try (Transaction tx = db.beginTx()) {
             Node node = tx.getNodeByElementId(nodeId);
             Map<RelationshipType, Map<Direction, MutableLong>> actualDegrees = new HashMap<>();
-            Iterables.forEach(node.getRelationships(), r -> actualDegrees
-                    .computeIfAbsent(r.getType(), t -> new HashMap<>())
-                    .computeIfAbsent(directionOf(node, r), d -> new MutableLong())
-                    .increment());
+            Iterables.forEach(
+                    node.getRelationships(),
+                    r -> actualDegrees
+                            .computeIfAbsent(r.getType(), t -> new HashMap<>())
+                            .computeIfAbsent(directionOf(node, r), d -> new MutableLong())
+                            .increment());
             MutableLong actualTotalDegree = new MutableLong();
             actualDegrees.forEach((type, directions) -> {
                 long actualTotalDirectionDegree = 0;

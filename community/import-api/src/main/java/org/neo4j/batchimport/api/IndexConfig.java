@@ -19,10 +19,16 @@
  */
 package org.neo4j.batchimport.api;
 
+import java.util.function.Predicate;
+import org.neo4j.function.Predicates;
+import org.neo4j.internal.schema.IndexDescriptor;
+import org.neo4j.util.Preconditions;
+
 public class IndexConfig {
-    public static final IndexConfig DEFAULT = new IndexConfig();
+
     private boolean createLabelIndex;
     private boolean createRelationTypeIndex;
+    private Predicate<IndexDescriptor> excludeFromPopulating = Predicates.alwaysFalse();
 
     public IndexConfig withLabelIndex() {
         this.createLabelIndex = true;
@@ -34,12 +40,22 @@ public class IndexConfig {
         return this;
     }
 
+    public IndexConfig excludeFromPopulating(Predicate<IndexDescriptor> excludeFromPopulating) {
+        this.excludeFromPopulating = Preconditions.requireNonNull(
+                excludeFromPopulating, "Exclude from populating predicate must not be null");
+        return this;
+    }
+
     public boolean createLabelIndex() {
         return createLabelIndex;
     }
 
     public boolean createRelationshipIndex() {
         return createRelationTypeIndex;
+    }
+
+    public boolean isExcludedFromPopulating(IndexDescriptor descriptor) {
+        return excludeFromPopulating.test(descriptor);
     }
 
     public static IndexConfig create() {

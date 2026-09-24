@@ -28,6 +28,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import org.eclipse.collections.api.list.primitive.MutableLongList;
 import org.eclipse.collections.impl.factory.primitive.LongLists;
@@ -44,7 +45,14 @@ import org.neo4j.util.concurrent.WorkSync;
 public class IdGeneratorUpdatesWorkSync {
     public static final String ID_GENERATOR_BATCH_APPLIER_TAG = "idGeneratorBatchApplier";
 
-    private final Map<IdGenerator, WorkSync<IdGenerator, IdGeneratorUpdateWork>> workSyncMap = new HashMap<>();
+    /**
+     * Vector stores can be added after DB startup, by any transaction (i.e. any Thread) creating a vector
+     * of a certain type for the first time. `VectorStore#VectorStore` calls `idGeneratorFactory.open`,
+     * which in turn leads to a modification of this map. Therefore, we need a thread-safe map.
+     */
+    private final Map<IdGenerator, WorkSync<IdGenerator, IdGeneratorUpdateWork>> workSyncMap =
+            new ConcurrentHashMap<>();
+
     private final boolean alwaysFreeOnDelete;
 
     public IdGeneratorUpdatesWorkSync() {
@@ -59,16 +67,18 @@ public class IdGeneratorUpdatesWorkSync {
         this.workSyncMap.put(idGenerator, new WorkSync<>(idGenerator));
     }
 
-    public Batch newBatch(CursorContext cursorContext) {
-        return new Batch(cursorContext);
+    public Batch newBatch(CursorContext cursorContext, boolean bridgeOnDelete) {
+        return new Batch(cursorContext, bridgeOnDelete);
     }
 
     public class Batch implements IdUpdateListener {
         private final Map<IdGenerator, ChangedIds> idUpdatesMap = new HashMap<>();
         private final CursorContext cursorContext;
+        private final boolean bridgeOnDelete;
 
-        protected Batch(CursorContext cursorContext) {
+        protected Batch(CursorContext cursorContext, boolean bridgeOnDelete) {
             this.cursorContext = cursorContext;
+            this.bridgeOnDelete = bridgeOnDelete;
         }
 
         @Override
@@ -135,7 +145,7 @@ public class IdGeneratorUpdatesWorkSync {
         }
 
         private ChangedIds createChangedIds(IdGenerator ignored) {
-            return new ChangedIds(alwaysFreeOnDelete, cursorContext);
+            return new ChangedIds(alwaysFreeOnDelete, cursorContext, bridgeOnDelete);
         }
     }
 
@@ -145,11 +155,13 @@ public class IdGeneratorUpdatesWorkSync {
         private final MutableLongList ids = LongLists.mutable.empty();
         private final boolean freeOnDelete;
         private final CursorContext cursorContext;
+        private final boolean bridgeOnDelete;
         private AsyncApply asyncApply;
 
-        ChangedIds(boolean freeOnDelete, CursorContext cursorContext) {
+        ChangedIds(boolean freeOnDelete, CursorContext cursorContext, boolean bridgeOnDelete) {
             this.freeOnDelete = freeOnDelete;
             this.cursorContext = cursorContext;
+            this.bridgeOnDelete = bridgeOnDelete;
         }
 
         private void addUsedId(long id, int numberOfIds) {
@@ -168,9 +180,9 @@ public class IdGeneratorUpdatesWorkSync {
                     visitor.markUsed(id, slots);
                 } else {
                     if (freeOnDelete) {
-                        visitor.markDeletedAndFree(id, slots);
+                        visitor.markDeletedAndFree(id, slots, bridgeOnDelete);
                     } else {
-                        visitor.markDeleted(id, slots);
+                        visitor.markDeleted(id, slots, bridgeOnDelete);
                     }
                 }
             });
@@ -208,8 +220,8 @@ public class IdGeneratorUpdatesWorkSync {
         public void apply(IdGenerator idGenerator) {
             for (ChangedIds changes : this.changeList) {
                 // work units are applied in parallel and shouldn't share the same context
-                try (var marker = idGenerator.transactionalMarker(
-                        changes.cursorContext.createRelatedContext(ID_GENERATOR_BATCH_APPLIER_TAG))) {
+                try (var relatedContext = changes.cursorContext.createRelatedContext(ID_GENERATOR_BATCH_APPLIER_TAG);
+                        var marker = idGenerator.transactionalMarker(relatedContext)) {
                     changes.accept(marker);
                 }
             }

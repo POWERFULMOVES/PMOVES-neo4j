@@ -45,6 +45,7 @@ import org.neo4j.batchimport.api.input.InputChunk;
 import org.neo4j.batchimport.api.input.PropertySizeCalculator;
 import org.neo4j.batchimport.api.input.ReadableGroups;
 import org.neo4j.csv.reader.Extractors;
+import org.neo4j.importer.SchemaCommandSource;
 import org.neo4j.internal.batchimport.input.csv.CsvInput;
 import org.neo4j.internal.batchimport.input.csv.Header;
 import org.neo4j.internal.batchimport.input.csv.Header.Entry;
@@ -87,23 +88,7 @@ public class DataGeneratorInput implements Input {
     private final Header nodeHeader;
     private final Header relationshipHeader;
     private final Groups groups;
-
-    public DataGeneratorInput(
-            DataDistribution dataDistribution,
-            IdType idType,
-            long seed,
-            Header nodeHeader,
-            Header relationshipHeader,
-            Groups groups) {
-        this(
-                dataDistribution,
-                idType,
-                seed,
-                RandomValues.DEFAULT_CONFIGURATION,
-                nodeHeader,
-                relationshipHeader,
-                groups);
-    }
+    private final SchemaCommandSource schemaCommandSource;
 
     public DataGeneratorInput(
             DataDistribution dataDistribution,
@@ -112,7 +97,8 @@ public class DataGeneratorInput implements Input {
             RandomValues.Configuration randomConfig,
             Header nodeHeader,
             Header relationshipHeader,
-            Groups groups) {
+            Groups groups,
+            SchemaCommandSource schemaCommandSource) {
         this.dataDistribution = dataDistribution;
         this.idType = idType;
         this.seed = seed;
@@ -120,6 +106,7 @@ public class DataGeneratorInput implements Input {
         this.nodeHeader = nodeHeader;
         this.relationshipHeader = relationshipHeader;
         this.groups = groups;
+        this.schemaCommandSource = schemaCommandSource;
     }
 
     public static DataDistribution data(long nodeCount, long relationshipCount) {
@@ -149,6 +136,17 @@ public class DataGeneratorInput implements Input {
     }
 
     @Override
+    public SchemaCommandSource schemaCommandSource() {
+        return schemaCommandSource;
+    }
+
+    @Override
+    public boolean containsVectorData() {
+        // unknown as it is generated; however, will note if it is possible
+        return randomConfig.includeVectorTypes();
+    }
+
+    @Override
     public IdType idType() {
         return idType;
     }
@@ -159,7 +157,7 @@ public class DataGeneratorInput implements Input {
     }
 
     @Override
-    public Estimates validateAndEstimate(PropertySizeCalculator valueSizeCalculator) {
+    public Estimates validateAndEstimate(PropertySizeCalculator valueSizeCalculator, int numberOfThreads) {
         int sampleSize = 100;
         InputEntity[] nodeSample = sample(nodes(Collector.EMPTY), sampleSize);
         double labelsPerNodeEstimate = sampleLabels(nodeSample);
@@ -216,7 +214,7 @@ public class DataGeneratorInput implements Input {
             return new double[] {0, 0};
         }
 
-        int propertiesPerEntity = sample[0].propertyCount();
+        int propertiesPerEntity = sample[0].properties.size();
         long propertiesSize = 0;
         for (InputEntity entity : sample) {
             if (entity != null) {
@@ -552,8 +550,15 @@ public class DataGeneratorInput implements Input {
                 case "float[]" -> random.nextFloatArray().asObjectCopy();
                 case "double" -> random.nextDoubleValue().asObjectCopy();
                 case "double[]" -> random.nextDoubleArray().asObjectCopy();
-                default -> throw new IllegalArgumentException(
-                        entry + " " + entry.extractor().name());
+                case "Int8Vector" -> random.nextInt8Vector().asObjectCopy();
+                case "Int16Vector" -> random.nextInt16Vector().asObjectCopy();
+                case "Int32Vector" -> random.nextInt32Vector().asObjectCopy();
+                case "Int64Vector" -> random.nextInt64Vector().asObjectCopy();
+                case "Float32Vector" -> random.nextFloat32Vector().asObjectCopy();
+                case "Float64Vector" -> random.nextFloat64Vector().asObjectCopy();
+                default ->
+                    throw new IllegalArgumentException(
+                            entry + " " + entry.extractor().name());
             };
         }
 

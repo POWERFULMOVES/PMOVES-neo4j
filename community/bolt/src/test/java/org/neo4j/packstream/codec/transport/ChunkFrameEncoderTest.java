@@ -60,6 +60,7 @@ class ChunkFrameEncoderTest {
 
                     if (!payload.isReadable()) {
                         ByteBufAssertions.assertThat(actual).hasNoRemainingReadableBytes();
+                        inputBytes.release();
 
                         return;
                     }
@@ -87,6 +88,7 @@ class ChunkFrameEncoderTest {
                     }
 
                     ByteBufAssertions.assertThat(actual).hasNoRemainingReadableBytes();
+                    inputBytes.release();
 
                     assertNull(ctx.tracked(channel.readOutbound()));
                 }))

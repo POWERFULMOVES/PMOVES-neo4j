@@ -20,6 +20,7 @@
 package org.neo4j.bolt.protocol.common.message.decoder.transaction;
 
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.neo4j.bolt.testing.util.ErrorUtil.useNewMessage;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -31,12 +32,12 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.Mockito;
 import org.neo4j.bolt.protocol.common.message.decoder.MessageDecoder;
 import org.neo4j.bolt.protocol.common.message.decoder.NonEmptyMessageDecoderTest;
-import org.neo4j.bolt.protocol.common.message.request.transaction.BeginMessage;
 import org.neo4j.bolt.testing.mock.ConnectionMockFactory;
+import org.neo4j.boltmessages.request.transaction.BeginMessage;
 import org.neo4j.packstream.error.reader.PackstreamReaderException;
 import org.neo4j.packstream.error.struct.IllegalStructArgumentException;
 import org.neo4j.packstream.io.PackstreamBuf;
-import org.neo4j.packstream.io.value.PackstreamValueReader;
+import org.neo4j.packstream.io.value.AbstractPackstreamValueReader;
 import org.neo4j.packstream.struct.StructHeader;
 import org.neo4j.values.AnyValue;
 import org.neo4j.values.storable.Values;
@@ -51,7 +52,7 @@ public abstract class AbstractBeginMessageDecoderTest<D extends MessageDecoder<B
     protected void shouldFailWithBookmarkParserExceptionWhenParsingFails(AnyValue bookmarkValue)
             throws PackstreamReaderException {
         var buf = PackstreamBuf.allocUnpooled();
-        var reader = Mockito.mock(PackstreamValueReader.class);
+        var reader = Mockito.mock(AbstractPackstreamValueReader.class);
 
         var meta = new MapValueBuilder();
         meta.add("bookmarks", bookmarkValue);
@@ -64,7 +65,8 @@ public abstract class AbstractBeginMessageDecoderTest<D extends MessageDecoder<B
 
         assertThatExceptionOfType(IllegalStructArgumentException.class)
                 .isThrownBy(() -> this.getDecoder().read(connection, buf, new StructHeader(1, (short) 0x42)))
-                .withMessageContaining("Illegal value for field \"bookmarks\":");
+                .withMessageContaining(useNewMessage("08N06: General network protocol error.")
+                        .whenLegacyFallbackTo("Illegal value for field \"bookmarks\":"));
     }
 
     public static Stream<Arguments> invalidBookmarks() {
@@ -78,8 +80,8 @@ public abstract class AbstractBeginMessageDecoderTest<D extends MessageDecoder<B
     @Test
     protected void shouldFailWithIllegalStructArgumentWhenInvalidArgumentIsPassed() throws PackstreamReaderException {
         var buf = PackstreamBuf.allocUnpooled();
-        var reader = Mockito.mock(PackstreamValueReader.class);
-        var ex = new PackstreamReaderException("Something went kaput :(");
+        var reader = Mockito.mock(AbstractPackstreamValueReader.class);
+        var ex = PackstreamReaderException.internalError(this.getClass().getSimpleName(), "Something went kaput :(");
 
         Mockito.doThrow(ex).when(reader).readMap();
 
@@ -88,7 +90,8 @@ public abstract class AbstractBeginMessageDecoderTest<D extends MessageDecoder<B
 
         assertThatExceptionOfType(IllegalStructArgumentException.class)
                 .isThrownBy(() -> this.getDecoder().read(connection, buf, new StructHeader(1, (short) 0x42)))
-                .withMessage("Illegal value for field \"metadata\": Something went kaput :(")
+                .withMessage(useNewMessage("08N06: General network protocol error.")
+                        .whenLegacyFallbackTo("Illegal value for field \"metadata\": Something went kaput :("))
                 .withCause(ex);
     }
 
@@ -96,7 +99,7 @@ public abstract class AbstractBeginMessageDecoderTest<D extends MessageDecoder<B
     protected void shouldFailWithIllegalStructArgumentWhenInvalidMetadataEntryIsPassed()
             throws PackstreamReaderException {
         var buf = PackstreamBuf.allocUnpooled();
-        var reader = Mockito.mock(PackstreamValueReader.class);
+        var reader = Mockito.mock(AbstractPackstreamValueReader.class);
 
         var meta = new MapValueBuilder();
         meta.add("tx_timeout", Values.stringValue("✨✨ nonsense ✨✨"));
@@ -109,7 +112,9 @@ public abstract class AbstractBeginMessageDecoderTest<D extends MessageDecoder<B
         assertThatExceptionOfType(IllegalStructArgumentException.class)
                 .isThrownBy(() -> this.getDecoder().read(connection, buf, new StructHeader(1, (short) 0x42)))
                 .withMessage(
-                        "Illegal value for field \"metadata\": Illegal value for field \"tx_timeout\": Expected long")
+                        useNewMessage("08N06: General network protocol error.")
+                                .whenLegacyFallbackTo(
+                                        "Illegal value for field \"metadata\": Illegal value for field \"tx_timeout\": Expected long"))
                 .withCauseInstanceOf(IllegalStructArgumentException.class);
     }
 }

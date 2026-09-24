@@ -21,8 +21,7 @@ package org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands
 
 import org.neo4j.configuration.Config
 import org.neo4j.configuration.SettingImpl
-import org.neo4j.cypher.internal.ast.CommandResultItem
-import org.neo4j.cypher.internal.ast.ShowColumn
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.ShowSettingsClause.defaultValueColumn
 import org.neo4j.cypher.internal.ast.ShowSettingsClause.descriptionColumn
 import org.neo4j.cypher.internal.ast.ShowSettingsClause.isDeprecatedColumn
@@ -32,10 +31,13 @@ import org.neo4j.cypher.internal.ast.ShowSettingsClause.nameColumn
 import org.neo4j.cypher.internal.ast.ShowSettingsClause.startupValueColumn
 import org.neo4j.cypher.internal.ast.ShowSettingsClause.validValuesColumn
 import org.neo4j.cypher.internal.ast.ShowSettingsClause.valueColumn
+import org.neo4j.cypher.internal.logical.plans.CommandDefaultColumn
+import org.neo4j.cypher.internal.logical.plans.CommandYieldColumn
 import org.neo4j.cypher.internal.runtime.ClosingIterator
 import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Expression
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.QueryState
+import org.neo4j.exceptions.InternalException
 import org.neo4j.values.AnyValue
 import org.neo4j.values.storable.Values
 
@@ -44,9 +46,10 @@ import scala.util.Try
 
 // SHOW SETTING[S] [names | nameExpression] [WHERE clause | YIELD clause]
 case class ShowSettingsCommand(
-  givenNames: Either[List[String], Expression],
-  columns: List[ShowColumn],
-  yieldColumns: List[CommandResultItem]
+  givenNames: Option[Expression],
+  columns: List[CommandDefaultColumn],
+  yieldColumns: List[CommandYieldColumn],
+  cypherVersion: CypherVersion
 ) extends Command(columns, yieldColumns) {
 
   private def asMap[T](config: Config)(setting: SettingImpl[T]): Map[String, AnyValue] = requestedColumnsNames.map {
@@ -63,11 +66,15 @@ case class ShowSettingsCommand(
     case unknown                 =>
       // This match should cover all existing columns but we get scala warnings
       // on non-exhaustive match due to it being string values
-      throw new IllegalStateException(s"Missing case for column: $unknown")
+      throw InternalException.internalError(
+        this.getClass.getSimpleName,
+        s"Unknown column for show settings. Missing case for column: $unknown.",
+        s"Missing case for column: $unknown"
+      )
   }.toMap[String, AnyValue]
 
   override def originalNameRows(state: QueryState, baseRow: CypherRow): ClosingIterator[Map[String, AnyValue]] = {
-    val names = Command.extractNames(givenNames, state, baseRow, "SHOW SETTINGS")
+    val names = Command.extractNames(givenNames, state, baseRow, "SHOW SETTINGS", cypherVersion)
     val config = state.query.getConfig
     val txContext = state.query.transactionalContext
     val accessMode = txContext.securityContext.mode()
@@ -81,7 +88,6 @@ case class ShowSettingsCommand(
       .sortBy(_.name())
       .map(asMap(config)(_))
 
-    val updatedRows = updateRowsWithPotentiallyRenamedColumns(rows)
-    ClosingIterator.apply(updatedRows.iterator)
+    ClosingIterator.apply(rows.iterator)
   }
 }

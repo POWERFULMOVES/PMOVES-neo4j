@@ -29,7 +29,6 @@ import static picocli.CommandLine.Option;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.io.PrintStream;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.NoSuchFileException;
@@ -41,6 +40,7 @@ import java.util.Optional;
 import java.util.StringJoiner;
 import org.neo4j.cli.AbstractAdminCommand;
 import org.neo4j.cli.CommandFailedException;
+import org.neo4j.cli.CommandOptionDescriptions;
 import org.neo4j.cli.Converters;
 import org.neo4j.cli.ExecutionContext;
 import org.neo4j.cloud.storage.SchemeFileSystemAbstraction;
@@ -50,9 +50,15 @@ import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.configuration.helpers.DatabaseNamePattern;
 import org.neo4j.dbms.archive.DumpFormatSelector;
 import org.neo4j.dbms.archive.Dumper;
+import org.neo4j.dbms.archive.Dumper.DumpOutput;
+import org.neo4j.dbms.archive.Dumper.FileOutput;
+import org.neo4j.dbms.archive.Dumper.SplitFileOutput;
+import org.neo4j.dbms.archive.Dumper.StdoutOutput;
+import org.neo4j.dbms.archive.Manifest;
 import org.neo4j.internal.helpers.ArrayUtil;
 import org.neo4j.internal.helpers.Exceptions;
 import org.neo4j.io.fs.FileSystemAbstraction;
+import org.neo4j.io.fs.filename.SequentialFileNameHelper;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.layout.Neo4jLayout;
 import org.neo4j.io.locker.FileLockException;
@@ -118,6 +124,16 @@ public class DumpCommand extends AbstractAdminCommand {
             description = "Overwrite any existing dump file in the destination folder.")
     private boolean overwriteDestination;
 
+    @Option(
+            names = CommandOptionDescriptions.SplitArchiveOption.OPTION_NAME,
+            arity = "1",
+            paramLabel = "<splitsize>",
+            description = CommandOptionDescriptions.SplitArchiveOption.DUMP_DESCRIPTION,
+            converter = Converters.ByteUnitConverter.class)
+    private long overrideArchiveSplitSize = 0;
+
+    private InternalLog log;
+
     public DumpCommand(ExecutionContext ctx) {
         super(ctx);
     }
@@ -139,7 +155,7 @@ public class DumpCommand extends AbstractAdminCommand {
 
             Path storagePath = null;
             if (target.toDir != null) {
-                storagePath = fs.resolve(target.toDir);
+                storagePath = normalizeAndValidateIfStoragePathDirectory(fs.resolve(target.toDir));
                 if (!fs.isDirectory(storagePath)) {
                     throw new CommandFailedException(target.toDir + " is not an existing directory");
                 }
@@ -155,7 +171,7 @@ public class DumpCommand extends AbstractAdminCommand {
                 storagePath = createDefaultDumpsDir(fs, config);
             }
 
-            InternalLog log = logProvider.getLog(getClass());
+            log = logProvider.getLog(getClass());
 
             List<FailedDump> failedDumps = new ArrayList<>();
 
@@ -173,7 +189,7 @@ public class DumpCommand extends AbstractAdminCommand {
                         throw new CommandFailedException("Database does not exist: " + databaseName, e);
                     }
 
-                    if (fs.fileExists(databaseLayout.file(StoreMigrator.MIGRATION_DIRECTORY))) {
+                    if (fs.fileExists(databaseLayout.path(StoreMigrator.MIGRATION_DIRECTORY))) {
                         throw new CommandFailedException(
                                 "Store migration folder detected - A dump can not be taken during a store migration. Make sure "
                                         + "store migration is completed before trying again.");
@@ -182,7 +198,7 @@ public class DumpCommand extends AbstractAdminCommand {
                     try (Closeable ignored = LockChecker.checkDatabaseLock(databaseLayout)) {
                         checkDbState(fs, databaseLayout, config, memoryTracker, databaseName, log);
                         logFormatDeprecationWarning(log, databaseLayout, config, fs);
-                        dump(dumper, databaseLayout, databaseName, storagePath);
+                        dump(dumper, config, databaseLayout, databaseName, storagePath, fs);
                     } catch (FileLockException e) {
                         throw new CommandFailedException(
                                 "The database is in use. Stop database '" + databaseName + "' and try again.", e);
@@ -223,8 +239,8 @@ public class DumpCommand extends AbstractAdminCommand {
         } catch (IOException e) {
             throw new CommandFailedException(
                     format(
-                            "Unable to create default dumps directory at '%s': %s: %s",
-                            defaultDumpPath, e.getClass().getSimpleName(), e.getMessage()),
+                            "Unable to create default dumps directory at '%s': %s",
+                            defaultDumpPath, e.getClass().getSimpleName()),
                     e);
         }
         return defaultDumpPath;
@@ -267,35 +283,58 @@ public class DumpCommand extends AbstractAdminCommand {
 
     record FailedDump(String dbName, Exception e) {}
 
-    private static Path buildArchivePath(String database, Path to) {
-        return to.resolve(database + DUMP_EXTENSION);
-    }
-
-    private OutputStream openDumpStream(Dumper dumper, String databaseName, Path storagePath) throws IOException {
+    private DumpOutput openDumpStream(
+            SchemeFileSystemAbstraction fs, Config config, String databaseName, Path storagePath) throws IOException {
         if (storagePath == null) {
-            return ctx.out();
+            return new StdoutOutput(ctx);
         }
-        var archive = buildArchivePath(databaseName, storagePath);
-        return dumper.openForDump(archive, overwriteDestination);
+
+        final var archive = storagePath.resolve(databaseName + DUMP_EXTENSION).toAbsolutePath();
+        long splitSize = SplitFileOutput.determineSplitArtifactSize(config, overrideArchiveSplitSize);
+
+        // Allow "overwriting" of existing dumps.
+        if (overwriteDestination) {
+            deleteArchive(fs, archive);
+        }
+
+        if (splitSize > 0) {
+            return SplitFileOutput.of(fs, archive, splitSize);
+        }
+        return FileOutput.of(fs, archive);
     }
 
-    private void dump(Dumper dumper, DatabaseLayout databaseLayout, String databaseName, Path storagePath) {
+    private void deleteArchive(FileSystemAbstraction fs, Path archive) throws IOException {
+        // Delete the archive and all potential split parts
+        SequentialFileNameHelper helper = new SequentialFileNameHelper(
+                archive.getParent(), archive.getFileName().toString());
+        Path[] files = helper.getFiles(fs);
+        for (Path file : files) {
+            fs.deleteFile(file);
+        }
+        fs.deleteFile(archive);
+    }
+
+    private void dump(
+            Dumper dumper,
+            Config config,
+            DatabaseLayout databaseLayout,
+            String databaseName,
+            Path storagePath,
+            SchemeFileSystemAbstraction fs) {
         Path databasePath = databaseLayout.databaseDirectory();
         try {
-            var format = DumpFormatSelector.selectFormat(ctx.err());
+            var format = DumpFormatSelector.selectWriteFormat(ctx.err());
             var lockFile = databaseLayout.databaseLockFile().getFileName().toString();
             var quarantineMarkerFile =
                     databaseLayout.quarantineFile().getFileName().toString();
             // this is closed inside the dump call
-            var out = openDumpStream(dumper, databaseName, storagePath);
-            dumper.dump(
+            Manifest mf = Dumper.collectManifest(
                     databasePath,
                     databaseLayout.getTransactionLogsDirectory(),
-                    out,
-                    format,
                     path -> oneOf(path, lockFile, quarantineMarkerFile));
+            dumper.dump(openDumpStream(fs, config, databaseName, storagePath), format, mf);
         } catch (FileAlreadyExistsException e) {
-            throw new CommandFailedException("Archive already exists: " + e.getMessage(), e);
+            throw new CommandFailedException(format("Archive already exists: %s", e.getMessage()), e);
         } catch (NoSuchFileException e) {
             if (Paths.get(e.getMessage()).toAbsolutePath().equals(databasePath)) {
                 throw new CommandFailedException("Database does not exist: " + databaseLayout.getDatabaseName(), e);
@@ -333,12 +372,12 @@ public class DumpCommand extends AbstractAdminCommand {
         try {
             return isRecoveryRequired(fs, databaseLayout, additionalConfiguration, memoryTracker);
         } catch (Exception e) {
-            throw new CommandFailedException("Failure when checking for recovery state: '%s'." + e.getMessage(), e);
+            throw new CommandFailedException("Failure when checking for recovery state", e);
         }
     }
 
     private static void wrapIOException(IOException e) {
         throw new CommandFailedException(
-                format("Unable to dump database: %s: %s", e.getClass().getSimpleName(), e.getMessage()), e);
+                format("Unable to dump database%n%s: %s", e.getClass().getSimpleName(), e.getMessage()), e);
     }
 }

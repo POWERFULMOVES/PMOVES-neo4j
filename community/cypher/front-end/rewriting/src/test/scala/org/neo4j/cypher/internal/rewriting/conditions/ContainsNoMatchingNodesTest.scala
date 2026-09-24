@@ -16,7 +16,9 @@
  */
 package org.neo4j.cypher.internal.rewriting.conditions
 
+import org.neo4j.cypher.internal.ast.AdditiveProjection
 import org.neo4j.cypher.internal.ast.AstConstructionTestSupport
+import org.neo4j.cypher.internal.ast.FreeProjection
 import org.neo4j.cypher.internal.ast.Return
 import org.neo4j.cypher.internal.ast.ReturnItems
 import org.neo4j.cypher.internal.ast.UnaliasedReturnItem
@@ -24,20 +26,28 @@ import org.neo4j.cypher.internal.util.ASTNode
 import org.neo4j.cypher.internal.util.CancellationChecker
 import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 
+case object TestCondition extends ContainsNoMatchingStatementNodes {
+
+  override val matcher: PartialFunction[ASTNode, String] = {
+    case ri: ReturnItems if ri.includeExisting => "ReturnItems(includeExisting = true, ...)"
+  }
+
+  override val name: String = "NoMatchingNodesTest"
+}
+
 class ContainsNoMatchingNodesTest extends CypherFunSuite with AstConstructionTestSupport {
 
-  val condition: Any => Seq[String] = containsNoMatchingNodes({
-    case ri: ReturnItems if ri.includeExisting => "ReturnItems(includeExisting = true, ...)"
-  })(_)(CancellationChecker.NeverCancelled)
+  val condition: Any => Seq[String] = TestCondition(_)(CancellationChecker.NeverCancelled)
 
   test("Happy when not finding ReturnItems(includeExisting = true, ...)") {
     val ast: ASTNode = Return(
       false,
-      ReturnItems(includeExisting = false, Seq(UnaliasedReturnItem(varFor("foo"), "foo") _)) _,
+      ReturnItems(FreeProjection, Seq(UnaliasedReturnItem(varFor("foo"), "foo")(pos)))(pos),
+      None,
       None,
       None,
       None
-    ) _
+    )(pos)
 
     condition(ast) should equal(Seq())
   }
@@ -45,11 +55,12 @@ class ContainsNoMatchingNodesTest extends CypherFunSuite with AstConstructionTes
   test("Fails when finding ReturnItems(includeExisting = true, ...)") {
     val ast: ASTNode = Return(
       false,
-      ReturnItems(includeExisting = true, Seq(UnaliasedReturnItem(varFor("foo"), "foo") _)) _,
+      ReturnItems(AdditiveProjection, Seq(UnaliasedReturnItem(varFor("foo"), "foo")(pos)))(pos),
+      None,
       None,
       None,
       None
-    ) _
+    )(pos)
 
     condition(ast) should equal(
       Seq("Expected none but found ReturnItems(includeExisting = true, ...) at position line 0, column 0 (offset: 0)")

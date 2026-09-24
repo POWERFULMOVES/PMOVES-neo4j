@@ -20,8 +20,7 @@
 package org.neo4j.dbms.systemgraph.allocation;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.util.Arrays;
 import java.util.stream.Stream;
@@ -29,6 +28,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.neo4j.exceptions.InvalidArgumentException;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.values.AnyValue;
 import org.neo4j.values.storable.Values;
 
@@ -37,7 +39,7 @@ public class DatabaseAllocationHintsTest {
     @Test
     void hintShouldBeSealed() {
         var hintClass = DatabaseAllocationHints.Hint.class;
-        assertTrue(hintClass.isSealed(), "Hint class must be sealed!");
+        assertThat(hintClass.isSealed()).as("Hint class must be sealed!").isTrue();
     }
 
     @Test
@@ -81,12 +83,17 @@ public class DatabaseAllocationHintsTest {
     private static Stream<Arguments> invalidValues() {
         return Stream.of(
                 Arguments.of(DatabaseWeight.KEY, Values.intValue(-1), DatabaseWeight.class, -1),
-                Arguments.of(DatabaseWeight.KEY, Values.stringValue("hello"), DatabaseWeight.class, "hello"),
                 Arguments.of(
                         DatabaseWeight.KEY,
                         Values.intValue(Integer.MIN_VALUE),
                         DatabaseWeight.class,
                         Integer.MIN_VALUE));
+    }
+
+    private static Stream<Arguments> invalidTypes() {
+        return Stream.of(
+                Arguments.of(DatabaseWeight.KEY, Values.intArray(new int[] {1, 2, 3}), "IntegerArray", "[1, 2, 3]"),
+                Arguments.of(DatabaseWeight.KEY, Values.stringValue("hello"), "String", "\"hello\""));
     }
 
     @ParameterizedTest
@@ -96,13 +103,38 @@ public class DatabaseAllocationHintsTest {
             AnyValue hintValue,
             Class<? extends DatabaseAllocationHints.Hint<?>> expectedHintClass,
             Object expectedValue) {
-        assertThrows(IllegalArgumentException.class, () -> DatabaseAllocationHints.createFromInput(hintKey, hintValue));
+        assertThatThrownBy(() -> DatabaseAllocationHints.createFromInput(hintKey, hintValue))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @ParameterizedTest
+    @MethodSource("invalidTypes")
+    void parseInvalidTypesShouldThrow(String hintKey, AnyValue hintValue, String actualType, String actualValue) {
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(
+                        () -> DatabaseAllocationHints.createFromInput(hintKey, hintValue))
+                .isInstanceOf(InvalidArgumentException.class)
+                .hasMessage(String.format(
+                        "Incorrect value type provided for allocation hint 'weight'. Expected an Integer but found a %s.",
+                        actualType))
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22G03)
+                .hasStatusDescription("error: data exception - invalid value type")
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N27)
+                .hasStatusDescription(String.format(
+                        "error: data exception - invalid entity type. Invalid input '%s' for weight. Expected to be INTEGER.",
+                        actualValue));
     }
 
     @Test
     void parseUnknownKeysShouldThrow() {
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> DatabaseAllocationHints.createFromInput("_unknown_key_", Values.intValue(100)));
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(
+                        () -> DatabaseAllocationHints.createFromInput("_unknown_key_", Values.intValue(100)))
+                .isInstanceOf(InvalidArgumentException.class)
+                .hasMessage(
+                        "The key _unknown_key_ is not a recognised allocation hint key! Valid hint keys are: 'weight'")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22NA9)
+                .hasStatusDescription(
+                        "error: data exception - unexpected map entry. Invalid input. Unexpected key '_unknown_key_', expected keys are 'weight'.");
+        ;
     }
 }

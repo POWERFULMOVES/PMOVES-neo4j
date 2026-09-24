@@ -28,20 +28,17 @@ import org.neo4j.kernel.api.exceptions.Status;
  * violations to any constraints defined for the database.
  */
 public class ConstraintViolationTransactionFailureException extends TransactionFailureException {
-    public ConstraintViolationTransactionFailureException(String msg, KernelException cause) {
-        super(Status.Schema.ConstraintValidationFailed, cause, msg);
+
+    protected ConstraintViolationTransactionFailureException(ErrorGqlStatusObject gqlStatusObject, String msg) {
+        super(gqlStatusObject, Status.Schema.ConstraintValidationFailed, msg);
     }
 
-    public ConstraintViolationTransactionFailureException(
-            ErrorGqlStatusObject gqlStatusObject, String msg, KernelException cause) {
+    private ConstraintViolationTransactionFailureException(
+            ErrorGqlStatusObject gqlStatusObject, KernelException cause, String msg) {
         super(gqlStatusObject, Status.Schema.ConstraintValidationFailed, cause, msg);
     }
 
-    public ConstraintViolationTransactionFailureException(String msg) {
-        this(msg, null);
-    }
-
-    public ConstraintViolationTransactionFailureException(ErrorGqlStatusObject gqlStatusObject, String msg) {
-        this(gqlStatusObject, msg, null);
+    public static ConstraintViolationTransactionFailureException create(String msg, KernelException cause) {
+        return new ConstraintViolationTransactionFailureException(cause, cause, msg);
     }
 }

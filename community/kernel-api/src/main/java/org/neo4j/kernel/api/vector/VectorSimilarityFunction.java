@@ -20,21 +20,40 @@
 package org.neo4j.kernel.api.vector;
 
 import org.neo4j.values.AnyValue;
+import org.neo4j.values.VectorCandidate;
 
-public interface VectorSimilarityFunction {
-    String name();
+public interface VectorSimilarityFunction extends VectorDistanceFunction {
+    String functionName();
 
+    /**
+     * Returns a float[] if the provided value is a valid vector candidate in the context of the vector similarity
+     * function, otherwise null.
+     */
     default float[] maybeToValidVector(AnyValue candidate) {
         return maybeToValidVector(VectorCandidate.maybeFrom(candidate));
     }
 
-    default float[] toValidVector(AnyValue candidate) {
-        return toValidVector(VectorCandidate.from(candidate));
-    }
-
+    /**
+     * Returns a float[] if the provided vector candidate is valid in the context of the vector similarity
+     * function, otherwise null.
+     */
     float[] maybeToValidVector(VectorCandidate candidate);
 
+    /**
+     * Returns a float[] if the provided vector candidate is valid in the context of the vector similarity
+     * function, otherwise throws an Exception.
+     */
     float[] toValidVector(VectorCandidate candidate);
 
     float compare(float[] vector1, float[] vector2);
+
+    @Override
+    default float distance(VectorCandidate vector1, VectorCandidate vector2) {
+        return -compare(toValidVector(vector1), toValidVector(vector2));
+    }
+
+    @Override
+    default boolean valid(VectorCandidate vector) {
+        return maybeToValidVector(vector) != null;
+    }
 }

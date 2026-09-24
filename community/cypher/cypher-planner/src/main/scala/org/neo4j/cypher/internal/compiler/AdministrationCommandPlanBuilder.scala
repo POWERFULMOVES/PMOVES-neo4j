@@ -20,20 +20,25 @@
 package org.neo4j.cypher.internal.compiler
 
 import org.neo4j.configuration.GraphDatabaseSettings.SYSTEM_DATABASE_NAME
-import org.neo4j.cypher.internal.ast.AddedInRewrite
+import org.neo4j.cypher.internal.CypherVersion
+import org.neo4j.cypher.internal.ast.AddedInRewriteProcCall
+import org.neo4j.cypher.internal.ast.AddedInRewriteShowCommands
 import org.neo4j.cypher.internal.ast.AllDatabasesScope
 import org.neo4j.cypher.internal.ast.AllGraphsScope
 import org.neo4j.cypher.internal.ast.AlterAliasAction
+import org.neo4j.cypher.internal.ast.AlterAuthRule
+import org.neo4j.cypher.internal.ast.AlterAuthRuleAction
+import org.neo4j.cypher.internal.ast.AlterCompositeDatabaseAction
 import org.neo4j.cypher.internal.ast.AlterDatabase
-import org.neo4j.cypher.internal.ast.AlterDatabaseAction
+import org.neo4j.cypher.internal.ast.AlterDatabaseOptionsAction
+import org.neo4j.cypher.internal.ast.AlterDatabaseTopologyAction
 import org.neo4j.cypher.internal.ast.AlterLocalDatabaseAlias
 import org.neo4j.cypher.internal.ast.AlterRemoteDatabaseAlias
 import org.neo4j.cypher.internal.ast.AlterServer
 import org.neo4j.cypher.internal.ast.AlterUser
-import org.neo4j.cypher.internal.ast.AssignImmutablePrivilegeAction
+import org.neo4j.cypher.internal.ast.AlterUsers
 import org.neo4j.cypher.internal.ast.AssignPrivilegeAction
 import org.neo4j.cypher.internal.ast.AssignRoleAction
-import org.neo4j.cypher.internal.ast.CallClause
 import org.neo4j.cypher.internal.ast.CascadeAliases
 import org.neo4j.cypher.internal.ast.CatalogName
 import org.neo4j.cypher.internal.ast.Clause
@@ -43,25 +48,30 @@ import org.neo4j.cypher.internal.ast.CommandClause
 import org.neo4j.cypher.internal.ast.CommandClauseAllowedOnSystem
 import org.neo4j.cypher.internal.ast.CountExpression
 import org.neo4j.cypher.internal.ast.CreateAliasAction
+import org.neo4j.cypher.internal.ast.CreateAuthRule
+import org.neo4j.cypher.internal.ast.CreateAuthRuleAction
 import org.neo4j.cypher.internal.ast.CreateCompositeDatabase
 import org.neo4j.cypher.internal.ast.CreateCompositeDatabaseAction
 import org.neo4j.cypher.internal.ast.CreateDatabase
 import org.neo4j.cypher.internal.ast.CreateDatabaseAction
 import org.neo4j.cypher.internal.ast.CreateLocalDatabaseAlias
 import org.neo4j.cypher.internal.ast.CreateRemoteDatabaseAlias
+import org.neo4j.cypher.internal.ast.CreateReplicaDatabase
 import org.neo4j.cypher.internal.ast.CreateRole
 import org.neo4j.cypher.internal.ast.CreateRoleAction
 import org.neo4j.cypher.internal.ast.CreateUser
 import org.neo4j.cypher.internal.ast.CreateUserAction
+import org.neo4j.cypher.internal.ast.DatabaseAndDbmsAction
 import org.neo4j.cypher.internal.ast.DatabaseName
 import org.neo4j.cypher.internal.ast.DatabasePrivilege
 import org.neo4j.cypher.internal.ast.DatabaseScope
-import org.neo4j.cypher.internal.ast.DbmsAction
 import org.neo4j.cypher.internal.ast.DbmsPrivilege
 import org.neo4j.cypher.internal.ast.DeallocateServers
 import org.neo4j.cypher.internal.ast.DenyPrivilege
 import org.neo4j.cypher.internal.ast.DestroyData
 import org.neo4j.cypher.internal.ast.DropAliasAction
+import org.neo4j.cypher.internal.ast.DropAuthRule
+import org.neo4j.cypher.internal.ast.DropAuthRuleAction
 import org.neo4j.cypher.internal.ast.DropCompositeDatabaseAction
 import org.neo4j.cypher.internal.ast.DropDatabase
 import org.neo4j.cypher.internal.ast.DropDatabaseAction
@@ -74,6 +84,7 @@ import org.neo4j.cypher.internal.ast.DropUserAction
 import org.neo4j.cypher.internal.ast.EnableServer
 import org.neo4j.cypher.internal.ast.ExistsExpression
 import org.neo4j.cypher.internal.ast.GrantPrivilege
+import org.neo4j.cypher.internal.ast.GrantRolesToAuthRules
 import org.neo4j.cypher.internal.ast.GrantRolesToUsers
 import org.neo4j.cypher.internal.ast.GraphDirectReference
 import org.neo4j.cypher.internal.ast.GraphPrivilege
@@ -84,6 +95,7 @@ import org.neo4j.cypher.internal.ast.IfExistsDo
 import org.neo4j.cypher.internal.ast.IfExistsDoNothing
 import org.neo4j.cypher.internal.ast.IfExistsReplace
 import org.neo4j.cypher.internal.ast.LoadPrivilege
+import org.neo4j.cypher.internal.ast.NextStatement
 import org.neo4j.cypher.internal.ast.NoOptions
 import org.neo4j.cypher.internal.ast.NoResource
 import org.neo4j.cypher.internal.ast.NoWait
@@ -91,6 +103,8 @@ import org.neo4j.cypher.internal.ast.ParsedAsYield
 import org.neo4j.cypher.internal.ast.ReallocateDatabases
 import org.neo4j.cypher.internal.ast.RemovePrivilegeAction
 import org.neo4j.cypher.internal.ast.RemoveRoleAction
+import org.neo4j.cypher.internal.ast.RenameAuthRule
+import org.neo4j.cypher.internal.ast.RenameAuthRuleAction
 import org.neo4j.cypher.internal.ast.RenameRole
 import org.neo4j.cypher.internal.ast.RenameRoleAction
 import org.neo4j.cypher.internal.ast.RenameServer
@@ -102,19 +116,25 @@ import org.neo4j.cypher.internal.ast.RevokeBothType
 import org.neo4j.cypher.internal.ast.RevokeDenyType
 import org.neo4j.cypher.internal.ast.RevokeGrantType
 import org.neo4j.cypher.internal.ast.RevokePrivilege
+import org.neo4j.cypher.internal.ast.RevokeRolesFromAuthRules
 import org.neo4j.cypher.internal.ast.RevokeRolesFromUsers
 import org.neo4j.cypher.internal.ast.RevokeType
 import org.neo4j.cypher.internal.ast.ServerManagementAction
 import org.neo4j.cypher.internal.ast.SetAuthAction
 import org.neo4j.cypher.internal.ast.SetDatabaseAccessAction
+import org.neo4j.cypher.internal.ast.SetDatabaseDefaultLanguageAction
 import org.neo4j.cypher.internal.ast.SetOwnPassword
 import org.neo4j.cypher.internal.ast.SetPasswordsAction
 import org.neo4j.cypher.internal.ast.SetUserHomeDatabaseAction
+import org.neo4j.cypher.internal.ast.SetUserMetadataAction
 import org.neo4j.cypher.internal.ast.SetUserStatusAction
+import org.neo4j.cypher.internal.ast.ShardDefinition
 import org.neo4j.cypher.internal.ast.ShowAliasAction
 import org.neo4j.cypher.internal.ast.ShowAliases
+import org.neo4j.cypher.internal.ast.ShowAuthRuleAction
+import org.neo4j.cypher.internal.ast.ShowAuthRules
+import org.neo4j.cypher.internal.ast.ShowAuthRulesPrivileges
 import org.neo4j.cypher.internal.ast.ShowCurrentUser
-import org.neo4j.cypher.internal.ast.ShowDatabase
 import org.neo4j.cypher.internal.ast.ShowPrivilegeAction
 import org.neo4j.cypher.internal.ast.ShowPrivilegeCommands
 import org.neo4j.cypher.internal.ast.ShowPrivileges
@@ -124,6 +144,7 @@ import org.neo4j.cypher.internal.ast.ShowServerAction
 import org.neo4j.cypher.internal.ast.ShowServers
 import org.neo4j.cypher.internal.ast.ShowSupportedPrivilegeCommand
 import org.neo4j.cypher.internal.ast.ShowUserAction
+import org.neo4j.cypher.internal.ast.ShowUserCredentialsAction
 import org.neo4j.cypher.internal.ast.ShowUserPrivileges
 import org.neo4j.cypher.internal.ast.ShowUsers
 import org.neo4j.cypher.internal.ast.ShowUsersPrivileges
@@ -134,13 +155,14 @@ import org.neo4j.cypher.internal.ast.StartDatabase
 import org.neo4j.cypher.internal.ast.StartDatabaseAction
 import org.neo4j.cypher.internal.ast.StopDatabase
 import org.neo4j.cypher.internal.ast.StopDatabaseAction
+import org.neo4j.cypher.internal.ast.TopLevelBraces
+import org.neo4j.cypher.internal.ast.Union
 import org.neo4j.cypher.internal.ast.UseGraph
 import org.neo4j.cypher.internal.ast.WaitUntilComplete
 import org.neo4j.cypher.internal.ast.With
 import org.neo4j.cypher.internal.ast.prettifier.ExpressionStringifier
 import org.neo4j.cypher.internal.ast.prettifier.Prettifier
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheckContext
-import org.neo4j.cypher.internal.ast.semantics.SemanticCheckResult
 import org.neo4j.cypher.internal.ast.semantics.SemanticState
 import org.neo4j.cypher.internal.compiler.phases.LogicalPlanState
 import org.neo4j.cypher.internal.compiler.phases.PlannerContext
@@ -155,7 +177,7 @@ import org.neo4j.cypher.internal.frontend.phases.BaseState
 import org.neo4j.cypher.internal.frontend.phases.CompilationPhaseTracer.CompilationPhase
 import org.neo4j.cypher.internal.frontend.phases.CompilationPhaseTracer.CompilationPhase.PIPE_BUILDING
 import org.neo4j.cypher.internal.frontend.phases.Phase
-import org.neo4j.cypher.internal.frontend.phases.ResolvedCall
+import org.neo4j.cypher.internal.frontend.phases.ResolvedNonLocalCall
 import org.neo4j.cypher.internal.logical.plans
 import org.neo4j.cypher.internal.logical.plans.AssertRoleCanBeDropped
 import org.neo4j.cypher.internal.logical.plans.AssertRoleCanBeRenamed
@@ -163,17 +185,28 @@ import org.neo4j.cypher.internal.logical.plans.DatabaseTypeFilter.Alias
 import org.neo4j.cypher.internal.logical.plans.DatabaseTypeFilter.CompositeDatabase
 import org.neo4j.cypher.internal.logical.plans.DatabaseTypeFilter.DatabaseOrLocalAlias
 import org.neo4j.cypher.internal.logical.plans.DenyLoadAction
+import org.neo4j.cypher.internal.logical.plans.EnsureRoleHasNoDeniedPrivileges
+import org.neo4j.cypher.internal.logical.plans.EnsureRoleNotGrantedToAnyAuthRules
 import org.neo4j.cypher.internal.logical.plans.GrantLoadAction
+import org.neo4j.cypher.internal.logical.plans.PrivilegePlan
 import org.neo4j.cypher.internal.planner.spi.AdministrationPlannerName
+import org.neo4j.cypher.internal.util.EmptyErrorMessageProvider
 import org.neo4j.cypher.internal.util.Foldable.SkipChildren
+import org.neo4j.cypher.internal.util.Foldable.TraverseChildren
 import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.StepSequencer
 import org.neo4j.cypher.internal.util.attribution.SequentialIdGen
-import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.PRIMARY_PROPERTY
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.PRIMARY_PROPERTY
+import org.neo4j.exceptions.InternalException
 import org.neo4j.exceptions.InvalidSemanticsException
 import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation
+import org.neo4j.gqlstatus.GqlHelper
 import org.neo4j.gqlstatus.GqlStatusInfoCodes
 import org.neo4j.graphdb.security.AuthorizationViolationException
+import org.neo4j.internal.kernel.api.security.AbstractSecurityLog
+import org.neo4j.internal.kernel.api.security.SecurityExceptionLogger
+
+import scala.language.implicitConversions
 
 /**
  * This planner takes on queries that run at the DBMS level for multi-database administration.
@@ -194,9 +227,11 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
   override def postConditions: Set[StepSequencer.Condition] = Set.empty
 
   // Automatically convert AST form into Planner form
-  implicit private val expressionToEitherStringParam: PartialFunction[Expression, Either[String, Parameter]] = {
-    case StringLiteral(str) => Left(str)
-    case p: Parameter       => Right(p)
+  implicit private def expressionToEitherStringParam(expression: Expression): Either[String, Parameter] = {
+    expression match {
+      case StringLiteral(str) => Left(str)
+      case p: Parameter       => Right(p)
+    }
   }
 
   override def process(from: BaseState, context: PlannerContext): LogicalPlanState = {
@@ -215,11 +250,14 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
     def getSourceForCreateRole(
       roleName: Either[String, Parameter],
       createImmutable: Boolean,
-      ifExistsDo: IfExistsDo
+      ifExistsDo: IfExistsDo,
+      securityLog: AbstractSecurityLog
     ): plans.SecurityAdministrationLogicalPlan = {
       val canCreateImmutableCheck =
         if (createImmutable)
-          Some(plans.AssertSecurityDisabled(() => AuthorizationViolationException.creatingImmutableRoles()))
+          Some(plans.AssertSecurityDisabled(() =>
+            new SecurityExceptionLogger(securityLog).logAndGet(AuthorizationViolationException.creatingImmutableRoles())
+          ))
         else None
       ifExistsDo match {
         case IfExistsReplace =>
@@ -246,24 +284,67 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
       databaseName: DatabaseName,
       waitUntilComplete: WaitUntilComplete
     ): plans.DatabaseAdministrationLogicalPlan = waitUntilComplete match {
-      case NoWait => logicalPlan
-      case _      => plans.WaitForCompletion(logicalPlan, databaseName, waitUntilComplete)
+      case _: NoWait => logicalPlan
+      case _         => plans.WaitForCompletion(logicalPlan, databaseName, waitUntilComplete)
     }
 
-    def planSystemProcedureCall(resolved: ResolvedCall, returns: Option[Return]): plans.LogicalPlan = {
-      val SemanticCheckResult(_, errors) = resolved.semanticCheck.run(SemanticState.clean, SemanticCheckContext.default)
-      errors.foreach { error => throw context.cypherExceptionFactory.syntaxException(error.msg, error.position) }
+    def getSourceForCreateAuthRule(
+      authRuleName: Either[String, Parameter],
+      ifExistsDo: IfExistsDo
+    ): plans.SecurityAdministrationLogicalPlan = {
+      ifExistsDo match {
+        case IfExistsReplace =>
+          plans.DropAuthRule(
+            plans.AssertAllowedDbmsActions(None, Seq(DropAuthRuleAction, CreateAuthRuleAction)),
+            authRuleName
+          )
+        case IfExistsDoNothing =>
+          plans.DoNothingIfExists(
+            plans.AssertAllowedDbmsActions(
+              None,
+              Seq(CreateAuthRuleAction)
+            ),
+            s"CREATE AUTH RULE",
+            plans.AuthRuleEntity,
+            authRuleName
+          )
+        case _ => plans.AssertAllowedDbmsActions(
+            None,
+            Seq(CreateAuthRuleAction)
+          )
+      }
+    }
+
+    def planSystemProcedureCall(
+      language: CypherVersion,
+      resolved: ResolvedNonLocalCall,
+      returns: Option[Return]
+    ): plans.LogicalPlan = {
+      val semanticContext = SemanticCheckContext(language, EmptyErrorMessageProvider)
+      resolved.semanticCheck.run(SemanticState.clean, semanticContext).errors.foreach { error =>
+        if (error.gqlStatusObject != null) {
+          throw context.cypherExceptionFactory.syntaxException(error.gqlStatusObject, error.msg, error.position)
+        }
+        // This case can be removed once all semantic errors have been ported to GQLSTATUS
+        throw context.cypherExceptionFactory.syntaxException(GqlHelper.getDefaultObject, error.msg, error.position)
+      }
       val signature = resolved.signature
       val checkCredentialsExpired = !signature.allowExpiredCredentials
-      plans.SystemProcedureCall(signature.name.toString, resolved, returns, context.params, checkCredentialsExpired)
+      plans.SystemProcedureCall(resolved, returns, context.params, checkCredentialsExpired)
     }
 
     // Check for non-administration commands that are allowed on system database, e.g. SHOW PROCEDURES YIELD ...
-    // Currently doesn't allow WITH except when it is used instead of YIELD
+    // Currently doesn't allow WITH except when it is used instead of YIELD or added in rewrites
+    // Also allows system procedure calls together with the commands
     def checkClausesAllowedOnSystem(clauses: Seq[Clause]) =
-      clauses.exists(_.isInstanceOf[CommandClauseAllowedOnSystem]) && clauses.forall {
-        case w: With => w.withType == ParsedAsYield || w.withType == AddedInRewrite
-        case c       => c.isInstanceOf[ClauseAllowedOnSystem]
+      clauses.exists {
+        case r: ResolvedNonLocalCall => r.signature.systemProcedure
+        case c                       => c.isInstanceOf[CommandClauseAllowedOnSystem]
+      } && clauses.forall {
+        case w: With =>
+          w.withType == ParsedAsYield || w.withType == AddedInRewriteShowCommands || w.withType == AddedInRewriteProcCall
+        case r: ResolvedNonLocalCall => r.signature.systemProcedure
+        case c                       => c.isInstanceOf[ClauseAllowedOnSystem]
       }
 
     // Return non-administration commands that are not allowed on system database, e.g. SHOW CONSTRAINTS YIELD ...
@@ -271,8 +352,11 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
     def getCommandClausesNotAllowedOnSystem(clauses: Seq[Clause]) =
       clauses.filter(clause => clause.isInstanceOf[CommandClause] && !clause.isInstanceOf[ClauseAllowedOnSystem])
 
-    def assignPrivilegeAction(immutable: Boolean) =
-      if (immutable) AssignImmutablePrivilegeAction else AssignPrivilegeAction
+    def checkCanMutateImmutablePlan(
+      immutable: Boolean,
+      onViolation: () => AuthorizationViolationException
+    ): Option[PrivilegePlan] =
+      if (immutable) Some(plans.AssertSecurityDisabled(onViolation)) else None
 
     val mapDatabaseScope: PartialFunction[DatabaseScope, plans.PrivilegeCommandScope] = {
       case SingleNamedDatabaseScope(db) => plans.NamedScope(db)
@@ -325,9 +409,14 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
 
     val maybeLogicalPlan: Option[plans.LogicalPlan] = from.statement() match {
       // SHOW USERS
-      case su: ShowUsers => Some(plans.ShowUsers(
-          plans.AssertAllowedDbmsActions(ShowUserAction),
+      case su: ShowUsers =>
+        val assertAllowed =
+          if (su.asCommands) plans.AssertAllowedDbmsActions(None, Seq(ShowUserAction, ShowUserCredentialsAction))
+          else plans.AssertAllowedDbmsActions(ShowUserAction)
+        Some(plans.ShowUsers(
+          assertAllowed,
           su.withAuth,
+          su.asCommands,
           su.defaultColumnNames.map(varFor),
           su.yields,
           su.returns
@@ -337,11 +426,17 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
       case su: ShowCurrentUser => Some(plans.ShowCurrentUser(su.defaultColumnNames.map(varFor), su.yields, su.returns))
 
       // CREATE [OR REPLACE] USER foo [IF NOT EXISTS] WITH [PLAINTEXT | ENCRYPTED] PASSWORD password
-      case c @ CreateUser(userName, userOptions, ifExistsDo, externalAuths, nativeAuth) =>
+      case c @ CreateUser(userName, userOptions, ifExistsDo, externalAuths, nativeAuth, tags) =>
+        val dbmsActions = CreateUserAction +: Vector(
+          (ifExistsDo == IfExistsReplace, DropUserAction),
+          (tags.nonEmpty, SetUserMetadataAction)
+        ).collect { case (true, action) => action }
+        val assertAllowed = plans.AssertAllowedDbmsActions(None, dbmsActions)
+
         val source = ifExistsDo match {
           case IfExistsReplace => plans.DropUser(
               plans.AssertNotCurrentUser(
-                plans.AssertAllowedDbmsActions(None, Seq(DropUserAction, CreateUserAction)),
+                assertAllowed,
                 userName,
                 "replace",
                 "Deleting yourself is not allowed",
@@ -352,12 +447,12 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
             )
           case IfExistsDoNothing =>
             plans.DoNothingIfExists(
-              plans.AssertAllowedDbmsActions(CreateUserAction),
+              assertAllowed,
               "CREATE USER",
               plans.UserEntity,
               userName
             )
-          case _ => plans.AssertAllowedDbmsActions(CreateUserAction)
+          case _ => assertAllowed
         }
         Some(plans.LogSystemCommand(
           plans.CreateUser(
@@ -366,7 +461,8 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
             userOptions.suspended,
             userOptions.homeDatabase,
             externalAuths,
-            nativeAuth
+            nativeAuth,
+            tags
           ),
           prettifier.asString(c)
         ))
@@ -403,15 +499,20 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
         Some(plans.LogSystemCommand(plans.DropUser(source, userName), prettifier.asString(c)))
 
       // ALTER USER foo
-      case c @ AlterUser(userName, userOptions, ifExists, externalAuths, nativeAuth, removeAuth) =>
+      case c @ AlterUser(userName, userOptions, ifExists, externalAuths, nativeAuth, removeAuth, tags) =>
         val dbmsActions = Vector(
           (nativeAuth.nonEmpty, SetPasswordsAction),
           (externalAuths.nonEmpty || removeAuth.nonEmpty, SetAuthAction),
           (userOptions.suspended.nonEmpty, SetUserStatusAction),
-          (userOptions.homeDatabase.nonEmpty, SetUserHomeDatabaseAction)
+          (userOptions.homeDatabase.nonEmpty, SetUserHomeDatabaseAction),
+          (tags.nonEmpty, SetUserMetadataAction)
         ).collect { case (true, action) => action }
 
-        if (dbmsActions.isEmpty) throw new IllegalStateException("Alter user has nothing to do")
+        if (dbmsActions.isEmpty) throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          "Alter user has nothing to do.",
+          "Alter user has nothing to do"
+        )
 
         val assertAllowed = plans.AssertAllowedDbmsActions(None, dbmsActions)
 
@@ -436,8 +537,17 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
             userOptions.homeDatabase,
             nativeAuth,
             externalAuths,
-            removeAuth
+            removeAuth,
+            tags
           ),
+          prettifier.asString(c)
+        ))
+
+      // ALTER USERS
+      case c @ AlterUsers(userNames, ifExists, tags) =>
+        val source = plans.AssertAllowedDbmsActions(SetUserMetadataAction)
+        Some(plans.LogSystemCommand(
+          plans.AlterUsers(source, userNames.map(expressionToEitherStringParam), ifExists, tags),
           prettifier.asString(c)
         ))
 
@@ -452,11 +562,14 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
       case sr: ShowRoles =>
         val assertAllowed =
           if (sr.withUsers) plans.AssertAllowedDbmsActions(None, Seq(ShowRoleAction, ShowUserAction))
+          else if (sr.withAuthRules) plans.AssertAllowedDbmsActions(None, Seq(ShowRoleAction, ShowAuthRuleAction))
           else plans.AssertAllowedDbmsActions(ShowRoleAction)
         Some(plans.ShowRoles(
           assertAllowed,
           withUsers = sr.withUsers,
+          withAuthRules = sr.withAuthRules,
           showAll = sr.showAll,
+          asCommands = sr.asCommands,
           sr.defaultColumnNames.map(varFor),
           sr.yields,
           sr.returns
@@ -464,12 +577,12 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
 
       // CREATE [OR REPLACE] ROLE foo [IF NOT EXISTS]
       case c @ CreateRole(roleName, immutable, None, ifExistsDo) =>
-        val source = getSourceForCreateRole(roleName, immutable, ifExistsDo)
+        val source = getSourceForCreateRole(roleName, immutable, ifExistsDo, context.securityLog)
         Some(plans.LogSystemCommand(plans.CreateRole(source, roleName, immutable), prettifier.asString(c)))
 
       // CREATE [OR REPLACE] ROLE foo [IF NOT EXISTS] AS COPY OF bar
       case c @ CreateRole(roleName, immutable, Some(fromName), ifExistsDo) =>
-        val source = getSourceForCreateRole(roleName, immutable, ifExistsDo)
+        val source = getSourceForCreateRole(roleName, immutable, ifExistsDo, context.securityLog)
         Some(plans.LogSystemCommand(
           plans.CopyRolePrivileges(
             plans.CopyRolePrivileges(
@@ -522,6 +635,69 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
           prettifier.asString(c)
         ))
 
+      // SHOW AUTH RULES
+      case showAuthRules: ShowAuthRules => Some(plans.ShowAuthRules(
+          plans.AssertAllowedDbmsActions(ShowAuthRuleAction),
+          showAuthRules.asCommands,
+          showAuthRules.defaultColumnNames.map(varFor),
+          showAuthRules.yields,
+          showAuthRules.returns
+        ))
+
+      // CREATE [OR REPLACE] AUTH RULE foo [IF NOT EXISTS] SET CONDITION expr [SET ENABLED true|false]
+      case c @ CreateAuthRule(authRuleName, ifExistsDo, _) =>
+        val source = getSourceForCreateAuthRule(authRuleName, ifExistsDo)
+        Some(plans.LogSystemCommand(
+          plans.CreateAuthRule(source, authRuleName, c.condition.map(_.expression).get, c.enabled.map(_.enabled)),
+          prettifier.asString(c)
+        ))
+
+      // ALTER AUTH RULE foo [IF EXISTS] [SET CONDITION expr] [SET ENABLED true|false]
+      case c @ AlterAuthRule(authRuleName, ifExists, _) =>
+        val assertAllowed = plans.AssertAllowedDbmsActions(AlterAuthRuleAction)
+        val source =
+          if (ifExists)
+            plans.DoNothingIfNotExists(assertAllowed, "ALTER AUTH RULE", plans.AuthRuleEntity, authRuleName, "alter")
+          else assertAllowed
+        Some(plans.LogSystemCommand(
+          plans.AlterAuthRule(source, authRuleName, c.condition.map(_.expression), c.enabled.map(_.enabled)),
+          prettifier.asString(c)
+        ))
+
+      // RENAME AUTH RULE foo [IF EXISTS] TO bar
+      case c @ RenameAuthRule(fromAuthRuleName, toAuthRuleName, ifExists) =>
+        val assertAllowed = plans.AssertAllowedDbmsActions(RenameAuthRuleAction)
+        val source =
+          if (ifExists)
+            plans.DoNothingIfNotExists(
+              assertAllowed,
+              "RENAME AUTH RULE",
+              plans.AuthRuleEntity,
+              fromAuthRuleName,
+              "rename"
+            )
+          else assertAllowed
+        Some(plans.LogSystemCommand(
+          plans.RenameAuthRule(source, fromAuthRuleName, toAuthRuleName),
+          prettifier.asString(c)
+        ))
+
+      // DROP AUTH RULE foo [IF EXISTS]
+      case d @ DropAuthRule(authRuleName, ifExists) =>
+        val assertAllowed = plans.AssertAllowedDbmsActions(DropAuthRuleAction)
+        val source =
+          if (ifExists)
+            plans.DoNothingIfNotExists(assertAllowed, "DROP AUTH RULE", plans.AuthRuleEntity, authRuleName, "delete")
+          else plans.EnsureNodeExists(
+            assertAllowed,
+            "DROP AUTH RULE",
+            plans.AuthRuleEntity,
+            authRuleName,
+            labelDescription = "Auth Rule",
+            action = "delete"
+          )
+        Some(plans.LogSystemCommand(plans.DropAuthRule(source, authRuleName), prettifier.asString(d)))
+
       // GRANT roles TO users
       case c: GrantRolesToUsers =>
         val plan = (for (userName <- c.userNames; roleName <- c.roleNames) yield {
@@ -564,14 +740,59 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
         }
         Some(plans.LogSystemCommand(plan, prettifier.asString(c)))
 
+      // GRANT roles TO AUTH RULE[S] rules
+      case c: GrantRolesToAuthRules =>
+        val plan = (for (ruleName <- c.ruleNames; roleName <- c.roleNames) yield {
+          roleName -> ruleName
+        }).foldLeft(
+          plans.AssertAllowedDbmsActions(AssignRoleAction).asInstanceOf[plans.SecurityAdministrationLogicalPlan]
+        ) {
+          case (source, (roleName, ruleName)) =>
+            val subCommand = c.copy(
+              roleNames = List(roleName),
+              ruleNames = List(ruleName)
+            )(c.position)
+            val roleCheck = EnsureRoleHasNoDeniedPrivileges(Some(source), roleName, prettifier.asString(subCommand))
+            plans.GrantRoleToAuthRule(
+              roleCheck,
+              roleName,
+              ruleName,
+              prettifier.asString(subCommand)
+            )
+        }
+        Some(plans.LogSystemCommand(plan, prettifier.asString(c)))
+
+      // REVOKE roles FROM AUTH RULE[S] rules
+      case c: RevokeRolesFromAuthRules =>
+        val plan = (for (ruleName <- c.ruleNames; roleName <- c.roleNames) yield {
+          roleName -> ruleName
+        }).foldLeft(
+          // TODO are these the right privileges?
+          plans.AssertAllowedDbmsActions(RemoveRoleAction).asInstanceOf[plans.SecurityAdministrationLogicalPlan]
+        ) {
+          case (source, (roleName, ruleName)) =>
+            val subCommand = c.copy(
+              roleNames = List(roleName),
+              ruleNames = List(ruleName)
+            )(c.position)
+            val roleCheck = EnsureRoleHasNoDeniedPrivileges(Some(source), roleName, prettifier.asString(subCommand))
+            plans.RevokeRoleFromAuthRule(
+              roleCheck,
+              roleName,
+              ruleName,
+              prettifier.asString(subCommand)
+            )
+        }
+        Some(plans.LogSystemCommand(plan, prettifier.asString(c)))
+
       // GRANT _ ON DBMS TO role
       case c @ GrantPrivilege(DbmsPrivilege(action), immutable, _, qualifiers, roleNames) =>
         val plan = (for (roleName <- roleNames; qualifier <- qualifiers; simpleQualifier <- qualifier.simplify) yield {
           (roleName, simpleQualifier)
         }).foldLeft(
           plans.AssertAllowedDbmsActions(
-            plans.AssertDbmsActionIsAssignable(None, action), // this is the privilege being assigned
-            assignPrivilegeAction(immutable) // this is the action of assigning a privilege
+            checkCanMutateImmutablePlan(immutable, () => AuthorizationViolationException.grantingImmutablePrivileges()),
+            Seq(AssignPrivilegeAction)
           ).asInstanceOf[plans.PrivilegePlan]
         ) {
           case (source, (roleName, simpleQualifier)) =>
@@ -598,8 +819,8 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
           (roleName, simpleQualifier)
         }).foldLeft(
           plans.AssertAllowedDbmsActions(
-            plans.AssertDbmsActionIsAssignable(None, action), // this is the privilege being assigned
-            assignPrivilegeAction(immutable) // this is the action of assigning a privilege
+            checkCanMutateImmutablePlan(immutable, () => AuthorizationViolationException.denyingImmutablePrivileges()),
+            Seq(AssignPrivilegeAction)
           ).asInstanceOf[plans.PrivilegePlan]
         ) {
           case (source, (roleName, simpleQualifier)) =>
@@ -609,8 +830,10 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
             )(c.position)
             val roleCheck =
               if (immutable) source else plans.AssertMutablePrivilegesCanBeAssignedToRole(source, roleName)
+            val authRuleCheck =
+              EnsureRoleNotGrantedToAnyAuthRules(Some(roleCheck), roleName, prettifier.asString(subCommand))
             plans.DenyDbmsAction(
-              roleCheck,
+              authRuleCheck,
               action,
               simpleQualifier,
               roleName,
@@ -628,8 +851,6 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
           plans.AssertAllowedDbmsActions(RemovePrivilegeAction)
             .asInstanceOf[plans.PrivilegePlan]
         ) {
-          // recursively build privilege plan using `AssertDbmsPrivilegeCanBeMutated` as the innermost plan.
-          // use `planRevokes` to expand plans which are revoking BOTH (i.e. GRANT and DENY).
           case (previous, (roleName, simpleQualifier)) =>
             planRevokes(
               previous,
@@ -637,12 +858,19 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
               (s, r) => {
                 val subCommand =
                   c.copy(qualifier = List(simpleQualifier), roleNames = List(roleName), revokeType = r)(c.position)
+                val assertCanBeMutated =
+                  plans.AssertDbmsPrivilegeCanBeMutated(s, action, simpleQualifier, roleName, r.relType)
+                val authRuleCheck = r match {
+                  case _: RevokeDenyType =>
+                    EnsureRoleNotGrantedToAnyAuthRules(
+                      Some(assertCanBeMutated),
+                      roleName,
+                      prettifier.asString(subCommand)
+                    )
+                  case _ => assertCanBeMutated
+                }
                 plans.RevokeDbmsAction(
-                  planRevokes(
-                    s,
-                    revokeType,
-                    (s, r) => plans.AssertDbmsPrivilegeCanBeMutated(s, action, simpleQualifier, roleName, r.relType)
-                  ),
+                  authRuleCheck,
                   action,
                   simpleQualifier,
                   roleName,
@@ -663,7 +891,10 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
         ) yield {
           (roleName, simpleQualifiers, dbScope, mapDatabaseScope(dbScope))
         }).foldLeft(
-          plans.AssertAllowedDbmsActions(assignPrivilegeAction(immutable)).asInstanceOf[plans.PrivilegePlan]
+          plans.AssertAllowedDbmsActions(
+            checkCanMutateImmutablePlan(immutable, () => AuthorizationViolationException.grantingImmutablePrivileges()),
+            Seq(AssignPrivilegeAction)
+          ).asInstanceOf[plans.PrivilegePlan]
         ) {
           case (source, (role, qualifier, dbScope, runtimeScope)) =>
             val subCommand = c.copy(
@@ -692,21 +923,27 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
         ) yield {
           (roleName, simpleQualifiers, dbScope, mapDatabaseScope(dbScope))
         }).foldLeft(
-          plans.AssertAllowedDbmsActions(assignPrivilegeAction(immutable)).asInstanceOf[plans.PrivilegePlan]
+          plans.AssertAllowedDbmsActions(
+            checkCanMutateImmutablePlan(immutable, () => AuthorizationViolationException.denyingImmutablePrivileges()),
+            Seq(AssignPrivilegeAction)
+          ).asInstanceOf[plans.PrivilegePlan]
         ) {
-          case (source, (role, qualifier, dbScope, runtimeScope)) =>
+          case (source, (roleName, qualifier, dbScope, runtimeScope)) =>
             val subCommand = c.copy(
               privilege = privilege.copy(scope = dbScope)(privilege.position),
               qualifier = List(qualifier),
-              roleNames = List(role)
+              roleNames = List(roleName)
             )(c.position)
-            val roleCheck = if (immutable) source else plans.AssertMutablePrivilegesCanBeAssignedToRole(source, role)
+            val roleCheck =
+              if (immutable) source else plans.AssertMutablePrivilegesCanBeAssignedToRole(source, roleName)
+            val authRuleCheck =
+              EnsureRoleNotGrantedToAnyAuthRules(Some(roleCheck), roleName, prettifier.asString(subCommand))
             plans.DenyDatabaseAction(
-              roleCheck,
+              authRuleCheck,
               action,
               runtimeScope,
               qualifier,
-              role,
+              roleName,
               immutable,
               prettifier.asString(subCommand)
             )
@@ -739,13 +976,15 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
                   roleNames = List(role),
                   revokeType = r
                 )(c.position)
+                val assertCanBeMutated =
+                  plans.AssertDatabasePrivilegeCanBeMutated(s, action, runtimeScope, qualifier, role, r.relType)
+                val authRuleCheck = r match {
+                  case _: RevokeDenyType =>
+                    EnsureRoleNotGrantedToAnyAuthRules(Some(assertCanBeMutated), role, prettifier.asString(subCommand))
+                  case _ => assertCanBeMutated
+                }
                 plans.RevokeDatabaseAction(
-                  planRevokes(
-                    s,
-                    revokeType,
-                    (s, r) =>
-                      plans.AssertDatabasePrivilegeCanBeMutated(s, action, runtimeScope, qualifier, role, r.relType)
-                  ),
+                  authRuleCheck,
                   action,
                   runtimeScope,
                   qualifier,
@@ -774,7 +1013,10 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
         ) yield {
           (roleName, simpleQualifier, resource, graphScope, mapGraphScope(graphScope))
         }).foldLeft(
-          plans.AssertAllowedDbmsActions(assignPrivilegeAction(immutable)).asInstanceOf[plans.PrivilegePlan]
+          plans.AssertAllowedDbmsActions(
+            checkCanMutateImmutablePlan(immutable, () => AuthorizationViolationException.grantingImmutablePrivileges()),
+            Seq(AssignPrivilegeAction)
+          ).asInstanceOf[plans.PrivilegePlan]
         ) {
           case (source, (roleName, simpleQualifier, resource, graphScope, runtimeScope)) =>
             val subCommand = c.copy(
@@ -784,6 +1026,7 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
             )(c.position)
             val roleCheck =
               if (immutable) source else plans.AssertMutablePrivilegesCanBeAssignedToRole(source, roleName)
+
             plans.GrantGraphAction(
               roleCheck,
               action,
@@ -812,7 +1055,10 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
         ) yield {
           (roleName, simpleQualifier, resource, graphScope, mapGraphScope(graphScope))
         }).foldLeft(
-          plans.AssertAllowedDbmsActions(assignPrivilegeAction(immutable)).asInstanceOf[plans.PrivilegePlan]
+          plans.AssertAllowedDbmsActions(
+            checkCanMutateImmutablePlan(immutable, () => AuthorizationViolationException.denyingImmutablePrivileges()),
+            Seq(AssignPrivilegeAction)
+          ).asInstanceOf[plans.PrivilegePlan]
         ) {
           case (source, (roleName, simpleQualifier, resource, graphScope, runtimeScope)) =>
             val subCommand = c.copy(
@@ -822,8 +1068,10 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
             )(c.position)
             val roleCheck =
               if (immutable) source else plans.AssertMutablePrivilegesCanBeAssignedToRole(source, roleName)
+            val authRuleCheck =
+              EnsureRoleNotGrantedToAnyAuthRules(Some(roleCheck), roleName, prettifier.asString(subCommand))
             plans.DenyGraphAction(
-              roleCheck,
+              authRuleCheck,
               action,
               resource,
               runtimeScope,
@@ -863,21 +1111,27 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
                   roleNames = List(roleName),
                   revokeType = r
                 )(c.position)
-                plans.RevokeGraphAction(
-                  planRevokes(
+                val assertCanBeMutated =
+                  plans.AssertGraphPrivilegeCanBeMutated(
                     s,
-                    revokeType,
-                    (s, r) =>
-                      plans.AssertGraphPrivilegeCanBeMutated(
-                        s,
-                        action,
-                        resource,
-                        runtimeScope,
-                        segment,
-                        roleName,
-                        r.relType
-                      )
-                  ),
+                    action,
+                    resource,
+                    runtimeScope,
+                    segment,
+                    roleName,
+                    r.relType
+                  )
+                val authRuleCheck = r match {
+                  case _: RevokeDenyType =>
+                    EnsureRoleNotGrantedToAnyAuthRules(
+                      Some(assertCanBeMutated),
+                      roleName,
+                      prettifier.asString(subCommand)
+                    )
+                  case _ => assertCanBeMutated
+                }
+                plans.RevokeGraphAction(
+                  authRuleCheck,
                   action,
                   resource,
                   runtimeScope,
@@ -907,7 +1161,10 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
         ) yield {
           (roleName, simpleQualifiers, resource)
         }).foldLeft(
-          plans.AssertAllowedDbmsActions(assignPrivilegeAction(immutable)).asInstanceOf[plans.PrivilegePlan]
+          plans.AssertAllowedDbmsActions(
+            checkCanMutateImmutablePlan(immutable, () => AuthorizationViolationException.grantingImmutablePrivileges()),
+            Seq(AssignPrivilegeAction)
+          ).asInstanceOf[plans.PrivilegePlan]
         ) { case (source, (roleName, qualifier, resource)) =>
           val subCommand = g.copy(
             privilege = privilege,
@@ -933,7 +1190,10 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
         ) yield {
           (roleName, simpleQualifiers, resource)
         }).foldLeft(
-          plans.AssertAllowedDbmsActions(assignPrivilegeAction(immutable)).asInstanceOf[plans.PrivilegePlan]
+          plans.AssertAllowedDbmsActions(
+            checkCanMutateImmutablePlan(immutable, () => AuthorizationViolationException.denyingImmutablePrivileges()),
+            Seq(AssignPrivilegeAction)
+          ).asInstanceOf[plans.PrivilegePlan]
         ) { case (source, (roleName, qualifier, resource)) =>
           val subCommand = d.copy(
             privilege = privilege,
@@ -941,7 +1201,17 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
             roleNames = List(roleName)
           )(d.position)
           val roleCheck = if (immutable) source else plans.AssertMutablePrivilegesCanBeAssignedToRole(source, roleName)
-          DenyLoadAction(roleCheck, action, resource, qualifier, roleName, immutable, prettifier.asString(subCommand))
+          val authRuleCheck =
+            EnsureRoleNotGrantedToAnyAuthRules(Some(roleCheck), roleName, prettifier.asString(subCommand))
+          DenyLoadAction(
+            authRuleCheck,
+            action,
+            resource,
+            qualifier,
+            roleName,
+            immutable,
+            prettifier.asString(subCommand)
+          )
         }
         Some(plans.LogSystemCommand(plan, prettifier.asString(d)))
 
@@ -972,20 +1242,26 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
                 roleNames = List(roleName),
                 revokeType = r
               )(rp.position)
-              plans.RevokeLoadAction(
-                planRevokes(
+              val assertCanBeMutated =
+                plans.AssertLoadPrivilegeCanBeMutated(
                   s,
-                  revokeType,
-                  (s, r) =>
-                    plans.AssertLoadPrivilegeCanBeMutated(
-                      s,
-                      action,
-                      resource,
-                      qualifier,
-                      roleName,
-                      r.relType
-                    )
-                ),
+                  action,
+                  resource,
+                  qualifier,
+                  roleName,
+                  r.relType
+                )
+              val authRuleCheck = r match {
+                case _: RevokeDenyType =>
+                  EnsureRoleNotGrantedToAnyAuthRules(
+                    Some(assertCanBeMutated),
+                    roleName,
+                    prettifier.asString(subCommand)
+                  )
+                case _ => assertCanBeMutated
+              }
+              plans.RevokeLoadAction(
+                authRuleCheck,
                 action,
                 resource,
                 qualifier,
@@ -1019,6 +1295,9 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
               ShowUserPrivileges(Some(users.head))(scope.position),
               Some(plans.AssertAllowedDbmsActionsOrSelf(users.head, Seq(ShowPrivilegeAction, ShowUserAction)))
             )
+          // SHOW AUTH RULES rule1[, rule2] PRIVILEGES
+          case scope: ShowAuthRulesPrivileges =>
+            (scope, Some(plans.AssertAllowedDbmsActions(None, Seq(ShowPrivilegeAction, ShowAuthRuleAction))))
           // SHOW [ALL | ROLE role | ROLES role1, role2] PRIVILEGES
           case scope =>
             (scope, Some(plans.AssertAllowedDbmsActions(ShowPrivilegeAction)))
@@ -1045,6 +1324,9 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
               ShowUserPrivileges(Some(users.head))(scope.position),
               Some(plans.AssertAllowedDbmsActionsOrSelf(users.head, Seq(ShowPrivilegeAction, ShowUserAction)))
             )
+          // SHOW AUTH RULES rule1[, rule2] PRIVILEGES
+          case scope: ShowAuthRulesPrivileges =>
+            (scope, Some(plans.AssertAllowedDbmsActions(None, Seq(ShowPrivilegeAction, ShowAuthRuleAction))))
           // SHOW [ALL | ROLE role | ROLES role1, role2] PRIVILEGES
           case scope =>
             (scope, Some(plans.AssertAllowedDbmsActions(ShowPrivilegeAction)))
@@ -1061,19 +1343,9 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
       case c: ShowSupportedPrivilegeCommand =>
         Some(plans.ShowSupportedPrivileges(c.defaultColumnNames.map(varFor), c.yields, c.returns))
 
-      // SHOW DATABASES | SHOW DEFAULT DATABASE | SHOW DATABASE foo
-      case sd: ShowDatabase =>
-        Some(plans.ShowDatabase(
-          sd.scope,
-          sd.defaultColumns.useAllColumns,
-          sd.defaultColumnNames.map(varFor),
-          sd.yields,
-          sd.returns
-        ))
-
-      // CREATE [OR REPLACE] DATABASE foo [IF NOT EXISTS]
-      case c @ CreateDatabase(dbName, ifExistsDo, options, waitUntilComplete, topology) =>
-        Some(plans.AssertManagementActionNotBlocked(CreateDatabaseAction))
+      // CREATE [OR REPLACE] DATABASE foo [IF NOT EXISTS] (with shards)
+      case c @ CreateDatabase(dbName, ifExistsDo, options, waitUntilComplete, None, cypherVersion, Some(shardDef)) =>
+        Some(plans.AssertManagementActionNotBlocked(c.name, CreateDatabaseAction))
           .map(plans.AssertAllowedDbmsActions(_, CreateDatabaseAction))
           .flatMap(canCreateCheck =>
             ifExistsDo match {
@@ -1083,7 +1355,8 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
                   dbName,
                   DropDatabaseAction
                 ))
-                  .map(plans.EnsureDatabaseSafeToDelete(_, dbName, Restrict))
+                  .map(plans.AssertNotShardedDatabase(_, dbName, "CREATE OR REPLACE DATABASE", "delete"))
+                  .map(plans.EnsureDatabaseSafeToDelete(_, dbName, Restrict, "CREATE OR REPLACE DATABASE"))
                   .map(plans.DropDatabase(_, dbName, DestroyData, forceComposite = false, Restrict))
               case IfExistsDoNothing =>
                 Some(canCreateCheck)
@@ -1096,13 +1369,91 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
                 Some(canCreateCheck)
             }
           ).map(plans.EnsureNameIsNotAmbiguous(_, dbName.asLegacyName, isComposite = false))
-          .map(plans.CreateDatabase(_, dbName.asLegacyName, options, ifExistsDo, isComposite = false, topology))
+          .map(plans.CreateShardedDatabase(_, dbName.asLegacyName, options, ifExistsDo, shardDef, cypherVersion))
           .map(plans.EnsureValidNumberOfDatabases(_))
           .map(wrapInWait(_, dbName, waitUntilComplete))
           .map(plans.LogSystemCommand(_, prettifier.asString(c)))
 
-      case c @ CreateCompositeDatabase(dbName, ifExistsDo, options, waitUntilComplete) =>
-        Some(plans.AssertManagementActionNotBlocked(CreateCompositeDatabaseAction))
+      // CREATE [OR REPLACE] DATABASE foo [IF NOT EXISTS]
+      case c @ CreateDatabase(dbName, ifExistsDo, options, waitUntilComplete, topology, cypherVersion, None) =>
+        Some(plans.AssertManagementActionNotBlocked(c.name, CreateDatabaseAction))
+          .map(plans.AssertAllowedDbmsActions(_, CreateDatabaseAction))
+          .flatMap(canCreateCheck =>
+            ifExistsDo match {
+              case IfExistsReplace =>
+                Some(plans.AssertCanDropDatabase(
+                  canCreateCheck,
+                  dbName,
+                  DropDatabaseAction
+                ))
+                  .map(plans.AssertNotShardedDatabase(_, dbName, "CREATE OR REPLACE DATABASE", "delete"))
+                  .map(plans.EnsureDatabaseSafeToDelete(_, dbName, Restrict, "CREATE OR REPLACE DATABASE"))
+                  .map(plans.DropDatabase(_, dbName, DestroyData, forceComposite = false, Restrict))
+              case IfExistsDoNothing =>
+                Some(canCreateCheck)
+                  .map(plans.DoNothingIfDatabaseExists(
+                    _,
+                    "CREATE DATABASE",
+                    dbName
+                  ))
+              case _ =>
+                Some(canCreateCheck)
+            }
+          ).map(plans.EnsureNameIsNotAmbiguous(_, dbName.asLegacyName, isComposite = false))
+          .map(plans.CreateDatabase(
+            _,
+            dbName.asLegacyName,
+            options,
+            ifExistsDo,
+            plans.StandardDatabase,
+            topology,
+            cypherVersion
+          ))
+          .map(plans.EnsureValidNumberOfDatabases(_))
+          .map(wrapInWait(_, dbName, waitUntilComplete))
+          .map(plans.LogSystemCommand(_, prettifier.asString(c)))
+
+      // CREATE [OR REPLACE] REPLICA DATABASE foo [IF NOT EXISTS]
+      case c @ CreateReplicaDatabase(dbName, ifExistsDo, options, waitUntilComplete, topology, cypherVersion) =>
+        Some(plans.AssertManagementActionNotBlocked(c.name, CreateDatabaseAction))
+          .map(plans.AssertAllowedDbmsActions(_, CreateDatabaseAction))
+          .flatMap(canCreateCheck =>
+            ifExistsDo match {
+              case IfExistsReplace =>
+                Some(plans.AssertCanDropDatabase(
+                  canCreateCheck,
+                  dbName,
+                  DropDatabaseAction
+                ))
+                  .map(plans.AssertNotShardedDatabase(_, dbName, "CREATE OR REPLACE REPLICA DATABASE", "delete"))
+                  .map(plans.EnsureDatabaseSafeToDelete(_, dbName, Restrict, "CREATE OR REPLACE REPLICA DATABASE"))
+                  .map(plans.DropDatabase(_, dbName, DestroyData, forceComposite = false, Restrict))
+              case IfExistsDoNothing =>
+                Some(canCreateCheck)
+                  .map(plans.DoNothingIfDatabaseExists(
+                    _,
+                    "CREATE REPLICA DATABASE",
+                    dbName
+                  ))
+              case _ =>
+                Some(canCreateCheck)
+            }
+          ).map(plans.EnsureNameIsNotAmbiguous(_, dbName.asLegacyName, isComposite = false))
+          .map(plans.CreateDatabase(
+            _,
+            dbName.asLegacyName,
+            options,
+            ifExistsDo,
+            plans.ReplicaDatabase,
+            topology,
+            cypherVersion
+          ))
+          .map(plans.EnsureValidNumberOfDatabases(_))
+          .map(wrapInWait(_, dbName, waitUntilComplete))
+          .map(plans.LogSystemCommand(_, prettifier.asString(c)))
+
+      case c @ CreateCompositeDatabase(dbName, ifExistsDo, options, waitUntilComplete, cypherVersion) =>
+        Some(plans.AssertManagementActionNotBlocked(c.name, CreateCompositeDatabaseAction))
           .map(plans.AssertAllowedDbmsActions(_, CreateCompositeDatabaseAction))
           .flatMap(canCreateCheck =>
             ifExistsDo match {
@@ -1112,7 +1463,13 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
                   dbName,
                   DropCompositeDatabaseAction
                 ))
-                  .map(plans.EnsureDatabaseSafeToDelete(_, dbName, Restrict))
+                  .map(plans.AssertNotShardedDatabase(
+                    _,
+                    dbName,
+                    "CREATE OR REPLACE COMPOSITE DATABASE",
+                    "delete"
+                  ))
+                  .map(plans.EnsureDatabaseSafeToDelete(_, dbName, Restrict, "CREATE OR REPLACE COMPOSITE DATABASE"))
                   .map(plans.DropDatabase(_, dbName, DestroyData, forceComposite = false, Restrict))
               case IfExistsDoNothing =>
                 Some(canCreateCheck)
@@ -1125,7 +1482,15 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
                 Some(canCreateCheck)
             }
           ).map(plans.EnsureNameIsNotAmbiguous(_, dbName.asLegacyName, isComposite = true))
-          .map(plans.CreateDatabase(_, dbName.asLegacyName, options, ifExistsDo, isComposite = true, topology = None))
+          .map(plans.CreateDatabase(
+            _,
+            dbName.asLegacyName,
+            options,
+            ifExistsDo,
+            plans.CompositeDatabase,
+            topology = None,
+            cypherVersion
+          ))
           .map(plans.EnsureValidNumberOfDatabases(_))
           .map(wrapInWait(_, dbName, waitUntilComplete))
           .map(plans.LogSystemCommand(_, prettifier.asString(c)))
@@ -1133,7 +1498,7 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
       // DROP [COMPOSITE] DATABASE foo [IF EXISTS] [DESTROY | DUMP DATA]
       case c @ DropDatabase(dbName, ifExists, composite, aliasAction, additionalAction, waitUntilComplete) =>
         val action = if (composite) DropCompositeDatabaseAction else DropDatabaseAction
-        val assertNotBlockedPlan = plans.AssertManagementActionNotBlocked(action)
+        val assertNotBlockedPlan = plans.AssertManagementActionNotBlocked(c.name, action)
         Some(
           if (composite) plans.AssertAllowedDbmsActions(assertNotBlockedPlan, DropCompositeDatabaseAction)
           else plans.AssertCanDropDatabase(assertNotBlockedPlan, dbName, DropDatabaseAction)
@@ -1151,36 +1516,65 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
               "DROP DATABASE",
               dbName,
               "delete",
-              if (composite) CompositeDatabase else DatabaseOrLocalAlias
+              if (composite) CompositeDatabase else DatabaseOrLocalAlias,
+              updateContextParams = true
             )
           else assertAllowed
         )
-          .map(plans.EnsureDatabaseSafeToDelete(_, dbName, aliasAction))
+          .map(plans.EnsureDatabaseSafeToDelete(_, dbName, aliasAction, "DROP DATABASE"))
           .map(plans.EnsureValidNonSystemDatabase(_, "DROP DATABASE", dbName, "delete"))
+          .map(plans.AssertNotInvalidActionOnShard(_, dbName, "DROP DATABASE", "delete"))
           .map(plans.DropDatabase(_, dbName, additionalAction, composite, aliasAction))
           .map(wrapInWait(_, dbName, waitUntilComplete))
           .map(plans.LogSystemCommand(_, prettifier.asString(c)))
 
-      // ALTER DATABASE foo [IF EXISTS] [SET ACCESS {READ ONLY | READ WRITE}] [SET TOPOLOGY n PRIMARY [m SECONDARY]] [SET OPTION key value] [REMOVE OPTION key]
-      case c @ AlterDatabase(dbName, ifExists, access, topology, options, optionsToRemove, waitUntilComplete) =>
+      // ALTER DATABASE foo [IF EXISTS] ...
+      case c @ AlterDatabase(
+          dbName,
+          ifExists,
+          access,
+          topology,
+          options,
+          optionsToRemove,
+          waitUntilComplete,
+          cypherVersion,
+          shardDefinition,
+          replicas
+        ) =>
+        val cypherVersionForPrivileges = context.cypherVersion == CypherVersion.Cypher5
+        // Composite databases currently don't have any sub-privileges, just ALTER privilege
+        val requiredPrivilegeActionsForCompositeDatabases: Seq[DatabaseAndDbmsAction] =
+          Seq(AlterCompositeDatabaseAction(cypherVersionForPrivileges))
         // For a set of (predicate -> privilege); If the predicate is true, add the privilege to the set of required privileges
-        val requiredPrivilegedActions: Seq[DbmsAction] = Seq(
-          // ALTER DATABASE foo SET TOPOLOGY requires 'ALTER DATABASE' privileges:
-          topology.nonEmpty -> AlterDatabaseAction,
-          // ALTER DATABASE foo SET OPTION ... requires 'ALTER DATABASE' privileges:
-          (options != NoOptions) -> AlterDatabaseAction,
-          // ALTER DATABASE foo REMOVE OPTION ... requires 'ALTER DATABASE' privileges:
-          optionsToRemove.nonEmpty -> AlterDatabaseAction,
+        val v = cypherVersionForPrivileges
+        // For each branch of ALTER DATABASE, the internal privilege (same display name "ALTER DATABASE" to the user) required for that operation:
+        val requiredPrivilegedActionsForDatabases: Seq[DatabaseAndDbmsAction] = Seq(
+          // ALTER DATABASE foo SET TOPOLOGY requires internal AlterDatabaseTopology privilege which can be granted by 'ALTER DATABASE':
+          if (topology.nonEmpty) Some(AlterDatabaseTopologyAction(v)) else None,
+          if (replicas.nonEmpty) Some(AlterDatabaseTopologyAction(v)) else None,
+          if (shardDefinition.nonEmpty) Some(AlterDatabaseTopologyAction(v)) else None,
+          // ALTER DATABASE foo SET OPTION ... requires internal AlterDatabaseOptions privilege which can be granted by 'ALTER DATABASE':
+          if (options != NoOptions) Some(AlterDatabaseOptionsAction(v)) else None,
+          // ALTER DATABASE foo REMOVE OPTION ... requires internal AlterDatabaseOptions privilege which can be granted by 'ALTER DATABASE':
+          if (optionsToRemove.nonEmpty) Some(AlterDatabaseOptionsAction(v)) else None,
           // ALTER DATABASE foo SET ACCESS ... requires 'SET DATABASE ACCESS' privileges:
-          access.nonEmpty -> SetDatabaseAccessAction
-        ).filter(_._1)
-          .map(_._2)
+          if (access.nonEmpty) Some(SetDatabaseAccessAction(v)) else None,
+          // ALTER DATABASE foo SET DEFAULT LANGUAGE ... requires 'SET DATABASE DEFAULT LANGUAGE' privileges:
+          if (cypherVersion.nonEmpty) Some(SetDatabaseDefaultLanguageAction(v)) else None
+        ).flatten
           .distinct
+        val alterIsValidOnSystem =
+          requiredPrivilegedActionsForDatabases == Seq(SetDatabaseDefaultLanguageAction(cypherVersionForPrivileges))
 
-        Some(plans.AssertManagementActionNotBlocked(AlterDatabaseAction))
-          // AssertManagementActionNotBlocked doesn't know about SetDatabaseAccessAction,
-          // pass AlterDatabaseAction no matter what requiredPrivilegedActions we need
-          .map(s => plans.AssertAllowedDbmsActions(Some(s), requiredPrivilegedActions))
+        Some(plans.AssertManagementActionNotBlocked(c.name, requiredPrivilegedActionsForDatabases))
+          .map(s =>
+            plans.AssertCanAlterDatabase(
+              s,
+              dbName,
+              requiredPrivilegeActionsForCompositeDatabases,
+              requiredPrivilegedActionsForDatabases
+            )
+          )
           .map(assertAllowed =>
             if (ifExists) plans.DoNothingIfDatabaseNotExists(
               assertAllowed,
@@ -1191,8 +1585,91 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
             )
             else assertAllowed
           )
-          .map(plans.EnsureValidNonSystemDatabase(_, "ALTER DATABASE", dbName, "alter"))
-          .map(plans.AlterDatabase(_, dbName, access, topology, options, optionsToRemove))
+          .map(source =>
+            if (!alterIsValidOnSystem) plans.EnsureValidNonSystemDatabase(source, "ALTER DATABASE", dbName, "alter")
+            else source
+          )
+          .map(s =>
+            if (access.nonEmpty) {
+              val action = "SET ACCESS"
+              plans.AssertNotPropertyShard(
+                plans.AssertNotGraphShard(s, dbName, action, "alter"),
+                dbName,
+                action,
+                "alter"
+              )
+            } else s
+          )
+          .map(s =>
+            if (cypherVersion.nonEmpty) {
+              val action = "SET DEFAULT LANGUAGE"
+              plans.AssertNotPropertyShard(
+                plans.AssertNotGraphShard(s, dbName, action, "alter"),
+                dbName,
+                action,
+                "alter"
+              )
+            } else s
+          )
+          .map(s =>
+            if (options != NoOptions) {
+              val action = "SET OPTION"
+              plans.AssertNotGraphShard(
+                plans.AssertNotPropertyShard(s, dbName, action, "alter"),
+                dbName,
+                action,
+                "alter"
+              )
+            } else s
+          )
+          .map(s =>
+            if (optionsToRemove.nonEmpty) {
+              val action = "REMOVE OPTION"
+              plans.AssertNotGraphShard(
+                plans.AssertNotPropertyShard(s, dbName, action, "alter"),
+                dbName,
+                action,
+                "alter"
+              )
+            } else s
+          )
+          .map(s =>
+            if (topology.nonEmpty) {
+              // allowed on graph shard and non-sharded database
+              val action = "SET TOPOLOGY ... PRIMARY / SECONDARY"
+              val ps =
+                plans.AssertNotVirtualSpd(
+                  plans.AssertNotPropertyShard(s, dbName, action, "alter"),
+                  dbName,
+                  action,
+                  "alter"
+                )
+              plans.AlterDatabase(ps, dbName, access, topology, options, cypherVersion, optionsToRemove, None)
+            } else if (shardDefinition.nonEmpty) {
+              // allowed on sharded database
+              val action = shardDefinition match {
+                case Some(ShardDefinition(_, Some(_), _)) => "SET GRAPH SHARD"
+                case _                                    => "SET PROPERTY SHARD"
+              }
+              val ps = plans.AssertNotPropertyShard(
+                plans.AssertNotGraphShard(plans.AssertNotStandard(s, dbName, action, "alter"), dbName, action, "alter"),
+                dbName,
+                action,
+                "alter"
+              )
+              plans.AlterShardedDatabase(ps, dbName, access, options, cypherVersion, shardDefinition)
+            } else if (replicas.nonEmpty) {
+              // allowed on property shard
+              val action = "SET TOPOLOGY ... REPLICAS"
+              val ps = plans.AssertNotVirtualSpd(
+                plans.AssertNotGraphShard(plans.AssertNotStandard(s, dbName, action, "alter"), dbName, action, "alter"),
+                dbName,
+                action,
+                "alter"
+              )
+              plans.AlterDatabase(ps, dbName, access, None, options, cypherVersion, optionsToRemove, replicas)
+            } else plans.AlterDatabase(s, dbName, access, None, options, cypherVersion, optionsToRemove, None)
+          )
           .map(wrapInWait(_, dbName, waitUntilComplete))
           .map(plans.LogSystemCommand(_, prettifier.asString(c)))
 
@@ -1201,7 +1678,7 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
         val assertAllowed = plans.AssertAllowedDatabaseAction(
           StartDatabaseAction,
           dbName,
-          Some(plans.AssertManagementActionNotBlocked(StartDatabaseAction))
+          Some(plans.AssertManagementActionNotBlocked(c.name, StartDatabaseAction))
         )
         val plan = wrapInWait(plans.StartDatabase(assertAllowed, dbName), dbName, waitUntilComplete)
         Some(plans.LogSystemCommand(plan, prettifier.asString(c)))
@@ -1211,7 +1688,7 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
         val assertAllowed = plans.AssertAllowedDatabaseAction(
           StopDatabaseAction,
           dbName,
-          Some(plans.AssertManagementActionNotBlocked(StopDatabaseAction))
+          Some(plans.AssertManagementActionNotBlocked(c.name, StopDatabaseAction))
         )
         val plan = wrapInWait(
           plans.StopDatabase(
@@ -1245,8 +1722,10 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
         }
         val ensureValidDatabase =
           plans.EnsureValidNonSystemDatabase(source, "CREATE DATABASE ALIAS", targetName, "create", Some(aliasName))
+        val assertNotInvalidActionOnShard =
+          plans.AssertNotInvalidActionOnShard(ensureValidDatabase, targetName, "CREATE ALIAS", "create")
         val aliasCommand =
-          plans.CreateLocalDatabaseAlias(ensureValidDatabase, aliasName, targetName, properties, replace)
+          plans.CreateLocalDatabaseAlias(assertNotInvalidActionOnShard, aliasName, targetName, properties, replace)
         Some(plans.LogSystemCommand(aliasCommand, prettifier.asString(c)))
 
       // CREATE DATABASE ALIAS name AT
@@ -1255,10 +1734,10 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
           targetName,
           ifExistsDo,
           url,
-          username,
-          password,
+          remoteAliasCredentials,
           driverSettings,
-          properties
+          properties,
+          defaultLanguage
         ) =>
         val assertAllowed =
           plans.AssertAllowedDbmsActions(
@@ -1285,10 +1764,10 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
           targetName,
           replace,
           url,
-          username,
-          password,
+          remoteAliasCredentials,
           driverSettings,
-          properties
+          properties,
+          defaultLanguage
         )
         Some(plans.LogSystemCommand(aliasCommand, prettifier.asString(c)))
 
@@ -1349,7 +1828,8 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
           username,
           password,
           driverSettings,
-          properties
+          properties,
+          defaultLanguage
         ) =>
         val assertAllowedRemote = plans.AssertAllowedDbmsActions(
           Some(plans.AssertNotBlockedRemoteAliasManagement()),
@@ -1376,7 +1856,8 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
             username.map(expressionToEitherStringParam),
             password,
             driverSettings,
-            properties
+            properties,
+            defaultLanguage
           )
         Some(plans.LogSystemCommand(aliasCommand, prettifier.asString(c)))
 
@@ -1392,22 +1873,22 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
           ))
 
       case c @ EnableServer(name, options) =>
-        val checkBlocked = plans.AssertManagementActionNotBlocked(ServerManagementAction)
+        val checkBlocked = plans.AssertManagementActionNotBlocked(c.name, ServerManagementAction)
         val assertAllowed = plans.AssertAllowedDbmsActions(checkBlocked, ServerManagementAction)
         Some(plans.LogSystemCommand(plans.EnableServer(assertAllowed, name, options), prettifier.asString(c)))
 
       case c @ AlterServer(name, options) =>
-        val checkBlocked = plans.AssertManagementActionNotBlocked(ServerManagementAction)
+        val checkBlocked = plans.AssertManagementActionNotBlocked(c.name, ServerManagementAction)
         val assertAllowed = plans.AssertAllowedDbmsActions(checkBlocked, ServerManagementAction)
         Some(plans.LogSystemCommand(plans.AlterServer(assertAllowed, name, options), prettifier.asString(c)))
 
       case c @ RenameServer(name, newName) =>
-        val checkBlocked = plans.AssertManagementActionNotBlocked(ServerManagementAction)
+        val checkBlocked = plans.AssertManagementActionNotBlocked(c.name, ServerManagementAction)
         val assertAllowed = plans.AssertAllowedDbmsActions(checkBlocked, ServerManagementAction)
         Some(plans.LogSystemCommand(plans.RenameServer(assertAllowed, name, newName), prettifier.asString(c)))
 
       case c @ DropServer(name) =>
-        val checkBlocked = plans.AssertManagementActionNotBlocked(ServerManagementAction)
+        val checkBlocked = plans.AssertManagementActionNotBlocked(c.name, ServerManagementAction)
         val assertAllowed = plans.AssertAllowedDbmsActions(checkBlocked, ServerManagementAction)
         Some(plans.LogSystemCommand(plans.DropServer(assertAllowed, name), prettifier.asString(c)))
 
@@ -1422,12 +1903,12 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
         ))
 
       case c @ DeallocateServers(dryRun, names) =>
-        val checkBlocked = plans.AssertManagementActionNotBlocked(ServerManagementAction)
+        val checkBlocked = plans.AssertManagementActionNotBlocked(c.name, ServerManagementAction)
         val assertAllowed = plans.AssertAllowedDbmsActions(checkBlocked, ServerManagementAction)
         Some(plans.LogSystemCommand(plans.DeallocateServer(assertAllowed, dryRun, names), prettifier.asString(c)))
 
       case c @ ReallocateDatabases(dryRun) =>
-        val checkBlocked = plans.AssertManagementActionNotBlocked(ServerManagementAction)
+        val checkBlocked = plans.AssertManagementActionNotBlocked(c.name, ServerManagementAction)
         Some(plans.LogSystemCommand(
           plans.ReallocateDatabases(plans.AssertAllowedDbmsActions(checkBlocked, ServerManagementAction), dryRun),
           prettifier.asString(c)
@@ -1435,73 +1916,86 @@ case object AdministrationCommandPlanBuilder extends Phase[PlannerContext, BaseS
 
       // Global call: CALL foo.bar.baz("arg1", 2) // only if system procedure is allowed!
       case q @ SingleQuery(Seq(
-          resolved @ ResolvedCall(signature, _, _, _, _, _, _),
-          returns @ Return(_, _, _, _, _, _, _)
+          resolved @ ResolvedNonLocalCall(signature, _, _, _, _, _, _),
+          returns @ Return(_, _, _, _, _, _, _, _, _)
         )) if signature.systemProcedure =>
         blockSubqueries(q)
-        Some(planSystemProcedureCall(resolved, Some(returns)))
+        Some(planSystemProcedureCall(context.cypherVersion, resolved, Some(returns)))
 
       case q @ SingleQuery(Seq(
-          UseGraph(GraphDirectReference(CatalogName(List(SYSTEM_DATABASE_NAME)))),
-          resolved @ ResolvedCall(signature, _, _, _, _, _, _),
-          returns @ Return(_, _, _, _, _, _, _)
+          UseGraph(GraphDirectReference(CatalogName(List(SYSTEM_DATABASE_NAME), _))),
+          resolved @ ResolvedNonLocalCall(signature, _, _, _, _, _, _),
+          returns @ Return(_, _, _, _, _, _, _, _, _)
         )) if signature.systemProcedure =>
         blockSubqueries(q)
-        Some(planSystemProcedureCall(resolved, Some(returns)))
+        Some(planSystemProcedureCall(context.cypherVersion, resolved, Some(returns)))
 
-      case q @ SingleQuery(Seq(resolved @ ResolvedCall(signature, _, _, _, _, _, _))) if signature.systemProcedure =>
+      case q @ SingleQuery(Seq(resolved @ ResolvedNonLocalCall(signature, _, _, _, _, _, _)))
+        if signature.systemProcedure =>
         blockSubqueries(q)
-        Some(planSystemProcedureCall(resolved, None))
+        Some(planSystemProcedureCall(context.cypherVersion, resolved, None))
 
       case q @ SingleQuery(
           Seq(
-            UseGraph(GraphDirectReference(CatalogName(List(SYSTEM_DATABASE_NAME)))),
-            resolved @ ResolvedCall(signature, _, _, _, _, _, _)
+            UseGraph(GraphDirectReference(CatalogName(List(SYSTEM_DATABASE_NAME), _))),
+            resolved @ ResolvedNonLocalCall(signature, _, _, _, _, _, _)
           )
         ) if signature.systemProcedure =>
         blockSubqueries(q)
-        Some(planSystemProcedureCall(resolved, None))
+        Some(planSystemProcedureCall(context.cypherVersion, resolved, None))
 
       // Non-administration commands that are allowed on system database, e.g. SHOW PROCEDURES YIELD ...
+      // Also includes the SHOW DATABASES command
       case q @ SingleQuery(clauses) if checkClausesAllowedOnSystem(clauses) =>
         blockSubqueries(q)
         Some(plans.AllowedNonAdministrationCommands(q))
 
       case q =>
         // Check for non-administration commands that are not allowed on system database, e.g. SHOW CONSTRAINTS YIELD ...
-        // To get a better error than the procedure error below
         val unsupportedCommandClauses = q match {
           case SingleQuery(clauses) =>
             getCommandClausesNotAllowedOnSystem(clauses).map(_.name).distinct
           case _ => List.empty
         }
-        if (unsupportedCommandClauses.nonEmpty) {
-          throw InvalidSemanticsException.unsupportedRequestOnSystemDatabase(
-            unsupportedCommandClauses.sorted.mkString(", "),
-            s"The following commands are not allowed on a system database: ${unsupportedCommandClauses.sorted.mkString(", ")}."
-          )
-        }
-
         val unsupportedClauses = q.folder.treeFold(List.empty[String]) {
-          case _: UseGraph   => acc => SkipChildren(acc)
-          case _: CallClause => acc => SkipChildren(acc)
-          case _: Return     => acc => SkipChildren(acc)
-          case c: Clause     => acc => SkipChildren(acc :+ c.name)
-        }
+          case _: Union         => acc => TraverseChildren(acc :+ "UNION")
+          case _: NextStatement =>
+            // might have been re-written away but let's keep the check for if not
+            acc => TraverseChildren(acc :+ "NEXT")
+          case _: TopLevelBraces =>
+            // might have been re-written away but let's keep the check for if not
+            acc => TraverseChildren(acc :+ TopLevelBraces.name)
+          case _: UseGraph                                            => acc => SkipChildren(acc)
+          case c: ResolvedNonLocalCall if c.signature.systemProcedure => acc => SkipChildren(acc)
+          case c: ResolvedNonLocalCall =>
+            acc => SkipChildren(acc :+ s"CALL ${c.signature.name.fullName}")
+          case _: Return => acc => SkipChildren(acc)
+          case w: With
+            if w.withType == ParsedAsYield || w.withType == AddedInRewriteShowCommands || w.withType == AddedInRewriteProcCall =>
+            acc => SkipChildren(acc)
+          case _: CommandClauseAllowedOnSystem => acc => SkipChildren(acc)
+          case c: Clause                       => acc => SkipChildren(acc :+ c.name)
+        }.distinct
+
         if (unsupportedClauses.nonEmpty) {
+          val hasCommandClauses = unsupportedCommandClauses.nonEmpty || q.folder.treeExists {
+            case _: CommandClause => true
+          }
+
+          val legacyMessage =
+            if (unsupportedClauses.equals(unsupportedCommandClauses))
+              // We only have disallowed commands, so let's say 'commands'
+              s"The following commands are not allowed on a system database: ${unsupportedClauses.sorted.mkString(", ")}."
+            else if (hasCommandClauses)
+              // We have at least one command and one other clause
+              s"The following clauses are not allowed on a system database: ${unsupportedClauses.sorted.mkString(", ")}."
+            else
+              s"The following unsupported clauses were used: ${unsupportedClauses.sorted.mkString(", ")}. \n" + systemDbProcedureRules
+
           throw InvalidSemanticsException.unsupportedRequestOnSystemDatabase(
             unsupportedClauses.sorted.mkString(", "),
-            s"The following unsupported clauses were used: ${unsupportedClauses.sorted.mkString(", ")}. \n" + systemDbProcedureRules
-          )
-        }
-
-        val callCount = q.folder.treeCount {
-          case _: CallClause => ()
-        }
-        if (callCount > 1) {
-          throw InvalidSemanticsException.unsupportedRequestOnSystemDatabase(
-            "More than one CALL clause",
-            s"The given query uses $callCount CALL clauses (${callCount - 1} too many). \n" + systemDbProcedureRules
+            legacyMessage,
+            true
           )
         }
 
@@ -1526,7 +2020,8 @@ case object UnsupportedSystemCommand extends Phase[PlannerContext, BaseState, Lo
     throw InvalidSemanticsException.unsupportedRequestOnSystemDatabase(
       from.queryText,
       s"Not a recognised system command or procedure. " +
-        s"This Cypher command can only be executed in a user database: ${from.queryText}"
+        s"This Cypher command can only be executed in a user database: ${from.queryText}",
+      false
     )
   }
 }

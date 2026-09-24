@@ -22,10 +22,11 @@ package org.neo4j.kernel.impl.query;
 import java.io.Closeable;
 import java.util.function.Consumer;
 import org.neo4j.graphdb.Transaction;
-import org.neo4j.graphdb.TransactionTerminatedException;
+import org.neo4j.graphdb.TransactionTerminatedHelper;
 import org.neo4j.internal.helpers.Exceptions;
 import org.neo4j.internal.kernel.api.ExecutionStatistics;
 import org.neo4j.internal.kernel.api.connectioninfo.ClientConnectionInfo;
+import org.neo4j.internal.kernel.api.exceptions.TransactionFailureException;
 import org.neo4j.internal.kernel.api.security.SecurityContext;
 import org.neo4j.io.IOUtils;
 import org.neo4j.kernel.GraphDatabaseQueryService;
@@ -200,8 +201,8 @@ public class Neo4jTransactionalContext implements TransactionalContext {
         }
     }
 
-    private KernelTransaction.KernelTransactionMonitor statisticsMonitor() {
-        return KernelTransaction.KernelTransactionMonitor.withAfterCommit(
+    private KernelTransaction.Monitor statisticsMonitor() {
+        return KernelTransaction.Monitor.withAfterCommit(
                 statistics -> executingQuery.recordStatisticsOfClosedTransaction(
                         statistics.pageHits(),
                         statistics.pageFaults(),
@@ -259,10 +260,7 @@ public class Neo4jTransactionalContext implements TransactionalContext {
          * To still keep track of the running stream after switching transactions, we need to open the new transaction
          * before closing the old one. This way, a query will not disappear and appear when switching transactions.
          *
-         * Since our transactions are thread bound, we must first unbind the old transaction from the thread before
-         * creating a new one. And then we need to do that thread switching again to close the old transaction.
          */
-
         checkNotTerminated();
 
         // (1) Remember old statement
@@ -289,13 +287,26 @@ public class Neo4jTransactionalContext implements TransactionalContext {
         // (5) commit old transaction
         try {
             oldStatement.close();
+            long committedTransactionId;
             try (oldKernelTx) {
-                return oldKernelTx.commit(statisticsMonitor());
+                committedTransactionId = oldKernelTx.commit(statisticsMonitor());
             }
+            kernelTransaction.cursorContext().getVersionContext().initRead();
+            kernelTransaction.reportVisibilityBoundaryRefresh();
+            return committedTransactionId;
         } catch (Throwable t) {
             // Corner case: The old transaction might have been terminated by the user. Now we also need to
             // terminate the new transaction.
             transaction.rollback();
+            // It's important to preserve GQL status where possible, in particular for
+            // transient exceptions like lease exceptions that the driver must retry
+            if (t instanceof TransactionFailureException e) {
+                throw new org.neo4j.graphdb.TransactionFailureException(
+                        e.gqlStatusObject(), e.getMessage(), e, e.status());
+            }
+            if (t instanceof RuntimeException e) {
+                throw e;
+            }
             throw new RuntimeException(t);
         }
     }
@@ -309,10 +320,11 @@ public class Neo4jTransactionalContext implements TransactionalContext {
         OnCloseCallback onClose = null;
         try {
             newTransaction = graph.beginTransaction(transactionType, securityContext, clientInfo);
-            long newTransactionId = newTransaction.kernelTransaction().getTransactionSequenceNumber();
+            var newKernelTransaction = newTransaction.kernelTransaction();
+            long newTransactionId = newKernelTransaction.getTransactionSequenceNumber();
             InnerTransactionHandler innerTransactionHandler = kernelTransaction.getInnerTransactionHandler();
             onClose = () -> innerTransactionHandler.removeInnerTransaction(newTransactionId);
-            innerTransactionHandler.registerInnerTransaction(newTransactionId);
+            innerTransactionHandler.registerInnerTransaction(newKernelTransaction);
 
             KernelStatement newStatement =
                     (KernelStatement) newTransaction.kernelTransaction().acquireStatement();
@@ -353,7 +365,7 @@ public class Neo4jTransactionalContext implements TransactionalContext {
 
     private void checkNotTerminated() {
         transaction.terminationReason().ifPresent(status -> {
-            throw new TransactionTerminatedException(status);
+            throw TransactionTerminatedHelper.transactionTerminated(status);
         });
     }
 

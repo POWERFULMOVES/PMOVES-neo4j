@@ -28,6 +28,8 @@ import org.junit.jupiter.api.Test;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.dbms.api.DatabaseManagementService;
 import org.neo4j.exceptions.InvalidArgumentException;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.graphdb.Transaction;
 import org.neo4j.internal.kernel.api.security.AuthenticationResult;
 import org.neo4j.internal.kernel.api.security.LoginContext;
@@ -38,6 +40,7 @@ import org.neo4j.test.extension.DbmsController;
 import org.neo4j.test.extension.DbmsExtension;
 import org.neo4j.test.extension.ExtensionCallback;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.test.utils.TestDirectory;
 
 @DbmsExtension(configurationCallback = "configure")
@@ -79,6 +82,7 @@ class BasicAuthIT {
     }
 
     @Test
+    @SkipOnSpd(reason = "SPD is enterprise only", notes = SkipOnSpd.Note.irrelevant)
     void shouldFailImpersonate() throws Exception {
         // GIVEN
         var systemDatabase = managementService.database(GraphDatabaseSettings.SYSTEM_DATABASE_NAME);
@@ -94,9 +98,12 @@ class BasicAuthIT {
         LoginContext loginContext =
                 authManager.login(AuthToken.newBasicAuthToken("foo", "barpassword"), EMBEDDED_CONNECTION);
         assertThat(loginContext.subject().getAuthenticationResult()).isEqualTo(AuthenticationResult.SUCCESS);
-        assertThatThrownBy(() -> authManager.impersonate(loginContext, "baz"))
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> authManager.impersonate(loginContext, "baz"))
                 .isInstanceOf(InvalidArgumentException.class)
-                .hasMessage("Impersonation is not supported in community edition.");
+                .hasMessage("Impersonation is not supported in community edition.")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_51N27)
+                .hasStatusDescription(
+                        "error: system configuration or operation exception - not supported in this edition. Impersonation is not supported in community edition.");
     }
 
     @Test

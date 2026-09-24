@@ -24,11 +24,11 @@ import static org.neo4j.io.IOUtils.closeAllSilently;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.function.Predicate;
-import org.neo4j.internal.kernel.api.CloseListener;
 import org.neo4j.internal.kernel.api.KernelReadTracer;
 import org.neo4j.internal.kernel.api.NodeCursor;
 import org.neo4j.internal.kernel.api.PropertyCursor;
 import org.neo4j.internal.kernel.api.RelationshipScanCursor;
+import org.neo4j.lang.CloseListener;
 import org.neo4j.storageengine.api.PropertySelection;
 import org.neo4j.storageengine.api.Reference;
 
@@ -54,6 +54,10 @@ public class FilteringRelationshipScanCursorWrapper implements RelationshipScanC
         this.delegate = delegate;
         this.filter = filter;
         this.resources = resources;
+    }
+
+    public RelationshipScanCursor internalRelationshipCursor() {
+        return delegate;
     }
 
     @Override
@@ -88,13 +92,13 @@ public class FilteringRelationshipScanCursorWrapper implements RelationshipScanC
     }
 
     @Override
-    public void setToken(int token) {
-        delegate.setToken(token);
+    public void setTrackingHandle(int handle) {
+        delegate.setTrackingHandle(handle);
     }
 
     @Override
-    public int getToken() {
-        return delegate.getToken();
+    public int getTrackingHandle() {
+        return delegate.getTrackingHandle();
     }
 
     @Override

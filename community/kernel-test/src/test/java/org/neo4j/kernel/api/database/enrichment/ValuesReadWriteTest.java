@@ -20,13 +20,14 @@
 package org.neo4j.kernel.api.database.enrichment;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.neo4j.storageengine.api.enrichment.WriteEnrichmentChannel.CHUNK_SIZE;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.List;
-import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.neo4j.io.fs.BufferBackedChannel;
@@ -34,8 +35,9 @@ import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.enrichment.WriteEnrichmentChannel;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.values.AnyValue;
+import org.neo4j.values.storable.RandomValues;
 import org.neo4j.values.storable.ValueType;
 import org.neo4j.values.virtual.ListValue;
 import org.neo4j.values.virtual.MapValue;
@@ -47,14 +49,24 @@ import org.neo4j.values.virtual.VirtualPathValue;
 import org.neo4j.values.virtual.VirtualRelationshipValue;
 import org.neo4j.values.virtual.VirtualValues;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class ValuesReadWriteTest {
 
     @Inject
     private RandomSupport random;
 
+    private static final int MAX_NUM_WRITES = 666;
+
+    @BeforeEach
+    void setup() {
+        random.withConfiguration(RandomValues.newConfigurationBuilder()
+                        .maxVectorNumBytes(CHUNK_SIZE / MAX_NUM_WRITES)
+                        .build())
+                .reset();
+    }
+
     @ParameterizedTest
-    @EnumSource(ValueType.class)
+    @EnumSource(value = ValueType.class)
     void valueRoundTrips(ValueType type) throws IOException {
         doRoundTrips(random.randomValues().nextValueOfType(type));
     }
@@ -66,7 +78,7 @@ class ValuesReadWriteTest {
     }
 
     private void doRoundTrips(AnyValue value) throws IOException {
-        final var positions = new int[random.nextInt(50, 666)];
+        final var positions = new int[random.nextInt(50, MAX_NUM_WRITES)];
         try (var writeChannel = new WriteEnrichmentChannel(EmptyMemoryTracker.INSTANCE)) {
             final var writer = new ValuesWriter(writeChannel);
             for (var i = 0; i < positions.length; i++) {

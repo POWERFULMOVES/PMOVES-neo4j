@@ -27,11 +27,11 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-import static org.neo4j.io.pagecache.context.OldestTransactionIdFactory.EMPTY_OLDEST_ID_FACTORY;
+import static org.neo4j.io.pagecache.context.OldestVisibilityHorizonFactory.EMPTY_OLDEST_HORIZON_FACTORY;
 
 import org.junit.jupiter.api.Test;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
-import org.neo4j.io.pagecache.context.OldestTransactionIdFactory;
+import org.neo4j.io.pagecache.context.OldestVisibilityHorizonFactory;
 import org.neo4j.io.pagecache.context.TransactionIdSnapshotFactory;
 import org.neo4j.io.pagecache.context.VersionContext;
 import org.neo4j.io.pagecache.context.VersionContextSupplier;
@@ -55,8 +55,7 @@ class KernelTransactionImplementationHandleTest {
                         .create("test"));
         when(tx.getTransactionSequenceNumber()).thenReturn(userTransactionId);
 
-        KernelTransactionImplementationHandle handle =
-                new KernelTransactionImplementationHandle(tx, clock, tx.concurrentCursorContextLookup());
+        KernelTransactionImplementationHandle handle = new KernelTransactionImplementationHandle(tx, clock);
 
         assertTrue(handle.isOpen());
     }
@@ -75,8 +74,7 @@ class KernelTransactionImplementationHandleTest {
                 .thenReturn(initialUserTransactionId)
                 .thenReturn(nextUserTransactionId);
 
-        KernelTransactionImplementationHandle handle =
-                new KernelTransactionImplementationHandle(tx, clock, tx.concurrentCursorContextLookup());
+        KernelTransactionImplementationHandle handle = new KernelTransactionImplementationHandle(tx, clock);
 
         assertFalse(handle.isOpen());
     }
@@ -92,8 +90,7 @@ class KernelTransactionImplementationHandleTest {
                         .create("test"));
         when(tx.getTransactionSequenceNumber()).thenReturn(userTransactionId);
 
-        KernelTransactionImplementationHandle handle =
-                new KernelTransactionImplementationHandle(tx, clock, tx.concurrentCursorContextLookup());
+        KernelTransactionImplementationHandle handle = new KernelTransactionImplementationHandle(tx, clock);
         handle.markForTermination(terminationReason);
 
         verify(tx).markForTermination(userTransactionId, terminationReason);
@@ -108,8 +105,7 @@ class KernelTransactionImplementationHandleTest {
         when(tx.getTransactionSequenceNumber()).thenReturn(42L);
         when(tx.markForTermination(anyLong(), any())).thenReturn(true);
 
-        KernelTransactionImplementationHandle handle =
-                new KernelTransactionImplementationHandle(tx, clock, tx.concurrentCursorContextLookup());
+        KernelTransactionImplementationHandle handle = new KernelTransactionImplementationHandle(tx, clock);
         assertTrue(handle.markForTermination(Status.Transaction.Terminated));
     }
 
@@ -122,8 +118,7 @@ class KernelTransactionImplementationHandleTest {
         when(tx.getTransactionSequenceNumber()).thenReturn(42L);
         when(tx.markForTermination(anyLong(), any())).thenReturn(false);
 
-        KernelTransactionImplementationHandle handle =
-                new KernelTransactionImplementationHandle(tx, clock, tx.concurrentCursorContextLookup());
+        KernelTransactionImplementationHandle handle = new KernelTransactionImplementationHandle(tx, clock);
         assertFalse(handle.markForTermination(Status.Transaction.Terminated));
     }
 
@@ -136,8 +131,7 @@ class KernelTransactionImplementationHandleTest {
         when(tx.isOpen()).thenReturn(true);
         when(tx.getTransactionSequenceNumber()).thenReturn(2L).thenReturn(3L);
 
-        KernelTransactionImplementationHandle handle =
-                new KernelTransactionImplementationHandle(tx, clock, tx.concurrentCursorContextLookup());
+        KernelTransactionImplementationHandle handle = new KernelTransactionImplementationHandle(tx, clock);
         assertSame(TransactionExecutionStatistic.NOT_AVAILABLE, handle.transactionStatistic());
     }
 
@@ -145,12 +139,12 @@ class KernelTransactionImplementationHandleTest {
         @Override
         public void init(
                 TransactionIdSnapshotFactory transactionIdSnapshotFactory,
-                OldestTransactionIdFactory oldestTransactionIdFactory) {}
+                OldestVisibilityHorizonFactory oldestVisibilityHorizonFactory) {}
 
         @Override
         public VersionContext createVersionContext() {
             var context = new TransactionVersionContext(
-                    TransactionIdSnapshotFactory.EMPTY_SNAPSHOT_FACTORY, EMPTY_OLDEST_ID_FACTORY);
+                    TransactionIdSnapshotFactory.EMPTY_SNAPSHOT_FACTORY, EMPTY_OLDEST_HORIZON_FACTORY);
             context.initRead();
             return context;
         }

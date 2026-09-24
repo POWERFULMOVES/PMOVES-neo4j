@@ -19,21 +19,24 @@
  */
 package org.neo4j.cypher.internal.evaluator
 
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.evaluator.SimpleInternalExpressionEvaluator.CONVERTERS
 import org.neo4j.cypher.internal.evaluator.SimpleInternalExpressionEvaluator.NULL_CURSOR_FACTORY
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.Parameter
+import org.neo4j.cypher.internal.planner.spi.NoPreferenceIndexComparatorFactory
 import org.neo4j.cypher.internal.planner.spi.ReadTokenContext
 import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.runtime.CypherRuntimeConfiguration
-import org.neo4j.cypher.internal.runtime.ExpressionCursors
 import org.neo4j.cypher.internal.runtime.ParameterMapping
+import org.neo4j.cypher.internal.runtime.QueryIndexRegistrator
 import org.neo4j.cypher.internal.runtime.QuerySelectivityTrackers
 import org.neo4j.cypher.internal.runtime.SelectivityTracker
 import org.neo4j.cypher.internal.runtime.SelectivityTrackerRegistrator
 import org.neo4j.cypher.internal.runtime.SelectivityTrackerStorage
 import org.neo4j.cypher.internal.runtime.ast.ParameterFromSlot
 import org.neo4j.cypher.internal.runtime.createParameterArray
+import org.neo4j.cypher.internal.runtime.cursors.ExpressionCursors
 import org.neo4j.cypher.internal.runtime.expressionVariableAllocation
 import org.neo4j.cypher.internal.runtime.interpreted.commands.convert.CommunityExpressionConverter
 import org.neo4j.cypher.internal.runtime.interpreted.commands.convert.ExpressionConverters
@@ -102,7 +105,8 @@ class SimpleInternalExpressionEvaluator extends InternalExpressionEvaluator {
       expressionVariables = new Array(nExpressionSlots),
       subscriber = QuerySubscriber.DO_NOTHING_SUBSCRIBER,
       queryMemoryTracker = NoOpQueryMemoryTracker,
-      memoryTrackerForOperatorProvider = NoOpMemoryTrackerForOperatorProvider
+      memoryTrackerForOperatorProvider = NoOpMemoryTrackerForOperatorProvider,
+      indexComparatorFactory = NoPreferenceIndexComparatorFactory
     )
 
   private def withSlottedParams(input: Expression, params: MapValue): (Expression, Array[AnyValue]) = {
@@ -144,7 +148,9 @@ object SimpleInternalExpressionEvaluator {
         ReadTokenContext.EMPTY,
         new AnonymousVariableNameGenerator(),
         noopSelectivityTrackerRegistrator,
-        CypherRuntimeConfiguration.defaultConfiguration
+        CypherRuntimeConfiguration.defaultConfiguration,
+        CypherVersion.Legacy.legacyVersion(),
+        QueryIndexRegistrator.unsupported()
       )
     )
 
@@ -186,16 +192,6 @@ object SimpleInternalExpressionEvaluator {
       cursorContext: CursorContext,
       memoryTracker: MemoryTracker
     ): NodeValueIndexCursor = null
-
-    override def allocateFullAccessNodeValueIndexCursor(
-      cursorContext: CursorContext,
-      memoryTracker: MemoryTracker
-    ): NodeValueIndexCursor = null
-
-    override def allocateFullAccessRelationshipValueIndexCursor(
-      cursorContext: CursorContext,
-      memoryTracker: MemoryTracker
-    ): RelationshipValueIndexCursor = null
 
     override def allocateNodeLabelIndexCursor(
       cursorContext: CursorContext,

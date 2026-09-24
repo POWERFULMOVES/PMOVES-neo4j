@@ -29,6 +29,7 @@ import static org.neo4j.index.internal.gbptree.GBPTreeTestUtil.consistencyCheckS
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
 import static org.neo4j.index.internal.gbptree.RootLayerConfiguration.multipleRoots;
 import static org.neo4j.io.ByteUnit.kibiBytes;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
 import static org.neo4j.test.Race.throwing;
@@ -61,47 +62,55 @@ import org.eclipse.collections.impl.factory.primitive.LongSets;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.neo4j.common.DependencyResolver;
 import org.neo4j.common.EmptyDependencyResolver;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
+import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.test.Race;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.extension.pagecache.EphemeralPageCacheExtension;
 import org.neo4j.test.utils.TestDirectory;
 import org.neo4j.util.concurrent.ArrayQueueOutOfOrderSequence;
 import org.neo4j.util.concurrent.OutOfOrderSequence;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 @EphemeralPageCacheExtension
 class MultiRootGBPTreeTest {
-    private static final SimpleByteArrayLayout rootKeyLayout = new SimpleByteArrayLayout();
-    private static final SimpleByteArrayLayout layout = new SimpleByteArrayLayout();
+    static final SimpleByteArrayLayout rootKeyLayout = new SimpleByteArrayLayout();
+    static final SimpleByteArrayLayout layout = new SimpleByteArrayLayout();
 
     @Inject
-    private RandomSupport random;
+    RandomSupport random;
 
     @Inject
-    private TestDirectory directory;
+    TestDirectory directory;
 
     @Inject
-    private FileSystemAbstraction fileSystem;
+    FileSystemAbstraction fileSystem;
 
     @Inject
-    private PageCache pageCache;
+    PageCache pageCache;
 
-    private MultiRootGBPTree<RawBytes, RawBytes, RawBytes> tree;
-    private long highestUsableSeed;
+    MultiRootGBPTree<RawBytes, RawBytes, RawBytes> tree;
+    ImmutableSet<OpenOption> openOptions;
+    DependencyResolver dependencyResolver;
+    long highestUsableSeed;
 
     @BeforeEach
-    void start() {
+    void start() throws Exception {
         PageCacheTracer pageCacheTracer = PageCacheTracer.NULL;
-        var path = directory.file("tree");
+        var path = new StoreFile(directory.file("tree"));
+        openOptions = Sets.immutable.empty();
+        dependencyResolver = EmptyDependencyResolver.EMPTY_RESOLVER;
         tree = new MultiRootGBPTree<>(
                 pageCache,
                 fileSystem,
@@ -111,20 +120,17 @@ class MultiRootGBPTreeTest {
                 NO_HEADER_READER,
                 immediate(),
                 false,
-                getOpenOptions(),
+                openOptions,
                 "db",
                 "test multi-root tree",
                 new CursorContextFactory(pageCacheTracer, EMPTY_CONTEXT_SUPPLIER),
                 multipleRoots(rootKeyLayout, (int) kibiBytes(1)),
                 pageCacheTracer,
-                EmptyDependencyResolver.EMPTY_RESOLVER,
+                dependencyResolver,
                 TreeNodeLayoutFactory.getInstance(),
-                LoggingStructureWriteLog.forGBPTree(fileSystem, path));
+                LoggingStructureWriteLog.forGBPTree(fileSystem, path),
+                false);
         highestUsableSeed = layout.highestUsableSeed();
-    }
-
-    protected ImmutableSet<OpenOption> getOpenOptions() {
-        return Sets.immutable.empty();
     }
 
     @AfterEach
@@ -146,7 +152,7 @@ class MultiRootGBPTreeTest {
 
         PageCacheTracer pageCacheTracer = PageCacheTracer.NULL;
         var layoutWithBadHashes = new MinimalHashCodeEntriesLayout();
-        var path = directory.file("tree");
+        var path = new StoreFile(directory.file("tree"));
         try (var badHashesTree = new MultiRootGBPTree<>(
                 pageCache,
                 fileSystem,
@@ -156,20 +162,21 @@ class MultiRootGBPTreeTest {
                 NO_HEADER_READER,
                 immediate(),
                 false,
-                getOpenOptions(),
+                openOptions,
                 "db",
                 "test multi-root tree",
                 new CursorContextFactory(pageCacheTracer, EMPTY_CONTEXT_SUPPLIER),
                 multipleRoots(layoutWithBadHashes, (int) kibiBytes(1)),
                 pageCacheTracer,
-                EmptyDependencyResolver.EMPTY_RESOLVER,
+                dependencyResolver,
                 TreeNodeLayoutFactory.getInstance(),
-                LoggingStructureWriteLog.forGBPTree(fileSystem, path))) {
+                LoggingStructureWriteLog.forGBPTree(fileSystem, path),
+                false)) {
 
             var externalId1 = 101;
             badHashesTree.create(layoutWithBadHashes.key(externalId1), NULL_CONTEXT);
-            insertData(badHashesTree, externalId1, 1, 100);
-            assertSeek(badHashesTree, externalId1, 1, 100);
+            insertData(badHashesTree, externalId1, 1, 100, NULL_CONTEXT);
+            assertSeek(badHashesTree, externalId1, 1, 100, NULL_CONTEXT);
 
             assertThat(consistencyCheckStrict(badHashesTree)).isTrue();
         }
@@ -189,12 +196,12 @@ class MultiRootGBPTreeTest {
         var externalId2 = 979;
         tree.create(rootKeyLayout.key(externalId1), NULL_CONTEXT);
         tree.create(rootKeyLayout.key(externalId2), NULL_CONTEXT);
-        insertData(externalId1, 1, 100);
-        insertData(externalId2, 1_000, 100);
+        insertData(externalId1, 1, 100, NULL_CONTEXT);
+        insertData(externalId2, 1_000, 100, NULL_CONTEXT);
 
         // then
-        assertSeek(externalId1, 1, 100);
-        assertSeek(externalId2, 1_000, 100);
+        assertSeek(externalId1, 1, 100, NULL_CONTEXT);
+        assertSeek(externalId2, 1_000, 100, NULL_CONTEXT);
     }
 
     @Test
@@ -250,19 +257,19 @@ class MultiRootGBPTreeTest {
         race.goUnchecked();
     }
 
-    @Test
-    void shouldWriteToMultipleRootsInParallel() throws Exception {
+    @ParameterizedTest
+    @ValueSource(ints = {0, DataTree.W_ESCALATING_COORDINATION})
+    void shouldWriteToMultipleRootsInParallel(int writerFlags) throws Exception {
         // given
         var numRoots = random.nextInt(2, 50);
         var numThreads = random.nextInt(2, 16);
         var externalIds = randomExternalIds(numRoots);
-        var executor = Executors.newFixedThreadPool(numThreads);
-        var numWritten = new AtomicInteger[numRoots];
-        for (var i = 0; i < numRoots; i++) {
-            numWritten[i] = new AtomicInteger();
-        }
+        try (var executor = Executors.newFixedThreadPool(numThreads)) {
+            var numWritten = new AtomicInteger[numRoots];
+            for (var i = 0; i < numRoots; i++) {
+                numWritten[i] = new AtomicInteger();
+            }
 
-        try {
             // create the roots in parallel
             var creationTasks = new ArrayList<Callable<Void>>();
             for (var i = 0; i < numRoots; i++) {
@@ -281,7 +288,7 @@ class MultiRootGBPTreeTest {
                 if (random.nextInt(100) == 0) {
                     // Checkpoint
                     writeTasks.add(() -> {
-                        tree.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+                        tree.checkpoint(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
                         return null;
                     });
                 } else {
@@ -290,7 +297,7 @@ class MultiRootGBPTreeTest {
                     var numEntries = random.nextInt(1, 5);
                     writeTasks.add(() -> {
                         try (var writer = tree.access(rootKeyLayout.key(externalIds[rootIndex]))
-                                .writer(NULL_CONTEXT)) {
+                                .writer(writerFlags, NULL_CONTEXT)) {
                             for (var e = 0; e < numEntries; e++) {
                                 var entrySeed = externalIds[rootIndex] + numWritten[rootIndex].getAndIncrement();
                                 writer.put(layout.key(entrySeed), layout.value(entrySeed));
@@ -301,13 +308,11 @@ class MultiRootGBPTreeTest {
                 }
             }
             getAllResults(executor.invokeAll(writeTasks));
-        } finally {
-            executor.shutdown();
-        }
 
-        // then all mappings and data should be there
-        for (var i = 0; i < externalIds.length; i++) {
-            assertSeek(externalIds[i], externalIds[i], numWritten[i].get());
+            // then all mappings and data should be there
+            for (var i = 0; i < externalIds.length; i++) {
+                assertSeek(externalIds[i], externalIds[i], numWritten[i].get(), NULL_CONTEXT);
+            }
         }
     }
 
@@ -385,7 +390,7 @@ class MultiRootGBPTreeTest {
         }));
         race.addContestant(throwing(() -> {
             Thread.sleep(200);
-            tree.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            tree.checkpoint(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
         }));
         race.goUnchecked();
 
@@ -458,16 +463,18 @@ class MultiRootGBPTreeTest {
     }
 
     @Test
-    void shouldCreateDeleteAndUpdateRootsConcurrently() throws IOException {
+    void shouldCreateDeleteAndUpdateRootsConcurrently() {
         // when
         var ops = new AtomicInteger();
         var numCheckpoints = new AtomicInteger();
-        var race = new Race().withEndCondition(() -> ops.get() > 10000 && numCheckpoints.get() >= 20);
+        int opsLimit = 10_000;
+        var race = new Race().withEndCondition(() -> ops.get() > opsLimit && numCheckpoints.get() >= 20);
         List<RawBytes> keys = new ArrayList<>();
         for (int i = 0; i < 10; i++) {
             keys.add(rootKeyLayout.key(i));
         }
         race.addContestants(3, throwing(() -> {
+            Thread.sleep(ops.get() > opsLimit ? random.nextInt(1, 10) : 1);
             try {
                 RawBytes key = random.among(keys);
                 tree.create(key, NULL_CONTEXT);
@@ -477,6 +484,7 @@ class MultiRootGBPTreeTest {
             ops.incrementAndGet();
         }));
         race.addContestants(3, throwing(() -> {
+            Thread.sleep(ops.get() > opsLimit ? random.nextInt(1, 10) : 1);
             try {
                 RawBytes key = random.among(keys);
                 updateKey(key, true);
@@ -486,14 +494,25 @@ class MultiRootGBPTreeTest {
             ops.incrementAndGet();
         }));
 
+        race.addContestants(5, throwing(() -> {
+            RawBytes key = random.among(keys);
+            var access = tree.access(key);
+            try (var reader = access.seek(key, key, NULL_CONTEXT)) {
+                reader.next();
+            } catch (DataTreeNotFoundException ignored) {
+            }
+            ops.incrementAndGet();
+        }));
+
         race.addContestants(3, throwing(() -> {
+            Thread.sleep(ops.get() > opsLimit ? random.nextInt(1, 10) : 1);
             updateKey(random.among(keys), false);
             ops.incrementAndGet();
         }));
 
         race.addContestant(throwing(() -> {
             Thread.sleep(50);
-            tree.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            tree.checkpoint(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
             numCheckpoints.incrementAndGet();
         }));
         race.goUnchecked();
@@ -536,7 +555,7 @@ class MultiRootGBPTreeTest {
     }
 
     @Test
-    void shouldReopenMultiRootGBPTree() throws IOException {
+    void shouldReopenMultiRootGBPTree() throws Exception {
         // given
         long externalId1 = 111;
         long externalId2 = 222;
@@ -546,25 +565,25 @@ class MultiRootGBPTreeTest {
         long seed2 = random.seed() + 1;
         int count1 = random.nextInt(100) + 50;
         int count2 = random.nextInt(100) + 50;
-        insertData(externalId1, seed1, count1);
-        insertData(externalId2, seed2, count2);
-        assertSeek(externalId1, seed1, count1);
-        assertSeek(externalId2, seed2, count2);
+        insertData(externalId1, seed1, count1, NULL_CONTEXT);
+        insertData(externalId2, seed2, count2, NULL_CONTEXT);
+        assertSeek(externalId1, seed1, count1, NULL_CONTEXT);
+        assertSeek(externalId2, seed2, count2, NULL_CONTEXT);
 
         // when
-        tree.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+        tree.checkpoint(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
         stop();
         start();
 
         // then
-        assertSeek(externalId1, seed1, count1);
-        assertSeek(externalId2, seed2, count2);
+        assertSeek(externalId1, seed1, count1, NULL_CONTEXT);
+        assertSeek(externalId2, seed2, count2, NULL_CONTEXT);
     }
 
     @Test
     void shouldIdentifyWrongRootLayoutOnOpen() throws IOException {
         // given
-        tree.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+        tree.checkpoint(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
         stop();
 
         // when/then
@@ -573,28 +592,29 @@ class MultiRootGBPTreeTest {
         assertThatThrownBy(() -> new MultiRootGBPTree<>(
                         pageCache,
                         fileSystem,
-                        directory.file("tree"),
+                        new StoreFile(directory.file("tree")),
                         layout,
                         NO_MONITOR,
                         NO_HEADER_READER,
                         immediate(),
                         false,
-                        getOpenOptions(),
+                        openOptions,
                         "db",
                         "test multi-root tree",
                         new CursorContextFactory(cacheTracer, EMPTY_CONTEXT_SUPPLIER),
                         multipleRoots(wrongRootLayout, (int) kibiBytes(1)),
                         cacheTracer,
-                        EmptyDependencyResolver.EMPTY_RESOLVER,
+                        dependencyResolver,
                         TreeNodeLayoutFactory.getInstance(),
-                        StructureWriteLog.EMPTY))
+                        StructureWriteLog.EMPTY,
+                        false))
                 .isInstanceOf(MetadataMismatchException.class);
     }
 
     @Test
     void shouldIdentifyWrongDataLayoutOnOpen() throws IOException {
         // given
-        tree.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+        tree.checkpoint(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
         stop();
 
         // when/then
@@ -603,21 +623,22 @@ class MultiRootGBPTreeTest {
         assertThatThrownBy(() -> new MultiRootGBPTree<>(
                         pageCache,
                         fileSystem,
-                        directory.file("tree"),
+                        new StoreFile(directory.file("tree")),
                         wrongDataLayout,
                         NO_MONITOR,
                         NO_HEADER_READER,
                         immediate(),
                         false,
-                        getOpenOptions(),
+                        openOptions,
                         "db",
                         "test multi-root tree",
                         new CursorContextFactory(cacheTracer, EMPTY_CONTEXT_SUPPLIER),
                         multipleRoots(rootKeyLayout, (int) kibiBytes(1)),
                         cacheTracer,
-                        EmptyDependencyResolver.EMPTY_RESOLVER,
+                        dependencyResolver,
                         TreeNodeLayoutFactory.getInstance(),
-                        StructureWriteLog.EMPTY))
+                        StructureWriteLog.EMPTY,
+                        false))
                 .isInstanceOf(MetadataMismatchException.class);
     }
 
@@ -633,21 +654,22 @@ class MultiRootGBPTreeTest {
             new MultiRootGBPTree<>(
                             pageCache,
                             fileSystem,
-                            file,
+                            new StoreFile(file),
                             dataLayout,
                             NO_MONITOR,
                             NO_HEADER_READER,
                             immediate(),
                             false,
-                            getOpenOptions(),
+                            openOptions,
                             "db",
                             "test multi-root tree",
                             new CursorContextFactory(cacheTracer, EMPTY_CONTEXT_SUPPLIER),
                             multipleRoots(rootKeyLayout, (int) kibiBytes(1)),
                             cacheTracer,
-                            EmptyDependencyResolver.EMPTY_RESOLVER,
+                            dependencyResolver,
                             TreeNodeLayoutFactory.getInstance(),
-                            StructureWriteLog.EMPTY)
+                            StructureWriteLog.EMPTY,
+                            false)
                     .close();
         }
     }
@@ -709,7 +731,7 @@ class MultiRootGBPTreeTest {
         var race = new Race().withEndCondition(() -> nextRootKey.get() > 1_000 && numCheckpoints.get() > 20);
         race.addContestant(throwing(() -> tree.create(rootKeyLayout.key(nextRootKey.getAndIncrement()), NULL_CONTEXT)));
         race.addContestant(throwing(() -> {
-            tree.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            tree.checkpoint(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
             numCheckpoints.incrementAndGet();
         }));
 
@@ -842,7 +864,7 @@ class MultiRootGBPTreeTest {
         return rootContents;
     }
 
-    private LongSet allExternalRoots() throws IOException {
+    LongSet allExternalRoots() throws IOException {
         MutableLongSet set = LongSets.mutable.empty();
         tree.visitAllRoots(NULL_CONTEXT, key -> {
             set.add(rootKeyLayout.keySeed(key));
@@ -864,14 +886,18 @@ class MultiRootGBPTreeTest {
         return externalIds;
     }
 
-    private void assertSeek(
-            MultiRootGBPTree<RawBytes, RawBytes, RawBytes> tree, long externalId, long startSeed, int count)
+    void assertSeek(
+            MultiRootGBPTree<RawBytes, RawBytes, RawBytes> tree,
+            long externalId,
+            long startSeed,
+            int count,
+            CursorContext cursorContext)
             throws IOException {
         var low = layout.newKey();
         var high = layout.newKey();
         layout.initializeAsLowest(low);
         layout.initializeAsHighest(high);
-        try (var seek = tree.access(rootKeyLayout.key(externalId)).seek(low, high, NULL_CONTEXT)) {
+        try (var seek = tree.access(rootKeyLayout.key(externalId)).seek(low, high, cursorContext)) {
             for (var i = 0; i < count; i++) {
                 assertThat(seek.next()).isTrue();
                 assertThat(seek.key().bytes).isEqualTo(layout.key(startSeed + i).bytes);
@@ -881,25 +907,29 @@ class MultiRootGBPTreeTest {
         }
     }
 
-    private void assertSeek(long externalId, long startSeed, int count) throws IOException {
-        assertSeek(tree, externalId, startSeed, count);
+    void assertSeek(long externalId, long startSeed, int count, CursorContext cursorContext) throws IOException {
+        assertSeek(tree, externalId, startSeed, count, cursorContext);
     }
 
-    private void insertData(long externalId, long startSeed, int count) throws IOException {
-        insertData(tree, externalId, startSeed, count);
+    void insertData(long externalId, long startSeed, int count, CursorContext cursorContext) throws IOException {
+        insertData(tree, externalId, startSeed, count, cursorContext);
     }
 
-    private void insertData(
-            MultiRootGBPTree<RawBytes, RawBytes, RawBytes> tree, long externalId, long startSeed, int count)
+    void insertData(
+            MultiRootGBPTree<RawBytes, RawBytes, RawBytes> tree,
+            long externalId,
+            long startSeed,
+            int count,
+            CursorContext cursorContext)
             throws IOException {
-        try (var writer = tree.access(rootKeyLayout.key(externalId)).writer(NULL_CONTEXT)) {
+        try (var writer = tree.access(rootKeyLayout.key(externalId)).writer(cursorContext)) {
             for (var i = 0; i < count; i++) {
                 writer.put(layout.key(startSeed + i), layout.value(startSeed + i));
             }
         }
     }
 
-    private Seeker<RawBytes, RawBytes> allSeek(long key) throws IOException {
+    Seeker<RawBytes, RawBytes> allSeek(long key) throws IOException {
         var low = layout.newKey();
         var high = layout.newKey();
         layout.initializeAsLowest(low);

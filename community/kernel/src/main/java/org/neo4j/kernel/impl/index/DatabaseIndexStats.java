@@ -35,6 +35,7 @@ import org.neo4j.internal.schema.IndexType;
 public class DatabaseIndexStats extends IndexMonitor.MonitorAdapter implements IndexCounters {
     private static class IndexTypeStats {
         final LongAdder queried = new LongAdder();
+        final LongAdder queriedWithFilter = new LongAdder();
         final LongAdder populated = new LongAdder();
         final LongAdder totalSize = new LongAdder();
     }
@@ -42,8 +43,8 @@ public class DatabaseIndexStats extends IndexMonitor.MonitorAdapter implements I
     private final Map<IndexType, IndexTypeStats> stats;
 
     public DatabaseIndexStats() {
-        final var stats = new EnumMap<IndexType, IndexTypeStats>(IndexType.class);
-        for (final var indexType : IndexType.values()) {
+        Map<IndexType, IndexTypeStats> stats = new EnumMap<>(IndexType.class);
+        for (IndexType indexType : IndexType.values()) {
             stats.put(indexType, new IndexTypeStats());
         }
         this.stats = Collections.unmodifiableMap(stats);
@@ -52,6 +53,11 @@ public class DatabaseIndexStats extends IndexMonitor.MonitorAdapter implements I
     @Override
     public long getQueryCount(IndexType type) {
         return stats.get(type).queried.longValue();
+    }
+
+    @Override
+    public long getQueryWithFilterCount(IndexType type) {
+        return stats.get(type).queriedWithFilter.longValue();
     }
 
     @Override
@@ -64,8 +70,16 @@ public class DatabaseIndexStats extends IndexMonitor.MonitorAdapter implements I
         return stats.get(type).totalSize.longValue();
     }
 
-    public void reportQueryCount(IndexDescriptor descriptor, long queriesSinceLastReport) {
-        stats.get(descriptor.getIndexType()).queried.add(queriesSinceLastReport);
+    public void reportQueryCount(
+            IndexDescriptor descriptor, long queriesSinceLastReport, long queriesWithFilterSinceLastReport) {
+        IndexType type = descriptor.getIndexType();
+        IndexTypeStats statsByType = stats.get(type);
+        statsByType.queried.add(queriesSinceLastReport);
+
+        // only for vectors, save the LongAdder+0 cycles
+        if (type == IndexType.VECTOR) {
+            statsByType.queriedWithFilter.add(queriesWithFilterSinceLastReport);
+        }
     }
 
     @Override

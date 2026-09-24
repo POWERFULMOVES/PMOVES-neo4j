@@ -36,12 +36,14 @@ import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RandomValuesTestSupport
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 
+object ProvidedOrderTestBase
+
 abstract class ProvidedOrderTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
   val sizeHint: Int
 ) extends RuntimeTestSuite[CONTEXT](edition, runtime)
-    with RandomValuesTestSupport {
+    with RandomValuesTestSupport[CONTEXT] {
 
   trait SeqMutator { def apply[X](in: Seq[X]): Seq[X] }
 
@@ -56,7 +58,8 @@ abstract class ProvidedOrderTestBase[CONTEXT <: RuntimeContext](
 trait NonParallelProvidedOrderTestBase[CONTEXT <: RuntimeContext] {
   self: ProvidedOrderTestBase[CONTEXT] =>
 
-  private[this] val parse: String => Expression = Parser.parseExpression
+  // Note! Parses with default version.
+  private[this] val parse: String => Expression = Parser.Latest.parseExpression
   private[this] val asc: Expression => ProvidedOrder = DefaultProvidedOrderFactory.asc(_: Expression)
   private[this] val desc: Expression => ProvidedOrder = DefaultProvidedOrderFactory.desc(_: Expression)
 
@@ -941,7 +944,7 @@ trait NonParallelProvidedOrderTestBase[CONTEXT <: RuntimeContext] {
 
     val runtimeResult = execute(logicalQuery, runtime, iteratorInput(input.iterator.map(v => Array[Any](v))))
 
-    val expected = input.map(x => Array[Any](x, if (x < 0.5) Array(x) else Array()))
+    val expected = input.map(x => Array[Any](x, if (x < 0.5) Array(x) else Array.empty[Any]))
     runtimeResult should beColumns("x", "rollup").withRows(inOrder(expected))
   }
 
@@ -965,7 +968,7 @@ trait NonParallelProvidedOrderTestBase[CONTEXT <: RuntimeContext] {
 
     val expected = input
       .filter(_ < 0.5)
-      .map(x => Array[Any](x, if (x < 0.25) Array(x) else Array()))
+      .map(x => Array[Any](x, if (x < 0.25) Array(x) else Array.empty[Any]))
     runtimeResult should beColumns("x", "rollup").withRows(inOrder(expected))
   }
 
@@ -1180,7 +1183,8 @@ trait NonParallelProvidedOrderTestBase[CONTEXT <: RuntimeContext] {
 trait CartesianProductProvidedOrderTestBase[CONTEXT <: RuntimeContext] {
   self: ProvidedOrderTestBase[CONTEXT] =>
 
-  private[this] val parse: String => Expression = Parser.parseExpression
+  // Note! Parses with default language.
+  private[this] val parse: String => Expression = Parser.Latest.parseExpression
   private[this] val asc: Expression => ProvidedOrder = DefaultProvidedOrderFactory.asc(_: Expression)
   private[this] val desc: Expression => ProvidedOrder = DefaultProvidedOrderFactory.desc(_: Expression)
 

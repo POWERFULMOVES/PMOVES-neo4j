@@ -29,6 +29,7 @@ import static org.neo4j.internal.recordstorage.Command.GroupDegreeCommand.combin
 import static org.neo4j.internal.recordstorage.RecordCursorTypes.GROUP_CURSOR;
 import static org.neo4j.internal.recordstorage.RecordStorageEngineTestUtils.applyLogicalChanges;
 import static org.neo4j.internal.recordstorage.RecordStorageEngineTestUtils.openSimpleStorageEngine;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.CursorContextFactory.NULL_CONTEXT_FACTORY;
 
@@ -37,18 +38,19 @@ import java.util.List;
 import org.eclipse.collections.api.map.primitive.MutableLongLongMap;
 import org.eclipse.collections.impl.factory.primitive.LongLongMaps;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.batchimport.api.Configuration;
-import org.neo4j.collection.diffset.LongDiffSets;
+import org.neo4j.collection.diffset.IntDiffSets;
 import org.neo4j.configuration.Config;
 import org.neo4j.internal.id.DefaultIdGeneratorFactory;
 import org.neo4j.internal.id.IdGenerator;
 import org.neo4j.internal.recordstorage.RecordStorageEngine;
+import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.layout.recordstorage.RecordDatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.api.FlatRelationshipModifications;
 import org.neo4j.kernel.impl.api.FlatRelationshipModifications.RelationshipData;
 import org.neo4j.kernel.impl.store.NeoStores;
@@ -58,20 +60,22 @@ import org.neo4j.kernel.impl.store.RelationshipStore;
 import org.neo4j.kernel.impl.store.StoreFactory;
 import org.neo4j.kernel.impl.store.record.RecordLoad;
 import org.neo4j.kernel.impl.store.record.RelationshipGroupRecord;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.kernel.lifecycle.Lifespan;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.EmptyMemoryTracker;
+import org.neo4j.storageengine.api.LogMetadataProviderImpl;
 import org.neo4j.storageengine.api.RelationshipDirection;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.storageengine.api.txstate.NodeState;
+import org.neo4j.test.LatestVersions;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.extension.pagecache.EphemeralPageCacheExtension;
 import org.neo4j.test.utils.TestDirectory;
+import org.neo4j.wal.LogTailLogVersionsMetadata;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 @EphemeralPageCacheExtension
 class DegreesRebuildFromStoreTest {
     @Inject
@@ -128,11 +132,12 @@ class DegreesRebuildFromStoreTest {
                     }
                 }
             }
-            storageEngine.checkpoint(DatabaseFlushEvent.NULL, NULL_CONTEXT);
+            storageEngine.checkpoint(DatabaseFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
         }
 
         // when
-        directory.getFileSystem().deleteFile(layout.relationshipGroupDegreesStore());
+        FileSystemAbstraction fileSystem = directory.getFileSystem();
+        layout.relationshipGroupDegreesStore().delete(fileSystem);
         rebuildAndVerify(layout, config, expectedDegrees);
     }
 
@@ -157,11 +162,12 @@ class DegreesRebuildFromStoreTest {
                                     expectedDegrees.put(combinedKeyOnGroupAndDirection(groupId, direction), degree),
                             NULL_CONTEXT);
             assertThat(expectedDegrees.isEmpty()).isFalse();
-            storageEngine.checkpoint(DatabaseFlushEvent.NULL, NULL_CONTEXT);
+            storageEngine.checkpoint(DatabaseFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
         }
 
         // when
-        directory.getFileSystem().deleteFile(layout.relationshipGroupDegreesStore());
+        FileSystemAbstraction fileSystem = directory.getFileSystem();
+        layout.relationshipGroupDegreesStore().delete(fileSystem);
         rebuildAndVerify(layout, config, expectedDegrees);
     }
 
@@ -185,12 +191,15 @@ class DegreesRebuildFromStoreTest {
                         NullLogProvider.getInstance(),
                         NULL_CONTEXT_FACTORY,
                         false,
-                        LogTailLogVersionsMetadata.EMPTY_LOG_TAIL)
+                        DatabaseCreationOptions.EMPTY_CREATION_OPTIONS)
                 .openAllNeoStores()) {
             DegreesRebuildFromStore rebuild = new DegreesRebuildFromStore(
-                    pageCache,
                     neoStores,
                     layout,
+                    new LogMetadataProviderImpl(
+                            LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
+                            LatestVersions.LATEST_LOG_FORMAT,
+                            LatestVersions.LATEST_KERNEL_VERSION),
                     NULL_CONTEXT_FACTORY,
                     NullLogProvider.getInstance(),
                     Configuration.withBatchSize(Configuration.DEFAULT, 100));
@@ -264,7 +273,7 @@ class DegreesRebuildFromStoreTest {
         }
         applyLogicalChanges(storageEngine, (state, tx) -> {
             NodeState nodeState = mock(NodeState.class);
-            when(nodeState.labelDiffSets()).thenReturn(LongDiffSets.EMPTY);
+            when(nodeState.labelDiffSets()).thenReturn(IntDiffSets.EMPTY);
             when(state.getNodeState(anyLong())).thenReturn(nodeState);
             tx.visitRelationshipModifications(
                     new FlatRelationshipModifications(relationships.toArray(new RelationshipData[0])));

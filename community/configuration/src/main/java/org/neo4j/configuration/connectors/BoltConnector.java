@@ -19,6 +19,7 @@
  */
 package org.neo4j.configuration.connectors;
 
+import static java.lang.String.format;
 import static java.time.Duration.ofMillis;
 import static java.time.Duration.ofMinutes;
 import static java.time.Duration.ofSeconds;
@@ -26,23 +27,30 @@ import static org.neo4j.configuration.GraphDatabaseSettings.default_advertised_a
 import static org.neo4j.configuration.GraphDatabaseSettings.default_listen_address;
 import static org.neo4j.configuration.SettingConstraints.NO_ALL_INTERFACES_ADDRESS;
 import static org.neo4j.configuration.SettingConstraints.any;
+import static org.neo4j.configuration.SettingConstraints.max;
 import static org.neo4j.configuration.SettingConstraints.min;
 import static org.neo4j.configuration.SettingImpl.newBuilder;
 import static org.neo4j.configuration.SettingValueParsers.BOOL;
 import static org.neo4j.configuration.SettingValueParsers.DURATION;
 import static org.neo4j.configuration.SettingValueParsers.INT;
 import static org.neo4j.configuration.SettingValueParsers.LONG;
+import static org.neo4j.configuration.SettingValueParsers.PATH;
 import static org.neo4j.configuration.SettingValueParsers.SOCKET_ADDRESS;
 import static org.neo4j.configuration.SettingValueParsers.ofEnum;
 import static org.neo4j.configuration.SettingValueParsers.setOf;
 import static org.neo4j.configuration.connectors.BoltConnector.EncryptionLevel.DISABLED;
 
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
+import java.util.Objects;
 import java.util.Set;
 import org.neo4j.annotations.api.PublicApi;
 import org.neo4j.annotations.service.ServiceProvider;
 import org.neo4j.configuration.Description;
 import org.neo4j.configuration.SettingConstraints;
+import org.neo4j.configuration.SettingValueParser;
 import org.neo4j.configuration.SettingsDeclaration;
 import org.neo4j.configuration.helpers.SocketAddress;
 import org.neo4j.graphdb.config.Setting;
@@ -50,10 +58,32 @@ import org.neo4j.graphdb.config.Setting;
 @ServiceProvider
 @PublicApi
 public final class BoltConnector implements SettingsDeclaration {
+
     public static final int DEFAULT_PORT = 7687;
 
     public static final String NAME = "bolt";
     public static final String INTERNAL_NAME = "bolt-internal";
+
+    private static final SettingValueParser<FilePermission> FILE_PERMISSIONS = new SettingValueParser<>() {
+        @Override
+        public FilePermission parse(String value) {
+            try {
+                return new FilePermission(value);
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException(format("'%s' is not a valid file permission value", value), e);
+            }
+        }
+
+        @Override
+        public Class<FilePermission> getType() {
+            return FilePermission.class;
+        }
+
+        @Override
+        public String getDescription() {
+            return "a set of file permissions";
+        }
+    };
 
     @Description("Enable the Bolt connector.")
     public static final Setting<Boolean> enabled = ConnectorDefaults.bolt_enabled;
@@ -125,6 +155,11 @@ public final class BoltConnector implements SettingsDeclaration {
     @Description("The maximum time an idle thread in the thread pool bound to this connector waits for new tasks.")
     public static final Setting<Duration> thread_pool_keep_alive = newBuilder(
                     "server.bolt.thread_pool_keep_alive", DURATION, ofMinutes(5))
+            .build();
+
+    @Description("Enabled of disabled object messages on local bolt connector .")
+    public static final Setting<Boolean> enable_object_messages_local_connector = newBuilder(
+                    "dbms.bolt.local_connector.object_transport_enabled", BOOL, false)
             .build();
 
     @Description(
@@ -200,6 +235,91 @@ public final class BoltConnector implements SettingsDeclaration {
             .addConstraint(min(1L))
             .build();
 
+    @Description(
+            "Enable or disable the Bolt Unix Domain Socket connector. "
+                    + "Requests submitted via this connector will be placed within a dedicated thread pool which is isolated from all other Bolt connections.")
+    public static final Setting<Boolean> enable_unix_socket =
+            newBuilder("server.bolt.unix_socket_enabled", BOOL, false).build();
+
+    @Description("The absolute path of the file for use with the Unix Domain Socket interface. "
+            + "This file must be specified and will be created at runtime and deleted on shutdown.")
+    public static final Setting<Path> unix_socket_path =
+            newBuilder("server.bolt.unix_socket_path", PATH, null).build();
+
+    @Description(
+            "Enable or disable authentication via the Bolt Unix Domain Socket connector. "
+                    + "If disabled, connected clients gain all permissions so long as they are able to access the Unix Domain Socket file.")
+    public static final Setting<Boolean> enable_unix_socket_auth =
+            newBuilder("server.bolt.unix_socket_auth", BOOL, true).build();
+
+    @Description("Sets the default permission mask applied to the Unix Domain Socket file. "
+            + "This mask should be set as restrictive as possible (especially when authentication is disabled on this connector)."
+            + "Note, however, that this permission may not be honored by Posix systems other than Linux.")
+    public static final Setting<FilePermission> unix_socket_permission_mask = newBuilder(
+                    "server.bolt.unix_socket_permission_mask",
+                    FILE_PERMISSIONS,
+                    new FilePermission(
+                            PosixFilePermission.OWNER_READ,
+                            PosixFilePermission.OWNER_WRITE,
+                            PosixFilePermission.OWNER_EXECUTE,
+                            PosixFilePermission.GROUP_EXECUTE,
+                            PosixFilePermission.OTHERS_EXECUTE))
+            .build();
+
+    @Description("Whether or not to delete an existing file for use with the Unix Domain Socket based interface. "
+            + "This improves the handling of the case where a previous hard shutdown was unable to delete the file.")
+    public static final Setting<Boolean> unix_socket_delete =
+            newBuilder("server.bolt.unix_socket_delete", BOOL, false).build();
+
+    @Description(
+            "Whether or not to allocate a dedicated thread pool for use with the Unix Domain Socket based interface. "
+                    + "This permits the use of the Unix Domain Socket connector as an emergency access connector when the server is over capacity.")
+    public static final Setting<Boolean> unix_socket_use_dedicated_thread_pool = newBuilder(
+                    "server.bolt.unix_socket_use_dedicated_thread_pool", BOOL, true)
+            .build();
+
+    @Description(
+            "The number of threads, including idle, to keep in the thread pool bound to the Unix Domain Socket connector.")
+    public static final Setting<Integer> unix_socket_dedicated_thread_pool_min_size = newBuilder(
+                    "server.bolt.unix_socket_thread_pool_min_size", INT, 0)
+            .addConstraint(min(0))
+            .build();
+
+    @Description("The maximum number of threads allowed in the thread pool bound to the Unix Domain Socket connector.")
+    public static final Setting<Integer> unix_socket_dedicated_thread_pool_max_size = newBuilder(
+                    "server.bolt.unix_socket_thread_pool_max_size", INT, 20)
+            .addConstraint(min(1))
+            .build();
+
+    @Description(
+            "The maximum time an idle thread in the thread pool bound to the Unix Domain Socket connector waits for new tasks.")
+    public static final Setting<Duration> unix_socket_dedicated_thread_pool_keep_alive = newBuilder(
+                    "server.bolt.unix_socket_thread_pool_keep_alive", DURATION, ofMinutes(5))
+            .build();
+
+    @Description("Enables fleet discovery on this instance.")
+    public static final Setting<Boolean> enable_discovery =
+            newBuilder("server.fleet_discovery.enabled", BOOL, true).build();
+
+    @Description("The port to listen for fleet discovery communication on (when set to zero a random port is bound).")
+    public static final Setting<Integer> discovery_listen_port = newBuilder("server.fleet_discovery.port", INT, 0)
+            .addConstraint(min(0))
+            .build();
+
+    @Description("The interval at which discovery broadcasts occur (base value to be adjusted by jitter interval).")
+    public static final Setting<Duration> discovery_broadcast_interval = newBuilder(
+                    "server.fleet_discovery.broadcast_interval", DURATION, ofSeconds(30))
+            .addConstraint(min(ofSeconds(5)))
+            .build();
+
+    @Description(
+            "The jitter to apply to the broadcast interval in percent (e.g. when set to 50 with broadcast interval of 30 then broadcasts repeat every 15 to 45 seconds).")
+    public static final Setting<Integer> discovery_broadcast_jitter = newBuilder(
+                    "server.fleet_discovery.broadcast_interval_jitter", INT, 25)
+            .addConstraint(min(0))
+            .addConstraint(max(75))
+            .build();
+
     public enum EncryptionLevel {
         REQUIRED,
         OPTIONAL,
@@ -209,7 +329,8 @@ public final class BoltConnector implements SettingsDeclaration {
     public enum KeepAliveRequestType {
 
         /**
-         * Causes keep-alive messages to be sent while the server is computing a response to a given driver command.
+         * Causes keep-alive messages to be sent while the server is computing a response to a given
+         * driver command.
          */
         ALL,
 
@@ -223,5 +344,46 @@ public final class BoltConnector implements SettingsDeclaration {
          * Disables keep-alive messages entirely.
          */
         OFF
+    }
+
+    public static class FilePermission {
+        private final Set<PosixFilePermission> posixPermissions;
+
+        public FilePermission(Set<PosixFilePermission> permissions) {
+            this.posixPermissions = permissions;
+        }
+
+        public FilePermission(PosixFilePermission... permissions) {
+            this(Set.of(permissions));
+        }
+
+        public FilePermission(String mask) {
+            this(PosixFilePermissions.fromString(mask));
+        }
+
+        public Set<PosixFilePermission> getPosixPermissions() {
+            return this.posixPermissions;
+        }
+
+        @Override
+        public String toString() {
+            return PosixFilePermissions.toString(this.posixPermissions);
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof FilePermission that)) {
+                return false;
+            }
+            return Objects.equals(posixPermissions, that.posixPermissions);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hashCode(posixPermissions);
+        }
     }
 }

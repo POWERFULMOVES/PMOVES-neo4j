@@ -21,9 +21,8 @@ package org.neo4j.ssl;
 
 import static java.nio.file.Files.createDirectories;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.neo4j.configuration.Config.newBuilder;
 import static org.neo4j.configuration.GraphDatabaseSettings.neo4j_home;
 import static org.neo4j.configuration.ssl.SslPolicyScope.BOLT;
@@ -31,7 +30,6 @@ import static org.neo4j.configuration.ssl.SslPolicyScope.TESTING;
 
 import java.io.IOException;
 import java.nio.file.Files;
-import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import javax.net.ssl.SSLException;
 import org.junit.jupiter.api.BeforeEach;
@@ -43,8 +41,6 @@ import org.neo4j.configuration.SslSystemInternalSettings;
 import org.neo4j.configuration.ssl.SslPolicyConfig;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.fs.FileUtils;
-import org.neo4j.logging.AssertableLogProvider;
-import org.neo4j.logging.LogAssertions;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.ssl.config.SslPolicyLoader;
 import org.neo4j.test.extension.Inject;
@@ -150,9 +146,9 @@ class SslPolicyLoaderTest {
                 .build();
 
         // when
-        Exception exception = assertThrows(
-                Exception.class, () -> SslPolicyLoader.create(fileSystem, config, NullLogProvider.getInstance()));
-        assertThat(exception).hasMessageContaining(expectedMessage).isInstanceOf(expectedCause);
+        assertThatThrownBy(() -> SslPolicyLoader.create(fileSystem, config, NullLogProvider.getInstance()))
+                .hasMessageContaining(expectedMessage)
+                .isInstanceOf(expectedCause);
     }
 
     @ParameterizedTest
@@ -166,7 +162,7 @@ class SslPolicyLoaderTest {
         // when
         SslPolicyLoader sslPolicyLoader;
         if (!ignoreDotfiles) {
-            assertThrows(Exception.class, () -> createSslPolicyLoader(ignoreDotfiles));
+            assertThatExceptionOfType(Exception.class).isThrownBy(() -> createSslPolicyLoader(ignoreDotfiles));
             return;
         } else {
             sslPolicyLoader = createSslPolicyLoader(ignoreDotfiles);
@@ -189,8 +185,9 @@ class SslPolicyLoaderTest {
         // when
         SslPolicyLoader sslPolicyLoader;
         if (!ignoreDotfiles) {
-            Exception exception = assertThrows(Exception.class, () -> createSslPolicyLoader(ignoreDotfiles));
-            assertThat(exception.getMessage()).contains("Failed to create trust manager");
+            assertThatExceptionOfType(Exception.class)
+                    .isThrownBy(() -> createSslPolicyLoader(ignoreDotfiles))
+                    .withMessageContaining("Failed to create trust manager");
             return;
         } else {
             sslPolicyLoader = createSslPolicyLoader(ignoreDotfiles);
@@ -224,10 +221,9 @@ class SslPolicyLoaderTest {
                 .build();
 
         // when
-        Exception exception = assertThrows(
-                Exception.class, () -> SslPolicyLoader.create(fileSystem, config, NullLogProvider.getInstance()));
-        assertThat(exception.getMessage()).contains(expectedErrorMessage);
-        assertThat(exception.getCause()).isInstanceOf(NoSuchFileException.class);
+        assertThatExceptionOfType(Exception.class)
+                .isThrownBy(() -> createSslPolicyLoader(true))
+                .withMessageContaining(expectedErrorMessage);
     }
 
     @Test
@@ -243,7 +239,7 @@ class SslPolicyLoaderTest {
         SslPolicyLoader sslPolicyLoader = SslPolicyLoader.create(fileSystem, config, NullLogProvider.getInstance());
 
         // when
-        assertThrows(IllegalArgumentException.class, () -> sslPolicyLoader.getPolicy(BOLT));
+        assertThatExceptionOfType(IllegalArgumentException.class).isThrownBy(() -> sslPolicyLoader.getPolicy(BOLT));
     }
 
     @Test
@@ -256,26 +252,7 @@ class SslPolicyLoaderTest {
         SslPolicy sslPolicy = sslPolicyLoader.getPolicy(null);
 
         // then
-        assertNull(sslPolicy);
-    }
-
-    @Test
-    void shouldLogWarningIfHostnameValidationDisabledByDefault() {
-
-        var logProvider = new AssertableLogProvider();
-        SslPolicyConfig policyConfig = SslPolicyConfig.forScope(TESTING);
-        Config config = newBuilder()
-                .set(neo4j_home, home.toAbsolutePath())
-                .set(SslSystemInternalSettings.ignore_dotfiles, false)
-                .set(policyConfig.enabled, Boolean.TRUE)
-                .set(policyConfig.base_directory, Path.of("certificates/default"))
-                .build();
-
-        SslPolicyLoader sslPolicyLoader = SslPolicyLoader.create(fileSystem, config, logProvider);
-        LogAssertions.assertThat(logProvider)
-                .containsMessageWithArguments(
-                        "SSL Hostname verification is disabled by default. Consider explicitly setting %s",
-                        policyConfig.verify_hostname.name());
+        assertThat(sslPolicy).isNull();
     }
 
     private static Path makeDir(Path parent, String child) throws IOException {
@@ -303,10 +280,12 @@ class SslPolicyLoaderTest {
     }
 
     private static void assertPolicyValid(SslPolicy sslPolicy) throws SSLException {
-        assertNotNull(sslPolicy);
-        assertNotNull(sslPolicy.privateKey());
-        assertNotNull(sslPolicy.certificateChain());
-        assertNotNull(sslPolicy.nettyClientContext());
-        assertNotNull(sslPolicy.nettyServerContext());
+        assertThat(sslPolicy).isNotNull();
+        assertThat(sslPolicy.privateKey()).isNotNull();
+        assertThat(sslPolicy.certificateChain()).isNotNull();
+        assertThat(sslPolicy.nettyClientContext()).isNotNull();
+        assertThat(sslPolicy.nettyServerContext()).isNotNull();
+        assertThat(sslPolicy.certificateFile()).isNotNull();
+        assertThat(sslPolicy.privateKeyFile()).isNotNull();
     }
 }

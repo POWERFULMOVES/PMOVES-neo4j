@@ -19,9 +19,8 @@
  */
 package org.neo4j.cypher.internal.compiler.planner.logical.idp
 
-import org.neo4j.cypher.internal.compiler.planner.logical.LeafPlanFinder
+import org.neo4j.cypher.internal.compiler.planner.logical.InterestingOrderSelectorHeuristic
 import org.neo4j.cypher.internal.compiler.planner.logical.LogicalPlanningContext
-import org.neo4j.cypher.internal.compiler.planner.logical.LogicalPlanningSupport.RichHint
 import org.neo4j.cypher.internal.compiler.planner.logical.QueryPlannerKit
 import org.neo4j.cypher.internal.compiler.planner.logical.SortPlanner
 import org.neo4j.cypher.internal.compiler.planner.logical.idp.IDPQueryGraphSolver.extraRequirementForInterestingOrder
@@ -32,12 +31,14 @@ import org.neo4j.cypher.internal.compiler.planner.logical.idp.expandSolverStep.p
 import org.neo4j.cypher.internal.compiler.planner.logical.idp.expandSolverStep.preFilterCandidatesByIntoVsAllHeuristic
 import org.neo4j.cypher.internal.compiler.planner.logical.ordering.InterestingOrderConfig
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.BestPlans
-import org.neo4j.cypher.internal.compiler.planner.logical.steps.leafPlanOptions
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.leafplanner.LeafPlanFinder
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.leafplanner.leafPlanOptions
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.ir.NodeConnection
 import org.neo4j.cypher.internal.ir.PatternRelationship
 import org.neo4j.cypher.internal.ir.QueryGraph
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
+import org.neo4j.cypher.internal.util.collection.immutable.ListSet.IterableOnceToListSet
 import org.neo4j.exceptions.InternalException
 import org.neo4j.time.Stopwatch
 
@@ -86,11 +87,27 @@ case class SingleComponentPlanner(
     kit: QueryPlannerKit,
     interestingOrderConfig: InterestingOrderConfig
   ): BestPlans = {
+    val idpLogger = context.staticComponents.idpLogger
+    idpLogger.markScope("planComponent") {
+      idpLogger.log(s"component = ${IDPLoggable.summary(qg)}")
+      doPlanComponent(bestLeafPlansPerAvailableSymbol, qg, context, kit, interestingOrderConfig)
+    }
+  }
+
+  private def doPlanComponent(
+    bestLeafPlansPerAvailableSymbol: Map[Set[LogicalVariable], BestPlans],
+    qg: QueryGraph,
+    context: LogicalPlanningContext,
+    kit: QueryPlannerKit,
+    interestingOrderConfig: InterestingOrderConfig
+  ): BestPlans = {
     val componentInterestingOrderConfig = interestingOrderConfig.forQueryGraph(qg)
     val qppInnerPlanner = new CacheBackedQPPInnerPlanner(IDPQPPInnerPlanner(context))
 
     val bestPlans =
       if (qg.nodeConnections.nonEmpty) {
+        val propertyRequirement =
+          context.settings.remoteBatchPropertiesStrategy.interestingPropertiesAsIDPExtraRequirement(qg, context)
         val orderRequirement = extraRequirementForInterestingOrder(context, componentInterestingOrderConfig)
         val generators = solverConfig.solvers(qppInnerPlanner).map(_(qg))
         val generator =
@@ -101,10 +118,12 @@ case class SingleComponentPlanner(
           projectingSelector = kit.pickBest,
           maxTableSize = solverConfig.maxTableSize,
           iterationDurationLimit = solverConfig.iterationDurationLimit,
-          extraRequirement = orderRequirement,
+          extraOrderRequirement = orderRequirement,
+          extraPropertyRequirement = propertyRequirement,
           monitor = monitor,
           stopWatchFactory = () => Stopwatch.start(),
-          cancellationChecker = context.staticComponents.cancellationChecker
+          cancellationChecker = context.staticComponents.cancellationChecker,
+          idpLogger = context.staticComponents.idpLogger
         )
 
         monitor.initTableFor(qg)
@@ -118,13 +137,13 @@ case class SingleComponentPlanner(
             componentInterestingOrderConfig
           )
         monitor.startIDPIterationFor(qg)
-        val result = solver(seed, qg.nodeConnections.toSeq, context)
+        val result = solver(seed, qg.nodeConnections.toListSet, context)
         monitor.endIDPIterationFor(qg, result.bestResult)
 
-        BestResults(result.bestResult, result.bestResultFulfillingReq)
+        BestResults(result.bestResult, result.bestSortedResult, result.bestExtraPropertiesResult)
       } else {
         val solutionPlans =
-          if (qg.shortestRelationshipPatterns.isEmpty) {
+          if (qg.shortestRelationshipPatterns.isEmpty && qg.searchClause.isEmpty) {
             bestLeafPlansPerAvailableSymbol
               .values
               .filter(bestPlans => planFullyCoversQG(qg, bestPlans.bestResult))
@@ -135,7 +154,10 @@ case class SingleComponentPlanner(
               .filter(bestPlans => planFullyCoversQG(qg, bestPlans.bestResult))
           }
         if (solutionPlans.size != 1) {
-          throw new InternalException("Found no leaf plan for connected component. This must not happen. QG: " + qg)
+          throw InternalException.internalError(
+            this.getClass.getSimpleName,
+            "Found no leaf plan for connected component. This must not happen. QG: " + qg
+          )
         }
 
         val result = solutionPlans.head
@@ -148,8 +170,13 @@ case class SingleComponentPlanner(
       println(
         s"Result (picked best plan):\n\tPlan #${bestPlans.bestResult.debugId}\n\t${bestPlans.bestResult.toString}"
       )
-      bestPlans.bestResultFulfillingReq.foreach { bSP =>
+      bestPlans.bestSortedResult.foreach { bSP =>
         println(s"Result (picked best sorted plan):\n\tPlan #${bSP.debugId}\n\t${bSP.toString}")
+      }
+      bestPlans.bestExtraPropertiesResult.foreach { bestExtraPropPlan =>
+        println(
+          s"Result (picked best plan with extra properties):\n\tPlan #${bestExtraPropPlan.debugId}\n\t${bestExtraPropPlan.toString}"
+        )
       }
       println("\n")
     }
@@ -167,37 +194,77 @@ case class SingleComponentPlanner(
     context: LogicalPlanningContext,
     interestingOrderConfig: InterestingOrderConfig
   ): Seed[NodeConnection, LogicalPlan] = {
-    for (pattern <- qg.nodeConnections)
+    context.staticComponents.idpLogger.markScope("initTable") {
+      doInitTable(qg, kit, bestLeafPlansPerAvailableSymbol, qppInnerPlanner, context, interestingOrderConfig)
+    }
+  }
+
+  private def doInitTable(
+    qg: QueryGraph,
+    kit: QueryPlannerKit,
+    bestLeafPlansPerAvailableSymbol: Map[Set[LogicalVariable], BestPlans],
+    qppInnerPlanner: QPPInnerPlanner,
+    context: LogicalPlanningContext,
+    interestingOrderConfig: InterestingOrderConfig
+  ): Seed[NodeConnection, LogicalPlan] = {
+    val seed = (for (pattern <- qg.nodeConnections)
       yield {
         val plans = planSinglePattern(qg, kit, pattern, bestLeafPlansPerAvailableSymbol, qppInnerPlanner, context)
           .map(plan => kit.select(plan, qg))
+        val plansWithPrefetchedProperties =
+          context.settings.remoteBatchPropertiesStrategy.planPrefetchRemoteBatchPropertiesIfRequired(qg, plans, context)
         // From _all_ plans (even if they are sorted), put the best into the seed
         // with `false`. We don't want to compare just the ones that are unsorted
         // in isolation, because it could be that the best overall plan is sorted.
-        val best =
-          kit.pickBest(plans, s"best overall plan for $pattern")
-            .map(p => ((Set(pattern), /* ordered = */ false), p))
-
-        val result: Iterable[((Set[NodeConnection], Boolean), LogicalPlan)] =
+        val bestWithoutPrefetchedProperties =
+          kit.pickBest(
+            plans,
+            InterestingOrderSelectorHeuristic(context, interestingOrderConfig),
+            s"best overall plan for $pattern"
+          )
+            .map(p =>
+              (SolvableItemWithExtraRequirements(Set(pattern), isSorted = false, hasPrefetchedProperties = false), p)
+            )
+        val bestWithPrefetchedProperties =
+          kit.pickBest(
+            plansWithPrefetchedProperties,
+            InterestingOrderSelectorHeuristic(context, interestingOrderConfig),
+            s"best plan with additional properties for $pattern"
+          ).map(p =>
+            (SolvableItemWithExtraRequirements(Set(pattern), isSorted = false, hasPrefetchedProperties = true), p)
+          )
+        val result: Iterable[(SolvableItemWithExtraRequirements[NodeConnection], LogicalPlan)] =
           if (interestingOrderConfig.orderToSolve.isEmpty) {
-            best
+            bestWithoutPrefetchedProperties ++ bestWithPrefetchedProperties
           } else {
-            val ordered =
-              plans.flatMap(plan => SortPlanner.planIfAsSortedAsPossible(plan, interestingOrderConfig, context))
+            val orderedForAllPlans =
+              plans.flatMap(plan =>
+                SortPlanner.planIfAsSortedAsPossible(plan, interestingOrderConfig, context)
+              )
+
             // Also add the best sorted plan into the seed with `true`.
-            val bestWithSort = kit.pickBest(ordered, s"best sorted plan for $pattern")
-              .map(p => ((Set(pattern), /* ordered = */ true), p))
-            best ++ bestWithSort
+            val bestOverallSorted =
+              kit.pickBest(orderedForAllPlans, s"best sorted plan for $pattern")
+                .map(p =>
+                  (SolvableItemWithExtraRequirements(Set(pattern), isSorted = true, hasPrefetchedProperties = false), p)
+                )
+
+            bestWithoutPrefetchedProperties ++ bestWithPrefetchedProperties ++ bestOverallSorted
           }
 
-        if (result.isEmpty)
-          throw new InternalException(
-            "Found no access plan for a pattern relationship in a connected component. This must not happen."
-          )
-
         result
-      }
-  }.flatten
+      }).flatten
+    // An entirely empty seed while node connections exist means the IDP has no starting point at
+    // all and cannot plan the component. Individual relationships may have no direct leaf plan —
+    // the IDP reaches them via expansion from adjacent plans — but at least one entry is required.
+    if (seed.isEmpty && qg.nodeConnections.nonEmpty) {
+      throw InternalException.internalError(
+        this.getClass.getSimpleName,
+        "Found no access plan for pattern relationships in a connected component. This must not happen."
+      )
+    }
+    seed
+  }
 }
 
 trait SingleComponentPlannerTrait {
@@ -251,10 +318,13 @@ object SingleComponentPlanner {
     context: LogicalPlanningContext
   ): Iterable[LogicalPlan] = {
     val solveds = context.staticComponents.planningAttributes.solveds
-
-    val leaves = bestLeafPlansPerAvailableSymbol
-      .values
-      .flatMap(_.allResults)
+    val allLeafPlans = bestLeafPlansPerAvailableSymbol.values.flatMap(_.allResults)
+    val leaves =
+      allLeafPlans ++ context.settings.remoteBatchPropertiesStrategy.planPrefetchRemoteBatchPropertiesIfRequired(
+        qg,
+        allLeafPlans,
+        context
+      )
 
     val perLeafSolutions: Map[LogicalPlan, SinglePatternSolutions] = leaves.map { leaf =>
       val solvedQg = solveds.get(leaf.id).asSinglePlannerQuery.lastQueryGraph

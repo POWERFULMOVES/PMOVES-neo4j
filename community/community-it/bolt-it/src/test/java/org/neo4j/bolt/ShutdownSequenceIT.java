@@ -22,7 +22,6 @@ package org.neo4j.bolt;
 import static java.lang.String.valueOf;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.doAnswer;
 import static org.neo4j.bolt.testing.assertions.BoltConnectionAssertions.assertThat;
@@ -33,7 +32,6 @@ import static org.neo4j.values.storable.Values.stringValue;
 
 import java.io.IOException;
 import java.time.Duration;
-import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
@@ -44,8 +42,14 @@ import org.neo4j.bolt.test.annotation.connection.initializer.Authenticated;
 import org.neo4j.bolt.test.annotation.connection.transport.ExcludeTransport;
 import org.neo4j.bolt.test.annotation.setup.FactoryFunction;
 import org.neo4j.bolt.test.annotation.setup.SettingsFunction;
+import org.neo4j.bolt.test.annotation.test.BoltTest;
 import org.neo4j.bolt.test.annotation.test.TransportTest;
+import org.neo4j.bolt.test.connection.setup.SettingBuilder;
 import org.neo4j.bolt.test.util.ServerUtil;
+import org.neo4j.bolt.testing.assertions.DiagnosticRecordAssertions;
+import org.neo4j.bolt.testing.assertions.FailureCauseAssertions;
+import org.neo4j.bolt.testing.assertions.FailureMetadataAssertions;
+import org.neo4j.bolt.testing.assertions.GqlMessageParameters;
 import org.neo4j.bolt.testing.client.BoltTestConnection;
 import org.neo4j.bolt.testing.client.TransportType;
 import org.neo4j.bolt.testing.messages.BoltWire;
@@ -54,9 +58,10 @@ import org.neo4j.bolt.transport.Neo4jWithSocketExtension;
 import org.neo4j.configuration.connectors.BoltConnector;
 import org.neo4j.configuration.connectors.BoltConnectorInternalSettings;
 import org.neo4j.exceptions.KernelException;
+import org.neo4j.gqlstatus.ErrorClassification;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.graphdb.GraphDatabaseService;
 import org.neo4j.graphdb.Transaction;
-import org.neo4j.graphdb.config.Setting;
 import org.neo4j.internal.helpers.collection.Pair;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.logging.AssertableLogProvider;
@@ -76,7 +81,7 @@ import org.neo4j.test.extension.testdirectory.EphemeralTestDirectoryExtension;
 @BoltTestExtension
 @ExtendWith(OtherThreadExtension.class)
 @ExcludeTransport(TransportType.UNIX) // UNIX behavior may differ on some operating systems
-public class ShutdownSequenceIT {
+class ShutdownSequenceIT {
     private static final Duration THREAD_POOL_SHUTDOWN_WAIT_TIME = Duration.ofMinutes(10);
 
     private final AssertableLogProvider internalLogProvider = new SpiedAssertableLogProvider(BoltServer.class);
@@ -95,10 +100,10 @@ public class ShutdownSequenceIT {
     }
 
     @SettingsFunction
-    static void customizeSettings(Map<Setting<?>, Object> settings) {
-        settings.put(BoltConnector.thread_pool_min_size, 0);
-        settings.put(BoltConnector.thread_pool_max_size, 2);
-        settings.put(BoltConnectorInternalSettings.thread_pool_shutdown_wait_time, THREAD_POOL_SHUTDOWN_WAIT_TIME);
+    static void customizeSettings(SettingBuilder settings) {
+        settings.set(BoltConnector.thread_pool_min_size, 0)
+                .set(BoltConnector.thread_pool_max_size, 2)
+                .set(BoltConnectorInternalSettings.thread_pool_shutdown_wait_time, THREAD_POOL_SHUTDOWN_WAIT_TIME);
     }
 
     @BeforeEach
@@ -117,13 +122,13 @@ public class ShutdownSequenceIT {
         this.internalLogProvider.clear();
     }
 
-    @TransportTest
+    @BoltTest
     void shouldReturnFailureForTransactionAwareConnections(BoltWire wire, @Authenticated BoltTestConnection connection)
             throws IOException, InterruptedException {
         connection.send(wire.run("CALL test.stream.nodes()")).send(wire.pull());
 
         // Wait for a transaction to start on the server side
-        assertTrue(txStarted.await(1, MINUTES));
+        assertThat(txStarted.await(1, MINUTES)).isTrue();
 
         // Register a callback when the bolt worker thread pool is shut down.
         var boltLog = internalLogProvider.getLog(BoltServer.class);
@@ -141,18 +146,26 @@ public class ShutdownSequenceIT {
         // Expect the connection to have the following interactions
         assertThat(connection)
                 .receivesSuccess()
-                .receivesFailure(
-                        meta -> assertThat(meta)
-                                // todo this should not be a transient error such as Status.Transaction.Terminated
-                                .containsEntry(
-                                        "code",
-                                        Status.General.DatabaseUnavailable.code()
-                                                .serialize())
-                                .containsEntry(
-                                        "message",
-                                        "The transaction has been terminated. Retry your operation in a new transaction, "
-                                                + "and you should see a successful result. The database is not currently available to serve your request, "
-                                                + "refer to the database logs for more details. Retrying your request at a later time may succeed. "))
+                .receivesFailure(FailureMetadataAssertions.create()
+                        .hasLegacyStatus(Status.General.DatabaseUnavailable)
+                        .hasLegacyMessage(
+                                "The transaction has been terminated. Retry your operation in a new transaction, "
+                                        + "and you should see a successful result. The database is not currently available to serve your request, "
+                                        + "refer to the database logs for more details. Retrying your request at a later time may succeed. ")
+                        .hasDescription(
+                                "error: procedure exception - procedure execution error. Execution of the procedure test.stream.nodes() failed.")
+                        .hasStatus(GqlStatusInfoCodes.STATUS_52N37)
+                        .hasCause(FailureCauseAssertions.create()
+                                // FIXME: Status does not adhere to the standard GQL message format
+                                .hasStatus(
+                                        GqlStatusInfoCodes.STATUS_25N16.getGqlStatus(),
+                                        "The transaction has been terminated. Retry your operation in a new transaction, and you should see a successful result. The database is not currently available to serve your request, refer to the database logs for more details. Retrying your request at a later time may succeed.")
+                                .hasLegacyMessageFuzzy(
+                                        "The transaction has been terminated. Retry your operation in a new transaction, and you should see a successful result. The database is not currently available to serve your request, refer to the database logs for more details. Retrying your request at a later time may succeed.")
+                                .hasDescription(
+                                        "error: invalid transaction state - transaction termination transient error. The transaction has been terminated. Retry your operation in a new transaction, and you should see a successful result. Reason: The database is not currently available to serve your request, refer to the database logs for more details. Retrying your request at a later time may succeed.")
+                                .hasDiagnosticRecord(DiagnosticRecordAssertions.create()
+                                        .hasClassification(ErrorClassification.TRANSIENT_ERROR))))
                 .isEventuallyTerminated();
 
         assertThat(internalLogProvider)
@@ -181,7 +194,7 @@ public class ShutdownSequenceIT {
         connection.send(wire.run("CALL test.stream.strings()")).send(wire.pull());
 
         // Wait for a transaction to start on the server side
-        assertTrue(txStarted.await(1, MINUTES));
+        assertThat(txStarted.await(1, MINUTES)).isTrue();
 
         // Register a callback when the bolt worker thread pool is shut down.
         var boltLog = internalLogProvider.getLog(BoltServer.class);
@@ -200,18 +213,21 @@ public class ShutdownSequenceIT {
         assertThat(connection)
                 .receivesSuccess()
                 .receivesRecord(record -> assertThat(record).hasSize(1).contains(stringValue("0")))
-                .receivesFailure(
-                        meta -> assertThat(meta)
-                                // todo this should not be a transient error such as Status.Transaction.Terminated
-                                .containsEntry(
-                                        "code",
-                                        Status.General.DatabaseUnavailable.code()
-                                                .serialize())
-                                .containsEntry(
-                                        "message",
-                                        "The transaction has been terminated. Retry your operation in a new transaction, "
-                                                + "and you should see a successful result. The database is not currently available to serve your request, "
-                                                + "refer to the database logs for more details. Retrying your request at a later time may succeed. "))
+                .receivesFailure(FailureMetadataAssertions.create()
+                        .hasLegacyStatus(Status.General.DatabaseUnavailable)
+                        .hasLegacyMessage(
+                                "The transaction has been terminated. Retry your operation in a new transaction, "
+                                        + "and you should see a successful result. The database is not currently available to serve your request, "
+                                        + "refer to the database logs for more details. Retrying your request at a later time may succeed. ")
+                        .hasStatus(
+                                GqlStatusInfoCodes.STATUS_25N16,
+                                GqlMessageParameters.create()
+                                        .withString(
+                                                "The database is not currently available to serve your request, refer to the database logs for more details. Retrying your request at a later time may succeed."))
+                        .hasDescriptionFuzzy(
+                                "error: invalid transaction state - transaction termination transient error. The transaction has been terminated. Retry your operation in a new transaction,")
+                        .hasDiagnosticRecord(DiagnosticRecordAssertions.create()
+                                .hasClassification(ErrorClassification.TRANSIENT_ERROR)))
                 .isEventuallyTerminated();
 
         assertThat(internalLogProvider)
@@ -234,7 +250,7 @@ public class ShutdownSequenceIT {
         public Stream<Output> streamStrings() {
             pair.first().countDown();
             try {
-                assertTrue(pair.other().await(1, MINUTES));
+                assertThat(pair.other().await(1, MINUTES)).isTrue();
             } catch (InterruptedException e) {
                 fail("Interrupted while waiting for bolt worker threads shut down.");
             }
@@ -247,7 +263,7 @@ public class ShutdownSequenceIT {
         public Stream<Output> streamNodes() {
             pair.first().countDown();
             try {
-                assertTrue(pair.other().await(1, MINUTES));
+                assertThat(pair.other().await(1, MINUTES)).isTrue();
             } catch (InterruptedException e) {
                 fail("Interrupted while waiting for bolt worker threads shut down.");
             }

@@ -20,25 +20,27 @@
 package org.neo4j.cypher.internal.optionsmap
 
 import org.neo4j.configuration.Config
-import org.neo4j.configuration.GraphDatabaseInternalSettings
 import org.neo4j.configuration.GraphDatabaseSettings
 import org.neo4j.cypher.internal.MapValueOps.Ops
+import org.neo4j.dbms.systemgraph.ReplicaConfig
+import org.neo4j.dbms.systemgraph.SeedRestoreUntil
+import org.neo4j.dbms.systemgraph.SeedURI
 import org.neo4j.dbms.systemgraph.allocation.DatabaseAllocationHints
-import org.neo4j.gqlstatus.GqlHelper
 import org.neo4j.kernel.api.exceptions.InvalidArgumentsException
+import org.neo4j.kernel.database.NormalizedDatabaseName
 import org.neo4j.storageengine.api.StorageEngineFactory
 import org.neo4j.storageengine.api.StorageEngineFactory.allAvailableStorageEngines
+import org.neo4j.string.SecureString
 import org.neo4j.values.AnyValue
-import org.neo4j.values.storable.IntValue
-import org.neo4j.values.storable.NoValue
-import org.neo4j.values.storable.TextValue
-import org.neo4j.values.utils.PrettyPrinter
+import org.neo4j.values.storable._
+import org.neo4j.values.virtual.ListValue
 import org.neo4j.values.virtual.MapValue
+import org.neo4j.values.virtual.VirtualValues
 
-import java.lang.Boolean.FALSE
+import java.util
 import java.util.Locale
-import java.util.UUID
 
+import scala.collection.convert.ImplicitConversions.`iterable AsScalaIterable`
 import scala.jdk.CollectionConverters.CollectionHasAsScala
 import scala.jdk.CollectionConverters.SeqHasAsJava
 
@@ -69,8 +71,7 @@ trait MapOptionValidator extends OptionValidator[MapValue] {
       case mapValue: MapValue =>
         validateContent(mapValue, config)
         mapValue
-      case _ =>
-        throw new InvalidArgumentsException(s"Could not $operation with specified $KEY '$value', Map expected.")
+      case _ => throw InvalidArgumentsException.invalidMapOption(operation, KEY, value)
     }
   }
 }
@@ -84,26 +85,22 @@ trait StringOptionValidator extends OptionValidator[String] {
       case textValue: TextValue =>
         validateContent(textValue.stringValue(), config)
         textValue.stringValue()
-      case _ =>
-        val pp = new PrettyPrinter
-        value.writeTo(pp)
-        val gql = GqlHelper.getGql22G03_22N27(pp.value, KEY, java.util.List.of("STRING"))
-        throw new InvalidArgumentsException(gql, s"Could not $operation with specified $KEY '$value', String expected.")
+      case _ => throw InvalidArgumentsException.invalidStringOption(operation, KEY, value)
     }
   }
 }
 
-trait IntOptionValidator extends OptionValidator[Int] {
+object SeedRestoreUntilOption extends OptionValidator[SeedRestoreUntil] {
+  override val KEY: String = "seedRestoreUntil"
 
-  protected def validateContent(value: Int, config: Option[Config])(implicit operation: String): Unit
-
-  override protected def validate(value: AnyValue, config: Option[Config])(implicit operation: String): Int = {
+  override protected def validate(value: AnyValue, config: Option[Config])(implicit
+    operation: String): SeedRestoreUntil = {
     value match {
-      case intValue: IntValue =>
-        validateContent(intValue.intValue, config)
-        intValue.intValue
-      case _ =>
-        throw new InvalidArgumentsException(s"Could not $operation with specified $KEY '$value', Integer expected.")
+      case numberValue: NumberValue =>
+        SeedRestoreUntil.txId(numberValue.asObject().longValue())
+      case dateTimeValue: DateTimeValue =>
+        SeedRestoreUntil.datetime(dateTimeValue.asObjectCopy())
+      case _ => throw InvalidArgumentsException.invalidSeedRestoreOption(operation, KEY, value)
     }
   }
 }
@@ -128,25 +125,13 @@ object ExistingDataOption extends StringOptionValidator {
 object ExistingSeedInstanceOption extends StringOptionValidator {
   override val KEY: String = "existingDataSeedInstance"
 
-  override protected def validateContent(value: String, config: Option[Config])(implicit operation: String): Unit =
-    try {
-      UUID.fromString(value)
-    } catch {
-      case _: IllegalArgumentException =>
-        throw InvalidArgumentsException.unrecognisedOptionGivenValue(operation, value, KEY, "server uuid string", false)
-    }
+  override protected def validateContent(value: String, config: Option[Config])(implicit operation: String): Unit = {}
 }
 
 object ExistingSeedServerOption extends StringOptionValidator {
   override val KEY: String = "existingDataSeedServer"
 
-  override protected def validateContent(value: String, config: Option[Config])(implicit operation: String): Unit =
-    try {
-      UUID.fromString(value)
-    } catch {
-      case _: IllegalArgumentException =>
-        throw InvalidArgumentsException.unrecognisedOptionGivenValue(operation, value, KEY, "server uuid string", false)
-    }
+  override protected def validateContent(value: String, config: Option[Config])(implicit operation: String): Unit = {}
 }
 
 object StoreFormatOption extends StringOptionValidator {
@@ -155,11 +140,8 @@ object StoreFormatOption extends StringOptionValidator {
   override protected def validateContent(value: String, config: Option[Config])(implicit operation: String): Unit = {
     try {
       // Validate the format by looking for a storage engine that supports it - will throw if none was found
-      val versionsUnderDev =
-        config.fold(FALSE)(_.get(GraphDatabaseInternalSettings.include_versions_under_development))
       val selectEngineConfig = Config.newBuilder()
         .set(GraphDatabaseSettings.db_format, value)
-        .set(GraphDatabaseInternalSettings.include_versions_under_development, versionsUnderDev)
         .build()
       StorageEngineFactory.selectStorageEngine(selectEngineConfig)
     } catch {
@@ -172,19 +154,76 @@ object StoreFormatOption extends StringOptionValidator {
   }
 }
 
-object SeedURIOption extends StringOptionValidator {
+object SeedURIOption extends OptionValidator[SeedURI] {
   override val KEY: String = "seedURI"
 
-  override protected def validateContent(value: String, config: Option[Config])(implicit operation: String): Unit = {
-    // no content validation, any string is accepted
+  override protected def validate(value: AnyValue, config: Option[Config])(implicit operation: String): SeedURI = {
+    value match {
+      case textValue: TextValue => SeedURI.single(textValue.stringValue())
+      case listValue: ListValue => SeedURI.multiple(listValue.toList.map {
+          case text: TextValue => text.stringValue()
+          case _               => throw InvalidArgumentsException.invalidStringOption(operation, KEY, value);
+        }.asJava)
+      case mapValue: MapValue =>
+        val map: util.HashMap[String, String] = util.HashMap.newHashMap(mapValue.size())
+        mapValue.foreachEntry((k, v) =>
+          map.put(
+            k,
+            v match {
+              case text: TextValue => text.stringValue()
+              case _ =>
+                throw InvalidArgumentsException.invalidStringOption(operation, "'" + k + "' in '" + KEY + "'", v)
+            }
+          )
+        )
+        SeedURI.sharded(map)
+      case _ => throw InvalidArgumentsException.invalidStringOption(operation, KEY, value)
+    }
+  }
+
+  def validateSingleOnly(seedURI: SeedURI)(implicit operation: String): SeedURI = {
+    val uriMap = seedURI.uriMap
+    val multipleUris = seedURI.multipleUris
+    if (!uriMap.isEmpty) {
+      val keys: Array[String] = uriMap.keySet.toArray(new Array[String](0))
+      val values: Array[AnyValue] = keys.map(uriMap.get).map(Values.stringValue)
+      throw InvalidArgumentsException.invalidStringOption(operation, KEY, VirtualValues.map(keys, values))
+    }
+    if (!multipleUris.isEmpty) {
+      throw InvalidArgumentsException.invalidStringOption(
+        operation,
+        KEY,
+        VirtualValues.fromList(
+          multipleUris.get().asScala.map(Values.stringValue).map(_.asInstanceOf[AnyValue]).toList.asJava
+        )
+      )
+    }
+    seedURI
   }
 }
 
-object SeedCredentialsOption extends StringOptionValidator {
+object SeedSourceDatabaseOption extends OptionValidator[NormalizedDatabaseName] {
+  override val KEY: String = "seedSourceDatabase"
+
+  override protected def validate(value: AnyValue, config: Option[Config])(implicit
+    operation: String): NormalizedDatabaseName = {
+    value match {
+      case text: TextValue =>
+        new NormalizedDatabaseName(text.stringValue())
+      case _ => throw InvalidArgumentsException.invalidStringOption(operation, KEY, value)
+    }
+  }
+}
+
+object SeedCredentialsOption extends OptionValidator[SecureString] {
   override val KEY: String = "seedCredentials"
 
-  override protected def validateContent(value: String, config: Option[Config])(implicit operation: String): Unit = {
-    // no content validation, any string is accepted
+  override protected def validate(value: AnyValue, config: Option[Config])(implicit operation: String): SecureString = {
+    value match {
+      case text: TextValue =>
+        new SecureString(text.stringValue())
+      case _ => throw InvalidArgumentsException.invalidStringOption(operation, KEY, value)
+    }
   }
 }
 
@@ -233,13 +272,85 @@ object AllocationHintsOption extends MapOptionValidator {
   override val KEY: String = "allocationHints"
 
   override protected def validateContent(value: MapValue, config: Option[Config])(implicit operation: String): Unit = {
-    value.foreach((k, v) => {
-      try {
-        DatabaseAllocationHints.validate(k, v)
-      } catch {
-        case e: IllegalArgumentException => // TODO should not this have gql-code too?
-          throw new InvalidArgumentsException(s"Could not $operation with specified $KEY '$value'. ${e.getMessage}'")
-      }
-    })
+    value.foreachEntry((k, v) => DatabaseAllocationHints.validate(k, v))
+  }
+}
+
+object ExternalIdentityOption extends StringOptionValidator {
+  override val KEY: String = "externalIdentity"
+
+  override protected def validateContent(value: String, config: Option[Config])(implicit operation: String): Unit = {
+    // no content validation, any string is accepted
+  }
+}
+
+object BackpressureEnabledOption extends StringOptionValidator {
+  val KEY = "backpressureEnabled"
+
+  // possible options:
+  val VALID_VALUE = "true"
+
+  override protected def validateContent(value: String, config: Option[Config])(implicit operation: String): Unit = {
+    if (!value.equalsIgnoreCase(VALID_VALUE)) {
+      throw InvalidArgumentsException.unrecognisedOptionGivenValue(operation, KEY, value, VALID_VALUE, true)
+    }
+  }
+}
+
+object ReplicaConfigOption extends OptionValidator[ReplicaConfig] {
+  override val KEY: String = "replicaConfig"
+  val OPTION_LOCAL = "local"
+  val OPTION_REMOTE = "remote"
+  val OPTION_ADDRESSES = "addresses"
+  val OPTION_PULLURI = "pullURI"
+  val VALID_OPTIONS: util.List[String] = util.List.of(OPTION_LOCAL, OPTION_REMOTE, OPTION_ADDRESSES, OPTION_PULLURI);
+
+  private def getOptionalFromMap[R](mapValue: MapValue, key: String): util.Optional[R] = {
+    val value = mapValue.get(key)
+    value match {
+      case _: NoValue           => util.Optional.empty()
+      case textValue: TextValue => util.Optional.of(textValue.stringValue().asInstanceOf[R])
+      case list: ListValue =>
+        val elements = new util.ArrayList[String]()
+        list.foreach(e => elements.add(e.asInstanceOf[TextValue].stringValue()))
+        util.Optional.of(elements.asInstanceOf[R])
+      case _ => throw new UnsupportedOperationException()
+    }
+  }
+
+  override protected def validate(value: AnyValue, config: Option[Config])(implicit
+    operation: String): ReplicaConfig = {
+    value match {
+      case mapValue: MapValue if mapValue.isEmpty => throw InvalidArgumentsException.providedFieldEmpty(KEY);
+      case mapValue: MapValue =>
+        mapValue.foreachEntry((k, v) => {
+          k match {
+            case OPTION_LOCAL => if (!v.isInstanceOf[TextValue])
+                throw InvalidArgumentsException.invalidReplicaConfigOptionType(operation, KEY, k, v, "String");
+            case OPTION_REMOTE => if (!v.isInstanceOf[TextValue])
+                throw InvalidArgumentsException.invalidReplicaConfigOptionType(operation, KEY, k, v, "String");
+            case OPTION_ADDRESSES =>
+              v match {
+                case listValue: ListValue =>
+                  listValue.foreach {
+                    case _: TextValue =>
+                    case _ =>
+                      InvalidArgumentsException.invalidReplicaConfigOptionType(operation, KEY, k, v, "List<String>")
+                  }
+                case _ => InvalidArgumentsException.invalidReplicaConfigOptionType(operation, KEY, k, v, "List<String>")
+              }
+            case OPTION_PULLURI => if (!v.isInstanceOf[TextValue])
+                throw InvalidArgumentsException.invalidReplicaConfigOptionType(operation, KEY, k, v, "String");
+            case _ => throw InvalidArgumentsException.invalidReplicaConfigOption(operation, KEY, k, VALID_OPTIONS);
+          }
+        })
+        val local = getOptionalFromMap[String](mapValue, OPTION_LOCAL)
+        val remote = getOptionalFromMap[String](mapValue, OPTION_REMOTE)
+        val addresses = getOptionalFromMap[util.List[String]](mapValue, OPTION_ADDRESSES)
+        val pullURI = getOptionalFromMap[String](mapValue, OPTION_PULLURI)
+
+        new ReplicaConfig(local, remote, addresses, pullURI);
+      case _ => throw InvalidArgumentsException.invalidMapOption(operation, KEY, value)
+    }
   }
 }

@@ -26,16 +26,17 @@ import org.neo4j.cypher.internal.logical.generator.LogicalPlanGenerator
 import org.neo4j.cypher.internal.logical.generator.LogicalPlanGenerator.WithState
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 import org.neo4j.cypher.internal.logical.plans.ordering.ProvidedOrder
+import org.neo4j.cypher.internal.notification.devNullLogger
 import org.neo4j.cypher.internal.planner.spi.PlanContext
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.EffectiveCardinalities
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.LeveragedOrders
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.ProvidedOrders
+import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.StableLeafPlans
 import org.neo4j.cypher.internal.runtime.interpreted.TransactionalContextWrapper
 import org.neo4j.cypher.internal.spi.TransactionBoundPlanContext
 import org.neo4j.cypher.internal.util.Cost
 import org.neo4j.cypher.internal.util.EffectiveCardinality
 import org.neo4j.cypher.internal.util.attribution.Default
-import org.neo4j.cypher.internal.util.devNullLogger
 import org.neo4j.graphdb.Node
 import org.neo4j.graphdb.Relationship
 import org.neo4j.kernel.impl.query.TransactionalContext
@@ -56,6 +57,7 @@ object LogicalQueryGenerator {
       override val defaultValue: ProvidedOrder = ProvidedOrder.empty
     }
     val leveragedOrders = new LeveragedOrders
+    val stableLeafPlans = new StableLeafPlans
 
     val tokenRead = txContext.kernelTransaction().tokenRead()
     val log = NullLog.getInstance()
@@ -63,7 +65,8 @@ object LogicalQueryGenerator {
       TransactionalContextWrapper(txContext),
       devNullLogger,
       log,
-      CypherVersion.Default
+      CypherVersion.Legacy.legacyVersion(),
+      identity
     )
     val labelMap = tokenRead.labelsGetAllTokens().asScala.map(l => l.name() -> l.id()).toMap
     val relMap = tokenRead.relationshipTypesGetAllTokens().asScala.toVector.map(r => r.name() -> r.id()).toMap
@@ -87,6 +90,7 @@ object LogicalQueryGenerator {
             effectiveCardinalities,
             providedOrders,
             leveragedOrders,
+            stableLeafPlans,
             hasLoadCSV = false,
             state.idGen,
             doProfile = false,

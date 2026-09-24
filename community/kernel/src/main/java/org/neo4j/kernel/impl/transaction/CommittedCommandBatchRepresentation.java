@@ -22,9 +22,9 @@ package org.neo4j.kernel.impl.transaction;
 import java.io.IOException;
 import org.neo4j.io.fs.WritableChannel;
 import org.neo4j.kernel.KernelVersion;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntryWriter;
 import org.neo4j.storageengine.api.CommandBatch;
 import org.neo4j.storageengine.api.TransactionId;
+import org.neo4j.wal.entry.LogEntryWriter;
 
 public interface CommittedCommandBatchRepresentation {
 
@@ -34,6 +34,12 @@ public interface CommittedCommandBatchRepresentation {
 
     int checksum();
 
+    /**
+     * @return the previousChecksum of the batch if known.
+     * Some channels do not have info about previous checksum, and this could return 0.
+     */
+    int previousChecksum();
+
     long timeWritten();
 
     long txId();
@@ -41,6 +47,8 @@ public interface CommittedCommandBatchRepresentation {
     boolean isRollback();
 
     long appendIndex();
+
+    long transactionSequenceNumber();
 
     long previousBatchAppendIndex();
 

@@ -19,21 +19,52 @@
  */
 package org.neo4j.test;
 
+import static org.neo4j.kernel.KernelVersion.GLORIOUS_FUTURE;
+
 import org.neo4j.configuration.Config;
+import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.dbms.database.DbmsRuntimeVersion;
 import org.neo4j.kernel.BinarySupportedKernelVersions;
 import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.KernelVersionProvider;
-import org.neo4j.kernel.impl.transaction.log.entry.LogFormat;
+import org.neo4j.kernel.KernelVersionProviders;
+import org.neo4j.kernel.api.impl.schema.vector.VectorIndexVersion;
+import org.neo4j.wal.LogFormatVersionProvider;
+import org.neo4j.wal.entry.LogFormat;
 
 public final class LatestVersions {
+    private LatestVersions() {}
+
     public static final KernelVersion LATEST_KERNEL_VERSION = KernelVersion.getLatestVersion(Config.defaults());
-    public static final KernelVersionProvider LATEST_KERNEL_VERSION_PROVIDER = () -> LATEST_KERNEL_VERSION;
+    public static final KernelVersionProvider LATEST_KERNEL_VERSION_PROVIDER =
+            KernelVersionProviders.fixed(LATEST_KERNEL_VERSION);
     public static final DbmsRuntimeVersion LATEST_RUNTIME_VERSION =
             DbmsRuntimeVersion.getLatestVersion(Config.defaults());
     public static final BinarySupportedKernelVersions BINARY_VERSIONS =
             new BinarySupportedKernelVersions(Config.defaults());
-    public static final LogFormat LATEST_LOG_FORMAT = LogFormat.fromKernelVersion(LATEST_KERNEL_VERSION);
+    public static final LogFormat LATEST_LOG_FORMAT =
+            LogFormat.fromConfigAndKernelVersion(Config.defaults(), LATEST_KERNEL_VERSION);
+    public static final LogFormatVersionProvider LATEST_LOG_FORMAT_PROVIDER = () -> LATEST_LOG_FORMAT;
 
-    private LatestVersions() {}
+    // TODO MERGELOG: remember to update version
+    // NOTE this is only correct if allow_new_log_format_on_upgrade_or_create is false
+    public static final KernelVersion LATEST_KERNEL_VERSION_WITHOUT_ENVELOPES =
+            LogFormat.getLastVersionPreEnvelopeFormat();
+    public static final DbmsRuntimeVersion LATEST_RUNTIME_VERSION_WITHOUT_ENVELOPES =
+            findDbmsVersionMatchingKernelVersion(LATEST_KERNEL_VERSION_WITHOUT_ENVELOPES);
+
+    public static final BinarySupportedKernelVersions FUTURE_BINARY_VERSIONS = new BinarySupportedKernelVersions(
+            Config.defaults(GraphDatabaseInternalSettings.latest_kernel_version, GLORIOUS_FUTURE.version()));
+
+    private static DbmsRuntimeVersion findDbmsVersionMatchingKernelVersion(KernelVersion version) {
+        for (DbmsRuntimeVersion dbmsRuntimeVersion : DbmsRuntimeVersion.VERSIONS) {
+            if (dbmsRuntimeVersion.kernelVersion() == version) {
+                return dbmsRuntimeVersion;
+            }
+        }
+        throw new IllegalArgumentException("No matching Dbms version found for " + version.toString());
+    }
+
+    public static final VectorIndexVersion LATEST_VECTOR_INDEX_VERSION =
+            VectorIndexVersion.latestSupportedVersion(LATEST_KERNEL_VERSION);
 }

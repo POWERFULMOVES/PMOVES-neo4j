@@ -1,18 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+
+  <modelVersion>4.0.0</modelVersion>
   <parent>
     <groupId>org.neo4j</groupId>
     <artifactId>parent</artifactId>
-    <version>5.26.25-SNAPSHOT</version>
+    <version>2026.09.0</version>
     <relativePath>../../pom.xml</relativePath>
   </parent>
-
-  <properties>
-    <moduleName>org.neo4j.procedure.api</moduleName>
-  </properties>
-
-  <modelVersion>4.0.0</modelVersion>
   <artifactId>neo4j-procedure-api</artifactId>
 
   <packaging>jar</packaging>
@@ -25,6 +20,36 @@
     <developerConnection>scm:git:git@github.com:neo4j/neo4j.git</developerConnection>
     <url>https://github.com/neo4j/neo4j</url>
   </scm>
+
+  <properties>
+    <moduleName>org.neo4j.procedure.api</moduleName>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.neo4j</groupId>
+      <artifactId>annotations</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.neo4j</groupId>
+      <artifactId>neo4j-collections</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.neo4j</groupId>
+      <artifactId>neo4j-graphdb-api</artifactId>
+      <version>${project.version}</version>
+      <optional>true</optional>
+    </dependency>
+
+    <!-- For javadoc references validation -->
+    <dependency>
+      <groupId>org.neo4j</groupId>
+      <artifactId>neo4j-logging</artifactId>
+      <version>${project.version}</version>
+      <optional>true</optional>
+    </dependency>
+  </dependencies>
 
   <build>
     <plugins>
@@ -44,27 +69,34 @@
           <skipTests>true</skipTests>
         </configuration>
       </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>analyze</id>
+            <goals>
+              <goal>analyze-only</goal>
+            </goals>
+            <configuration>
+              <failOnWarning>true</failOnWarning>
+              <ignoredDependencies>
+                <!-- Ignore test dependencies to not risk tests stop running and for convenience. -->
+                <ignoredDependency>org.junit.jupiter:*</ignoredDependency>
+                <ignoredDependency>org.scalatest:*</ignoredDependency>
+                <ignoredDependency>org.scalacheck:*</ignoredDependency>
+                <ignoredDependency>co.helmethair:scalatest-junit-runner</ignoredDependency>
+                <ignoredDependency>org.opentest4j:opentest4j</ignoredDependency>
+                <ignoredDependency>org.assertj:*</ignoredDependency>
+
+                <!-- For javadoc references validation -->
+                <ignoredDependency>org.neo4j:neo4j-logging</ignoredDependency>
+                <ignoredDependency>org.neo4j:neo4j-graphdb-api</ignoredDependency>
+              </ignoredDependencies>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
     </plugins>
   </build>
-
-  <dependencies>
-    <dependency>
-      <groupId>org.neo4j</groupId>
-      <artifactId>annotations</artifactId>
-    </dependency>
-
-    <!-- For javadoc references validation -->
-    <dependency>
-      <groupId>org.neo4j</groupId>
-      <artifactId>neo4j-logging</artifactId>
-      <version>${project.version}</version>
-      <optional>true</optional>
-    </dependency>
-    <dependency>
-      <groupId>org.neo4j</groupId>
-      <artifactId>neo4j-graphdb-api</artifactId>
-      <version>${project.version}</version>
-      <optional>true</optional>
-    </dependency>
-  </dependencies>
 </project>

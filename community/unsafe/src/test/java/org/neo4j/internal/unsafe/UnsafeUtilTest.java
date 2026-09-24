@@ -20,15 +20,13 @@
 package org.neo4j.internal.unsafe;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.neo4j.internal.unsafe.UnsafeUtil.allocateMemory;
 import static org.neo4j.internal.unsafe.UnsafeUtil.arrayBaseOffset;
 import static org.neo4j.internal.unsafe.UnsafeUtil.arrayIndexScale;
 import static org.neo4j.internal.unsafe.UnsafeUtil.arrayOffset;
 import static org.neo4j.internal.unsafe.UnsafeUtil.assertHasUnsafe;
+import static org.neo4j.internal.unsafe.UnsafeUtil.checkAccess;
 import static org.neo4j.internal.unsafe.UnsafeUtil.compareAndSwapLong;
 import static org.neo4j.internal.unsafe.UnsafeUtil.free;
 import static org.neo4j.internal.unsafe.UnsafeUtil.getAndSetLong;
@@ -38,7 +36,6 @@ import static org.neo4j.internal.unsafe.UnsafeUtil.getInt;
 import static org.neo4j.internal.unsafe.UnsafeUtil.getLong;
 import static org.neo4j.internal.unsafe.UnsafeUtil.getLongVolatile;
 import static org.neo4j.internal.unsafe.UnsafeUtil.getShort;
-import static org.neo4j.internal.unsafe.UnsafeUtil.initDirectByteBuffer;
 import static org.neo4j.internal.unsafe.UnsafeUtil.newDirectByteBuffer;
 import static org.neo4j.internal.unsafe.UnsafeUtil.pageSize;
 import static org.neo4j.internal.unsafe.UnsafeUtil.putByte;
@@ -51,6 +48,8 @@ import static org.neo4j.internal.unsafe.UnsafeUtil.setMemory;
 import java.nio.ByteBuffer;
 import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;
+import org.assertj.core.api.AbstractThrowableAssert;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
 import org.neo4j.memory.LocalMemoryTracker;
 
@@ -141,8 +140,8 @@ class UnsafeUtilTest {
         long aByteOffset = getFieldOffset(Obj.class, "aByte");
         obj = new Obj();
         putByte(obj, aByteOffset, (byte) 1);
-        assertThat(obj.aByte).isEqualTo((byte) 1);
-        assertThat(getByte(obj, aByteOffset)).isEqualTo((byte) 1);
+        assertThat(obj.aByte).isOne();
+        assertThat(getByte(obj, aByteOffset)).isOne();
         obj.aByte = 0;
         assertThat(obj).isEqualTo(new Obj());
     }
@@ -154,29 +153,29 @@ class UnsafeUtilTest {
         long address = allocateMemory(sizeInBytes, tracker);
         try {
             putByte(address, (byte) 1);
-            assertThat(getByte(address)).isEqualTo((byte) 1);
+            assertThat(getByte(address)).isOne();
             setMemory(address, sizeInBytes, (byte) 0);
-            assertThat(getByte(address)).isEqualTo((byte) 0);
+            assertThat(getByte(address)).isZero();
 
             putShort(address, (short) 1);
-            assertThat(getShort(address)).isEqualTo((short) 1);
+            assertThat(getShort(address)).isOne();
             setMemory(address, sizeInBytes, (byte) 0);
-            assertThat(getShort(address)).isEqualTo((short) 0);
+            assertThat(getShort(address)).isZero();
 
             putInt(address, 1);
-            assertThat(getInt(address)).isEqualTo(1);
+            assertThat(getInt(address)).isOne();
             setMemory(address, sizeInBytes, (byte) 0);
-            assertThat(getInt(address)).isEqualTo(0);
+            assertThat(getInt(address)).isZero();
 
             putLong(address, 1);
-            assertThat(getLong(address)).isEqualTo(1L);
+            assertThat(getLong(address)).isOne();
             setMemory(address, sizeInBytes, (byte) 0);
-            assertThat(getLong(address)).isEqualTo(0L);
+            assertThat(getLong(address)).isZero();
 
             putLongVolatile(address, 1);
-            assertThat(getLongVolatile(address)).isEqualTo(1L);
+            assertThat(getLongVolatile(address)).isOne();
             setMemory(address, sizeInBytes, (byte) 0);
-            assertThat(getLongVolatile(address)).isEqualTo(0L);
+            assertThat(getLongVolatile(address)).isZero();
         } finally {
             free(address, sizeInBytes, tracker);
         }
@@ -186,9 +185,9 @@ class UnsafeUtilTest {
     void compareAndSwapLongField() {
         Obj obj = new Obj();
         long aLongOffset = getFieldOffset(Obj.class, "aLong");
-        assertTrue(compareAndSwapLong(obj, aLongOffset, 0, 5));
-        assertFalse(compareAndSwapLong(obj, aLongOffset, 0, 5));
-        assertTrue(compareAndSwapLong(obj, aLongOffset, 5, 0));
+        assertThat(compareAndSwapLong(obj, aLongOffset, 0, 5)).isTrue();
+        assertThat(compareAndSwapLong(obj, aLongOffset, 0, 5)).isFalse();
+        assertThat(compareAndSwapLong(obj, aLongOffset, 5, 0)).isTrue();
         assertThat(obj).isEqualTo(new Obj());
     }
 
@@ -196,7 +195,7 @@ class UnsafeUtilTest {
     void getAndSetLongField() {
         Obj obj = new Obj();
         long offset = getFieldOffset(Obj.class, "aLong");
-        assertThat(getAndSetLong(obj, offset, 42L)).isEqualTo(0L);
+        assertThat(getAndSetLong(obj, offset, 42L)).isZero();
         assertThat(getAndSetLong(obj, offset, -1)).isEqualTo(42L);
     }
 
@@ -210,9 +209,9 @@ class UnsafeUtilTest {
         scale = arrayIndexScale(bytes.getClass());
         base = arrayBaseOffset(bytes.getClass());
         putByte(bytes, arrayOffset(1, base, scale), (byte) -1);
-        assertThat(bytes[0]).isEqualTo((byte) 0);
+        assertThat(bytes[0]).isZero();
         assertThat(bytes[1]).isEqualTo((byte) -1);
-        assertThat(bytes[2]).isEqualTo((byte) 0);
+        assertThat(bytes[2]).isZero();
     }
 
     @Test
@@ -229,7 +228,7 @@ class UnsafeUtilTest {
 
         // THEN
         free(p, sizeInBytes, tracker);
-        assertEquals(value, readValue);
+        assertThat(readValue).isEqualTo(value);
     }
 
     @Test
@@ -246,7 +245,7 @@ class UnsafeUtilTest {
 
         // THEN
         free(p, sizeInBytes, tracker);
-        assertEquals(value, readValue);
+        assertThat(readValue).isEqualTo(value);
     }
 
     @Test
@@ -263,7 +262,7 @@ class UnsafeUtilTest {
 
         // THEN
         free(p, sizeInBytes, tracker);
-        assertEquals(value, readValue);
+        assertThat(readValue).isEqualTo(value);
     }
 
     @Test
@@ -275,36 +274,19 @@ class UnsafeUtilTest {
             setMemory(address, sizeInBytes, (byte) 0);
             ByteBuffer a = newDirectByteBuffer(address, sizeInBytes);
             assertThat(a).isNotSameAs(newDirectByteBuffer(address, sizeInBytes));
-            assertThat(a.hasArray()).isEqualTo(false);
-            assertThat(a.isDirect()).isEqualTo(true);
+            assertThat(a.hasArray()).isFalse();
+            assertThat(a.isDirect()).isTrue();
             assertThat(a.capacity()).isEqualTo(sizeInBytes);
             assertThat(a.limit()).isEqualTo(sizeInBytes);
-            assertThat(a.position()).isEqualTo(0);
+            assertThat(a.position()).isZero();
             assertThat(a.remaining()).isEqualTo(sizeInBytes);
-            assertThat(getByte(address)).isEqualTo((byte) 0);
+            assertThat(getByte(address)).isZero();
             a.put((byte) -1);
             assertThat(getByte(address)).isEqualTo((byte) -1);
 
             a.position(101);
             a.mark();
             a.limit(202);
-
-            long address2 = allocateMemory(sizeInBytes, tracker);
-            try {
-                setMemory(address2, sizeInBytes, (byte) 0);
-                initDirectByteBuffer(a, address2, sizeInBytes);
-                assertThat(a.hasArray()).isEqualTo(false);
-                assertThat(a.isDirect()).isEqualTo(true);
-                assertThat(a.capacity()).isEqualTo(sizeInBytes);
-                assertThat(a.limit()).isEqualTo(sizeInBytes);
-                assertThat(a.position()).isEqualTo(0);
-                assertThat(a.remaining()).isEqualTo(sizeInBytes);
-                assertThat(getByte(address2)).isEqualTo((byte) 0);
-                a.put((byte) -1);
-                assertThat(getByte(address2)).isEqualTo((byte) -1);
-            } finally {
-                free(address2, sizeInBytes, tracker);
-            }
         } finally {
             free(address, sizeInBytes, tracker);
         }
@@ -330,6 +312,69 @@ class UnsafeUtilTest {
     @Test
     void closeNativeByteBufferWithUnsafe() {
         ByteBuffer directBuffer = ByteBuffer.allocateDirect(1024);
-        assertDoesNotThrow(() -> UnsafeUtil.invokeCleaner(directBuffer));
+        assertThatCode(() -> UnsafeUtil.invokeCleaner(directBuffer)).doesNotThrowAnyException();
+    }
+
+    @Test
+    void detectBadMemoryAccess() {
+        UnsafeUtil.addAllocatedPointer(0x7fc7f84a1000L, 220976);
+        try {
+            assertThatCode(() -> checkAccess(0x7fc7f84a1000L, 220976)).doesNotThrowAnyException();
+            assertThatCode(() -> checkAccess(0x7fc7f84a0000L, 220976))
+                    .hasMessageContaining("Bad access to address 0x7fc7f84a0000");
+        } finally {
+            UnsafeUtil.removeAllocatedPointer(0x7fc7f84a1000L);
+        }
+    }
+
+    @Test
+    void allowAdjacentAllocationAccesses() {
+        allocateCheckAndAssertThat(() -> checkAccess(64, 128), 128, 0, 128).doesNotThrowAnyException();
+        allocateCheckAndAssertThat(() -> checkAccess(20, 100), 32, 0, 32, 64, 96, 128)
+                .doesNotThrowAnyException();
+        allocateCheckAndAssertThat(() -> checkAccess(64, 40), 32, 0, 32, 64, 96, 128)
+                .doesNotThrowAnyException();
+
+        allocateCheckAndAssertThat(() -> checkAccess(20, 100), 32, 0, 32, 96, 128)
+                .hasMessageContaining("Bad access to address 0x14 with size 100");
+        allocateCheckAndAssertThat(() -> checkAccess(64, 40), 32, 0, 32, 96, 128)
+                .hasMessageContaining("Bad access to address 0x40 with size 40");
+        allocateCheckAndAssertThat(() -> checkAccess(32, 65), 32, 32, 64)
+                .hasMessageContaining("'[0x20 - <access start(0x20)>  0x40][0x40 - 0x60] <access end(0x61)> '");
+    }
+
+    @Test
+    void accessMap() {
+        long[] pointers = new long[] {32, 96, 128};
+
+        allocateCheckAndAssertThat(() -> checkAccess(10, 10), 32, pointers)
+                .hasMessageContaining("' <access start(0xa)>  <access end(0x14)> [0x20 - 0x40]'");
+        allocateCheckAndAssertThat(() -> checkAccess(10, 32), 32, pointers)
+                .hasMessageContaining("' <access start(0xa)> [0x20 - <access end(0x2a)>  0x40]'");
+        allocateCheckAndAssertThat(() -> checkAccess(10, 64), 32, pointers)
+                .hasMessageContaining("' <access start(0xa)> [0x20 - 0x40] <access end(0x4a)> '");
+        allocateCheckAndAssertThat(() -> checkAccess(10, 128), 32, pointers)
+                .hasMessageContaining(
+                        "' <access start(0xa)> [0x20 - 0x40] GAP! [0x60 - 0x80][0x80 - <access end(0x8a)>  0xa0]'");
+        allocateCheckAndAssertThat(() -> checkAccess(32, 70), 32, pointers)
+                .hasMessageContaining("'[0x20 - <access start(0x20)>  0x40] GAP! [0x60 - <access end(0x66)>  0x80]'");
+        allocateCheckAndAssertThat(() -> checkAccess(128, 40), 32, pointers)
+                .hasMessageContaining("'[0x80 - <access start(0x80)>  0xa0] <access end(0xa8)> '");
+        allocateCheckAndAssertThat(() -> checkAccess(161, 32), 32, pointers)
+                .hasMessageContaining("'[0x80 - 0xa0] <access start(0xa1)>  <access end(0xc1)> '");
+    }
+
+    private static AbstractThrowableAssert<?, ? extends Throwable> allocateCheckAndAssertThat(
+            ThrowingCallable check, int size, long... pointers) {
+        for (long pointer : pointers) {
+            UnsafeUtil.addAllocatedPointer(pointer, size);
+        }
+        try {
+            return assertThatCode(check);
+        } finally {
+            for (long pointer : pointers) {
+                UnsafeUtil.removeAllocatedPointer(pointer);
+            }
+        }
     }
 }

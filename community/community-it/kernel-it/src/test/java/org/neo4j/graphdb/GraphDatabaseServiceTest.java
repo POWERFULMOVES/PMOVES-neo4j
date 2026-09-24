@@ -20,25 +20,24 @@
 package org.neo4j.graphdb;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.neo4j.configuration.GraphDatabaseSettings.shutdown_transaction_end_timeout;
 
 import java.time.Duration;
-import java.util.concurrent.Callable;
 import java.util.concurrent.Future;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.function.ThrowingSupplier;
 import org.neo4j.dbms.api.DatabaseManagementService;
-import org.neo4j.kernel.availability.DatabaseAvailability;
-import org.neo4j.kernel.impl.MyRelTypes;
+import org.neo4j.kernel.availability.AvailabilityListener;
+import org.neo4j.kernel.availability.DatabaseAvailabilityGuard;
+import org.neo4j.kernel.impl.locking.LockClientStoppedException;
 import org.neo4j.test.Barrier;
 import org.neo4j.test.OtherThreadExecutor;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.ExtensionCallback;
 import org.neo4j.test.extension.ImpermanentDbmsExtension;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
 
 @ImpermanentDbmsExtension(configurationCallback = "configure")
 public class GraphDatabaseServiceTest {
@@ -52,6 +51,9 @@ public class GraphDatabaseServiceTest {
 
     @Inject
     private GraphDatabaseService database;
+
+    @Inject
+    private DatabaseAvailabilityGuard availabilityGuard;
 
     @ExtensionCallback
     void configure(TestDatabaseManagementServiceBuilder builder) {
@@ -71,6 +73,10 @@ public class GraphDatabaseServiceTest {
         assertThrows(DatabaseShutdownException.class, () -> database.beginTx());
     }
 
+    @SkipOnSpd(
+            reason = "When running in SPD/cluster we get a ReplicationStoppedException instead. "
+                    + "If/when cluster changes this behaviour we could enable this test again.",
+            notes = {SkipOnSpd.Note.temporary})
     @Test
     void givenDatabaseAndStartedTxWhenShutdownThenWaitForTxToFinish() throws Exception {
         Barrier.Control barrier = new Barrier.Control();
@@ -85,14 +91,25 @@ public class GraphDatabaseServiceTest {
 
         barrier.await();
 
+        availabilityGuard.addListener(new AvailabilityListener() {
+            @Override
+            public void unavailable() {
+                barrier.release();
+            }
+        });
         Future<Object> shutdownFuture = t3.executeDontWait(() -> {
             managementService.shutdown();
             return null;
         });
-        t3.waitUntilWaiting(location -> location.isAt(DatabaseAvailability.class, "stop"));
-        barrier.release();
-        assertDoesNotThrow((ThrowingSupplier<Object>) txFuture::get);
         shutdownFuture.get();
+        try {
+            // future can complete normally or fail with DatabaseShutdownException or LockClientStoppedException
+            txFuture.get();
+        } catch (Exception e) {
+            assertThat(e)
+                    .rootCause()
+                    .isInstanceOfAny(DatabaseShutdownException.class, LockClientStoppedException.class);
+        }
     }
 
     @Test
@@ -114,12 +131,17 @@ public class GraphDatabaseServiceTest {
         });
 
         barrier.await();
+        availabilityGuard.addListener(new AvailabilityListener() {
+            @Override
+            public void unavailable() {
+                barrier.release(); // <-- this triggers t2 to continue its transaction
+            }
+        });
         Future<Object> shutdownFuture = t3.executeDontWait(() -> {
             managementService.shutdown();
             return null;
         });
-        t3.waitUntilWaiting(location -> location.isAt(DatabaseAvailability.class, "stop"));
-        barrier.release(); // <-- this triggers t2 to continue its transaction
+
         shutdownFuture.get();
 
         assertThrows(DatabaseShutdownException.class, database::beginTx);
@@ -146,40 +168,6 @@ public class GraphDatabaseServiceTest {
                 ResourceIterable<Node> allNodes = tx.getAllNodes()) {
             assertThat(allNodes).hasSize(2);
             tx.commit();
-        }
-    }
-
-    private static Callable<Transaction> beginTx(final GraphDatabaseService db) {
-        return db::beginTx;
-    }
-
-    private static Callable<Void> setProperty(final Entity entity, final String key, final String value) {
-        return () -> {
-            entity.setProperty(key, value);
-            return null;
-        };
-    }
-
-    private static Callable<Void> close(final Transaction tx) {
-        return () -> {
-            tx.close();
-            return null;
-        };
-    }
-
-    private static Relationship createRelationship(GraphDatabaseService db, Node node) {
-        try (Transaction tx = db.beginTx()) {
-            Relationship rel = tx.getNodeById(node.getId()).createRelationshipTo(node, MyRelTypes.TEST);
-            tx.commit();
-            return rel;
-        }
-    }
-
-    private static Node createNode(GraphDatabaseService db) {
-        try (Transaction tx = db.beginTx()) {
-            Node node = tx.createNode();
-            tx.commit();
-            return node;
         }
     }
 }

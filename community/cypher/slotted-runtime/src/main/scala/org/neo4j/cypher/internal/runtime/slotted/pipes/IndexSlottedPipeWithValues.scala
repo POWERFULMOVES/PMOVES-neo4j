@@ -32,7 +32,7 @@ import org.neo4j.internal.kernel.api.RelationshipValueIndexCursor
 trait IndexSlottedPipeWithValues extends Pipe {
 
   // Offset of the long slot of node variable
-  val offset: Int
+  val offset: Option[Int]
   // the indices of the index properties where we will get values
   val indexPropertyIndices: Array[Int]
   // the offsets of the cached node property slots where we will set values
@@ -44,7 +44,7 @@ trait IndexSlottedPipeWithValues extends Pipe {
     override protected def fetchNext(): CypherRow = {
       if (cursor.next()) {
         val slottedContext = state.newRowWithArgument(rowFactory)
-        slottedContext.setLongAt(offset, cursor.nodeReference())
+        offset.foreach(o => slottedContext.setLongAt(o, cursor.nodeReference()))
         var i = 0
         while (i < indexPropertyIndices.length) {
           val value = cursor.propertyValue(indexPropertyIndices(i))
@@ -58,27 +58,26 @@ trait IndexSlottedPipeWithValues extends Pipe {
 
   class SlottedRelationshipIndexIterator(
     state: QueryState,
-    startOffset: Int,
-    endOffset: Int,
+    startOffset: Option[Int],
+    endOffset: Option[Int],
     cursor: RelationshipValueIndexCursor
   ) extends IndexIteratorBase[CypherRow](cursor) {
+    private val relationshipWriter = Relationships.compileRelationshipWriter(offset, startOffset, endOffset)
 
     override protected def fetchNext(): CypherRow = {
-      while (cursor.next()) {
-        // NOTE: sourceNodeReference and targetNodeReference is not implemented yet on the cursor
-        if (cursor.readFromStore()) {
-          val slottedContext = state.newRowWithArgument(rowFactory)
-          slottedContext.setLongAt(offset, cursor.relationshipReference())
-          slottedContext.setLongAt(startOffset, cursor.sourceNodeReference())
-          slottedContext.setLongAt(endOffset, cursor.targetNodeReference())
-          var i = 0
-          while (i < indexPropertyIndices.length) {
-            val value = cursor.propertyValue(indexPropertyIndices(i))
-            slottedContext.setCachedPropertyAt(indexPropertySlotOffsets(i), value)
-            i += 1
-          }
-          return slottedContext
+      while (cursor.next() && relationshipWriter.readFromStore(cursor)) {
+        val slottedContext = state.newRowWithArgument(rowFactory)
+        relationshipWriter.writeRow(
+          slottedContext,
+          cursor
+        )
+        var i = 0
+        while (i < indexPropertyIndices.length) {
+          val value = cursor.propertyValue(indexPropertyIndices(i))
+          slottedContext.setCachedPropertyAt(indexPropertySlotOffsets(i), value)
+          i += 1
         }
+        return slottedContext
       }
       null
     }
@@ -86,39 +85,38 @@ trait IndexSlottedPipeWithValues extends Pipe {
 
   class SlottedUndirectedRelationshipIndexIterator(
     state: QueryState,
-    startOffset: Int,
-    endOffset: Int,
+    startOffset: Option[Int],
+    endOffset: Option[Int],
     cursor: RelationshipValueIndexCursor
   ) extends IndexIteratorBase[CypherRow](cursor) {
 
     private var emitSibling: Boolean = false
-    private var lastRelationship: Long = -1L
-    private var lastStart: Long = -1L
-    private var lastEnd: Long = -1L
+    private val relationshipWriter = Relationships.compileRelationshipWriter(offset, startOffset, endOffset)
 
     override protected def fetchNext(): CypherRow = {
       val newContext =
         if (emitSibling) {
           emitSibling = false
           val slottedContext = state.newRowWithArgument(rowFactory)
-          slottedContext.setLongAt(offset, lastRelationship)
-          slottedContext.setLongAt(startOffset, lastEnd)
-          slottedContext.setLongAt(endOffset, lastStart)
+          relationshipWriter.writeRow(
+            slottedContext,
+            cursor.relationshipReference(),
+            cursor.targetNodeReference(),
+            cursor.sourceNodeReference()
+          )
           slottedContext
         } else {
           var slottedContext: CypherRow = null
           while (slottedContext == null && cursor.next()) {
             // NOTE: sourceNodeReference and targetNodeReference is not implemented yet on the cursor
             if (cursor.readFromStore()) {
-              lastRelationship = cursor.relationshipReference()
-              lastStart = cursor.sourceNodeReference()
-              lastEnd = cursor.targetNodeReference()
+              val start = cursor.sourceNodeReference()
+              val end = cursor.targetNodeReference()
               slottedContext = state.newRowWithArgument(rowFactory)
-              slottedContext.setLongAt(offset, lastRelationship)
-              slottedContext.setLongAt(startOffset, lastStart)
-              slottedContext.setLongAt(endOffset, lastEnd)
+              relationshipWriter.writeRow(slottedContext, cursor.relationshipReference(), start, end)
+
               // For self-loops, we don't emit sibling
-              emitSibling = lastStart != lastEnd
+              emitSibling = start != end
             }
           }
           slottedContext

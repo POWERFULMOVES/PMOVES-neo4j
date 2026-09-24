@@ -30,25 +30,28 @@ import java.time.OffsetDateTime;
 import java.time.OffsetTime;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
+import java.util.Set;
 import java.util.TreeSet;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.neo4j.graphdb.spatial.Point;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.values.storable.CoordinateReferenceSystem;
 import org.neo4j.values.storable.PointValue;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.Values;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class TypeRepresentationTest {
 
     @Inject
@@ -100,8 +103,8 @@ class TypeRepresentationTest {
                 Arguments.of(Values.of(new short[] {1, 2, 3}), SchemaValueType.LIST_INTEGER),
                 Arguments.of(Values.of(new int[] {1, 2, 3}), SchemaValueType.LIST_INTEGER),
                 Arguments.of(Values.of(new long[] {1, 2, 3}), SchemaValueType.LIST_INTEGER),
-                Arguments.of(Values.of(new float[] {1f, 2f}), SchemaValueType.LIST_FLOAT),
-                Arguments.of(Values.of(new double[] {1f, 2f}), SchemaValueType.LIST_FLOAT),
+                Arguments.of(Values.of(new float[] {1.0f, 2.0f}), SchemaValueType.LIST_FLOAT),
+                Arguments.of(Values.of(new double[] {1.0f, 2.0f}), SchemaValueType.LIST_FLOAT),
 
                 // List of dates and times
                 Arguments.of(Values.of(new ZonedDateTime[] {ZonedDateTime.now()}), SchemaValueType.LIST_ZONED_DATETIME),
@@ -115,30 +118,50 @@ class TypeRepresentationTest {
                 // Special cases
                 Arguments.of(Values.byteArray(new byte[] {}), SpecialTypes.LIST_NOTHING),
                 Arguments.of(Values.NO_VALUE, SpecialTypes.NULL),
-                Arguments.of(null, SpecialTypes.NULL));
+                Arguments.of(null, SpecialTypes.NULL),
+                Arguments.of(Values.int8Vector(new byte[] {1}), VectorType.int8Vector(1)),
+                Arguments.of(Values.int8Vector(new byte[] {1, 2, 3}), VectorType.int8Vector(3)),
+                Arguments.of(Values.int16Vector(new short[] {1}), VectorType.int16Vector(1)),
+                Arguments.of(Values.int16Vector(new short[] {1, 2, 3}), VectorType.int16Vector(3)),
+                Arguments.of(Values.int32Vector(1), VectorType.int32Vector(1)),
+                Arguments.of(Values.int32Vector(1, 2, 3), VectorType.int32Vector(3)),
+                Arguments.of(Values.int64Vector(1), VectorType.int64Vector(1)),
+                Arguments.of(Values.int64Vector(1, 2, 3), VectorType.int64Vector(3)),
+                Arguments.of(Values.float32Vector(1), VectorType.float32Vector(1)),
+                Arguments.of(Values.float32Vector(1, 2, 3), VectorType.float32Vector(3)),
+                Arguments.of(Values.float64Vector(1), VectorType.float64Vector(1)),
+                Arguments.of(Values.float64Vector(1, 2, 3), VectorType.float64Vector(3)));
     }
 
     @ParameterizedTest
     @MethodSource("expectedRepresentations")
-    void testValueToType(Value value, TypeRepresentation expectedType) {
+    void shouldInferCorrectTypeForValue(Value value, TypeRepresentation expectedType) {
         assertThat(TypeRepresentation.infer(value)).isEqualTo(expectedType);
     }
 
-    private static Stream<TypeRepresentation> enums() {
-        return Stream.concat(Stream.of(SchemaValueType.values()), Stream.of(SpecialTypes.values()));
+    private static Stream<TypeRepresentation> types() {
+        return Stream.of(
+                        Arrays.stream(SchemaValueType.values()),
+                        Arrays.stream(SpecialTypes.values()),
+                        Stream.of(
+                                VectorType.int8Vector(1), VectorType.int8Vector(3),
+                                VectorType.int16Vector(1), VectorType.int16Vector(3),
+                                VectorType.int32Vector(1), VectorType.int32Vector(3),
+                                VectorType.int64Vector(1), VectorType.int64Vector(3),
+                                VectorType.float32Vector(1), VectorType.float32Vector(3),
+                                VectorType.float64Vector(1), VectorType.float64Vector(3)))
+                .flatMap(Function.identity());
     }
 
     @ParameterizedTest
-    @MethodSource("enums")
-    void testAllTypesHaveOrdering(TypeRepresentation type) {
-        assertThat(TypeRepresentation.compare(type, type)).isEqualTo(0);
+    @MethodSource("types")
+    void shouldReturnZeroWhenComparingTypeToItself(TypeRepresentation type) {
+        assertThat(TypeRepresentation.compare(type, type)).isZero();
     }
 
     private static Stream<Arguments> illegalCombinations() {
         return Stream.of(
-                Arguments.of(PropertyTypeSet.of(), Values.of(1l)),
-                Arguments.of(PropertyTypeSet.of(), Values.of("HELLO")),
-                Arguments.of(PropertyTypeSet.of(SchemaValueType.STRING), Values.of(1l)),
+                Arguments.of(PropertyTypeSet.of(SchemaValueType.STRING), Values.of(1L)),
                 Arguments.of(
                         PropertyTypeSet.of(SchemaValueType.LIST_BOOLEAN, SchemaValueType.LIST_INTEGER),
                         Values.of("hello")),
@@ -151,6 +174,8 @@ class TypeRepresentationTest {
 
     private static Stream<Arguments> legalCombinations() {
         return Stream.of(
+                Arguments.of(PropertyTypeSet.of(), Values.of(1L)),
+                Arguments.of(PropertyTypeSet.of(), Values.of("HELLO")),
                 Arguments.of(PropertyTypeSet.of(SchemaValueType.STRING), Values.of("Hello")),
                 Arguments.of(PropertyTypeSet.of(SchemaValueType.INTEGER, SchemaValueType.FLOAT), Values.of(1.0f)),
                 Arguments.of(PropertyTypeSet.of(SchemaValueType.INTEGER, SchemaValueType.FLOAT), Values.NO_VALUE),
@@ -161,32 +186,33 @@ class TypeRepresentationTest {
 
     @ParameterizedTest
     @MethodSource("illegalCombinations")
-    void testShouldPreventIllegalCombinations(PropertyTypeSet set, Value value) {
+    void shouldPreventIllegalCombinations(PropertyTypeSet set, Value value) {
         assertThat(TypeRepresentation.disallows(set, value)).isTrue();
     }
 
     @ParameterizedTest
     @MethodSource("legalCombinations")
-    void testShouldNotPreventLegalCombinations(PropertyTypeSet set, Value value) {
+    void shouldNotPreventLegalCombinations(PropertyTypeSet set, Value value) {
         assertThat(TypeRepresentation.disallows(set, value)).isFalse();
     }
 
     @Test
-    void testCIP_100Ordering() {
+    void shouldOrderAllTypesAccordingToCip100Spec() {
         // GIVEN
-        var entries = enums().collect(Collectors.toCollection(ArrayList<TypeRepresentation>::new));
+        List<TypeRepresentation> entries = types().collect(Collectors.toCollection(ArrayList<TypeRepresentation>::new));
         Collections.shuffle(entries, random.random());
 
         // WHEN
-        var set = new TreeSet<>(TypeRepresentation::compare);
+        Set<TypeRepresentation> set = new TreeSet<>(TypeRepresentation::compare);
         set.addAll(entries);
-        var actual = set.stream().map(TypeRepresentation::userDescription).toArray(String[]::new);
+        String[] actual = set.stream().map(TypeRepresentation::userDescription).toArray(String[]::new);
 
         // THEN
-        var expected = new String[] {
+        String[] expected = new String[] {
             "NULL",
             "BOOLEAN",
             "STRING",
+            "UUID",
             "INTEGER",
             "FLOAT",
             "DATE",
@@ -196,9 +222,22 @@ class TypeRepresentationTest {
             "ZONED DATETIME",
             "DURATION",
             "POINT",
+            "VECTOR<INTEGER8 NOT NULL>(1)",
+            "VECTOR<INTEGER8 NOT NULL>(3)",
+            "VECTOR<INTEGER16 NOT NULL>(1)",
+            "VECTOR<INTEGER16 NOT NULL>(3)",
+            "VECTOR<INTEGER32 NOT NULL>(1)",
+            "VECTOR<INTEGER32 NOT NULL>(3)",
+            "VECTOR<INTEGER NOT NULL>(1)",
+            "VECTOR<INTEGER NOT NULL>(3)",
+            "VECTOR<FLOAT32 NOT NULL>(1)",
+            "VECTOR<FLOAT32 NOT NULL>(3)",
+            "VECTOR<FLOAT NOT NULL>(1)",
+            "VECTOR<FLOAT NOT NULL>(3)",
             "LIST<NOTHING>",
             "LIST<BOOLEAN NOT NULL>",
             "LIST<STRING NOT NULL>",
+            "LIST<UUID NOT NULL>",
             "LIST<INTEGER NOT NULL>",
             "LIST<FLOAT NOT NULL>",
             "LIST<DATE NOT NULL>",
@@ -212,5 +251,24 @@ class TypeRepresentationTest {
             "ANY",
         };
         assertThat(actual).isEqualTo(expected);
+    }
+
+    private static Stream<ConstrainableType> constrainableTypes() {
+        return Stream.of(
+                        Arrays.stream(SchemaValueType.values()),
+                        Stream.of(
+                                VectorType.int8Vector(1), VectorType.int8Vector(3),
+                                VectorType.int16Vector(1), VectorType.int16Vector(3),
+                                VectorType.int32Vector(1), VectorType.int32Vector(3),
+                                VectorType.int64Vector(1), VectorType.int64Vector(3),
+                                VectorType.float32Vector(1), VectorType.float32Vector(3),
+                                VectorType.float64Vector(1), VectorType.float64Vector(3)))
+                .flatMap(Function.identity());
+    }
+
+    @ParameterizedTest
+    @MethodSource("constrainableTypes")
+    void shouldDeserializeBackToOriginalType(ConstrainableType type) {
+        assertThat(type).isEqualTo(TypeRepresentation.deserialize(type.serialize()));
     }
 }

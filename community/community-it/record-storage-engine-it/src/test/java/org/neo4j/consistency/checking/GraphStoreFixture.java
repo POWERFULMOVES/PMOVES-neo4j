@@ -84,10 +84,9 @@ import org.neo4j.kernel.impl.store.record.PropertyRecord;
 import org.neo4j.kernel.impl.store.record.RelationshipGroupRecord;
 import org.neo4j.kernel.impl.store.record.RelationshipRecord;
 import org.neo4j.kernel.impl.store.record.SchemaRecord;
-import org.neo4j.kernel.impl.transaction.log.TransactionAppender;
-import org.neo4j.kernel.impl.transaction.log.TransactionCommitmentFactory;
 import org.neo4j.kernel.impl.transaction.tracing.TransactionWriteEvent;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
+import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.CommandBatch;
 import org.neo4j.storageengine.api.EntityUpdates;
@@ -108,6 +107,8 @@ import org.neo4j.token.api.NamedToken;
 import org.neo4j.token.api.TokenConstants;
 import org.neo4j.token.api.TokenHolder;
 import org.neo4j.values.storable.Value;
+import org.neo4j.wal.TransactionAppender;
+import org.neo4j.wal.TransactionCommitmentFactory;
 
 public abstract class GraphStoreFixture implements AutoCloseable {
     private DirectStoreAccess directStoreAccess;
@@ -151,7 +152,8 @@ public abstract class GraphStoreFixture implements AutoCloseable {
                 dependencyResolver.resolveDependency(StorageEngine.class),
                 false,
                 CommandCommitListeners.NO_LISTENERS,
-                () -> true);
+                () -> true,
+                NullLogProvider.getInstance());
         transactionIdStore = database.getDependencyResolver().resolveDependency(TransactionIdStore.class);
         commitmentFactory = database.getDependencyResolver().resolveDependency(TransactionCommitmentFactory.class);
 
@@ -200,7 +202,8 @@ public abstract class GraphStoreFixture implements AutoCloseable {
                             commitmentFactory.newCommitment(),
                             transactionIdGenerator),
                     TransactionWriteEvent.NULL,
-                    TransactionApplicationMode.EXTERNAL);
+                    TransactionApplicationMode.EXTERNAL,
+                    EmptyMemoryTracker.INSTANCE);
         }
     }
 
@@ -614,7 +617,8 @@ public abstract class GraphStoreFixture implements AutoCloseable {
                     allocatorProvider.allocator(StoreType.PROPERTY_STRING),
                     allocatorProvider.allocator(StoreType.PROPERTY_ARRAY),
                     NULL_CONTEXT,
-                    INSTANCE);
+                    INSTANCE,
+                    "db-format-2000");
             propertyRecord.addPropertyBlock(propertyBlock);
 
             return propertyRecord;

@@ -50,7 +50,6 @@ import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import net.sourceforge.argparse4j.inf.ArgumentParserException;
-import org.assertj.core.api.AbstractStringAssert;
 import org.assertj.core.api.Condition;
 import org.neo4j.shell.CypherShell;
 import org.neo4j.shell.Environment;
@@ -96,6 +95,11 @@ public class AssertableMain {
         return this;
     }
 
+    public final AssertableMain outputSatisfies(Consumer<String> consumer) {
+        consumer.accept(out.toString(UTF_8).replace("\r\n", "\n"));
+        return this;
+    }
+
     public AssertableMain assertSuccess(boolean isErrorOutputEmpty) {
         assertEquals(EXIT_SUCCESS, exitCode, failureSupplier("Unexpected exit code"));
         if (isErrorOutputEmpty) {
@@ -136,9 +140,9 @@ public class AssertableMain {
         return this;
     }
 
-    public final AssertableMain assertThatErrorOutput(Consumer<AbstractStringAssert<?>> f) {
+    public final AssertableMain errorOutputSatisfies(Consumer<String> f) {
         var errorOutput = err.toString(UTF_8);
-        f.accept(assertThat(errorOutput));
+        f.accept(errorOutput);
         return this;
     }
 
@@ -223,7 +227,7 @@ public class AssertableMain {
             var outPrintStream = new PrintStream(out);
             var errPrintStream = new PrintStream(err);
             var args = parseArgs();
-            var logger = new AnsiPrinter(Format.VERBOSE, outPrintStream, errPrintStream);
+            var logger = new AnsiPrinter(Format.VERBOSE, args.getErrorFormat(), outPrintStream, errPrintStream);
             CompletionEngine mockedCompletionEngine = mock(CompletionEngine.class);
             var dbInfo = new StubDbInfo(mock(ParameterService.class), false);
             var terminal = terminalBuilder()

@@ -20,11 +20,10 @@ import org.neo4j.cypher.internal.util.InputPosition
 
 case class AnyType(isNullable: Boolean)(val position: InputPosition) extends CypherType {
   val parentType: CypherType = this
-  override val isAbstract = true
 
   override def isAssignableFrom(other: CypherType): Boolean = true
 
-  override val toString = "Any"
+  override val toClassString = "Any"
   override val toCypherTypeString = "ANY"
 
   override def sortOrder: Int = CypherTypeOrder.ANY.id

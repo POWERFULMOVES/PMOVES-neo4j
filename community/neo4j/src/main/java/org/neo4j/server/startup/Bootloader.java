@@ -24,6 +24,7 @@ import static org.neo4j.configuration.SettingValueParsers.INT;
 import static org.neo4j.configuration.SettingValueParsers.PATH;
 import static org.neo4j.function.Predicates.alwaysTrue;
 import static org.neo4j.function.Predicates.notNull;
+import static org.neo4j.logging.log4j.LogConfig.createLoggerFromXmlConfig;
 import static org.neo4j.server.startup.BootloaderOsAbstraction.UNKNOWN_PID;
 import static org.neo4j.server.startup.validation.ConfigValidationSummary.ValidationResult.ERRORS;
 import static org.neo4j.server.startup.validation.ConfigValidationSummary.ValidationResult.OK;
@@ -34,10 +35,9 @@ import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -58,7 +58,12 @@ import org.neo4j.configuration.connectors.HttpsConnector;
 import org.neo4j.graphdb.config.Configuration;
 import org.neo4j.graphdb.config.Setting;
 import org.neo4j.io.IOUtils;
+import org.neo4j.io.fs.DefaultFileSystemAbstraction;
+import org.neo4j.logging.log4j.Log4jLog;
+import org.neo4j.logging.log4j.Log4jLogProvider;
+import org.neo4j.logging.log4j.Neo4jLoggerContext;
 import org.neo4j.server.startup.validation.ConfigValidationHelper;
+import org.neo4j.server.startup.validation.ConfigValidationSummary;
 import org.neo4j.time.Stopwatch;
 import org.neo4j.util.VisibleForTesting;
 
@@ -170,6 +175,18 @@ public abstract class Bootloader implements AutoCloseable {
         return config(true, false);
     }
 
+    private void logConfigWarnings(ConfigValidationSummary summary) {
+        Path xmlConfig = config.get(GraphDatabaseSettings.user_logging_config_path);
+        boolean allowDefaultXmlConfig =
+                !config.getUnfiltered().isExplicitlySet(GraphDatabaseSettings.user_logging_config_path);
+        try (Neo4jLoggerContext ctx = createLoggerFromXmlConfig(
+                new DefaultFileSystemAbstraction(), xmlConfig, allowDefaultXmlConfig, config::configStringLookup)) {
+            Log4jLogProvider logProvider = new Log4jLogProvider(ctx);
+            Log4jLog log = logProvider.getLog(Bootloader.class);
+            summary.log(log);
+        }
+    }
+
     protected void validateConfigVerbose(boolean silentOnSuccess) {
         var helper = new ConfigValidationHelper(confFile());
         var summary = helper.validateAll(() -> fullConfig().getUnfiltered());
@@ -179,12 +196,14 @@ public abstract class Bootloader implements AutoCloseable {
             if (summary.result() == ERRORS) {
                 summary.print(environment.err(), verbose);
                 summary.printClosingStatement(environment.err());
+                logConfigWarnings(summary);
             }
         } else {
             // Don't print anything if all is well
             if (summary.result() != OK) {
                 summary.print(environment.err(), verbose);
                 summary.printClosingStatement(environment.out());
+                logConfigWarnings(summary);
             }
         }
 
@@ -192,7 +211,8 @@ public abstract class Bootloader implements AutoCloseable {
             throw new CommandFailedException(
                     "Configuration contains errors. This validation can be performed again using '"
                             + ValidateConfigCommand.COMMAND + "'.",
-                    ExitCode.FAIL);
+                    ExitCode.FAIL,
+                    false);
         }
     }
 
@@ -226,17 +246,17 @@ public abstract class Bootloader implements AutoCloseable {
                     .commandExpansion(expandCommands)
                     .setDefaults(overriddenDefaultsValues())
                     .set(GraphDatabaseSettings.neo4j_home, home())
+                    .set(GraphDatabaseSettings.configuration_directory, confDir())
                     .fromFile(mainConfFile, allowThrow, filter);
 
-            Collections.reverse(additionalConfigs);
-            additionalConfigs.forEach(additionalConfig -> builder.fromFile(additionalConfig, false, filter));
+            additionalConfigs.reversed().forEach(additionalConfig -> builder.fromFile(additionalConfig, false, filter));
 
             return new FilteredConfig(builder.build(), filter);
         } catch (RuntimeException e) {
             if (additionalConfigs.isEmpty()) {
-                throw new CommandFailedException("Failed to read config " + mainConfFile + ": " + e.getMessage(), e);
+                throw new CommandFailedException("Failed to read config " + mainConfFile, e);
             } else {
-                throw new CommandFailedException("Failed to read config: " + e.getMessage(), e);
+                throw new CommandFailedException("Failed to read config", e);
             }
         }
     }
@@ -289,6 +309,8 @@ public abstract class Bootloader implements AutoCloseable {
         // here.
         return Set.of(
                 GraphDatabaseSettings.neo4j_home.name(),
+                GraphDatabaseSettings.configuration_directory.name(),
+                GraphDatabaseSettings.user_logging_config_path.name(),
                 GraphDatabaseSettings.logs_directory.name(),
                 GraphDatabaseSettings.plugin_dir.name(),
                 GraphDatabaseSettings.strict_config_validation.name(),
@@ -298,7 +320,8 @@ public abstract class Bootloader implements AutoCloseable {
                 BootloaderSettings.lib_directory.name(),
                 BootloaderSettings.windows_service_name.name(),
                 BootloaderSettings.windows_tools_directory.name(),
-                BootloaderSettings.pid_file.name());
+                BootloaderSettings.pid_file.name(),
+                GraphDatabaseInternalSettings.log_markers_enabled.name());
     }
 
     protected abstract Map<Setting<?>, Object> overriddenDefaultsValues();
@@ -409,10 +432,10 @@ public abstract class Bootloader implements AutoCloseable {
             BootloaderOsAbstraction os = os();
             validateConfigVerbose(false);
 
-            Optional<Long> runningProcess = os.getPidIfRunning();
+            OptionalLong runningProcess = os.getPidIfRunning();
             if (runningProcess.isPresent()) {
                 throw new CommandFailedException(
-                        String.format("Neo4j is already running%s.", pidIfKnown(runningProcess.get())),
+                        String.format("Neo4j is already running%s.", pidIfKnown(runningProcess.getAsLong())),
                         EXIT_CODE_RUNNING);
             }
 
@@ -443,7 +466,7 @@ public abstract class Bootloader implements AutoCloseable {
             BootloaderOsAbstraction os = os();
             validateConfigVerbose(dryRun);
 
-            Optional<Long> runningProcess = os.getPidIfRunning();
+            OptionalLong runningProcess = os.getPidIfRunning();
 
             this.additionalArgs.add(ARG_CONSOLE_MODE);
 
@@ -461,7 +484,7 @@ public abstract class Bootloader implements AutoCloseable {
 
             if (runningProcess.isPresent()) {
                 throw new CommandFailedException(
-                        String.format("Neo4j is already running%s.", pidIfKnown(runningProcess.get())),
+                        String.format("Neo4j is already running%s.", pidIfKnown(runningProcess.getAsLong())),
                         EXIT_CODE_RUNNING);
             }
 
@@ -472,7 +495,7 @@ public abstract class Bootloader implements AutoCloseable {
 
         void stop(Integer maybeTimeout) {
             BootloaderOsAbstraction os = os();
-            Optional<Long> runningProcess = os.getPidIfRunning();
+            OptionalLong runningProcess = os.getPidIfRunning();
             if (runningProcess.isEmpty()) {
                 environment.out().println("Neo4j is not running.");
                 return;
@@ -486,8 +509,17 @@ public abstract class Bootloader implements AutoCloseable {
             }
 
             Stopwatch stopwatch = Stopwatch.start();
-            long pid = runningProcess.get();
-            os.stop(pid);
+            long pid = runningProcess.getAsLong();
+            try {
+                os.stop(pid);
+            } catch (CommandFailedException e) {
+                environment.out().println(" failed to stop.");
+                environment
+                        .out()
+                        .printf("Neo4j%s process could not be stopped.%n%s%n", pidIfKnown(pid), e.getMessage());
+                throw new CommandFailedException("Failed to stop", e, EXIT_CODE_RUNNING);
+            }
+
             int printCount = 0;
             do {
                 if (!os.isRunning(pid)) {
@@ -523,11 +555,11 @@ public abstract class Bootloader implements AutoCloseable {
         }
 
         void status() {
-            Optional<Long> runningProcess = os().getPidIfRunning();
+            OptionalLong runningProcess = os().getPidIfRunning();
             if (runningProcess.isEmpty()) {
                 throw new CommandFailedException("Neo4j is not running.", EXIT_CODE_NOT_RUNNING);
             }
-            long pid = runningProcess.get();
+            long pid = runningProcess.getAsLong();
             environment.out().printf("Neo4j is running%s%n", pid != UNKNOWN_PID ? " at pid " + pid : "");
         }
 

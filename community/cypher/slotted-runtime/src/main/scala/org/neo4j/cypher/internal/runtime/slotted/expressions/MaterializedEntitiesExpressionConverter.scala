@@ -26,6 +26,7 @@ import org.neo4j.cypher.internal.expressions.PropertyKeyName
 import org.neo4j.cypher.internal.expressions.functions.Function
 import org.neo4j.cypher.internal.expressions.functions.Keys
 import org.neo4j.cypher.internal.expressions.functions.Labels
+import org.neo4j.cypher.internal.expressions.functions.Properties
 import org.neo4j.cypher.internal.expressions.functions.Type
 import org.neo4j.cypher.internal.physicalplanning
 import org.neo4j.cypher.internal.physicalplanning.ast.PropertyProjectionEntry
@@ -53,7 +54,9 @@ import org.neo4j.cypher.internal.runtime.interpreted.commands.values.TokenType.P
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.QueryState
 import org.neo4j.cypher.internal.util.attribution.Id
 import org.neo4j.cypher.operations.CypherFunctions
+import org.neo4j.exceptions.InternalException
 import org.neo4j.values.AnyValue
+import org.neo4j.values.storable.TextValue
 import org.neo4j.values.virtual.MapValue
 import org.neo4j.values.virtual.MapValueBuilder
 import org.neo4j.values.virtual.NodeValue
@@ -80,6 +83,11 @@ case class MaterializedEntitiesExpressionConverter(tokenContext: ReadTokenContex
         ))
       case e: physicalplanning.ast.PropertyProjection =>
         Some(MaterializedPropertyProjectionExpression(self.toCommandExpression(id, e.map), e.entries))
+      case expressions.ContainerIndex(container, index) =>
+        Some(MaterializedContainerIndexExpression(
+          self.toCommandExpression(id, container),
+          self.toCommandExpression(id, index)
+        ))
       case e: expressions.FunctionInvocation => toCommandExpression(id, e.function, e, self)
       case _                                 => None
     }
@@ -105,10 +113,11 @@ case class MaterializedEntitiesExpressionConverter(tokenContext: ReadTokenContex
     self: ExpressionConverters
   ): Option[commands.expressions.Expression] =
     (expression, invocation.arguments.headOption) match {
-      case (Keys, Some(arg))   => Some(MaterializedEntityKeysFunction(self.toCommandExpression(id, arg)))
-      case (Labels, Some(arg)) => Some(MaterializedEntityLabelsFunction(self.toCommandExpression(id, arg)))
-      case (Type, Some(arg))   => Some(MaterializedEntityTypeFunction(self.toCommandExpression(id, arg)))
-      case _                   => None
+      case (Keys, Some(arg))       => Some(MaterializedEntityKeysFunction(self.toCommandExpression(id, arg)))
+      case (Labels, Some(arg))     => Some(MaterializedEntityLabelsFunction(self.toCommandExpression(id, arg)))
+      case (Type, Some(arg))       => Some(MaterializedEntityTypeFunction(self.toCommandExpression(id, arg)))
+      case (Properties, Some(arg)) => Some(MaterializedPropertiesFunction(self.toCommandExpression(id, arg)))
+      case _                       => None
     }
 
   private def toCommandProperty(
@@ -136,14 +145,14 @@ case class MaterializedEntitiesExpressionConverter(tokenContext: ReadTokenContex
     val entity = self.toCommandExpression(id, e.expression)
     val hasLabelPredicates =
       e.labels.map(l => MaterializedEntityHasLabel(entity, KeyToken.Unresolved(l.name, TokenType.Label)))
-    Some(predicates.Ands(hasLabelPredicates: _*))
+    Some(predicates.Ands(hasLabelPredicates.toArray))
   }
 
   private def hasTypes(id: Id, e: expressions.HasTypes, self: ExpressionConverters): Option[Predicate] = {
     val entity = self.toCommandExpression(id, e.expression)
     val hasTypePredicates =
       e.types.map(t => MaterializedEntityHasType(entity, KeyToken.Unresolved(t.name, TokenType.RelType)))
-    Some(predicates.Ands(hasTypePredicates: _*))
+    Some(predicates.Ands(hasTypePredicates.toArray))
   }
 
   private def hasLabelsOrTypes(
@@ -153,7 +162,7 @@ case class MaterializedEntitiesExpressionConverter(tokenContext: ReadTokenContex
   ): Option[Predicate] = {
     val entity = self.toCommandExpression(id, e.entityExpression)
     val hasLabelOrTypePredicates = e.labelsOrTypes.map(lOrT => MaterializedEntityHasLabelOrType(entity, lOrT.name))
-    Some(predicates.Ands(hasLabelOrTypePredicates: _*))
+    Some(predicates.Ands(hasLabelOrTypePredicates.toArray))
   }
 }
 
@@ -191,7 +200,7 @@ case class MaterializedEntityHasLabel(entity: commands.expressions.Expression, l
 
       var i = 0
       while (i < node.labels().intSize()) {
-        if (node.labels().stringValue(i).equals(label.name)) {
+        if (node.labels().stringValue(i).stringValue().equals(label.name)) {
           return IsTrue
         }
 
@@ -246,7 +255,7 @@ case class MaterializedEntityHasLabelOrType(entity: commands.expressions.Express
     case node: NodeValue =>
       var i = 0
       while (i < node.labels().intSize()) {
-        if (node.labels().stringValue(i).equals(labelOrType)) {
+        if (node.labels().stringValue(i).stringValue().equals(labelOrType)) {
           return IsTrue
         }
 
@@ -257,6 +266,11 @@ case class MaterializedEntityHasLabelOrType(entity: commands.expressions.Express
 
     case relationship: RelationshipValue =>
       IsMatchResult(relationship.`type`().equals(labelOrType))
+
+    case x => throw InternalException.internalError(
+        getClass.getSimpleName,
+        s"Unexpected value encountered in MaterializedEntityHasLabelOrType.isMatch: $x"
+      )
   }
 
   override def toString = s"$entity:$labelOrType"
@@ -377,6 +391,31 @@ case class MaterializedEntityTypeFunction(relExpression: Expression) extends Nul
   override def children: Seq[AstNode[_]] = Seq(relExpression)
 }
 
+final case class MaterializedPropertiesFunction(mapExpression: Expression) extends Expression {
+
+  override def apply(row: ReadableRow, state: QueryState): AnyValue =
+    mapExpression.apply(row, state) match {
+      case node: NodeValue        => node.properties()
+      case rel: RelationshipValue => rel.properties()
+      case map: MapValue          => map
+      case value =>
+        CypherFunctions.properties(
+          value,
+          state.query,
+          state.cursors.nodeCursor,
+          state.cursors.relationshipScanCursor,
+          state.cursors.propertyCursor
+        )
+    }
+
+  override def rewrite(f: Expression => Expression): Expression =
+    f(MaterializedPropertiesFunction(mapExpression.rewrite(f)))
+
+  override def arguments: Seq[Expression] = Seq(mapExpression)
+
+  override def children: Seq[AstNode[_]] = Seq(mapExpression)
+}
+
 case class MaterializedPropertyProjectionExpression(mapExpression: Expression, entries: Seq[PropertyProjectionEntry])
     extends NullInNullOutExpression(mapExpression) {
 
@@ -404,4 +443,32 @@ case class MaterializedPropertyProjectionExpression(mapExpression: Expression, e
   override def arguments: Seq[Expression] = Seq(mapExpression)
 
   override def children: Seq[AstNode[_]] = Seq(mapExpression)
+}
+
+final case class MaterializedContainerIndexExpression(expression: Expression, index: Expression) extends Expression {
+
+  override def apply(row: ReadableRow, state: QueryState): AnyValue = {
+    (expression(row, state), index(row, state)) match {
+      case (nodeValue: NodeValue, propertyKey: TextValue) =>
+        nodeValue.properties().get(propertyKey.stringValue())
+      case (relationshipValue: RelationshipValue, propertyKey: TextValue) =>
+        relationshipValue.properties().get(propertyKey.stringValue())
+      case (containerValue, indexValue) =>
+        CypherFunctions.containerIndex(
+          containerValue,
+          indexValue,
+          state.query,
+          state.cursors.nodeCursor,
+          state.cursors.relationshipScanCursor,
+          state.cursors.propertyCursor
+        )
+    }
+  }
+  override def arguments: Seq[Expression] = Seq(expression, index)
+
+  override def children: Seq[AstNode[_]] = Seq(expression, index)
+
+  override def rewrite(f: Expression => Expression): Expression =
+    f(MaterializedContainerIndexExpression(expression.rewrite(f), index.rewrite(f)))
+
 }

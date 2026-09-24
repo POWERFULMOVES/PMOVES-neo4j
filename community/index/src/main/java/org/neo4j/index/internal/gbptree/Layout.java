@@ -36,6 +36,14 @@ public interface Layout<KEY, VALUE> extends KeyLayout<KEY> {
     int FIXED_SIZE_VALUE = -1;
 
     /**
+     * @return true if the value size is fixed, otherwise false. Generally the value size is fixed if the key size is fixed, and vice versa. But it can
+     * be overwritten.
+     */
+    default boolean fixedValueSize() {
+        return fixedSize();
+    }
+
+    /**
      * @return new value instance.
      */
     VALUE newValue();
@@ -88,6 +96,15 @@ public interface Layout<KEY, VALUE> extends KeyLayout<KEY> {
         }
 
         return (upperInt << Integer.SIZE) | identifier;
+    }
+
+    /**
+     * This method should be implemented for fixed size layouts to support leaf defragmentation in multiversion trees.
+     * When entry is deleted in the multiversion tree it is overridden with the result of {@link #newValue()} in initial state.
+     * This method normally should return true for such values.
+     */
+    default boolean valueDeleted(VALUE value) {
+        return false;
     }
 
     /**

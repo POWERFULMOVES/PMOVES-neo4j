@@ -22,16 +22,22 @@ package org.neo4j.shell.state;
 import static org.neo4j.shell.util.Versions.isPasswordChangeRequiredException;
 
 import java.net.URI;
+import java.time.Duration;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.logging.Level;
 import java.util.logging.LogManager;
 import org.neo4j.driver.AccessMode;
 import org.neo4j.driver.AuthToken;
 import org.neo4j.driver.AuthTokens;
-import org.neo4j.driver.Bookmark;
 import org.neo4j.driver.Config;
 import org.neo4j.driver.Driver;
 import org.neo4j.driver.GraphDatabase;
@@ -61,6 +67,8 @@ import org.neo4j.shell.build.Build;
 import org.neo4j.shell.exception.CommandException;
 import org.neo4j.shell.exception.ThrowingAction;
 import org.neo4j.shell.log.Logger;
+import org.neo4j.shell.util.Version;
+import org.neo4j.shell.util.Versions;
 import org.neo4j.util.VisibleForTesting;
 
 /**
@@ -68,12 +76,18 @@ import org.neo4j.util.VisibleForTesting;
  */
 public class BoltStateHandler implements TransactionHandler, Connector, DatabaseManager {
     private static final Logger log = Logger.create();
+    /**
+     * Bounded wait for Bolt session and driver teardown so batch/SSH callers do not hang indefinitely when shutdown
+     * stalls (e.g. flaky networks, constrained CI VMs).
+     */
+    private static final long RESOURCE_CLOSE_TIMEOUT_SECONDS = 30;
+
     private static final String USER_AGENT = "neo4j-cypher-shell/v" + Build.version();
-    private static final TransactionConfig USER_DIRECT_TX_CONF = txConfig(TransactionType.USER_DIRECT);
+    private static final Version supportsCypherVersionPrefix = new Version(5, 26, 0);
     private static final TransactionConfig SYSTEM_TX_CONF = txConfig(TransactionType.SYSTEM);
     private final TriFunction<URI, AuthToken, Config, Driver> driverProvider;
     private final boolean isInteractive;
-    private final Map<String, Bookmark> bookmarks = new HashMap<>();
+    private final TransactionConfig userDirectTxConf;
     protected Driver driver;
     Session userSession;
     Session serviceSession;
@@ -85,23 +99,26 @@ public class BoltStateHandler implements TransactionHandler, Connector, Database
     private LicenseDetails licenseDetails = LicenseDetailsImpl.YES;
     private org.neo4j.shell.cli.AccessMode accessMode;
 
-    public BoltStateHandler(boolean isInteractive, org.neo4j.shell.cli.AccessMode accessMode) {
-        this(GraphDatabase::driver, isInteractive, accessMode);
+    public BoltStateHandler(
+            boolean isInteractive, org.neo4j.shell.cli.AccessMode accessMode, Optional<Duration> txTimeout) {
+        this(GraphDatabase::driver, isInteractive, accessMode, txTimeout);
     }
 
     @VisibleForTesting
     BoltStateHandler(TriFunction<URI, AuthToken, Config, Driver> driverProvider, boolean isInteractive) {
-        this(driverProvider, isInteractive, org.neo4j.shell.cli.AccessMode.WRITE);
+        this(driverProvider, isInteractive, org.neo4j.shell.cli.AccessMode.WRITE, Optional.empty());
     }
 
     private BoltStateHandler(
             TriFunction<URI, AuthToken, Config, Driver> driverProvider,
             boolean isInteractive,
-            org.neo4j.shell.cli.AccessMode accessMode) {
+            org.neo4j.shell.cli.AccessMode accessMode,
+            Optional<Duration> txTimeout) {
         this.driverProvider = driverProvider;
         this.accessMode = accessMode;
         activeDatabaseNameAsSetByUser = ABSENT_DB_NAME;
         this.isInteractive = isInteractive;
+        this.userDirectTxConf = txConfig(TransactionType.USER_DIRECT, txTimeout);
     }
 
     @Override
@@ -148,7 +165,7 @@ public class BoltStateHandler implements TransactionHandler, Connector, Database
         if (isTransactionOpen()) {
             throw new CommandException("There is already an open transaction");
         }
-        tx = userSession.beginTransaction(USER_DIRECT_TX_CONF);
+        tx = userSession.beginTransaction(userDirectTxConf);
     }
 
     @Override
@@ -314,10 +331,7 @@ public class BoltStateHandler implements TransactionHandler, Connector, Database
             builder.withDatabase(databaseToConnectTo);
         }
         closeSession(previousDatabase);
-        final Bookmark bookmarkForDBToConnectTo = bookmarks.get(databaseToConnectTo);
-        if (bookmarkForDBToConnectTo != null) {
-            builder.withBookmarks(bookmarkForDBToConnectTo);
-        }
+        builder.withBookmarkManager(driver.executableQueryBookmarkManager());
 
         impersonatedUser().ifPresent(builder::withImpersonatedUser);
 
@@ -334,14 +348,48 @@ public class BoltStateHandler implements TransactionHandler, Connector, Database
      * @param databaseName the name of the database currently connected to
      */
     private void closeSession(String databaseName) {
-        if (userSession != null) {
-            // Save the last bookmark and close the session
-            final Bookmark bookmarkForPreviousDB = userSession.lastBookmark();
-            userSession.close();
-            bookmarks.put(databaseName, bookmarkForPreviousDB);
+        closeSessionWithTimeout(userSession, "user session");
+        closeSessionWithTimeout(serviceSession, "service session");
+    }
+
+    private void closeSessionWithTimeout(Session session, String label) {
+        if (session == null) {
+            return;
         }
-        if (serviceSession != null) {
-            serviceSession.close();
+        ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "cypher-shell-session-close");
+            t.setDaemon(true);
+            return t;
+        });
+        Future<?> closed = executor.submit(session::close);
+        try {
+            closed.get(RESOURCE_CLOSE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            closed.cancel(true);
+            log.warn(
+                    "%s did not close within %s seconds; continuing shutdown."
+                            .formatted(label, RESOURCE_CLOSE_TIMEOUT_SECONDS),
+                    e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            log.warn("%s close failed.".formatted(label), cause);
+            if (cause instanceof RuntimeException runtimeException) {
+                throw runtimeException;
+            }
+            if (cause instanceof Error error) {
+                throw error;
+            }
+            throw new RuntimeException(cause);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("Interrupted while closing %s".formatted(label), e);
+        } finally {
+            executor.shutdownNow();
+            try {
+                executor.awaitTermination(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 
@@ -398,6 +446,14 @@ public class BoltStateHandler implements TransactionHandler, Connector, Database
         }
     }
 
+    private Optional<Version> getServerVersionParsed() {
+        try {
+            return Optional.of(Versions.version(getServerVersion()));
+        } catch (Versions.FailedToParseException e) {
+            return Optional.empty();
+        }
+    }
+
     @Override
     public String getProtocolVersion() {
         if (isConnected()) {
@@ -428,7 +484,7 @@ public class BoltStateHandler implements TransactionHandler, Connector, Database
 
     @Override
     public Optional<BoltResult> runUserCypher(String cypher, Map<String, Value> queryParams) throws CommandException {
-        return runCypher(cypher, queryParams, USER_DIRECT_TX_CONF);
+        return runCypher(cypher, queryParams, userDirectTxConf);
     }
 
     public Optional<BoltResult> runServiceCypher(String cypher, Map<String, Value> queryParams)
@@ -448,6 +504,16 @@ public class BoltStateHandler implements TransactionHandler, Connector, Database
     public Optional<BoltResult> runCypher(String cypher, Map<String, Value> queryParams, TransactionType type)
             throws CommandException {
         return runCypher(cypher, queryParams, txConfig(type));
+    }
+
+    @Override
+    public Optional<BoltResult> runCypher5(String cypher, Map<String, Value> queryParams, TransactionType type)
+            throws CommandException {
+        final var supportsPrefix = getServerVersionParsed()
+                .map(v -> v.compareTo(supportsCypherVersionPrefix) >= 0)
+                .orElse(false);
+        final var prefixedQuery = supportsPrefix ? "CYPHER 5 " + cypher : cypher;
+        return runCypher(prefixedQuery, queryParams, type);
     }
 
     private Optional<BoltResult> runCypher(String cypher, Map<String, Value> queryParams, TransactionConfig config)
@@ -562,7 +628,7 @@ public class BoltStateHandler implements TransactionHandler, Connector, Database
         try {
             closeSession(activeDatabaseNameAsSetByUser);
             if (driver != null) {
-                driver.close();
+                closeDriverWithTimeout(driver);
             }
         } finally {
             userSession = null;
@@ -597,16 +663,34 @@ public class BoltStateHandler implements TransactionHandler, Connector, Database
         protocolVersion = null;
     }
 
+    private static void closeDriverWithTimeout(Driver driverToClose) {
+        try {
+            driverToClose
+                    .closeAsync()
+                    .toCompletableFuture()
+                    .orTimeout(RESOURCE_CLOSE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                    .join();
+        } catch (CompletionException e) {
+            log.warn(
+                    "Neo4j driver did not finish closing within %s seconds; continuing shutdown."
+                            .formatted(RESOURCE_CLOSE_TIMEOUT_SECONDS),
+                    e.getCause() != null ? e.getCause() : e);
+        }
+    }
+
     private Driver getDriver(ConnectionConfig connectionConfig, AuthToken authToken) {
         Config.ConfigBuilder configBuilder = Config.builder()
                 .withLogging(driverLogger())
                 .withTelemetryDisabled(true)
-                .withUserAgent(USER_AGENT);
+                .withUserAgent(USER_AGENT)
+                .withConnectionTimeout(30, TimeUnit.SECONDS)
+                .withMaxConnectionPoolSize(32)
+                .withAutoCommitRetriesDisabled(true);
         switch (connectionConfig.encryption()) {
             case TRUE -> configBuilder = configBuilder.withEncryption();
             case FALSE -> configBuilder = configBuilder.withoutEncryption();
             default -> {}
-                // Do nothing
+            // Do nothing
         }
         return driverProvider.apply(connectionConfig.uri(), authToken, configBuilder.build());
     }
@@ -636,9 +720,14 @@ public class BoltStateHandler implements TransactionHandler, Connector, Database
     }
 
     private static TransactionConfig txConfig(TransactionType type) {
-        return TransactionConfig.builder()
-                .withMetadata(Map.of("type", type.value(), "app", "cypher-shell_v" + Build.version()))
-                .build();
+        return txConfig(type, Optional.empty());
+    }
+
+    private static TransactionConfig txConfig(TransactionType type, Optional<Duration> timeout) {
+        final var builder = TransactionConfig.builder()
+                .withMetadata(Map.of("type", type.value(), "app", "cypher-shell_v" + Build.version()));
+        timeout.ifPresent(builder::withTimeout);
+        return builder.build();
     }
 
     public LicenseDetails licenseDetails() {

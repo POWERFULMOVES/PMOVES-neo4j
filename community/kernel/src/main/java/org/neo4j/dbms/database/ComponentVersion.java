@@ -35,6 +35,7 @@ public interface ComponentVersion {
     SystemGraphComponent.Name MULTI_DATABASE_COMPONENT = new SystemGraphComponent.Name("multi-database");
     SystemGraphComponent.Name DISCOVERY_COMPONENT = new SystemGraphComponent.Name("cluster-discovery");
     SystemGraphComponent.Name SEED_SYNCING_COMPONENT = new SystemGraphComponent.Name("seed-syncing");
+    SystemGraphComponent.Name FLEET_MANAGEMENT_COMPONENT = new SystemGraphComponent.Name("fleet-management");
 
     /**
      * Get the version of the component. Component versions are expected to be ordered and the oldest version is 0.
@@ -95,5 +96,22 @@ public interface ComponentVersion {
         public static final String VERSION_523 = "Neo4j 5.23";
         public static final String VERSION_525 = "Neo4j 5.25";
         public static final String VERSION_526 = "Neo4j 5.26";
+        public static final String VERSION_202502 = "Neo4j 2025.02";
+        public static final String VERSION_202503 = "Neo4j 2025.03";
+        public static final String VERSION_202504 = "Neo4j 2025.04";
+        public static final String VERSION_202505 = "Neo4j 2025.05";
+        public static final String VERSION_202506 = "Neo4j 2025.06";
+        public static final String VERSION_202507 = "Neo4j 2025.07";
+        public static final String VERSION_202508 = "Neo4j 2025.08";
+        public static final String VERSION_202509 = "Neo4j 2025.09";
+        public static final String VERSION_202510 = "Neo4j 2025.10";
+        public static final String VERSION_202511 = "Neo4j 2025.11";
+        public static final String VERSION_202512 = "Neo4j 2025.12";
+        public static final String VERSION_202601 = "Neo4j 2026.01";
+        public static final String VERSION_202602 = "Neo4j 2026.02";
+        public static final String VERSION_202606 = "Neo4j 2026.06";
+        public static final String VERSION_202607 = "Neo4j 2026.07";
+        public static final String VERSION_202608 = "Neo4j 2026.08";
+        public static final String VERSION_202610 = "Neo4j 2026.10";
     }
 }

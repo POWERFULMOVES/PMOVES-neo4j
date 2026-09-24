@@ -19,13 +19,14 @@
  */
 package org.neo4j.cypher.internal.logical.plans
 
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.Access
 import org.neo4j.cypher.internal.ast.ActionResource
 import org.neo4j.cypher.internal.ast.AdministrationAction
 import org.neo4j.cypher.internal.ast.DataExchangeAction
 import org.neo4j.cypher.internal.ast.DatabaseAction
+import org.neo4j.cypher.internal.ast.DatabaseAndDbmsAction
 import org.neo4j.cypher.internal.ast.DatabaseName
-import org.neo4j.cypher.internal.ast.DatabaseScope
 import org.neo4j.cypher.internal.ast.DbmsAction
 import org.neo4j.cypher.internal.ast.DropDatabaseAdditionalAction
 import org.neo4j.cypher.internal.ast.DropDatabaseAliasAction
@@ -36,11 +37,15 @@ import org.neo4j.cypher.internal.ast.IfExistsDo
 import org.neo4j.cypher.internal.ast.NativeAuth
 import org.neo4j.cypher.internal.ast.Options
 import org.neo4j.cypher.internal.ast.PrivilegeQualifier
+import org.neo4j.cypher.internal.ast.RemoteAliasCredentials
 import org.neo4j.cypher.internal.ast.RemoveAuth
 import org.neo4j.cypher.internal.ast.Return
+import org.neo4j.cypher.internal.ast.SetTags
+import org.neo4j.cypher.internal.ast.ShardDefinition
 import org.neo4j.cypher.internal.ast.ShowPrivilegeScope
 import org.neo4j.cypher.internal.ast.Statement
 import org.neo4j.cypher.internal.ast.Topology
+import org.neo4j.cypher.internal.ast.UserTagsAction
 import org.neo4j.cypher.internal.ast.WaitUntilComplete
 import org.neo4j.cypher.internal.ast.Yield
 import org.neo4j.cypher.internal.expressions.Expression
@@ -48,9 +53,7 @@ import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.Parameter
 import org.neo4j.cypher.internal.logical.plans.DatabaseTypeFilter.All
 import org.neo4j.cypher.internal.util.attribution.IdGen
-import org.neo4j.exceptions.DatabaseAdministrationException
-import org.neo4j.exceptions.NotSystemDatabaseException
-import org.neo4j.exceptions.SecurityAdministrationException
+import org.neo4j.exceptions.InternalException
 import org.neo4j.gqlstatus.ErrorGqlStatusObject
 import org.neo4j.graphdb.security.AuthorizationViolationException
 
@@ -65,27 +68,29 @@ abstract class AdministrationCommandLogicalPlan(
 
   override val localAvailableSymbols: Set[LogicalVariable] = returnColumns.toSet
 
-  def invalid(message: String): RuntimeException
 }
 
 abstract class DatabaseAdministrationLogicalPlan(source: Option[AdministrationCommandLogicalPlan] = None)(implicit
-  idGen: IdGen) extends AdministrationCommandLogicalPlan(source) {
-  override def invalid(message: String): DatabaseAdministrationException = new NotSystemDatabaseException(message)
-}
+  idGen: IdGen) extends AdministrationCommandLogicalPlan(source)
 
 abstract class SecurityAdministrationLogicalPlan(source: Option[AdministrationCommandLogicalPlan] = None)(implicit
-  idGen: IdGen) extends AdministrationCommandLogicalPlan(source) {
-  override def invalid(message: String): SecurityAdministrationException = new SecurityAdministrationException(message)
-}
+  idGen: IdGen) extends AdministrationCommandLogicalPlan(source)
 
 // Non-administration commands that are allowed on system database, e.g. SHOW PROCEDURES
-case class AllowedNonAdministrationCommands(statement: Statement)(implicit idGen: IdGen)
-    extends DatabaseAdministrationLogicalPlan
+// The `statement` is used to run the query, it gets turned back into a query string at runtime.
+// The `maybePlan` is just used to get a nicer plan description than `AdministrationCommand`.
+case class AllowedNonAdministrationCommands(
+  statement: Statement,
+  maybePlan: Option[LogicalPlan] = None
+)(implicit idGen: IdGen) extends DatabaseAdministrationLogicalPlan {
+  def addPlan(newPlan: LogicalPlan): AllowedNonAdministrationCommands = this.copy(maybePlan = Some(newPlan))(idGen)
+}
 
 // Security administration commands
 case class ShowUsers(
   source: PrivilegePlan,
   withAuth: Boolean,
+  asCommands: Boolean,
   override val returnColumns: List[LogicalVariable],
   yields: Option[Yield],
   returns: Option[Return]
@@ -105,7 +110,8 @@ case class CreateUser(
   suspended: Option[Boolean],
   defaultDatabase: Option[HomeDatabaseAction],
   externalAuths: Seq[ExternalAuth],
-  nativeAuth: Option[NativeAuth]
+  nativeAuth: Option[NativeAuth],
+  tags: Option[SetTags]
 )(implicit idGen: IdGen) extends SecurityAdministrationLogicalPlan(Some(source))
 
 case class RenameUser(
@@ -124,7 +130,19 @@ case class AlterUser(
   defaultDatabase: Option[HomeDatabaseAction],
   nativeAuth: Option[NativeAuth],
   externalAuths: Seq[ExternalAuth],
-  removeAuth: RemoveAuth
+  removeAuth: RemoveAuth,
+  tags: Seq[UserTagsAction]
+)(implicit idGen: IdGen) extends SecurityAdministrationLogicalPlan(Some(source)) {
+
+  val isTagsOnly: Boolean =
+    suspended.isEmpty && defaultDatabase.isEmpty && nativeAuth.isEmpty && externalAuths.isEmpty && removeAuth.isEmpty && tags.nonEmpty
+}
+
+case class AlterUsers(
+  source: SecurityAdministrationLogicalPlan,
+  userNames: Seq[Either[String, Parameter]],
+  ifExists: Boolean,
+  tags: Seq[UserTagsAction]
 )(implicit idGen: IdGen) extends SecurityAdministrationLogicalPlan(Some(source))
 
 case class SetOwnPassword(
@@ -137,12 +155,45 @@ case class CheckNativeAuthentication()(implicit idGen: IdGen) extends SecurityAd
 
 case class ShowRoles(
   source: PrivilegePlan,
-  withUsers: Boolean,
+  extensionType: ShowRoles.ShowRolesExtensionType,
   showAll: Boolean,
+  asCommands: Boolean,
   override val returnColumns: List[LogicalVariable],
   yields: Option[Yield],
   returns: Option[Return]
 )(implicit idGen: IdGen) extends SecurityAdministrationLogicalPlan(Some(source))
+
+object ShowRoles {
+
+  def apply(
+    source: PrivilegePlan,
+    withUsers: Boolean,
+    withAuthRules: Boolean,
+    showAll: Boolean,
+    asCommands: Boolean,
+    returnColumns: List[LogicalVariable],
+    yields: Option[Yield],
+    returns: Option[Return]
+  )(implicit idGen: IdGen): ShowRoles = {
+    val extensionType = (withUsers, withAuthRules) match {
+      case (false, false) => ShowRoles.NoExtension
+      case (true, false)  => ShowRoles.Users
+      case (false, true)  => ShowRoles.AuthRules
+      case (true, true) =>
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          "Cannot show both users and auth rules in the same command"
+        )
+    }
+    ShowRoles(source, extensionType, showAll, asCommands, returnColumns, yields, returns)(idGen)
+  }
+
+  sealed trait ShowRolesExtensionType
+  case object NoExtension extends ShowRolesExtensionType
+  case object Users extends ShowRolesExtensionType
+  case object AuthRules extends ShowRolesExtensionType
+
+}
 
 case class CreateRole(
   source: SecurityAdministrationLogicalPlan,
@@ -179,6 +230,39 @@ case class AssertMutablePrivilegesCanBeAssignedToRole(
   roleName: Either[String, Parameter]
 )(implicit idGen: IdGen) extends PrivilegePlan(Some(source))
 
+case class ShowAuthRules(
+  source: PrivilegePlan,
+  asCommands: Boolean,
+  override val returnColumns: List[LogicalVariable],
+  yields: Option[Yield],
+  returns: Option[Return]
+)(implicit idGen: IdGen) extends SecurityAdministrationLogicalPlan(Some(source))
+
+case class CreateAuthRule(
+  source: SecurityAdministrationLogicalPlan,
+  authRuleName: Either[String, Parameter],
+  condition: Expression,
+  enabled: Option[Boolean]
+)(implicit idGen: IdGen) extends SecurityAdministrationLogicalPlan(Some(source))
+
+case class AlterAuthRule(
+  source: SecurityAdministrationLogicalPlan,
+  authRuleName: Either[String, Parameter],
+  condition: Option[Expression],
+  enabled: Option[Boolean]
+)(implicit idGen: IdGen) extends SecurityAdministrationLogicalPlan(Some(source))
+
+case class RenameAuthRule(
+  source: SecurityAdministrationLogicalPlan,
+  fromAuthRuleName: Either[String, Parameter],
+  toAuthRuleName: Either[String, Parameter]
+)(implicit idGen: IdGen) extends SecurityAdministrationLogicalPlan(Some(source))
+
+case class DropAuthRule(
+  source: SecurityAdministrationLogicalPlan,
+  authRuleName: Either[String, Parameter]
+)(implicit idGen: IdGen) extends SecurityAdministrationLogicalPlan(Some(source))
+
 case class GrantRoleToUser(
   source: SecurityAdministrationLogicalPlan,
   roleName: Either[String, Parameter],
@@ -190,6 +274,20 @@ case class RevokeRoleFromUser(
   source: SecurityAdministrationLogicalPlan,
   roleName: Either[String, Parameter],
   userName: Either[String, Parameter],
+  command: String
+)(implicit idGen: IdGen) extends SecurityAdministrationLogicalPlan(Some(source))
+
+case class GrantRoleToAuthRule(
+  source: SecurityAdministrationLogicalPlan,
+  roleName: Either[String, Parameter],
+  ruleName: Either[String, Parameter],
+  command: String
+)(implicit idGen: IdGen) extends SecurityAdministrationLogicalPlan(Some(source))
+
+case class RevokeRoleFromAuthRule(
+  source: SecurityAdministrationLogicalPlan,
+  roleName: Either[String, Parameter],
+  ruleName: Either[String, Parameter],
   command: String
 )(implicit idGen: IdGen) extends SecurityAdministrationLogicalPlan(Some(source))
 
@@ -243,6 +341,13 @@ case class AssertCanDropDatabase(
   defaultAction: DbmsAction
 )(implicit idGen: IdGen) extends PrivilegePlan(Some(source))
 
+case class AssertCanAlterDatabase(
+  source: PrivilegePlan,
+  namespacedName: DatabaseName,
+  actionsForCompositeDatabases: Seq[DatabaseAndDbmsAction],
+  actionsForDatabases: Seq[DatabaseAndDbmsAction]
+)(implicit idGen: IdGen) extends PrivilegePlan(Some(source))
+
 case class AssertAllowedDbmsActionsOrSelf(user: Either[String, Parameter], actions: Seq[DbmsAction])(implicit
   idGen: IdGen) extends PrivilegePlan
 
@@ -260,7 +365,16 @@ case class AssertNotCurrentUser(
   errorGqlStatusObject: ErrorGqlStatusObject
 )(implicit idGen: IdGen) extends PrivilegePlan(Some(source))
 
-case class AssertManagementActionNotBlocked(action: AdministrationAction)(implicit idGen: IdGen) extends PrivilegePlan
+case class AssertManagementActionNotBlocked(command: String, action: Seq[AdministrationAction])(implicit idGen: IdGen)
+    extends PrivilegePlan
+
+object AssertManagementActionNotBlocked {
+
+  def apply(command: String, administrationAction: AdministrationAction)(implicit
+    idGen: IdGen): AssertManagementActionNotBlocked =
+    AssertManagementActionNotBlocked(command, Seq(administrationAction))
+}
+
 case class AssertNotBlockedRemoteAliasManagement()(implicit idGen: IdGen) extends PrivilegePlan
 
 case class AssertNotBlockedDropAlias(aliasName: DatabaseName)(implicit idGen: IdGen)
@@ -426,11 +540,6 @@ case class AssertLoadPrivilegeCanBeMutated(
   revokeType: String
 )(implicit idGen: IdGen) extends PrivilegePlan(Some(source))
 
-case class AssertDbmsActionIsAssignable(
-  source: Option[PrivilegePlan],
-  action: DbmsAction
-)(implicit idGen: IdGen) extends PrivilegePlan(source)
-
 case class ShowSupportedPrivileges(
   override val returnColumns: List[LogicalVariable],
   yields: Option[Yield],
@@ -460,6 +569,7 @@ case class LogSystemCommand(source: AdministrationCommandLogicalPlan, command: S
 sealed trait RBACEntity
 case object UserEntity extends RBACEntity
 case object RoleEntity extends RBACEntity
+case object AuthRuleEntity extends RBACEntity
 
 case class DoNothingIfNotExists(
   source: PrivilegePlan,
@@ -483,7 +593,8 @@ case class DoNothingIfDatabaseNotExists(
   command: String,
   name: DatabaseName,
   operation: String,
-  databaseTypeFilter: DatabaseTypeFilter = All
+  databaseTypeFilter: DatabaseTypeFilter = All,
+  updateContextParams: Boolean = false
 )(implicit idGen: IdGen) extends SecurityAdministrationLogicalPlan(Some(source))
 
 case class DoNothingIfDatabaseExists(
@@ -512,23 +623,52 @@ case class EnsureDatabaseNodeExists(
   action: String
 )(implicit idGen: IdGen) extends SecurityAdministrationLogicalPlan(Some(source))
 
+case class EnsureRoleHasNoDeniedPrivileges(
+  source: Option[SecurityAdministrationLogicalPlan],
+  roleName: Either[String, Parameter],
+  subquery: String
+)(implicit idGen: IdGen) extends SecurityAdministrationLogicalPlan(source)
+
+case class EnsureRoleNotGrantedToAnyAuthRules(
+  source: Option[PrivilegePlan],
+  roleName: Either[String, Parameter],
+  subquery: String
+)(implicit idGen: IdGen) extends PrivilegePlan(source)
+
 // Database administration commands
-case class ShowDatabase(
-  scope: DatabaseScope,
-  verbose: Boolean,
-  override val returnColumns: List[LogicalVariable],
-  yields: Option[Yield],
-  returns: Option[Return]
-)(implicit idGen: IdGen) extends DatabaseAdministrationLogicalPlan
+
+abstract class CreateDatabasePlan(source: AdministrationCommandLogicalPlan)(implicit idGen: IdGen)
+    extends DatabaseAdministrationLogicalPlan(Some(source)) {
+  def databaseName: Either[String, Parameter]
+}
+
+sealed trait CreateDatabaseType {
+  def isComposite: Boolean = this == CompositeDatabase
+  def isReplica: Boolean = this == ReplicaDatabase
+}
+
+case object StandardDatabase extends CreateDatabaseType
+case object CompositeDatabase extends CreateDatabaseType
+case object ReplicaDatabase extends CreateDatabaseType
+
+case class CreateShardedDatabase(
+  source: AdministrationCommandLogicalPlan,
+  databaseName: Either[String, Parameter],
+  options: Options,
+  ifExistsDo: IfExistsDo,
+  shardDef: ShardDefinition,
+  defaultLanguageVersion: Option[CypherVersion]
+)(implicit idGen: IdGen) extends CreateDatabasePlan(source)
 
 case class CreateDatabase(
   source: AdministrationCommandLogicalPlan,
   databaseName: Either[String, Parameter],
   options: Options,
   ifExistsDo: IfExistsDo,
-  isComposite: Boolean,
-  topology: Option[Topology]
-)(implicit idGen: IdGen) extends DatabaseAdministrationLogicalPlan(Some(source))
+  databaseType: CreateDatabaseType,
+  topology: Option[Topology],
+  defaultLanguageVersion: Option[CypherVersion]
+)(implicit idGen: IdGen) extends CreateDatabasePlan(source)
 
 case class DropDatabase(
   source: AdministrationCommandLogicalPlan,
@@ -544,7 +684,18 @@ case class AlterDatabase(
   access: Option[Access],
   topology: Option[Topology],
   options: Options,
-  optionsToRemove: Set[String]
+  defaultLanguageVersion: Option[CypherVersion],
+  optionsToRemove: Set[String],
+  replicas: Option[Either[Int, Parameter]]
+)(implicit idGen: IdGen) extends DatabaseAdministrationLogicalPlan(Some(source))
+
+case class AlterShardedDatabase(
+  source: AdministrationCommandLogicalPlan,
+  databaseName: DatabaseName,
+  access: Option[Access],
+  options: Options,
+  defaultLanguageVersion: Option[CypherVersion],
+  shardDefinition: Option[ShardDefinition]
 )(implicit idGen: IdGen) extends DatabaseAdministrationLogicalPlan(Some(source))
 
 case class StartDatabase(source: AdministrationCommandLogicalPlan, databaseName: DatabaseName)(
@@ -569,10 +720,10 @@ case class CreateRemoteDatabaseAlias(
   targetName: DatabaseName,
   replace: Boolean,
   url: Either[String, Parameter],
-  username: Either[String, Parameter],
-  password: Expression,
+  remoteAliasCredentials: RemoteAliasCredentials,
   driverSettings: Option[Either[Map[String, Expression], Parameter]],
-  properties: Option[Either[Map[String, Expression], Parameter]]
+  properties: Option[Either[Map[String, Expression], Parameter]],
+  defaultLanguageVersion: Option[CypherVersion]
 )(implicit idGen: IdGen) extends DatabaseAdministrationLogicalPlan(Some(source))
 
 case class DropDatabaseAlias(source: AdministrationCommandLogicalPlan, aliasName: DatabaseName)(
@@ -594,7 +745,8 @@ case class AlterRemoteDatabaseAlias(
   username: Option[Either[String, Parameter]],
   password: Option[Expression],
   driverSettings: Option[Either[Map[String, Expression], Parameter]],
-  properties: Option[Either[Map[String, Expression], Parameter]]
+  properties: Option[Either[Map[String, Expression], Parameter]],
+  defaultLanguage: Option[CypherVersion]
 )(implicit idGen: IdGen) extends DatabaseAdministrationLogicalPlan(Some(source))
 
 case class ShowAliases(
@@ -618,7 +770,8 @@ case class EnsureValidNonSystemDatabase(
 case class EnsureDatabaseSafeToDelete(
   source: AdministrationCommandLogicalPlan,
   databaseName: DatabaseName,
-  aliasAction: DropDatabaseAliasAction
+  aliasAction: DropDatabaseAliasAction,
+  action: String
 )(implicit idGen: IdGen)
     extends DatabaseAdministrationLogicalPlan(Some(source))
 
@@ -631,6 +784,50 @@ case class EnsureNameIsNotAmbiguous(
   databaseName: Either[String, Parameter],
   isComposite: Boolean
 )(implicit idGen: IdGen) extends DatabaseAdministrationLogicalPlan(Some(source))
+
+case class AssertNotStandard(
+  source: AdministrationCommandLogicalPlan,
+  name: DatabaseName,
+  action: String,
+  actionVerb: String
+)(implicit idGen: IdGen) extends DatabaseAdministrationLogicalPlan(Some(source))
+
+case class AssertNotVirtualSpd(
+  source: AdministrationCommandLogicalPlan,
+  name: DatabaseName,
+  action: String,
+  actionVerb: String
+)(implicit idGen: IdGen) extends DatabaseAdministrationLogicalPlan(Some(source))
+
+case class AssertNotGraphShard(
+  source: AdministrationCommandLogicalPlan,
+  name: DatabaseName,
+  action: String,
+  actionVerb: String
+)(implicit idGen: IdGen) extends DatabaseAdministrationLogicalPlan(Some(source))
+
+case class AssertNotPropertyShard(
+  source: AdministrationCommandLogicalPlan,
+  name: DatabaseName,
+  action: String,
+  actionVerb: String
+)(implicit idGen: IdGen) extends DatabaseAdministrationLogicalPlan(Some(source))
+
+case class AssertNotShardedDatabase(
+  source: AdministrationCommandLogicalPlan,
+  name: DatabaseName,
+  action: String,
+  actionVerb: String
+)(implicit idGen: IdGen)
+    extends DatabaseAdministrationLogicalPlan(Some(source))
+
+case class AssertNotInvalidActionOnShard(
+  source: AdministrationCommandLogicalPlan,
+  name: DatabaseName,
+  action: String,
+  actionVerb: String
+)(implicit idGen: IdGen)
+    extends SecurityAdministrationLogicalPlan(Some(source))
 
 case class EnableServer(
   source: AdministrationCommandLogicalPlan,
@@ -672,7 +869,7 @@ case class DeallocateServer(
 case class ReallocateDatabases(source: AdministrationCommandLogicalPlan, dryRun: Boolean)(implicit idGen: IdGen)
     extends DatabaseAdministrationLogicalPlan(Some(source))
 
-case class EnsureValidNumberOfDatabases(source: CreateDatabase)(implicit idGen: IdGen)
+case class EnsureValidNumberOfDatabases(source: CreateDatabasePlan)(implicit idGen: IdGen)
     extends DatabaseAdministrationLogicalPlan(Some(source))
 
 case class WaitForCompletion(

@@ -21,12 +21,13 @@ package org.neo4j.kernel.impl.storemigration;
 
 import static java.util.Arrays.asList;
 import static java.util.Collections.singleton;
-import static org.eclipse.collections.impl.factory.Sets.immutable;
 import static org.neo4j.batchimport.api.Configuration.defaultConfiguration;
+import static org.neo4j.configuration.GraphDatabaseInternalSettings.counts_store_max_cached_entries;
 import static org.neo4j.configuration.GraphDatabaseSettings.SYSTEM_DATABASE_NAME;
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
 import static org.neo4j.internal.recordstorage.RecordStorageEngineFactory.createMigrationTargetSchemaRuleAccess;
 import static org.neo4j.internal.recordstorage.StoreTokens.allTokens;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.kernel.impl.storemigration.FileOperation.COPY;
 import static org.neo4j.kernel.impl.storemigration.FileOperation.DELETE;
 import static org.neo4j.kernel.impl.storemigration.FileOperation.MOVE;
@@ -42,7 +43,6 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.UUID;
 import org.apache.commons.lang3.mutable.MutableBoolean;
-import org.eclipse.collections.api.factory.Sets;
 import org.eclipse.collections.api.set.ImmutableSet;
 import org.neo4j.batchimport.api.AdditionalInitialIds;
 import org.neo4j.batchimport.api.BatchImporter;
@@ -68,9 +68,11 @@ import org.neo4j.internal.batchimport.staging.CoarseBoundedProgressExecutionMoni
 import org.neo4j.internal.batchimport.staging.ExecutionMonitor;
 import org.neo4j.internal.counts.CountsBuilder;
 import org.neo4j.internal.counts.CountsStoreProvider;
-import org.neo4j.internal.counts.DegreeStoreProvider;
 import org.neo4j.internal.counts.DegreeUpdater;
 import org.neo4j.internal.counts.DegreesRebuilder;
+import org.neo4j.internal.counts.GBPTreeGenericCountsStore;
+import org.neo4j.internal.counts.GBPTreeRelationshipGroupDegreesStore;
+import org.neo4j.internal.counts.RelationshipGroupDegreesStore;
 import org.neo4j.internal.helpers.collection.Iterables;
 import org.neo4j.internal.helpers.progress.ProgressListener;
 import org.neo4j.internal.helpers.progress.ProgressMonitorFactory;
@@ -93,6 +95,7 @@ import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.impl.muninn.VersionStorage;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.api.index.IndexDirectoryStructure;
 import org.neo4j.kernel.impl.store.CommonAbstractStore;
 import org.neo4j.kernel.impl.store.LegacyMetadataHandler;
@@ -106,10 +109,7 @@ import org.neo4j.kernel.impl.store.format.PageCacheOptionsSelector;
 import org.neo4j.kernel.impl.store.format.RecordFormats;
 import org.neo4j.kernel.impl.store.record.AbstractBaseRecord;
 import org.neo4j.kernel.impl.storemigration.SchemaStoreMigration.SchemaStoreMigrator;
-import org.neo4j.kernel.impl.transaction.log.EmptyLogTailMetadata;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
+import org.neo4j.kernel.recovery.RecoveryStartupChecker;
 import org.neo4j.logging.InternalLogProvider;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.logging.internal.LogService;
@@ -128,6 +128,9 @@ import org.neo4j.storageengine.migration.AbstractStoreMigrationParticipant;
 import org.neo4j.storageengine.migration.SchemaRuleMigrationAccess;
 import org.neo4j.token.TokenHolders;
 import org.neo4j.token.api.TokenHolder;
+import org.neo4j.wal.EmptyLogTailMetadata;
+import org.neo4j.wal.LogPosition;
+import org.neo4j.wal.LogTailMetadata;
 
 /**
  * Migrates a {@link RecordStorageEngine} store from one version to another.
@@ -138,8 +141,6 @@ import org.neo4j.token.api.TokenHolder;
  * Just one out of many potential participants in a migration.
  */
 public class RecordStorageMigrator extends AbstractStoreMigrationParticipant {
-    public static final String NAME = "Store files";
-
     private static final String RECORD_STORAGE_MIGRATION_TAG = "recordStorageMigration";
     private static final String NODE_CHUNK_MIGRATION_TAG = "nodeChunkMigration";
     private static final String RELATIONSHIP_CHUNK_MIGRATION_TAG = "relationshipChunkMigration";
@@ -154,6 +155,7 @@ public class RecordStorageMigrator extends AbstractStoreMigrationParticipant {
     private final BatchImporterFactory batchImporterFactory;
     private final MemoryTracker memoryTracker;
     private final boolean forceBtreeIndexesToRange;
+    private final long maxOffHeapMemory;
     private boolean formatsHaveDifferentStoreCapabilities;
 
     public RecordStorageMigrator(
@@ -166,8 +168,9 @@ public class RecordStorageMigrator extends AbstractStoreMigrationParticipant {
             CursorContextFactory contextFactory,
             BatchImporterFactory batchImporterFactory,
             MemoryTracker memoryTracker,
-            boolean forceBtreeIndexesToRange) {
-        super(NAME);
+            boolean forceBtreeIndexesToRange,
+            long maxOffHeapMemory) {
+        super(STORE_FILES_MIGRATOR_NAME);
         this.fileSystem = fileSystem;
         this.pageCache = pageCache;
         this.config = config;
@@ -178,6 +181,7 @@ public class RecordStorageMigrator extends AbstractStoreMigrationParticipant {
         this.batchImporterFactory = batchImporterFactory;
         this.memoryTracker = memoryTracker;
         this.forceBtreeIndexesToRange = forceBtreeIndexesToRange;
+        this.maxOffHeapMemory = maxOffHeapMemory;
     }
 
     @Override
@@ -281,7 +285,7 @@ public class RecordStorageMigrator extends AbstractStoreMigrationParticipant {
                     schemaStoreMigration.migrate(dstAccess, dstTokensHolders);
 
                     try (var databaseFlushEvent = pageCacheTracer.beginDatabaseFlush()) {
-                        dstStore.flush(databaseFlushEvent, cursorContext);
+                        dstStore.flush(databaseFlushEvent, EMPTY_ASYNC_BLOCK_ACCESSOR, cursorContext);
                     }
                 }
             } else if (requiresPropertyMigration) {
@@ -341,7 +345,20 @@ public class RecordStorageMigrator extends AbstractStoreMigrationParticipant {
         prepareBatchImportMigration(sourceDirectoryStructure, migrationDirectoryStructure, oldFormat, newFormat);
 
         try (NeoStores legacyStore = instantiateLegacyStore(oldFormat, sourceDirectoryStructure)) {
-            Configuration importConfig = new Configuration.Overridden(defaultConfiguration(), config);
+            Configuration importConfig = new Configuration.Overridden(defaultConfiguration(), config) {
+                @Override
+                public long maxOffHeapMemory() {
+                    return maxOffHeapMemory == UNSPECIFIED_MAX_OFF_HEAP_MEMORY
+                            ? super.maxOffHeapMemory()
+                            : maxOffHeapMemory;
+                }
+
+                @Override
+                public boolean enableInstrumentation() {
+                    // should be unused anyway in the record import, but better safe than sorry!
+                    return false;
+                }
+            };
             AdditionalInitialIds additionalInitialIds = readAdditionalIds(
                     lastTxId,
                     lastTxAppendIndex,
@@ -368,7 +385,8 @@ public class RecordStorageMigrator extends AbstractStoreMigrationParticipant {
                     LogFilesInitializer.NULL,
                     indexImporterFactory,
                     memoryTracker,
-                    contextFactory);
+                    contextFactory,
+                    DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
             InputIterable nodes =
                     () -> legacyNodesAsInput(legacyStore, requiresPropertyMigration, contextFactory, memoryTracker);
             InputIterable relationships = () ->
@@ -387,7 +405,7 @@ public class RecordStorageMigrator extends AbstractStoreMigrationParticipant {
                     propertyStoreSize / 2,
                     propertyStoreSize / 2,
                     0 /*node labels left as 0 for now*/);
-            importer.doImport(Input.input(nodes, relationships, IdType.ACTUAL, estimates, ReadableGroups.EMPTY));
+            importer.doImport(Input.input(nodes, relationships, IdType.ACTUAL, estimates, ReadableGroups.EMPTY, false));
 
             // During migration the batch importer doesn't necessarily writes all entities, depending on
             // which stores needs migration. Node, relationship, relationship group stores are always written
@@ -446,8 +464,7 @@ public class RecordStorageMigrator extends AbstractStoreMigrationParticipant {
                         NullLogProvider.getInstance(),
                         contextFactory,
                         true,
-                        LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
-                        Sets.immutable.empty())
+                        DatabaseCreationOptions.EMPTY_CREATION_OPTIONS)
                 .openNeoStores(storesToOpen);
     }
 
@@ -545,8 +562,7 @@ public class RecordStorageMigrator extends AbstractStoreMigrationParticipant {
                 NullLogProvider.getInstance(),
                 contextFactory,
                 false,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
-                immutable.empty());
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
     }
 
     private static AdditionalInitialIds readAdditionalIds(
@@ -714,7 +730,7 @@ public class RecordStorageMigrator extends AbstractStoreMigrationParticipant {
             }
 
             try (var databaseFlushEvent = pageCacheTracer.beginDatabaseFlush()) {
-                dstStore.flush(databaseFlushEvent, cursorContext);
+                dstStore.flush(databaseFlushEvent, EMPTY_ASYNC_BLOCK_ACCESSOR, cursorContext);
             }
         }
     }
@@ -787,14 +803,13 @@ public class RecordStorageMigrator extends AbstractStoreMigrationParticipant {
                         contextFactory,
                         pageCacheTracer,
                         openOptions);
-                var context = contextFactory.create("update counts store");
-                var flushEvent = pageCacheTracer.beginFileFlush()) {
+                var context = contextFactory.create("update counts store")) {
             countsStore.start(context, memoryTracker);
             if (countsUpToDate.isTrue()) {
                 for (long txId = txIdBeforeMigration + 1; txId <= txIdAfterMigration; txId++) {
                     countsStore.updater(txId, true, context).close();
                 }
-                countsStore.checkpoint(flushEvent, context);
+                countsStore.checkpoint(pageCacheTracer, EMPTY_ASYNC_BLOCK_ACCESSOR, context);
             }
         }
 
@@ -810,34 +825,40 @@ public class RecordStorageMigrator extends AbstractStoreMigrationParticipant {
                 return txIdBeforeMigration;
             }
         };
-        try (var degreesStore = DegreeStoreProvider.getInstance()
-                        .openDegreesStore(
-                                pageCache,
-                                fileSystem,
-                                recordLayout,
-                                logService.getInternalLogProvider(),
-                                immediate(),
-                                Config.defaults(),
-                                contextFactory,
-                                pageCacheTracer,
-                                degreesBuilder,
-                                openOptions,
-                                false,
-                                VersionStorage.EMPTY_STORAGE);
-                var context = contextFactory.create("update group degrees store");
-                var flushEvent = pageCacheTracer.beginFileFlush()) {
+        try (var degreesStore = openDegreeStore(recordLayout, degreesBuilder, openOptions);
+                var context = contextFactory.create("update group degrees store")) {
             degreesStore.start(context, EmptyMemoryTracker.INSTANCE);
             if (degreesUpToDate.isTrue()) {
                 for (long txId = txIdBeforeMigration + 1; txId <= txIdAfterMigration; txId++) {
                     degreesStore.updater(txId, true, context).close();
                 }
-                degreesStore.checkpoint(flushEvent, context);
+                degreesStore.checkpoint(pageCacheTracer, EMPTY_ASYNC_BLOCK_ACCESSOR, context);
             }
         }
 
         if (formatsHaveDifferentStoreCapabilities) {
-            fileSystem.delete(recordLayout.indexStatisticsStore());
+            recordLayout.indexStatisticsStore().delete(fileSystem);
         }
+    }
+
+    private RelationshipGroupDegreesStore openDegreeStore(
+            RecordDatabaseLayout recordLayout, DegreesRebuilder degreesBuilder, ImmutableSet<OpenOption> openOptions)
+            throws IOException {
+        return new GBPTreeRelationshipGroupDegreesStore(
+                pageCache,
+                recordLayout.relationshipGroupDegreesStore(),
+                fileSystem,
+                immediate(),
+                degreesBuilder,
+                false,
+                GBPTreeGenericCountsStore.NO_MONITOR,
+                recordLayout.getDatabaseName(),
+                Config.defaults().get(counts_store_max_cached_entries),
+                logService.getInternalLogProvider(),
+                contextFactory,
+                pageCacheTracer,
+                openOptions,
+                RecoveryStartupChecker.EMPTY_CHECKER);
     }
 
     private CountsStore openCountsStore(

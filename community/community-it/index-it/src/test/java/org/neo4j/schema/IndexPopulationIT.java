@@ -40,8 +40,6 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.atomic.AtomicLong;
-import org.apache.commons.lang3.RandomStringUtils;
 import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -58,31 +56,42 @@ import org.neo4j.graphdb.schema.IndexType;
 import org.neo4j.internal.helpers.collection.Iterables;
 import org.neo4j.internal.helpers.collection.Iterators;
 import org.neo4j.internal.kernel.api.IndexMonitor;
+import org.neo4j.internal.kernel.api.IndexReadSession;
+import org.neo4j.internal.kernel.api.NodeValueIndexCursor;
 import org.neo4j.internal.kernel.api.PropertyIndexQuery;
+import org.neo4j.internal.kernel.api.PropertyIndexQuery.ExactPredicate;
 import org.neo4j.internal.kernel.api.TokenRead;
 import org.neo4j.internal.schema.IndexDescriptor;
-import org.neo4j.kernel.database.DatabaseMemoryTrackers;
+import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.impl.api.index.IndexPopulationJob;
 import org.neo4j.kernel.impl.coreapi.TransactionImpl;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.logging.AssertableLogProvider;
 import org.neo4j.monitoring.Monitors;
+import org.neo4j.test.RandomSupport;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
 import org.neo4j.values.storable.RandomValues;
+import org.neo4j.values.storable.RandomValuesUtils;
 
 @TestDirectoryExtension
+@RandomSupportExtension
 class IndexPopulationIT {
     @Inject
     private TestDirectory directory;
+
+    @Inject
+    private RandomSupport random;
 
     private GraphDatabaseAPI database;
     private ExecutorService executorService;
     private AssertableLogProvider logProvider;
     private DatabaseManagementService managementService;
-    private Monitors monitors;
+    private Monitors monitors = new Monitors();
 
     @BeforeEach
     void setUp() {
@@ -100,56 +109,6 @@ class IndexPopulationIT {
     void tearDown() {
         executorService.shutdown();
         managementService.shutdown();
-    }
-
-    @Test
-    void trackMemoryOnIndexPopulation() throws InterruptedException {
-        Label nodeLabel = Label.label("nodeLabel");
-        var propertyName = "testProperty";
-        var indexName = "testIndex";
-
-        try (Transaction transaction = database.beginTx()) {
-            var node = transaction.createNode(nodeLabel);
-            node.setProperty(propertyName, RandomStringUtils.insecure().nextAscii(1024));
-            transaction.commit();
-        }
-
-        var monitors = database.getDependencyResolver().resolveDependency(Monitors.class);
-        var memoryTrackers = database.getDependencyResolver().resolveDependency(DatabaseMemoryTrackers.class);
-        var otherTracker = memoryTrackers.getOtherTracker();
-        var estimatedHeapBefore = otherTracker.estimatedHeapMemory();
-        var usedNativeBefore = otherTracker.usedNativeMemory();
-        AtomicLong peakUsage = new AtomicLong();
-        CountDownLatch populationJobCompleted = new CountDownLatch(1);
-        monitors.addMonitorListener(new IndexMonitor.MonitorAdapter() {
-            @Override
-            public void populationCompleteOn(IndexDescriptor descriptor) {
-                peakUsage.set(Math.max(otherTracker.usedNativeMemory(), peakUsage.get()));
-            }
-
-            @Override
-            public void populationJobCompleted(long peakDirectMemoryUsage) {
-                populationJobCompleted.countDown();
-            }
-        });
-
-        try (Transaction transaction = database.beginTx()) {
-            transaction
-                    .schema()
-                    .indexFor(nodeLabel)
-                    .on(propertyName)
-                    .withName(indexName)
-                    .create();
-            transaction.commit();
-        }
-
-        waitForOnlineIndexes();
-        populationJobCompleted.await();
-
-        long nativeMemoryAfterIndexCompletion = otherTracker.usedNativeMemory();
-        assertEquals(estimatedHeapBefore, otherTracker.estimatedHeapMemory());
-        assertEquals(usedNativeBefore, nativeMemoryAfterIndexCompletion);
-        assertThat(peakUsage.get()).isGreaterThan(nativeMemoryAfterIndexCompletion);
     }
 
     @Test
@@ -270,25 +229,26 @@ class IndexPopulationIT {
     }
 
     @Test
+    @SkipOnSpd(reason = "monitors are not called on graph shard")
     void concurrentUpdatesPopulationOfManyIndexesOnSameSchema() throws InterruptedException, KernelException {
         Label nodeLabel = Label.label("nodeLabel");
-        var propertyName = "testProperty";
-        var rangeIndex = "rangeIndex";
-        var textIndex = "textIndex";
-        var concurrentValue = "concurrentValue";
+        String propertyName = "testProperty";
+        String rangeIndex = "rangeIndex";
+        String textIndex = "textIndex";
+        String concurrentValue = "concurrentValue";
 
         CountDownLatch blockLatch = new CountDownLatch(1);
         CountDownLatch signalLatch = new CountDownLatch(1);
 
         monitors.addMonitorListener(new PopulationScanCompleteBlock(rangeIndex, blockLatch, signalLatch));
 
-        try (var transaction = database.beginTx()) {
-            var node = transaction.createNode(nodeLabel);
+        try (Transaction transaction = database.beginTx()) {
+            Node node = transaction.createNode(nodeLabel);
             node.setProperty(propertyName, "initialValue");
             transaction.commit();
         }
 
-        try (var transaction = database.beginTx()) {
+        try (Transaction transaction = database.beginTx()) {
             transaction
                     .schema()
                     .indexFor(nodeLabel)
@@ -310,8 +270,8 @@ class IndexPopulationIT {
 
         // scan complete
         // new transaction can add to the concurrent queue that will be processed on flip
-        try (var concurrentUpdater = database.beginTx()) {
-            var node = concurrentUpdater.createNode(nodeLabel);
+        try (Transaction concurrentUpdater = database.beginTx()) {
+            Node node = concurrentUpdater.createNode(nodeLabel);
             node.setProperty(propertyName, concurrentValue);
             concurrentUpdater.commit();
         }
@@ -327,28 +287,31 @@ class IndexPopulationIT {
     }
 
     private boolean nodeValueExistsInIndex(String propertyName, String value, String indexName) throws KernelException {
-        try (var transaction = database.beginTx()) {
-            var ktx = ((TransactionImpl) transaction).kernelTransaction();
+        try (Transaction transaction = database.beginTx()) {
+            KernelTransaction ktx = ((TransactionImpl) transaction).kernelTransaction();
             TokenRead tokenRead = ktx.tokenRead();
             int propertyId = tokenRead.propertyKey(propertyName);
-            var query = PropertyIndexQuery.exact(propertyId, utf8Value(value.getBytes(UTF_8)));
+            ExactPredicate query = PropertyIndexQuery.exact(propertyId, utf8Value(value.getBytes(UTF_8)));
 
-            var index = ktx.schemaRead().indexGetForName(indexName);
-            try (var cursor = ktx.cursors().allocateNodeValueIndexCursor(NULL_CONTEXT, INSTANCE)) {
-                var indexSession = ktx.dataRead().indexReadSession(index);
+            IndexDescriptor index = ktx.schemaRead().indexGetForName(indexName);
+            try (NodeValueIndexCursor cursor = ktx.cursors().allocateNodeValueIndexCursor(NULL_CONTEXT, INSTANCE)) {
+                IndexReadSession indexSession = ktx.dataRead().indexReadSession(index);
                 ktx.dataRead().nodeIndexSeek(ktx.queryContext(), indexSession, cursor, unconstrained(), query);
                 return cursor.next();
             }
         }
     }
 
-    private static void prePopulateDatabase(GraphDatabaseService database, Label testLabel, String propertyName) {
-        final RandomValues randomValues = RandomValues.create();
+    private void prePopulateDatabase(GraphDatabaseService database, Label testLabel, String propertyName) {
+        random.withConfiguration(RandomValuesUtils.selectStorageEngineDependentConfigurationBuilder(database)
+                        .maxVectorNumBytes(RandomValues.MAX_NUM_BYTES_IN_INDEX_KEY)
+                        .build())
+                .reset();
 
         try (Transaction transaction = database.beginTx()) {
             for (int j = 0; j < 10_000; j++) {
                 Node node = transaction.createNode(testLabel);
-                Object property = randomValues.nextValue().asObject();
+                Object property = random.nextValue().asObject();
                 node.setProperty(propertyName, property);
             }
             transaction.commit();

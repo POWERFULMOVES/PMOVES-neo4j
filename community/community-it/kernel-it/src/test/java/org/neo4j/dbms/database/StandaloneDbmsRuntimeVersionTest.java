@@ -31,11 +31,16 @@ import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.ResourceIterator;
 import org.neo4j.test.LatestVersions;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
+import org.neo4j.test.UpgradeTestUtil;
 import org.neo4j.test.extension.DbmsExtension;
 import org.neo4j.test.extension.ExtensionCallback;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 
+@SkipOnSpd(
+        reason = "SPD compat runs this with another implementation of DbmsRuntimeVersion",
+        notes = SkipOnSpd.Note.incompatible)
 @TestDirectoryExtension
 @DbmsExtension()
 class StandaloneDbmsRuntimeVersionTest {
@@ -59,7 +64,7 @@ class StandaloneDbmsRuntimeVersionTest {
     }
 
     @Test
-    void testBasicVersionLifecycle() {
+    void testBasicVersionLifecycle() throws Exception {
         // the system DB will be initialised with the default version for this binary
         assertSame(LatestVersions.LATEST_RUNTIME_VERSION, dbmsRuntimeVersionProvider.getVersion());
 
@@ -67,7 +72,7 @@ class StandaloneDbmsRuntimeVersionTest {
         setRuntimeVersion(OLDER_VERSION);
         assertSame(OLDER_VERSION, dbmsRuntimeVersionProvider.getVersion());
 
-        systemDb.executeTransactionally("CALL dbms.upgrade()");
+        UpgradeTestUtil.manuallyUpgrade(systemDb);
 
         assertSame(LatestVersions.LATEST_RUNTIME_VERSION, dbmsRuntimeVersionProvider.getVersion());
     }
@@ -80,7 +85,7 @@ class StandaloneDbmsRuntimeVersionTest {
 
     @Test
     @DbmsExtension(configurationCallback = "configuration")
-    void latestVersionCanBeSetThroughConfigForTests() {
+    void latestVersionCanBeSetThroughConfigForTests() throws Exception {
         // The system DB should be initialised with what we think is latest
         assertSame(OVERRIDDEN_INITIAL_LATEST_VERSION, dbmsRuntimeVersionProvider.getVersion());
 
@@ -89,7 +94,7 @@ class StandaloneDbmsRuntimeVersionTest {
         setRuntimeVersion(OLDER_VERSION);
         assertSame(OLDER_VERSION, dbmsRuntimeVersionProvider.getVersion());
 
-        systemDb.executeTransactionally("CALL dbms.upgrade()");
+        UpgradeTestUtil.manuallyUpgrade(systemDb);
 
         assertSame(OVERRIDDEN_INITIAL_LATEST_VERSION, dbmsRuntimeVersionProvider.getVersion());
     }

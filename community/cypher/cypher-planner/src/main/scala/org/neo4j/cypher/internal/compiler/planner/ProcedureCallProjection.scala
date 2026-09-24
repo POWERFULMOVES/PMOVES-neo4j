@@ -19,14 +19,18 @@
  */
 package org.neo4j.cypher.internal.compiler.planner
 
-import org.neo4j.cypher.internal.ast.Hint
+import org.neo4j.cypher.internal.ast.IrHint
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.LogicalVariable
-import org.neo4j.cypher.internal.frontend.phases.ResolvedCall
+import org.neo4j.cypher.internal.frontend.phases.ResolvedNonLocalCall
 import org.neo4j.cypher.internal.ir.AbstractProcedureCallProjection
 import org.neo4j.cypher.internal.ir.QueryHorizon
+import org.neo4j.cypher.internal.util.collection.immutable.ListSet
 
-case class ProcedureCallProjection(call: ResolvedCall) extends AbstractProcedureCallProjection {
+case class ProcedureCallProjection(
+  call: ResolvedNonLocalCall,
+  importedSymbolsFromLastCallSubquery: Set[LogicalVariable]
+) extends AbstractProcedureCallProjection {
 
   override def exposedSymbols(coveredIds: Set[LogicalVariable]): Set[LogicalVariable] =
     coveredIds ++ call.callResults.map { result =>
@@ -37,7 +41,10 @@ case class ProcedureCallProjection(call: ResolvedCall) extends AbstractProcedure
 
   override def readOnly: Boolean = call.containsNoUpdates
 
-  override def allHints: Set[Hint] = Set.empty
+  override def allHints: ListSet[IrHint] = ListSet.empty
 
-  override def withoutHints(hintsToIgnore: Set[Hint]): QueryHorizon = this
+  override def withoutHints(hintsToIgnore: ListSet[IrHint]): QueryHorizon = this
+
+  override def withoutImpliedExpressions: QueryHorizon = this
+
 }

@@ -21,9 +21,9 @@ package org.neo4j.internal.kernel.api.security;
 
 import java.net.InetAddress;
 import java.net.URI;
+import java.util.function.IntPredicate;
 import java.util.function.Supplier;
-import org.eclipse.collections.api.set.primitive.IntSet;
-import org.eclipse.collections.impl.factory.primitive.IntSets;
+import org.neo4j.internal.kernel.api.LabelsSupplier;
 import org.neo4j.internal.kernel.api.RelTypeSupplier;
 import org.neo4j.internal.kernel.api.TokenSet;
 import org.neo4j.storageengine.api.PropertySelection;
@@ -91,28 +91,23 @@ public class TestAccessMode implements AccessMode {
     }
 
     @Override
+    public boolean hasNoTraverseNodePrivilege() {
+        return !allowRead && !allowReadAll;
+    }
+
+    @Override
     public boolean allowsTraverseNode(int... labels) {
         return allowRead;
     }
 
     @Override
-    public IntSet getTraverseSecurityProperties(int[] labels) {
-        return IntSets.immutable.empty();
-    }
-
-    @Override
-    public boolean hasApplicableTraverseAllowPropertyRules(int label) {
+    public boolean hasApplicableTraverseNodeAllowPropertyRules(int label) {
         return allowRead;
     }
 
     @Override
-    public boolean allowsTraverseNodeWithPropertyRules(ReadSecurityPropertyProvider propertyProvider, int... labels) {
+    public boolean allowsTraverseNode(LabelsSupplier labels, SelectedPropertiesProvider selectedPropertiesProvider) {
         return allowRead;
-    }
-
-    @Override
-    public boolean hasTraversePropertyRules() {
-        return false;
     }
 
     @Override
@@ -126,80 +121,64 @@ public class TestAccessMode implements AccessMode {
     }
 
     @Override
+    public boolean allowsTraverseAllRelsWithType(int relType) {
+        return allowRead;
+    }
+
+    @Override
     public boolean disallowsTraverseRelType(int relType) {
         return !allowRead;
     }
 
     @Override
-    public boolean allowsReadPropertyAllLabels(int propertyKey) {
-        return allowReadAll;
+    public boolean hasApplicableTraverseRelAllowPropertyRules(int type) {
+        return allowRead;
     }
 
     @Override
-    public boolean disallowsReadPropertyForSomeLabel(int propertyKey) {
-        return !allowReadAll;
+    public boolean allowsTraverseRelationship(int type, SelectedPropertiesProvider propertyProviderSupplier) {
+        return allowRead;
     }
 
     @Override
     public boolean allowsReadNodeProperties(
-            Supplier<TokenSet> labels, int[] propertyKeys, ReadSecurityPropertyProvider propertyProvider) {
+            LabelsSupplier labels, int[] propertyKeys, Supplier<SelectedPropertiesProvider> propertyProvider) {
         return allowRead;
     }
 
     @Override
-    public boolean allowsReadNodeProperties(Supplier<TokenSet> labels, int[] propertyKeys) {
+    public IntPredicate allowedToReadNodeProperties(
+            LabelsSupplier labels, Supplier<SelectedPropertiesProvider> propertyProvider, PropertySelection selection) {
+        return key -> allowRead;
+    }
+
+    @Override
+    public boolean allowsTraverseAndReadAllMatchingNodeProperties(int[] labels, int[] propertyKeys) {
         return allowRead;
     }
 
     @Override
-    public boolean allowsReadNodeProperty(
-            Supplier<TokenSet> labels, int propertyKey, ReadSecurityPropertyProvider propertyProvider) {
+    public boolean allowsTraverseAndReadAllMatchingRelProperties(int[] relTypes, int[] propertyKeys) {
         return allowRead;
     }
 
     @Override
-    public boolean allowsReadNodeProperty(Supplier<TokenSet> labels, int propertyKey) {
+    public boolean allowsReadRelProperties(
+            RelTypeSupplier relType, int[] propertyKeys, Supplier<SelectedPropertiesProvider> propertyProvider) {
         return allowRead;
     }
 
     @Override
-    public boolean allowsReadPropertyAllRelTypes(int propertyKey) {
-        return allowReadAll;
-    }
-
-    @Override
-    public boolean allowsReadRelationshipProperty(RelTypeSupplier relType, int propertyKey) {
-        return allowRead;
+    public IntPredicate allowedToReadRelationshipProperties(
+            RelTypeSupplier relType,
+            Supplier<SelectedPropertiesProvider> propertyProvider,
+            PropertySelection selection) {
+        return key -> allowRead;
     }
 
     @Override
     public boolean allowsSeePropertyKeyToken(int propertyKey) {
         return allowRead;
-    }
-
-    @Override
-    public boolean hasPropertyReadRules() {
-        return false;
-    }
-
-    @Override
-    public boolean hasPropertyReadRules(int... propertyKeys) {
-        return false;
-    }
-
-    @Override
-    public IntSet getReadSecurityProperties(int propertyKey) {
-        return IntSets.immutable.empty();
-    }
-
-    @Override
-    public IntSet getAllReadSecurityProperties() {
-        return IntSets.immutable.empty();
-    }
-
-    @Override
-    public PropertySelection getSecurityPropertySelection(PropertySelection selection) {
-        return PropertySelection.NO_PROPERTIES;
     }
 
     @Override
@@ -273,7 +252,7 @@ public class TestAccessMode implements AccessMode {
     }
 
     @Override
-    public boolean allowsSetProperty(Supplier<TokenSet> labels, int propertyKey) {
+    public boolean allowsSetProperty(LabelsSupplier labels, int propertyKey) {
         return allowWrite;
     }
 

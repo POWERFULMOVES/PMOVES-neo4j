@@ -18,13 +18,17 @@ package org.neo4j.cypher.internal.ast
 
 import org.neo4j.cypher.internal.ast.semantics.SemanticAnalysisTooling
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheck
+import org.neo4j.cypher.internal.ast.semantics._
 import org.neo4j.cypher.internal.expressions.LogicalVariable
-import org.neo4j.cypher.internal.expressions.ProcedureOutput
 import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.util.ASTNode
 import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.cypher.internal.util.ProcedureOutput
 import org.neo4j.cypher.internal.util.symbols.CypherType
 import org.neo4j.cypher.internal.util.symbols.TypeSpec
+import org.neo4j.gqlstatus.GqlHelper
+
+import scala.jdk.CollectionConverters._
 
 object ProcedureResultItem {
 
@@ -49,5 +53,18 @@ case class ProcedureResultItem(output: Option[ProcedureOutput], variable: Logica
     types
       .get(outputName)
       .map { typ => declareVariable(variable, typ.covariant): SemanticCheck }
-      .getOrElse(error(s"Unknown procedure output: `$outputName`", position))
+      .getOrElse {
+        val availableColumns = types.keys.toList.sorted
+        error(
+          GqlHelper.getGql42001_42N50(
+            outputName,
+            availableColumns.asJava,
+            position.offset,
+            position.line,
+            position.column
+          ),
+          s"Unknown procedure output: `$outputName`",
+          position
+        )
+      }
 }

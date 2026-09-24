@@ -20,14 +20,14 @@
 package org.neo4j.cypher.internal.runtime.spec
 
 import org.neo4j.cypher.internal.NonFatalCypherError
+import org.neo4j.cypher.internal.notification.InternalNotification
 import org.neo4j.cypher.internal.result.AsyncCleanupOnClose
 import org.neo4j.cypher.internal.runtime.ResourceManager
-import org.neo4j.cypher.internal.util.InternalNotification
 import org.neo4j.cypher.result.QueryProfile
 import org.neo4j.cypher.result.RuntimeResult
 import org.neo4j.exceptions.QueryExecutionTimeoutException
-import org.neo4j.graphdb.QueryStatistics
 import org.neo4j.graphdb.Transaction
+import org.neo4j.kernel.api.query.ExtendedQueryStatistics
 import org.neo4j.kernel.impl.query.QuerySubscriber
 import org.neo4j.kernel.impl.query.TransactionalContext
 import org.neo4j.util.VisibleForTesting
@@ -44,7 +44,8 @@ class ClosingRuntimeTestResult(
   txContext: TransactionalContext,
   resourceManager: ResourceManager,
   subscriber: QuerySubscriber,
-  assertAllReleased: () => Unit
+  assertAllReleased: () => Unit,
+  closeTx: Boolean = false
 ) extends RuntimeResult {
 
   private var error: Throwable = _
@@ -63,7 +64,7 @@ class ClosingRuntimeTestResult(
 
   override def hasServedRows: Boolean = inner.hasServedRows
 
-  override def queryStatistics(): QueryStatistics = inner.queryStatistics()
+  override def queryStatistics(): ExtendedQueryStatistics = inner.queryStatistics()
 
   override def heapHighWaterMark(): Long = inner.heapHighWaterMark()
 
@@ -99,6 +100,10 @@ class ClosingRuntimeTestResult(
         case _ =>
           inner.cancel()
           closeResources()
+      }
+      if (closeTx) {
+        txContext.close()
+        tx.close()
       }
       assertAllReleased()
     }

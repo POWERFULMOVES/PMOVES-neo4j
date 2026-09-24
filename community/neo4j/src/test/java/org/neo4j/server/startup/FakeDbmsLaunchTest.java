@@ -20,6 +20,7 @@
 package org.neo4j.server.startup;
 
 import static java.lang.System.lineSeparator;
+import static java.util.Collections.emptyMap;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static org.apache.commons.lang3.SystemUtils.IS_OS_WINDOWS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -242,6 +243,29 @@ class FakeDbmsLaunchTest {
             Map<String, String> java = Map.of(Bootloader.PROP_VM_NAME, "Java HotSpot(TM) 64-Bit Server VM");
             assertThat(execute(List.of("start"), java, version)).isEqualTo(EXIT_CODE_OK);
             assertThat(err.toString()).doesNotContain("WARNING! You are using an unsupported Java runtime");
+        }
+
+        @Test
+        void shouldNotComplainOnJava25() {
+            Runtime.Version version = Runtime.Version.parse("25.0.2");
+            Map<String, String> java = Map.of(Bootloader.PROP_VM_NAME, "Java HotSpot(TM) 64-Bit Server VM");
+            assertThat(execute(List.of("start"), java, version)).isEqualTo(EXIT_CODE_OK);
+            assertThat(err.toString()).doesNotContain("WARNING! You are using an unsupported Java runtime");
+        }
+
+        @Test
+        void includeUnsafeOptionOnJDK25ByDefault() {
+            Runtime.Version version = Runtime.Version.parse("25.0.1+2");
+            assertThat(execute(List.of("start"), emptyMap(), version)).isEqualTo(EXIT_CODE_OK);
+            assertThat(out.toString()).contains("--sun-misc-unsafe-memory-access=allow");
+        }
+
+        @Test
+        void doNotOverrideUnsafeOptionOnJDK25WhenProvided() {
+            Runtime.Version version = Runtime.Version.parse("25.0.1+2");
+            addConf(BootloaderSettings.additional_jvm, "--sun-misc-unsafe-memory-access=debug");
+            assertThat(execute(List.of("start"), emptyMap(), version)).isEqualTo(EXIT_CODE_OK);
+            assertThat(out.toString()).contains("--sun-misc-unsafe-memory-access=debug");
         }
 
         @Test
@@ -624,7 +648,10 @@ class FakeDbmsLaunchTest {
                     + jvmSetting + "=--add-opens=java.base/java.nio=ALL-UNNAMED" + lineSeparator()
                     + jvmSetting + "=--add-opens=java.base/java.io=ALL-UNNAMED" + lineSeparator()
                     + jvmSetting + "=--add-opens=java.base/sun.nio.ch=ALL-UNNAMED" + lineSeparator()
+                    + jvmSetting + "=--add-opens=java.base/java.util.concurrent=ALL-UNNAMED" + lineSeparator()
                     + jvmSetting + "=--enable-native-access=ALL-UNNAMED" + lineSeparator()
+                    + jvmSetting + "=-Dorg.neo4j.shaded.lucene9.vectorization.upperJavaFeatureVersion=25"
+                    + lineSeparator()
                     + jvmSetting + "=-Dlog4j2.disable.jmx=true";
             assertThat(Files.readString(confFile)).isEqualToIgnoringNewLines(expected);
         }

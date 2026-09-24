@@ -26,7 +26,8 @@ import org.neo4j.cypher.internal.ast.WriteAction
 import org.neo4j.cypher.internal.ast.factory.ddl.AdministrationAndSchemaCommandParserTestBase
 import org.neo4j.cypher.internal.ast.prettifier.Prettifier.maybeImmutable
 import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
+import org.neo4j.cypher.internal.util.test_helpers.GqlExceptionMatchers.gqlStatus
+import org.neo4j.gqlstatus.GqlStatusInfoCodes
 
 class WritePrivilegeAdministrationCommandParserTest extends AdministrationAndSchemaCommandParserTestBase {
 
@@ -44,7 +45,7 @@ class WritePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
           test(s"$verb$immutableString WRITE ON GRAPH foo $preposition role") {
             parsesTo[Statements](func(
               GraphPrivilege(WriteAction, graphScopeFoo)(pos),
-              List(ElementsAllQualifier() _),
+              List(ElementsAllQualifier()(pos)),
               Seq(literalRole),
               immutable
             )(pos))
@@ -53,7 +54,7 @@ class WritePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
           test(s"$verb$immutableString WRITE ON GRAPHS foo $preposition role") {
             parsesTo[Statements](func(
               GraphPrivilege(WriteAction, graphScopeFoo)(pos),
-              List(ElementsAllQualifier() _),
+              List(ElementsAllQualifier()(pos)),
               Seq(literalRole),
               immutable
             )(pos))
@@ -63,8 +64,8 @@ class WritePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString WRITE ON GRAPH * $preposition role") {
             parsesTo[Statements](func(
-              GraphPrivilege(WriteAction, AllGraphsScope()(_))(pos),
-              List(ElementsAllQualifier() _),
+              GraphPrivilege(WriteAction, AllGraphsScope()(pos))(pos),
+              List(ElementsAllQualifier()(pos)),
               Seq(literalRole),
               immutable
             )(pos))
@@ -72,8 +73,8 @@ class WritePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString WRITE ON GRAPHS * $preposition role") {
             parsesTo[Statements](func(
-              GraphPrivilege(WriteAction, AllGraphsScope()(_))(pos),
-              List(ElementsAllQualifier() _),
+              GraphPrivilege(WriteAction, AllGraphsScope()(pos))(pos),
+              List(ElementsAllQualifier()(pos)),
               Seq(literalRole),
               immutable
             )(pos))
@@ -82,7 +83,7 @@ class WritePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
           test(s"$verb$immutableString WRITE ON GRAPH foo, baz $preposition role") {
             parsesTo[Statements](func(
               GraphPrivilege(WriteAction, graphScopeFooBaz)(pos),
-              List(ElementsAllQualifier() _),
+              List(ElementsAllQualifier()(pos)),
               List(literalRole),
               immutable
             )(pos))
@@ -91,7 +92,7 @@ class WritePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
           test(s"$verb$immutableString WRITE ON GRAPHS foo, baz $preposition role") {
             parsesTo[Statements](func(
               GraphPrivilege(WriteAction, graphScopeFooBaz)(pos),
-              List(ElementsAllQualifier() _),
+              List(ElementsAllQualifier()(pos)),
               List(literalRole),
               immutable
             )(pos))
@@ -101,8 +102,8 @@ class WritePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString WRITE ON HOME GRAPH $preposition role") {
             parsesTo[Statements](func(
-              GraphPrivilege(WriteAction, HomeGraphScope()(_))(pos),
-              List(ElementsAllQualifier() _),
+              GraphPrivilege(WriteAction, HomeGraphScope()(pos))(pos),
+              List(ElementsAllQualifier()(pos)),
               Seq(literalRole),
               immutable
             )(pos))
@@ -112,8 +113,8 @@ class WritePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString WRITE ON GRAPH foo $preposition role1, role2") {
             parsesTo[Statements](func(
-              GraphPrivilege(WriteAction, graphScopeFoo)(_),
-              List(ElementsAllQualifier() _),
+              GraphPrivilege(WriteAction, graphScopeFoo)(pos),
+              List(ElementsAllQualifier()(pos)),
               Seq(literalRole1, literalRole2),
               immutable
             )(pos))
@@ -124,7 +125,7 @@ class WritePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
           test(s"$verb$immutableString WRITE ON GRAPH $$foo $preposition role") {
             parsesTo[Statements](func(
               GraphPrivilege(WriteAction, graphScopeParamFoo)(pos),
-              List(ElementsAllQualifier() _),
+              List(ElementsAllQualifier()(pos)),
               Seq(literalRole),
               immutable
             )(pos))
@@ -132,8 +133,8 @@ class WritePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString WRITE ON GRAPH `f:oo` $preposition role") {
             parsesTo[Statements](func(
-              GraphPrivilege(WriteAction, NamedGraphsScope(Seq(namespacedName("f:oo")))(_))(pos),
-              List(ElementsAllQualifier() _),
+              GraphPrivilege(WriteAction, NamedGraphsScope(Seq(namespacedName("f:oo")))(pos))(pos),
+              List(ElementsAllQualifier()(pos)),
               Seq(literalRole),
               immutable
             )(pos))
@@ -142,7 +143,7 @@ class WritePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
           test(s"$verb$immutableString WRITE ON GRAPH foo $preposition $$role") {
             parsesTo[Statements](func(
               GraphPrivilege(WriteAction, graphScopeFoo)(pos),
-              List(ElementsAllQualifier() _),
+              List(ElementsAllQualifier()(pos)),
               Seq(paramRole),
               immutable
             )(pos))
@@ -151,7 +152,7 @@ class WritePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
           test(s"$verb$immutableString WRITE ON GRAPH foo $preposition `r:ole`") {
             parsesTo[Statements](func(
               GraphPrivilege(WriteAction, graphScopeFoo)(pos),
-              List(ElementsAllQualifier() _),
+              List(ElementsAllQualifier()(pos)),
               Seq(literalRColonOle),
               immutable
             )(pos))
@@ -217,23 +218,15 @@ class WritePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString WRITE ON HOME GRAPHS $preposition role") {
             val offset = verb.length + immutableString.length + 15
-            failsParsing[Statements].in {
-              case Cypher5JavaCc => _.withMessage(
-                  s"""Invalid input 'GRAPHS': expected "GRAPH" (line 1, column ${offset + 1} (offset: $offset))"""
-                )
-              case _ => _.withSyntaxErrorContaining(
-                  s"""Invalid input 'GRAPHS': expected 'GRAPH' (line 1, column ${offset + 1} (offset: $offset))"""
-                )
-            }
+            failsParsing[Statements].withSyntaxErrorContaining(
+              s"""Invalid input 'GRAPHS': expected 'GRAPH' (line 1, column ${offset + 1} (offset: $offset))"""
+            )
           }
 
           test(s"$verb$immutableString WRITE ON DEFAULT GRAPHS $preposition role") {
             val offset = verb.length + immutableString.length + 18
             val antlr6Offset = verb.length + immutableString.length + 10
             failsParsing[Statements].in {
-              case Cypher5JavaCc => _.withMessage(
-                  s"""Invalid input 'GRAPHS': expected "GRAPH" (line 1, column ${offset + 1} (offset: $offset))"""
-                )
               case Cypher5 => _.withSyntaxErrorContaining(
                   s"""Invalid input 'GRAPHS': expected 'GRAPH' (line 1, column ${offset + 1} (offset: $offset))"""
                 )
@@ -267,9 +260,8 @@ class WritePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString WRITE ON DEFAULT GRAPH $preposition role") {
             failsParsing[Statements].in {
-              case Cypher5JavaCc | Cypher5 =>
-                _.withMessageStart("`ON DEFAULT GRAPH` is not supported. Use `ON HOME GRAPH` instead.")
-              case _ => _.withSyntaxErrorContaining("Invalid input 'DEFAULT': expected ")
+              case Cypher5 => _.withOldSyntax("`ON DEFAULT GRAPH` is not supported. Use `ON HOME GRAPH` instead.")
+              case _       => _.withSyntaxErrorContaining("Invalid input 'DEFAULT': expected ")
             }
           }
 
@@ -278,9 +270,6 @@ class WritePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
           test(s"$verb$immutableString WRITE ON DATABASES * $preposition role") {
             val offset = verb.length + immutableString.length + 10
             failsParsing[Statements].in {
-              case Cypher5JavaCc => _.withMessage(
-                  s"""Invalid input 'DATABASES': expected "DEFAULT", "GRAPH", "GRAPHS" or "HOME" (line 1, column ${offset + 1} (offset: $offset))"""
-                )
               case Cypher5 => _.withSyntaxErrorContaining(
                   s"""Invalid input 'DATABASES': expected 'GRAPH', 'DEFAULT GRAPH', 'HOME GRAPH' or 'GRAPHS' (line 1, column ${offset + 1} (offset: $offset))"""
                 )
@@ -293,9 +282,6 @@ class WritePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
           test(s"$verb$immutableString WRITE ON DATABASE foo $preposition role") {
             val offset = verb.length + immutableString.length + 10
             failsParsing[Statements].in {
-              case Cypher5JavaCc => _.withMessage(
-                  s"""Invalid input 'DATABASE': expected "DEFAULT", "GRAPH", "GRAPHS" or "HOME" (line 1, column ${offset + 1} (offset: $offset))"""
-                )
               case Cypher5 => _.withSyntaxErrorContaining(
                   s"""Invalid input 'DATABASE': expected 'GRAPH', 'DEFAULT GRAPH', 'HOME GRAPH' or 'GRAPHS' (line 1, column ${offset + 1} (offset: $offset))"""
                 )
@@ -318,9 +304,30 @@ class WritePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
           test(s"$verb$immutableString WRITE ON GRAPH `a`.`b`.`c` $preposition role") {
             // more than two components
             failsParsing[Statements]
-              .withMessageContaining(
-                "Invalid input ``a`.`b`.`c`` for name. Expected name to contain at most two components separated by `.`."
-              )
+              .in {
+                case Cypher5 => _.withMessageStart(
+                    "Invalid input ``a`.`b`.`c`` for name. Expected name to contain at most two components separated by `.`."
+                  )
+                    .withSyntaxErrorGqlStatus(
+                      gqlStatus(
+                        GqlStatusInfoCodes.STATUS_22N05,
+                        "error: data exception - input failed validation. Invalid input '`a`.`b`.`c`' for name."
+                      )
+                        .withCause(
+                          GqlStatusInfoCodes.STATUS_22N83,
+                          "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+                        )
+                    )
+                case _ => _.withMessageStart(
+                    "Incorrectly formatted graph reference '`a`.`b`.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+                  )
+                    .withSyntaxErrorGqlStatus(
+                      gqlStatus(
+                        GqlStatusInfoCodes.STATUS_42NAA,
+                        "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference '`a`.`b`.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+                      )
+                    )
+              }
           }
       }
   }

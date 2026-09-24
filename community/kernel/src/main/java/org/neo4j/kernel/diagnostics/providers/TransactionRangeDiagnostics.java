@@ -34,12 +34,13 @@ import org.neo4j.io.device.DeviceMapper;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.kernel.KernelVersionProvider;
 import org.neo4j.kernel.database.Database;
-import org.neo4j.kernel.impl.transaction.log.entry.LogHeader;
-import org.neo4j.kernel.impl.transaction.log.files.LogFile;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
-import org.neo4j.kernel.impl.transaction.log.files.checkpoint.CheckpointFile;
 import org.neo4j.logging.NullLog;
 import org.neo4j.storageengine.api.TransactionIdStore;
+import org.neo4j.wal.LogFile;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.checkpoint.CheckpointFile;
+import org.neo4j.wal.entry.LogHeader;
+import org.neo4j.wal.files.LogRangeInfo;
 
 public class TransactionRangeDiagnostics extends NamedDiagnosticsProvider {
     private final Database database;
@@ -80,11 +81,12 @@ public class TransactionRangeDiagnostics extends NamedDiagnosticsProvider {
 
     private void dumpTransactionLogInformation(
             DiagnosticsLogger logger, LogFile logFile, FileSystemAbstraction fileSystem) throws IOException {
+        LogRangeInfo logRangeInfo = logFile.getLogRangeInfo();
         logger.log("Transaction log files:");
-        logger.log(" - existing transaction log versions: " + logFile.getLowestLogVersion() + "-"
-                + logFile.getHighestLogVersion());
+        logger.log(" - existing transaction log versions: " + logRangeInfo.lowestVersion() + "-"
+                + logRangeInfo.highestVersion());
         boolean foundTransactions = false;
-        for (long logVersion = logFile.getLowestLogVersion();
+        for (long logVersion = logRangeInfo.lowestVersion();
                 logFile.versionExists(logVersion) && !foundTransactions;
                 logVersion++) {
             if (logFile.hasAnyEntries(logVersion)) {
@@ -113,9 +115,10 @@ public class TransactionRangeDiagnostics extends NamedDiagnosticsProvider {
 
     private void dumpCheckpointLogInformation(DiagnosticsLogger logger, CheckpointFile checkpointFile)
             throws IOException {
+        LogRangeInfo logRangeInfo = checkpointFile.getLogRangeInfo();
         logger.log("Checkpoint log files:");
-        logger.log(" - existing checkpoint log versions: " + checkpointFile.getLowestLogVersion() + "-"
-                + checkpointFile.getHighestLogVersion());
+        logger.log(" - existing checkpoint log versions: " + logRangeInfo.lowestVersion() + "-"
+                + logRangeInfo.highestVersion());
         checkpointFile
                 .findLatestCheckpoint(NullLog.getInstance())
                 .ifPresentOrElse(

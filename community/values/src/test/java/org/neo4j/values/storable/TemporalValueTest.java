@@ -21,18 +21,34 @@ package org.neo4j.values.storable;
 
 import static org.assertj.core.api.AssertionsForClassTypes.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.neo4j.values.storable.DateTimeValue.builder;
 import static org.neo4j.values.storable.DateTimeValue.datetime;
+import static org.neo4j.values.storable.DateValue.date;
+import static org.neo4j.values.storable.LocalDateTimeValue.localDateTime;
+import static org.neo4j.values.storable.Values.booleanValue;
+import static org.neo4j.values.storable.Values.longValue;
 import static org.neo4j.values.virtual.VirtualValues.EMPTY_MAP;
 
+import java.time.Year;
 import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.time.temporal.ChronoUnit;
+import java.time.temporal.Temporal;
 import java.time.temporal.TemporalUnit;
 import org.assertj.core.api.InstanceOfAssertFactories;
 import org.junit.jupiter.api.Test;
+import org.neo4j.exceptions.InvalidArgumentException;
+import org.neo4j.exceptions.UnsupportedTemporalUnitException;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
+import org.neo4j.values.AnyValue;
 import org.neo4j.values.virtual.MapValue;
+import org.neo4j.values.virtual.VirtualValues;
 
-public class TemporalValueTest {
+class TemporalValueTest {
+
+    private FrozenClock clock = new FrozenClock("UTC");
 
     @Test
     void shouldTruncateNicely() {
@@ -46,5 +62,149 @@ public class TemporalValueTest {
                 .satisfies(e -> assertEquals(
                         e.cause().get().statusDescription(),
                         "error: data exception - invalid argument. Invalid argument: cannot process 'Weeks'."));
+    }
+
+    @Test
+    void shouldNotAcceptNonTemporalValuesInUntil() {
+        TemporalValue<ZonedDateTime, DateTimeValue> t = datetime(0, 1, 1, 14, 0, 3, 0, "UTC");
+        TemporalUnit unit = ChronoUnit.WEEKS;
+        Temporal nonTemporalValue = Year.of(2025);
+
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> t.until(nonTemporalValue, unit))
+                .isInstanceOf(InvalidArgumentException.class)
+                .hasMessage("Can only compute durations between TemporalValues.")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22007)
+                .hasStatusDescription("error: data exception - invalid date, time, or datetime format")
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N01)
+                .hasStatusDescription(
+                        "error: data exception - invalid type. Expected the value 2025 to be of type DATE, LOCAL DATETIME, LOCAL TIME, ZONED DATETIME or ZONED TIME, but was of type java.time.temporal.Temporal.");
+    }
+
+    @Test
+    void shouldGiveProperErrorForWrongTypedTemporalField() {
+        MapValue map = VirtualValues.map(new String[] {"year"}, new AnyValue[] {booleanValue(true)});
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> DateValue.build(map, clock))
+                .isInstanceOf(UnsupportedTemporalUnitException.class)
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22G06)
+                .hasStatusDescription("error: data exception - invalid date, time, or datetime function field value")
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N40)
+                .hasStatusDescription(
+                        "error: data exception - non-assignable temporal component. Cannot assign 'year' of a BOOLEAN.");
+    }
+
+    @Test
+    void shouldGiveProperErrorForWrongTypedTimezone() {
+        MapValue map =
+                VirtualValues.map(new String[] {"hour", "timezone"}, new AnyValue[] {longValue(12), longValue(123)});
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> TimeValue.build(map, clock))
+                .isInstanceOf(UnsupportedTemporalUnitException.class)
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22G06)
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N40)
+                .hasStatusDescription(
+                        "error: data exception - non-assignable temporal component. Cannot assign 'timezone' of a INTEGER.");
+    }
+
+    @Test
+    void shouldFailToOverrideYearOfLeapDayToNonLeapYear() {
+        MapValue map =
+                VirtualValues.map(new String[] {"date", "year"}, new AnyValue[] {date(1984, 2, 29), longValue(1983)});
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> DateValue.build(map, clock))
+                .isInstanceOf(InvalidArgumentException.class)
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22007)
+                .hasStatusDescription("error: data exception - invalid date, time, or datetime format")
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N11)
+                .hasStatusDescription(
+                        "error: data exception - invalid argument. Invalid argument: cannot process 'year'.");
+    }
+
+    @Test
+    void shouldFailToOverrideYearOfLeapDayToNonLeapYearForDateTime() {
+        MapValue map = VirtualValues.map(
+                new String[] {"datetime", "year"},
+                new AnyValue[] {datetime(1984, 2, 29, 1, 1, 1, 0, "UTC"), longValue(1983)});
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> DateTimeValue.build(map, clock))
+                .isInstanceOf(InvalidArgumentException.class)
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N11)
+                .hasStatusDescription(
+                        "error: data exception - invalid argument. Invalid argument: cannot process 'year'.");
+    }
+
+    @Test
+    void shouldFailToOverrideYearOfLeapDayToNonLeapYearForLocalDateTime() {
+        MapValue map = VirtualValues.map(
+                new String[] {"datetime", "year"},
+                new AnyValue[] {localDateTime(1984, 2, 29, 1, 1, 1, 0), longValue(1983)});
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> LocalDateTimeValue.build(map, clock))
+                .isInstanceOf(InvalidArgumentException.class)
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N11)
+                .hasStatusDescription(
+                        "error: data exception - invalid argument. Invalid argument: cannot process 'year'.");
+    }
+
+    @Test
+    void shouldFailToOverrideMonthOfDay31ToShorterMonth() {
+        MapValue map =
+                VirtualValues.map(new String[] {"date", "month"}, new AnyValue[] {date(2023, 1, 31), longValue(4)});
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> DateValue.build(map, clock))
+                .isInstanceOf(InvalidArgumentException.class)
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N11)
+                .hasStatusDescription(
+                        "error: data exception - invalid argument. Invalid argument: cannot process 'month'.");
+    }
+
+    @Test
+    void shouldBlameOutOfRangeMonthRatherThanCoOverriddenYear() {
+        MapValue map = VirtualValues.map(
+                new String[] {"date", "year", "month"},
+                new AnyValue[] {date(1984, 2, 29), longValue(1980), longValue(13)});
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> DateValue.build(map, clock))
+                .isInstanceOf(InvalidArgumentException.class)
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N11)
+                .hasStatusDescription(
+                        "error: data exception - invalid argument. Invalid argument: cannot process 'month'.");
+    }
+
+    @Test
+    void shouldAllowOverridingYearAndDayOfLeapDayTogether() {
+        MapValue map = VirtualValues.map(
+                new String[] {"date", "year", "day"},
+                new AnyValue[] {date(1984, 2, 29), longValue(1983), longValue(28)});
+        assertEquals(date(1983, 2, 28), DateValue.build(map, clock));
+    }
+
+    @Test
+    void shouldAllowOverridingMonthOfLeapDayToAnotherLongMonth() {
+        MapValue map =
+                VirtualValues.map(new String[] {"date", "month"}, new AnyValue[] {date(1984, 2, 29), longValue(3)});
+        assertEquals(date(1984, 3, 29), DateValue.build(map, clock));
+    }
+
+    @Test
+    void shouldAllowOverridingYearAndMonthOfLeapDayTogetherWhenStillValid() {
+        MapValue map = VirtualValues.map(
+                new String[] {"date", "year", "month"},
+                new AnyValue[] {date(1984, 2, 29), longValue(1983), longValue(3)});
+        assertEquals(date(1983, 3, 29), DateValue.build(map, clock));
+    }
+
+    @Test
+    void shouldNotAcceptEmptyBuilderState() {
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> builder(clock).build())
+                .isInstanceOf(InvalidArgumentException.class)
+                .hasMessage("Builder state empty")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22007)
+                .hasStatusDescription("error: data exception - invalid date, time, or datetime format")
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N12)
+                .hasStatusDescription(
+                        "error: data exception - invalid date, time, or datetime format. Invalid argument: cannot process 'null'.");
     }
 }

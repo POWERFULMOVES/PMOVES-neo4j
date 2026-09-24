@@ -19,51 +19,74 @@
  */
 package org.neo4j.kernel.api.impl.schema.vector;
 
+import static org.neo4j.kernel.api.impl.schema.LuceneQueryFactory.propertyFiltersForAll;
+import static org.neo4j.kernel.api.impl.schema.LuceneQueryFactory.propertyFiltersForEach;
+
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.OptionalInt;
-import org.apache.lucene.search.Query;
-import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
-import org.neo4j.gqlstatus.GqlParams;
-import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.internal.helpers.collection.BoundedIterable;
+import org.neo4j.internal.kernel.api.EntityFilterBuilder;
+import org.neo4j.internal.kernel.api.EntityFilterIndexReader;
 import org.neo4j.internal.kernel.api.IndexQueryConstraints;
 import org.neo4j.internal.kernel.api.PropertyIndexQuery;
 import org.neo4j.internal.kernel.api.PropertyIndexQuery.NearestNeighborsPredicate;
 import org.neo4j.internal.kernel.api.QueryContext;
+import org.neo4j.internal.kernel.api.SharedEntityFilterBuilder;
 import org.neo4j.internal.kernel.api.exceptions.schema.IndexNotApplicableKernelException;
 import org.neo4j.internal.schema.IndexDescriptor;
+import org.neo4j.internal.schema.IndexQuery.IndexQueryType;
 import org.neo4j.io.IOUtils.AutoCloseables;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.kernel.api.impl.index.SearcherReference;
 import org.neo4j.kernel.api.impl.index.collector.ScoredEntityIterator;
 import org.neo4j.kernel.api.impl.index.collector.ValuesIterator;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDocumentsFactory;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneEntityFilterBuilder;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneQueryContext;
+import org.neo4j.kernel.api.impl.index.lucene.SharedLuceneEntityFilterBuilder;
 import org.neo4j.kernel.api.impl.schema.AbstractLuceneIndexReader;
+import org.neo4j.kernel.api.impl.schema.LuceneQueryFactory;
 import org.neo4j.kernel.api.impl.schema.LuceneScoredEntityIndexProgressor;
 import org.neo4j.kernel.api.impl.schema.reader.IndexReaderCloseException;
 import org.neo4j.kernel.api.index.IndexProgressor;
 import org.neo4j.kernel.api.index.IndexProgressor.EntityValueClient;
 import org.neo4j.kernel.api.index.IndexSampler;
 import org.neo4j.kernel.impl.index.schema.IndexUsageTracking;
+import org.neo4j.logging.LogProvider;
+import org.neo4j.memory.MemoryTracker;
 import org.neo4j.values.storable.Value;
 
-class VectorIndexReader extends AbstractLuceneIndexReader {
-    private final VectorDocumentStructure documentStructure;
+public class VectorIndexReader extends AbstractLuceneIndexReader implements EntityFilterIndexReader {
     private final OptionalInt dimensions;
     private final List<SearcherReference> searchers;
+    private final int maxEfSearch;
 
     VectorIndexReader(
             IndexDescriptor descriptor,
             VectorIndexConfig vectorIndexConfig,
             VectorDocumentStructure documentStructure,
+            int maxEfSearch,
+            boolean rescoreReadAdvice,
             List<SearcherReference> searchers,
-            IndexUsageTracking usageTracker) {
-        super(descriptor, usageTracker);
-        this.documentStructure = documentStructure;
+            IndexUsageTracking usageTracker,
+            LogProvider logProvider) {
+        super(
+                descriptor,
+                usageTracker,
+                new LuceneQueryFactory.VectorQueryFactory(
+                        documentStructure,
+                        vectorIndexConfig.quantization(),
+                        vectorIndexConfig.defaultSearchExpansionFactor(),
+                        maxEfSearch,
+                        rescoreReadAdvice),
+                logProvider);
         this.dimensions = vectorIndexConfig.dimensions();
         this.searchers = searchers;
+        this.maxEfSearch = maxEfSearch;
     }
 
     @Override
@@ -74,11 +97,18 @@ class VectorIndexReader extends AbstractLuceneIndexReader {
         //              LeafReader::getFloatVectorValues seems promising with something like DocValuesCollector.
         //              Otherwise, perhaps k-ANN of k=1, filter=getById, (score-1) < epsilon?
 
-        var count = 0L;
-        final var query = VectorQueryFactory.getById(entityId);
-        for (final var searcher : searchers) {
+        if (searchers.isEmpty()) {
+            return 0;
+        }
+        long count = 0L;
+        LuceneQueryContext queryContext = searchers
+                .getFirst()
+                .getIndexSearcher()
+                .newQueryContext()
+                .exactTerm(LuceneDocumentsFactory.ENTITY_ID_KEY, entityId);
+        for (SearcherReference searcher : searchers) {
             try {
-                count += searcher.getIndexSearcher().count(query);
+                count += searcher.getIndexSearcher().count(queryContext);
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
             }
@@ -94,71 +124,118 @@ class VectorIndexReader extends AbstractLuceneIndexReader {
     @Override
     public void query(
             EntityValueClient client,
-            QueryContext context,
+            QueryContext queryContext,
+            CursorContext cursorContext,
             IndexQueryConstraints constraints,
             PropertyIndexQuery... predicates)
             throws IndexNotApplicableKernelException {
-        super.query(client, context, adjustedConstraints(constraints, predicates), predicates);
+        super.query(client, queryContext, cursorContext, adjustedConstraints(constraints, predicates), predicates);
     }
 
     @Override
-    protected PropertyIndexQuery validateQuery(PropertyIndexQuery... predicates)
+    public void reportIndexQueried(QueryContext context, PropertyIndexQuery... predicates) {
+        context.monitor().queried(descriptor);
+        boolean queriedWitFilter = propertyFiltersForAll(predicates, p -> p.type() != IndexQueryType.ALL);
+        if (queriedWitFilter) {
+            usageTracker.queriedWithFilter();
+        } else {
+            usageTracker.queried();
+        }
+    }
+
+    @Override
+    public void validateQuery(IndexQueryConstraints constraints, PropertyIndexQuery... predicates)
             throws IndexNotApplicableKernelException {
-        final var predicate = super.validateQuery(predicates);
-        if (predicate instanceof final NearestNeighborsPredicate nearestNeighbour) {
-            final var queryVector = nearestNeighbour.query();
+        validatePrimaryPredicate(predicates[0]);
+        validateFilteredQueryPredicates(predicates);
+    }
+
+    @Override
+    public PropertyIndexQuery validateSingleQuery(IndexQueryConstraints constraints, PropertyIndexQuery... predicates)
+            throws IndexNotApplicableKernelException {
+        PropertyIndexQuery predicate = super.validateSingleQuery(constraints, predicates);
+        if (predicate instanceof NearestNeighborsPredicate nearestNeighbour) {
+            float[] queryVector = nearestNeighbour.query();
             if (dimensions.isPresent() && queryVector.length != dimensions.getAsInt()) {
-                var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N65)
-                        .withParam(GqlParams.StringParam.idx, indexName())
-                        .withParam(GqlParams.NumberParam.dim1, queryVector.length)
-                        .withParam(GqlParams.NumberParam.dim2, dimensions.getAsInt())
-                        .build();
-                throw new IndexNotApplicableKernelException(
-                        gql,
-                        "Index query vector has a dimensionality of %d, but indexed vectors have %d."
-                                .formatted(queryVector.length, dimensions.getAsInt()));
+                throw IndexNotApplicableKernelException.vectorIndexDimensionalityMismatch(
+                        indexName(), dimensions.getAsInt(), queryVector.length);
             }
         }
         return predicate;
     }
 
+    @Override
+    public EntityFilterBuilder newEntityFilterBuilder(MemoryTracker memoryTracker) {
+        return new LuceneEntityFilterBuilder(LuceneDocumentsFactory.ENTITY_ID_KEY, searchers, memoryTracker);
+    }
+
+    @Override
+    public SharedEntityFilterBuilder newSharedEntityFilterBuilder(MemoryTracker memoryTracker) {
+        return new SharedLuceneEntityFilterBuilder(LuceneDocumentsFactory.ENTITY_ID_KEY, searchers, memoryTracker);
+    }
+
+    private static final List<IndexQueryType> validIndexQueryTypes = List.of(
+            IndexQueryType.ALL,
+            IndexQueryType.EXISTS,
+            IndexQueryType.NOT_EXISTS,
+            IndexQueryType.EXACT,
+            IndexQueryType.RANGE,
+            IndexQueryType.IN_SET);
+
+    private void validateFilteredQueryPredicates(PropertyIndexQuery... predicates)
+            throws IndexNotApplicableKernelException {
+        propertyFiltersForEach(predicates, predicate -> {
+            if (predicate == null) {
+                throw nullVectorQueryFilter(
+                        msg -> IndexNotApplicableKernelException.indexNotApplicable(log, descriptor.getName(), msg),
+                        validIndexQueryTypes,
+                        predicates);
+            }
+            IndexQueryType type = predicate.type();
+            switch (type) {
+                case ALL, EXISTS, NOT_EXISTS, EXACT, RANGE, IN_SET -> {
+                    // Each filter predicate is independent of others;
+                    // so we can support arbitrary combinations range and exact predicates
+                }
+                default ->
+                    throw invalidVectorQueryFilter(
+                            msg -> IndexNotApplicableKernelException.indexNotApplicable(log, descriptor.getName(), msg),
+                            validIndexQueryTypes,
+                            predicate,
+                            predicates);
+            }
+        });
+    }
+
     private IndexQueryConstraints adjustedConstraints(
             IndexQueryConstraints constraints, PropertyIndexQuery... predicates)
             throws IndexNotApplicableKernelException {
-        return validateQuery(predicates) instanceof final NearestNeighborsPredicate nearestNeighbour
-                ? constraints.limit(Math.min(
-                        nearestNeighbour.numberOfNeighbors(),
-                        constraints.limit().orElse(Integer.MAX_VALUE)))
+        return validateSingleQuery(constraints, predicates) instanceof NearestNeighborsPredicate nearestNeighbor
+                ? constraints.limit(nearestNeighbor.numberOfNeighbors(constraints, maxEfSearch))
                 : constraints;
     }
 
     @Override
-    protected Query toLuceneQuery(PropertyIndexQuery predicate, IndexQueryConstraints constraints) {
-        return switch (predicate.type()) {
-            case ALL_ENTRIES -> VectorQueryFactory.allValues();
-            case NEAREST_NEIGHBORS -> {
-                final var nearestNeighborsPredicate = (NearestNeighborsPredicate) predicate;
-                final var k = Math.min(
-                        nearestNeighborsPredicate.numberOfNeighbors(),
-                        constraints.limit().orElse(Integer.MAX_VALUE));
-                final var effectiveK = k + constraints.skip().orElse(0);
-                yield VectorQueryFactory.approximateNearestNeighbors(
-                        documentStructure, nearestNeighborsPredicate.query(), Math.toIntExact(effectiveK));
-            }
-            default -> throw invalidQuery(IllegalArgumentException::new, predicate);
-        };
-    }
-
-    @Override
     protected IndexProgressor indexProgressor(
-            Query query, IndexQueryConstraints constraints, IndexProgressor.EntityValueClient client) {
-        final var iterator = searchLucene(query, constraints);
+            LuceneQueryFactory queryFactory,
+            IndexQueryConstraints constraints,
+            EntityValueClient client,
+            PropertyIndexQuery... predicates) {
+        ValuesIterator iterator;
+        if (searchers.isEmpty()) {
+            iterator = ValuesIterator.EMPTY;
+        } else {
+            iterator = searchLucene(
+                    queryFactory.createQuery(
+                            searchers.getFirst().getIndexSearcher(), constraints, descriptor, predicates),
+                    constraints);
+        }
         return new LuceneScoredEntityIndexProgressor(iterator, client, constraints);
     }
 
     @Override
     protected String entityIdFieldKey() {
-        return VectorDocumentStructure.ENTITY_ID_KEY;
+        return LuceneDocumentsFactory.ENTITY_ID_KEY;
     }
 
     @Override
@@ -170,22 +247,22 @@ class VectorIndexReader extends AbstractLuceneIndexReader {
 
     @Override
     public void close() {
-        final var closeables = new AutoCloseables<>(IndexReaderCloseException::new, searchers);
+        AutoCloseables<IndexReaderCloseException> closeables =
+                new AutoCloseables<>(IndexReaderCloseException::new, searchers);
         try (closeables) {
             super.close();
         }
     }
 
-    private ValuesIterator searchLucene(Query query, IndexQueryConstraints constraints) {
+    private ValuesIterator searchLucene(LuceneQueryContext queryContext, IndexQueryConstraints constraints) {
         // TODO VECTOR: FulltextIndexReader handles transaction state in a similar way
         //              with QueryContext, CursorContext, MemoryTracker
         try {
             // TODO VECTOR: pre-rewrite query? Not sure what rewriting entails
-            final var results = new ArrayList<ValuesIterator>(searchers.size());
-            for (final var searcher : searchers) {
-                final var collector = new VectorResultCollector(constraints);
-                searcher.getIndexSearcher().search(query, collector);
-                results.add(collector.iterator());
+            List<ValuesIterator> results = new ArrayList<>(searchers.size());
+            for (SearcherReference searcher : searchers) {
+                ValuesIterator valuesIterator = searcher.getIndexSearcher().searchVectors(queryContext, constraints);
+                results.add(valuesIterator);
             }
             return ScoredEntityIterator.mergeIterators(results);
         } catch (IOException e) {
@@ -193,13 +270,17 @@ class VectorIndexReader extends AbstractLuceneIndexReader {
         }
     }
 
-    BoundedIterable<Long> newAllEntriesValueReader(long fromIdInclusive, long toIdExclusive) throws IOException {
-        final var field = VectorDocumentStructure.ENTITY_ID_KEY;
-        final var query = VectorQueryFactory.allValues();
-        final var iterables = new ArrayList<BoundedIterable<Long>>(searchers.size());
-        for (final var searcher : searchers) {
+    BoundedIterable<Long> newAllEntriesValueReader(long fromIdInclusive, long toIdExclusive) {
+        if (searchers.isEmpty()) {
+            return BoundedIterable.empty();
+        }
+        String field = LuceneDocumentsFactory.ENTITY_ID_KEY;
+        LuceneQueryContext queryContext =
+                searchers.getFirst().getIndexSearcher().newQueryContext().matchAll();
+        Collection<BoundedIterable<Long>> iterables = new ArrayList<>(searchers.size());
+        for (SearcherReference searcher : searchers) {
             iterables.add(newAllEntriesValueReaderForPartition(
-                    field, searcher.getIndexSearcher(), query, fromIdInclusive, toIdExclusive));
+                    field, searcher.getIndexSearcher(), queryContext, fromIdInclusive, toIdExclusive));
         }
         return BoundedIterable.concat(iterables);
     }

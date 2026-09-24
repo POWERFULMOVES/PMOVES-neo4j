@@ -29,16 +29,24 @@ import org.neo4j.cypher.internal.runtime.interpreted.pipes.QueryState
 import org.neo4j.cypher.internal.util.attribution.Id
 
 case class UndirectedUnionRelationshipTypesScanSlottedPipe(
-  relOffset: Int,
-  fromOffset: Int,
+  relOffset: Option[Int],
+  fromOffset: Option[Int],
   types: Seq[LazyTypeStatic],
-  toOffset: Int,
-  indexOrder: IndexOrder
+  toOffset: Option[Int],
+  indexOrder: IndexOrder,
+  includeChangesFromThisTransaction: Boolean
 )(val id: Id = Id.INVALID_ID) extends Pipe {
 
   protected def internalCreateResults(state: QueryState): ClosingIterator[CypherRow] = {
     new UndirectedRelationshipTypeScanSlottedPipe.UndirectedIterator(
-      unionTypeIterator(state, types, indexOrder, state.relTypeTokenReadSession.get),
+      unionTypeIterator(
+        state,
+        types,
+        indexOrder,
+        state.relTypeTokenReadSession.get,
+        callReadFromStore = true,
+        includeChangesFromThisTransaction
+      ),
       relOffset,
       fromOffset,
       toOffset,

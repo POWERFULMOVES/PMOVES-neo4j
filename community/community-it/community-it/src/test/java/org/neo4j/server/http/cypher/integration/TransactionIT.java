@@ -23,6 +23,7 @@ import static java.lang.Math.max;
 import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.neo4j.server.WebContainerTestUtils.withCSVFile;
 import static org.neo4j.server.http.cypher.integration.TransactionConditions.containsNoErrors;
@@ -32,6 +33,7 @@ import static org.neo4j.server.http.cypher.integration.TransactionConditions.val
 import static org.neo4j.server.rest.domain.JsonHelper.jsonNode;
 import static org.neo4j.server.web.HttpHeaderUtils.ACCESS_MODE_HEADER;
 import static org.neo4j.server.web.HttpHeaderUtils.BOOKMARKS_HEADER;
+import static org.neo4j.test.assertion.Assert.assertEventually;
 import static org.neo4j.test.server.HTTP.RawPayload.quotedJson;
 import static org.neo4j.test.server.HTTP.RawPayload.rawPayload;
 
@@ -41,6 +43,7 @@ import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.io.Reader;
 import java.net.Socket;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
@@ -50,6 +53,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -57,6 +61,8 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.neo4j.bolt.tx.TransactionManager;
+import org.neo4j.configuration.Config;
+import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.fabric.bolt.QueryRouterBookmark;
 import org.neo4j.fabric.bookmark.BookmarkFormat;
 import org.neo4j.graphdb.GraphDatabaseService;
@@ -92,7 +98,7 @@ public class TransactionIT extends AbstractRestFunctionalTestBase {
     @AfterEach
     public void afterEach() {
         // verify TransactionManager's state is reset after each
-        assertThat(transactionManager.getTransactionCount()).isEqualTo(0);
+        assertEventually(() -> transactionManager.getTransactionCount(), c -> c == 0, 5, TimeUnit.SECONDS);
         executors.shutdown();
     }
 
@@ -546,7 +552,7 @@ public class TransactionIT extends AbstractRestFunctionalTestBase {
         for (JsonNode node : nodes.get(0).get("labels")) {
             labels.add(node.asText());
         }
-        assertTrue(labels.size() > 0, "some labels");
+        assertFalse(labels.isEmpty(), "some labels");
     }
 
     @Test
@@ -604,12 +610,11 @@ public class TransactionIT extends AbstractRestFunctionalTestBase {
             int times = 0;
             do {
                 nodesInDatabaseBeforeTransaction = countNodes();
-                txIdBefore = resolveDependency(TransactionIdStore.class).getLastClosedTransactionId();
+                txIdBefore = resolveDependency(TransactionIdStore.class).getHighestGapFreeClosedTransactionId();
 
                 // begin and execute and commit
                 // language=json
-                var query = String.format(
-                        """
+                var query = String.format("""
                         {
                           "statements": [
                             {
@@ -617,15 +622,14 @@ public class TransactionIT extends AbstractRestFunctionalTestBase {
                             }
                           ]
                         }
-                        """,
-                        url, batch);
+                        """, url, batch);
 
                 response = POST(transactionCommitUri(), quotedJson(query));
                 times++;
 
             } while (response.get("errors").iterator().hasNext() && (times < 5));
 
-            long txIdAfter = resolveDependency(TransactionIdStore.class).getLastClosedTransactionId();
+            long txIdAfter = resolveDependency(TransactionIdStore.class).getHighestGapFreeClosedTransactionId();
 
             assertThat(response).as("Last response is: " + response).satisfies(containsNoErrors());
             assertThat(response.status()).isEqualTo(200);
@@ -641,8 +645,7 @@ public class TransactionIT extends AbstractRestFunctionalTestBase {
         int batchSize = 2;
 
         // language=json
-        var query =
-                """
+        var query = """
                 {
                   "statements": [
                     {
@@ -657,11 +660,11 @@ public class TransactionIT extends AbstractRestFunctionalTestBase {
 
         withCSVFile(nodes, url -> {
             long nodesInDatabaseBeforeTransaction = countNodes();
-            long txIdBefore = resolveDependency(TransactionIdStore.class).getLastClosedTransactionId();
+            long txIdBefore = resolveDependency(TransactionIdStore.class).getHighestGapFreeClosedTransactionId();
 
             // begin and execute and commit
             Response response = POST(transactionCommitUri(), quotedJson(String.format(query, url, batchSize)));
-            long txIdAfter = resolveDependency(TransactionIdStore.class).getLastClosedTransactionId();
+            long txIdAfter = resolveDependency(TransactionIdStore.class).getHighestGapFreeClosedTransactionId();
 
             assertThat(response.status()).isEqualTo(200);
 
@@ -680,8 +683,7 @@ public class TransactionIT extends AbstractRestFunctionalTestBase {
     public void begin_and_execute_multiple_call_in_tx_last_and_commit() throws Exception {
 
         // language=json
-        var query =
-                """
+        var query = """
                 {
                   "statements": [
                     {
@@ -708,8 +710,7 @@ public class TransactionIT extends AbstractRestFunctionalTestBase {
     public void begin_and_execute_call_in_tx_followed_by_another_statement_and_commit() throws Exception {
 
         // language=json
-        var query =
-                """
+        var query = """
                 {
                   "statements": [
                     {
@@ -1116,24 +1117,30 @@ public class TransactionIT extends AbstractRestFunctionalTestBase {
 
     @Test
     void shouldFailForUnreachableBookmark() {
-        var lastClosedTransactionId = getLastClosedTransactionId();
+        Config config = resolveDependency(Config.class);
+        try {
+            config.setDynamic(GraphDatabaseSettings.bookmark_ready_timeout, Duration.ofSeconds(1), "test");
+            var lastClosedTransactionId = getLastClosedTransactionId();
 
-        var expectedBookmark = BookmarkFormat.serialize(new QueryRouterBookmark(
-                List.of(new QueryRouterBookmark.InternalGraphState(
-                        resolveDependency(Database.class)
-                                .getNamedDatabaseId()
-                                .databaseId()
-                                .uuid(),
-                        lastClosedTransactionId + 1)),
-                List.of()));
+            var expectedBookmark = BookmarkFormat.serialize(new QueryRouterBookmark(
+                    List.of(new QueryRouterBookmark.InternalGraphState(
+                            resolveDependency(Database.class)
+                                    .getNamedDatabaseId()
+                                    .databaseId()
+                                    .uuid(),
+                            lastClosedTransactionId + 1)),
+                    List.of()));
 
-        Response begin = POST(
-                TX_ENDPOINT,
-                quotedJson("{ 'statements': [ { 'statement': 'CREATE (n)' } ] }"),
-                bookmarkHeader(expectedBookmark));
+            Response begin = POST(
+                    TX_ENDPOINT,
+                    quotedJson("{ 'statements': [ { 'statement': 'CREATE (n)' } ] }"),
+                    bookmarkHeader(expectedBookmark));
 
-        assertThat(begin.status()).isEqualTo(201);
-        assertThat(begin).satisfies(hasErrors(Status.Transaction.BookmarkTimeout));
+            assertThat(begin.status()).isEqualTo(201);
+            assertThat(begin).satisfies(hasErrors(Status.Transaction.BookmarkTimeout));
+        } finally {
+            config.setDynamic(GraphDatabaseSettings.bookmark_ready_timeout, null, "test");
+        }
     }
 
     @Test
@@ -1168,35 +1175,40 @@ public class TransactionIT extends AbstractRestFunctionalTestBase {
 
     @Test
     public void shouldWaitForUpdatedBookmark() {
-        var lastClosedTransactionId = getLastClosedTransactionId();
+        Config config = resolveDependency(Config.class);
+        try {
+            config.setDynamic(GraphDatabaseSettings.bookmark_ready_timeout, Duration.ofSeconds(1), "test");
+            var lastClosedTransactionId = getLastClosedTransactionId();
 
-        var expectedBookmark = BookmarkFormat.serialize(new QueryRouterBookmark(
-                List.of(new QueryRouterBookmark.InternalGraphState(
-                        resolveDependency(Database.class)
-                                .getNamedDatabaseId()
-                                .databaseId()
-                                .uuid(),
-                        lastClosedTransactionId + 1)),
-                List.of()));
+            var expectedBookmark = BookmarkFormat.serialize(new QueryRouterBookmark(
+                    List.of(new QueryRouterBookmark.InternalGraphState(
+                            resolveDependency(Database.class)
+                                    .getNamedDatabaseId()
+                                    .databaseId()
+                                    .uuid(),
+                            lastClosedTransactionId + 1)),
+                    List.of()));
 
-        var begin = POST(
-                transactionCommitUri(),
-                quotedJson("{ 'statements': [ { 'statement': 'CREATE (n)' } ] }"),
-                bookmarkHeader(expectedBookmark));
+            var begin = POST(
+                    transactionCommitUri(),
+                    quotedJson("{ 'statements': [ { 'statement': 'CREATE (n)' } ] }"),
+                    bookmarkHeader(expectedBookmark));
 
-        assertThat(begin.status()).isEqualTo(200);
-        assertThat(begin).satisfies(hasErrors(Status.Transaction.BookmarkTimeout));
+            assertThat(begin.status()).isEqualTo(200);
+            assertThat(begin).satisfies(hasErrors(Status.Transaction.BookmarkTimeout));
 
-        // move the state forward one so bookmark becomes reachable
-        POST(transactionCommitUri(), quotedJson("{ 'statements': [ { 'statement': 'CREATE (n)' } ] }"));
+            // move the state forward one so bookmark becomes reachable
+            POST(transactionCommitUri(), quotedJson("{ 'statements': [ { 'statement': 'CREATE (n)' } ] }"));
+            Response begin2 = POST(
+                    transactionCommitUri(),
+                    quotedJson("{ 'statements': [ { 'statement': 'CREATE (n)' } ] }"),
+                    bookmarkHeader(expectedBookmark));
 
-        Response begin2 = POST(
-                transactionCommitUri(),
-                quotedJson("{ 'statements': [ { 'statement': 'CREATE (n)' } ] }"),
-                bookmarkHeader(expectedBookmark));
-
-        assertThat(begin2.status()).isEqualTo(200);
-        assertThat(begin2).satisfies(containsNoErrors());
+            assertThat(begin2.status()).isEqualTo(200);
+            assertThat(begin2).satisfies(containsNoErrors());
+        } finally {
+            config.setDynamic(GraphDatabaseSettings.bookmark_ready_timeout, null, "test");
+        }
     }
 
     @Test
@@ -1204,8 +1216,7 @@ public class TransactionIT extends AbstractRestFunctionalTestBase {
         var nodesAtStart = countNodes();
 
         // language=json
-        var query =
-                """
+        var query = """
                 {
                   "statements": [
                     {
@@ -1222,7 +1233,7 @@ public class TransactionIT extends AbstractRestFunctionalTestBase {
                     }
                   ]
                 }
-                                """;
+                """;
 
         HTTP.Response response = POST(transactionCommitUri(), quotedJson(query));
 
@@ -1236,8 +1247,7 @@ public class TransactionIT extends AbstractRestFunctionalTestBase {
         var nodesAtStart = countNodes();
 
         // language=json
-        var query =
-                """
+        var query = """
                 {
                   "statements": [
                     {
@@ -1281,7 +1291,7 @@ public class TransactionIT extends AbstractRestFunctionalTestBase {
     }
 
     private long countNodes(String... labels) {
-        Set<Label> givenLabels = new HashSet<>(labels.length);
+        Set<Label> givenLabels = HashSet.newHashSet(labels.length);
         for (String label : labels) {
             givenLabels.add(Label.label(label));
         }
@@ -1350,6 +1360,6 @@ public class TransactionIT extends AbstractRestFunctionalTestBase {
 
     public long getLastClosedTransactionId() {
         var txIdStore = resolveDependency(TransactionIdStore.class);
-        return txIdStore.getLastClosedTransactionId();
+        return txIdStore.getHighestGapFreeClosedTransactionId();
     }
 }

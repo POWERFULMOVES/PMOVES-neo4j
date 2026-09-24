@@ -22,7 +22,7 @@ import org.neo4j.cypher.internal.ast.RemovePropertyItem
 import org.neo4j.cypher.internal.ast.SetExactPropertiesFromMapItem
 import org.neo4j.cypher.internal.ast.SetIncludingPropertiesFromMapItem
 import org.neo4j.cypher.internal.ast.SetPropertyItem
-import org.neo4j.cypher.internal.ast.ShowDatabase
+import org.neo4j.cypher.internal.ast.ShowDatabasesClause
 import org.neo4j.cypher.internal.ast.Statements
 import org.neo4j.cypher.internal.ast.UseGraph
 import org.neo4j.cypher.internal.ast.Yield
@@ -37,12 +37,11 @@ import org.neo4j.cypher.internal.expressions.PropertyKeyName
 import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.label_expressions.LabelExpressionPredicate
 import org.neo4j.cypher.internal.util.InputPosition
-import org.scalatest.LoneElement
 
-class ParserPositionTest extends AstParsingTestBase with LoneElement {
+class ParserPositionTest extends AstParsingTestBase {
 
   test("MATCH (n) RETURN n.prop") {
-    parses[Statements].withPositionOf[Property](InputPosition(17, 1, 18))
+    parses[Statements].withPositionOf[Property](InputPosition(18, 1, 19))
   }
 
   test("MATCH (n) SET n.prop = 1") {
@@ -70,7 +69,7 @@ class ParserPositionTest extends AstParsingTestBase with LoneElement {
   }
 
   test("RETURN 3 IN list[0] AS r") {
-    parses[Statements].withPositionOf[ContainerIndex](InputPosition(17, 1, 18))
+    parses[Statements].withPositionOf[ContainerIndex](InputPosition(16, 1, 17))
   }
 
   test("RETURN 3 IN [1, 2, 3][0..1] AS r") {
@@ -78,7 +77,7 @@ class ParserPositionTest extends AstParsingTestBase with LoneElement {
   }
 
   test("MATCH (a) WHERE NOT (a:A)") {
-    parses[Statements].withPositionOf[LabelExpressionPredicate](InputPosition(21, 1, 22))
+    parses[Statements].withPositionOf[LabelExpressionPredicate](InputPosition(22, 1, 23))
   }
 
   test("MATCH (n) WHERE exists { (n) --> () }") {
@@ -98,7 +97,7 @@ class ParserPositionTest extends AstParsingTestBase with LoneElement {
   }
 
   test("MATCH (n) WHERE exists { MATCH (m) WHERE exists { (n)-[]->(m) } }") {
-    parses[Statements].withAstLike { ast: Statements =>
+    parses[Statements].withAstLike { (ast: Statements) =>
       ast.folder.findAllByClass[ExistsExpression] match {
         case Seq(exists, existsNested) =>
           exists.position shouldBe InputPosition(16, 1, 17)
@@ -126,8 +125,7 @@ class ParserPositionTest extends AstParsingTestBase with LoneElement {
     ("DATABASE neo4j YIELD name", 26)
   ).foreach { case (name, variableOffset) =>
     test(s"SHOW $name") {
-      parses[Statements]
-        .withPositionOf[ShowDatabase](InputPosition(0, 1, 1))
+      parses[Statements].withPositionOf[ShowDatabasesClause](InputPosition(0, 1, 1))
         .withAstLike { ast =>
           ast.folder.treeFind[Variable](_.name == "name").map(_.position) shouldBe
             Some(InputPosition(variableOffset, 1, variableOffset + 1))

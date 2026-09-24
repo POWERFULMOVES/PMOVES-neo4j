@@ -21,17 +21,23 @@ package org.neo4j.internal.recordstorage;
 
 import static org.neo4j.kernel.KernelVersion.LATEST_SCHEMA_CHANGE;
 import static org.neo4j.kernel.KernelVersion.VERSION_NODE_VECTOR_INDEX_INTRODUCED;
+import static org.neo4j.kernel.KernelVersion.VERSION_RELATIONSHIP_ENDPOINT_LABEL_AND_LABEL_EXISTENCE_CONSTRAINTS_INTRODUCED;
 import static org.neo4j.kernel.KernelVersion.VERSION_REL_UNIQUE_CONSTRAINTS_INTRODUCED;
 import static org.neo4j.kernel.KernelVersion.VERSION_TYPE_CONSTRAINTS_INTRODUCED;
 import static org.neo4j.kernel.KernelVersion.VERSION_UNIONS_AND_LIST_TYPE_CONSTRAINTS_INTRODUCED;
 import static org.neo4j.kernel.KernelVersion.VERSION_VECTOR_2_INTRODUCED;
+import static org.neo4j.kernel.KernelVersion.VERSION_VECTOR_INDEX_SINGLE_STAGE_FILTERING;
+import static org.neo4j.kernel.KernelVersion.VERSION_VECTOR_TYPE_INTRODUCED;
 
 import org.neo4j.internal.kernel.api.exceptions.DeletedNodeStillHasRelationshipsException;
 import org.neo4j.internal.kernel.api.exceptions.TransactionFailureException;
 import org.neo4j.internal.schema.ConstraintDescriptor;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexType;
+import org.neo4j.internal.schema.SchemaDescriptor;
 import org.neo4j.internal.schema.SchemaRule;
+import org.neo4j.internal.schema.constraints.PropertyTypeSet;
+import org.neo4j.internal.schema.constraints.TypeConstraintDescriptor;
 import org.neo4j.internal.schema.constraints.TypeRepresentation;
 import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.api.exceptions.Status;
@@ -44,7 +50,7 @@ import org.neo4j.kernel.impl.store.record.Record;
 class IntegrityValidator {
     static void validateNodeRecord(NodeRecord record) throws TransactionFailureException {
         if (!record.inUse() && record.getNextRel() != Record.NO_NEXT_RELATIONSHIP.intValue()) {
-            throw new DeletedNodeStillHasRelationshipsException(record.getId());
+            throw DeletedNodeStillHasRelationshipsException.nodeStillHasRelationships(record.getId());
         }
     }
 
@@ -61,11 +67,12 @@ class IntegrityValidator {
             return;
         }
 
-        if (schemaRule instanceof final IndexDescriptor index) {
-            final var schemaType = "index";
+        if (schemaRule instanceof IndexDescriptor index) {
+            final String schemaType = "index";
 
+            SchemaDescriptor schema = index.schema();
             if (index.getIndexType() == IndexType.VECTOR) {
-                switch (index.schema().entityType()) {
+                switch (schema.entityType()) {
                     case NODE -> {
                         if (kernelVersion.isLessThan(VERSION_NODE_VECTOR_INDEX_INTRODUCED)) {
                             throw upgradeNeededForSchemaRule(
@@ -79,10 +86,16 @@ class IntegrityValidator {
                         }
                     }
                 }
+
+                if ((schema.getEntityTokenIds().length > 1 || schema.getPropertyIds().length > 1)
+                        && kernelVersion.isLessThan(VERSION_VECTOR_INDEX_SINGLE_STAGE_FILTERING)) {
+                    throw upgradeNeededForSchemaRule(
+                            schemaType, index, kernelVersion, VERSION_VECTOR_INDEX_SINGLE_STAGE_FILTERING);
+                }
             }
 
-        } else if (schemaRule instanceof final ConstraintDescriptor constraint) {
-            final var schemaType = "constraint";
+        } else if (schemaRule instanceof ConstraintDescriptor constraint) {
+            final String schemaType = "constraint";
 
             if ((constraint.isRelationshipUniquenessConstraint() || constraint.isRelationshipKeyConstraint())
                     && kernelVersion.isLessThan(VERSION_REL_UNIQUE_CONSTRAINTS_INTRODUCED)) {
@@ -96,11 +109,36 @@ class IntegrityValidator {
                             schemaType, constraint, kernelVersion, VERSION_TYPE_CONSTRAINTS_INTRODUCED);
                 }
 
-                final var propertyType = constraint.asPropertyTypeConstraint().propertyType();
+                TypeConstraintDescriptor typeConstraint = constraint.asPropertyTypeConstraint();
+                PropertyTypeSet propertyType = typeConstraint.propertyType();
                 if ((TypeRepresentation.isUnion(propertyType) || TypeRepresentation.hasListTypes(propertyType))
                         && kernelVersion.isLessThan(VERSION_UNIONS_AND_LIST_TYPE_CONSTRAINTS_INTRODUCED)) {
                     throw upgradeNeededForSchemaRule(
                             schemaType, constraint, kernelVersion, VERSION_UNIONS_AND_LIST_TYPE_CONSTRAINTS_INTRODUCED);
+                }
+                if ((TypeRepresentation.hasVectorTypes(propertyType))
+                        && kernelVersion.isLessThan(VERSION_VECTOR_TYPE_INTRODUCED)) {
+                    throw upgradeNeededForSchemaRule(
+                            schemaType, constraint, kernelVersion, VERSION_VECTOR_TYPE_INTRODUCED);
+                }
+
+                if (typeConstraint.defaultValue().isPresent()) {
+                    // TODO temporarily disabled in this storage engine until decision is final
+                    throw TransactionFailureException.internalError(
+                            Status.Data.DataUnsupportedByStoreFormat,
+                            "Unsupported constraint",
+                            "Default value on type constraint unsupported by this storage engine");
+                }
+            }
+
+            if (constraint.isRelationshipEndpointLabelConstraint() || constraint.isNodeLabelExistenceConstraint()) {
+                if (kernelVersion.isLessThan(
+                        VERSION_RELATIONSHIP_ENDPOINT_LABEL_AND_LABEL_EXISTENCE_CONSTRAINTS_INTRODUCED)) {
+                    throw upgradeNeededForSchemaRule(
+                            schemaType,
+                            constraint,
+                            kernelVersion,
+                            VERSION_RELATIONSHIP_ENDPOINT_LABEL_AND_LABEL_EXISTENCE_CONSTRAINTS_INTRODUCED);
                 }
             }
 
@@ -112,8 +150,9 @@ class IntegrityValidator {
 
     private static TransactionFailureException upgradeNeededForSchemaRule(
             String schemaType, SchemaRule schemaRule, KernelVersion actualVersion, KernelVersion requiredVersion) {
-        return new TransactionFailureException(
+        return TransactionFailureException.internalError(
                 Status.General.UpgradeRequired,
+                IntegrityValidator.class.getSimpleName(),
                 "Operations on %s '%s' not allowed. "
                         + "Required kernel version for this transaction is %s, but actual version was %s.",
                 schemaType,

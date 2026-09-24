@@ -53,6 +53,11 @@ public class StrictBufferTestExtension implements ParameterResolver, AfterEachCa
     }
 
     @Override
+    public ExtensionContextScope getTestInstantiationExtensionContextScope(ExtensionContext rootContext) {
+        return ExtensionContextScope.TEST_METHOD;
+    }
+
+    @Override
     public Object resolveParameter(ParameterContext parameterContext, ExtensionContext extensionContext)
             throws ParameterResolutionException {
         var store = extensionContext.getStore(NAMESPACE);

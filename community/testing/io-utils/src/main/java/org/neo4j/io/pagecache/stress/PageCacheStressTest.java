@@ -20,7 +20,7 @@
 package org.neo4j.io.pagecache.stress;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.neo4j.io.pagecache.impl.muninn.MuninnPageCache.config;
+import static org.neo4j.io.pagecache.impl.muninn.MuninnPageCache.forPages;
 import static org.neo4j.io.pagecache.tracing.PageCacheTracer.NULL;
 
 import java.nio.file.OpenOption;
@@ -30,11 +30,8 @@ import org.eclipse.collections.api.set.ImmutableSet;
 import org.neo4j.io.fs.DefaultFileSystemAbstraction;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
-import org.neo4j.io.pagecache.PageSwapperFactory;
-import org.neo4j.io.pagecache.impl.SingleFilePageSwapperFactory;
 import org.neo4j.io.pagecache.impl.muninn.MuninnPageCache;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
-import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.scheduler.JobScheduler;
 import org.neo4j.test.scheduler.ThreadPoolJobScheduler;
 
@@ -67,6 +64,7 @@ public class PageCacheStressTest {
     private final Path workingDirectory;
 
     private final ImmutableSet<OpenOption> openOptions;
+    private final boolean asyncIO;
 
     private PageCacheStressTest(Builder builder) {
         this.numberOfPages = builder.numberOfPages;
@@ -80,15 +78,16 @@ public class PageCacheStressTest {
         this.workingDirectory = builder.workingDirectory;
 
         this.openOptions = builder.openOptions;
+        this.asyncIO = builder.asyncIO;
     }
 
     public void run() throws Exception {
         try (FileSystemAbstraction fs = new DefaultFileSystemAbstraction();
                 JobScheduler jobScheduler = new ThreadPoolJobScheduler()) {
-            PageSwapperFactory swapperFactory =
-                    new SingleFilePageSwapperFactory(fs, tracer, EmptyMemoryTracker.INSTANCE);
             try (PageCache pageCacheUnderTest = new MuninnPageCache(
-                    swapperFactory, jobScheduler, config(numberOfCachePages).pageCacheTracer(tracer))) {
+                    fs,
+                    jobScheduler,
+                    forPages(numberOfCachePages).pageCacheTracer(tracer).withAsyncIO(asyncIO))) {
                 PageCacheStresser pageCacheStresser =
                         new PageCacheStresser(numberOfPages, numberOfThreads, workingDirectory, openOptions);
                 pageCacheStresser.stress(pageCacheUnderTest, tracer, condition);
@@ -108,6 +107,7 @@ public class PageCacheStressTest {
         Path workingDirectory;
 
         ImmutableSet<OpenOption> openOptions = Sets.immutable.empty();
+        boolean asyncIO;
 
         public PageCacheStressTest build() {
             assertThat(numberOfPages)
@@ -143,6 +143,11 @@ public class PageCacheStressTest {
 
         public Builder withWorkingDirectory(Path workingDirectory) {
             this.workingDirectory = workingDirectory;
+            return this;
+        }
+
+        public Builder withAsyncIO(boolean asyncOperations) {
+            this.asyncIO = asyncOperations;
             return this;
         }
 

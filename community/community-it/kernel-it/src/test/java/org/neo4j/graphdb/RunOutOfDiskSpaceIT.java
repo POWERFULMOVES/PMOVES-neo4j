@@ -36,15 +36,17 @@ import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.fs.UncloseableDelegatingFileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
+import org.neo4j.storageengine.api.LogMetadataProvider;
 import org.neo4j.storageengine.api.LogVersionRepository;
-import org.neo4j.storageengine.api.MetadataProvider;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.Neo4jLayoutExtension;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.test.extension.pagecache.PageCacheSupportExtension;
 import org.neo4j.test.limited.LimitedFilesystemAbstraction;
 
 @Neo4jLayoutExtension
+@SkipOnSpd
 class RunOutOfDiskSpaceIT {
     @RegisterExtension
     static PageCacheSupportExtension pageCacheExtension = new PageCacheSupportExtension();
@@ -101,15 +103,12 @@ class RunOutOfDiskSpaceIT {
         managementService.shutdown();
 
         limitedFs.runOutOfDiskSpace(false);
-        managementService = new TestDatabaseManagementServiceBuilder(databaseLayout)
+        try (var dbms = new TestDatabaseManagementServiceBuilder(databaseLayout)
                 .setFileSystem(limitedFs)
-                .build();
-        try {
-            database = (GraphDatabaseAPI) managementService.database(DEFAULT_DATABASE_NAME);
-            var metadataProvider = database.getDependencyResolver().resolveDependency(MetadataProvider.class);
+                .build()) {
+            database = (GraphDatabaseAPI) dbms.database(DEFAULT_DATABASE_NAME);
+            var metadataProvider = database.getDependencyResolver().resolveDependency(LogMetadataProvider.class);
             assertEquals(logVersion, metadataProvider.getCurrentLogVersion());
-        } finally {
-            managementService.shutdown();
         }
     }
 
@@ -145,15 +144,12 @@ class RunOutOfDiskSpaceIT {
         managementService.shutdown();
 
         limitedFs.runOutOfDiskSpace(false);
-        managementService = new TestDatabaseManagementServiceBuilder(databaseLayout)
+        try (var dbms = new TestDatabaseManagementServiceBuilder(databaseLayout)
                 .setFileSystem(limitedFs)
-                .build();
-        try {
-            database = (GraphDatabaseAPI) managementService.database(DEFAULT_DATABASE_NAME);
-            var metadataProvider = database.getDependencyResolver().resolveDependency(MetadataProvider.class);
+                .build()) {
+            database = (GraphDatabaseAPI) dbms.database(DEFAULT_DATABASE_NAME);
+            var metadataProvider = database.getDependencyResolver().resolveDependency(LogMetadataProvider.class);
             assertEquals(logVersion, metadataProvider.getCurrentLogVersion());
-        } finally {
-            managementService.shutdown();
         }
     }
 }

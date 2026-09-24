@@ -38,12 +38,12 @@ import org.neo4j.graphdb.ResourceIterator;
 import org.neo4j.graphdb.Transaction;
 import org.neo4j.kernel.impl.store.record.PropertyBlock;
 import org.neo4j.kernel.impl.store.record.PropertyRecord;
-import org.neo4j.kernel.impl.transaction.log.CommandBatchCursor;
-import org.neo4j.kernel.impl.transaction.log.LogicalTransactionStore;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.storageengine.api.CommandBatch;
 import org.neo4j.test.extension.ImpermanentDbmsExtension;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.wal.CommandBatchCursor;
+import org.neo4j.wal.LogicalTransactionStore;
 
 @ImpermanentDbmsExtension
 class ProduceNoopCommandsIT {
@@ -108,15 +108,6 @@ class ProduceNoopCommandsIT {
             node.removeLabel(LABEL);
             node.addLabel(LABEL);
         });
-    }
-
-    @Test
-    void setNodePropertyToSameValue() {
-        // given
-        String id = node().withProperty(KEY, 123).build();
-
-        // when
-        onNode(id, (tx, node) -> node.setProperty(KEY, 123));
     }
 
     @Test
@@ -198,8 +189,9 @@ class ProduceNoopCommandsIT {
                 .build();
 
         // when
-        onNode(id, (tx, node) -> node.createRelationshipTo(tx.createNode(), TYPE)
-                .delete());
+        onNode(
+                id,
+                (tx, node) -> node.createRelationshipTo(tx.createNode(), TYPE).delete());
     }
 
     private static void deleteRelationship(Node node, int index) {

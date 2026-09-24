@@ -21,6 +21,7 @@ package org.neo4j.dbms.database;
 
 import static org.neo4j.configuration.GraphDatabaseSettings.SYSTEM_DATABASE_NAME;
 import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DATABASE_CREATED_AT_PROPERTY;
+import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DATABASE_DEFAULT_LANGUAGE_PROPERTY;
 import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DATABASE_DEFAULT_PROPERTY;
 import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DATABASE_LABEL;
 import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DATABASE_NAME_LABEL;
@@ -35,6 +36,7 @@ import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DISPLAY_NAME_PRO
 import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.NAMESPACE_PROPERTY;
 import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.NAME_PROPERTY;
 import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.PRIMARY_PROPERTY;
+import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.QUOTED_DISPLAY_NAME_PROPERTY;
 import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.TARGETS_RELATIONSHIP;
 import static org.neo4j.kernel.database.DatabaseId.SYSTEM_DATABASE_ID;
 
@@ -45,6 +47,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
+import org.neo4j.cypher.internal.CypherVersion;
 import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel;
 import org.neo4j.graphdb.ConstraintViolationException;
 import org.neo4j.graphdb.GraphDatabaseService;
@@ -54,11 +57,13 @@ import org.neo4j.graphdb.Transaction;
 import org.neo4j.graphdb.schema.ConstraintDefinition;
 import org.neo4j.kernel.api.exceptions.InvalidArgumentsException;
 import org.neo4j.kernel.database.NormalizedDatabaseName;
+import org.neo4j.util.Stringifier;
 
 /**
  * This is the community component for databases.
  * Each database is represented by a node with label :Database or :DeletedDatabase
- * and properties for the database name, status, uuid, creation time, store version and more.
+ * and properties for the (database name), status, uuid, creation time, store version and more.
+ * The database name is represented by :DatabaseName nodes connected to the database nodes.
  * There is also one node with label :DatabaseDefault and one with label :DatabaseAll,
  * that represent the default database and all databases, respectively.
  */
@@ -90,6 +95,7 @@ public class DefaultSystemGraphComponent extends AbstractSystemGraphComponent {
         }
 
         if (hasUniqueConstraint(tx, DATABASE_NAME_LABEL, NAME_PROPERTY, NAMESPACE_PROPERTY)
+                && hasUniqueConstraint(tx, DATABASE_NAME_LABEL, DISPLAY_NAME_PROPERTY)
                 && hasUniqueConstraint(tx, DATABASE_LABEL, DATABASE_NAME_PROPERTY)) {
             return Status.CURRENT;
         } else {
@@ -98,21 +104,22 @@ public class DefaultSystemGraphComponent extends AbstractSystemGraphComponent {
     }
 
     @Override
-    protected void initializeSystemGraphConstraints(Transaction tx) {
-        initializeSystemGraphConstraint(tx, DATABASE_NAME_LABEL, NAME_PROPERTY, NAMESPACE_PROPERTY);
-        initializeSystemGraphConstraint(tx, DATABASE_LABEL, DATABASE_NAME_PROPERTY);
+    protected void initializeSystemGraphSchema(GraphDatabaseService system) throws Exception {
+        initializeSystemGraphConstraint(system, DATABASE_NAME_LABEL, NAME_PROPERTY, NAMESPACE_PROPERTY);
+        initializeDisplayNameSystemGraphConstraint(system);
+        initializeSystemGraphConstraint(system, DATABASE_LABEL, DATABASE_NAME_PROPERTY);
     }
 
     @Override
     public void initializeSystemGraphModel(GraphDatabaseService system) throws InvalidArgumentsException {
+        CypherVersion languageVersion = cypherVersionFromConfig(config.get(GraphDatabaseSettings.default_language));
         try (var tx = system.beginTx()) {
             var now = ZonedDateTime.ofInstant(clock.instant(), clock.getZone());
-            createDatabaseNode(tx, defaultDbName.name(), true, UUID.randomUUID(), now);
-            createDatabaseNode(tx, SYSTEM_DATABASE_NAME, false, SYSTEM_DATABASE_ID.uuid(), now);
+            createDatabaseNode(tx, defaultDbName.name(), UUID.randomUUID(), now, languageVersion);
+            createDatabaseNode(tx, SYSTEM_DATABASE_NAME, SYSTEM_DATABASE_ID.uuid(), now, languageVersion);
             tx.commit();
         } catch (ConstraintViolationException e) {
-            throw new InvalidArgumentsException("The specified database '" + defaultDbName.name() + "' or '"
-                    + SYSTEM_DATABASE_NAME + "' already exists.");
+            throw InvalidArgumentsException.databaseAlreadyExistsInSystemDb(defaultDbName.name());
         }
     }
 
@@ -127,7 +134,7 @@ public class DefaultSystemGraphComponent extends AbstractSystemGraphComponent {
 
     @Override
     public void upgradeToCurrent(GraphDatabaseService system) throws Exception {
-        SystemGraphComponent.executeWithFullAccess(system, this::initializeSystemGraphConstraints);
+        this.initializeSystemGraphSchema(system);
         SystemGraphComponent.executeWithFullAccess(system, DefaultSystemGraphComponent::dropOldConstraints);
     }
 
@@ -148,7 +155,7 @@ public class DefaultSystemGraphComponent extends AbstractSystemGraphComponent {
         }
     }
 
-    private void updateDefaultDatabase(GraphDatabaseService system) throws InvalidArgumentsException {
+    private void updateDefaultDatabase(GraphDatabaseService system) {
         boolean defaultFound;
 
         try (Transaction tx = system.beginTx()) {
@@ -159,16 +166,18 @@ public class DefaultSystemGraphComponent extends AbstractSystemGraphComponent {
                     Node oldDb = nodes.next();
                     if (oldDb.getProperty(DATABASE_NAME_PROPERTY).equals(defaultDbName.name())) {
                         correctDefaultFound = true;
-                    } else {
-                        oldDb.setProperty(DATABASE_DEFAULT_PROPERTY, false);
+                    } else if (!oldDb.getProperty(DATABASE_NAME_PROPERTY).equals(SYSTEM_DATABASE_NAME)) {
                         oldDb.setProperty(
                                 DATABASE_STATUS_PROPERTY, TopologyGraphDbmsModel.DatabaseStatus.OFFLINE.statusName());
+                    }
+                    if (oldDb.hasProperty(DATABASE_DEFAULT_PROPERTY)) {
+                        oldDb.removeProperty(DATABASE_DEFAULT_PROPERTY);
                     }
                 }
                 return correctDefaultFound;
             };
             // First find current default, and if it does not have the name defined as default, unset it
-            try (ResourceIterator<Node> nodes = tx.findNodes(DATABASE_LABEL, DATABASE_DEFAULT_PROPERTY, true)) {
+            try (ResourceIterator<Node> nodes = tx.findNodes(DATABASE_LABEL)) {
                 defaultFound = unsetOldNode.apply(nodes);
             }
 
@@ -178,12 +187,13 @@ public class DefaultSystemGraphComponent extends AbstractSystemGraphComponent {
             if (!defaultFound) {
                 Node defaultDb = tx.findNode(DATABASE_LABEL, DATABASE_NAME_PROPERTY, defaultDbName.name());
                 if (defaultDb != null) {
-                    defaultDb.setProperty(DATABASE_DEFAULT_PROPERTY, true);
                     defaultDb.setProperty(
                             DATABASE_STATUS_PROPERTY, TopologyGraphDbmsModel.DatabaseStatus.ONLINE.statusName());
                 } else {
                     var now = ZonedDateTime.ofInstant(clock.instant(), clock.getZone());
-                    createDatabaseNode(tx, defaultDbName.name(), true, UUID.randomUUID(), now);
+                    CypherVersion languageVersion =
+                            cypherVersionFromConfig(config.get(GraphDatabaseSettings.default_language));
+                    createDatabaseNode(tx, defaultDbName.name(), UUID.randomUUID(), now, languageVersion);
                 }
             }
             tx.commit();
@@ -194,20 +204,20 @@ public class DefaultSystemGraphComponent extends AbstractSystemGraphComponent {
      * If the current default is deleted, unset it, but do not record that we found a valid default
      */
     private void unsetAnyDeleted(Transaction tx, Function<ResourceIterator<Node>, Boolean> unsetOldNode) {
-        try (ResourceIterator<Node> nodes = tx.findNodes(DELETED_DATABASE_LABEL, DATABASE_DEFAULT_PROPERTY, true)) {
+        try (ResourceIterator<Node> nodes = tx.findNodes(DELETED_DATABASE_LABEL)) {
             unsetOldNode.apply(nodes);
         }
     }
 
     public static Node createDatabaseNode(
-            Transaction tx, String databaseName, boolean defaultDb, UUID uuid, ZonedDateTime now) {
+            Transaction tx, String databaseName, UUID uuid, ZonedDateTime now, CypherVersion defaultLanguage) {
         var databaseNode = tx.createNode(DATABASE_LABEL);
         databaseNode.setProperty(DATABASE_NAME_PROPERTY, databaseName);
         databaseNode.setProperty(DATABASE_UUID_PROPERTY, uuid.toString());
         databaseNode.setProperty(DATABASE_STATUS_PROPERTY, TopologyGraphDbmsModel.DatabaseStatus.ONLINE.statusName());
-        databaseNode.setProperty(DATABASE_DEFAULT_PROPERTY, defaultDb);
         databaseNode.setProperty(DATABASE_CREATED_AT_PROPERTY, now);
         databaseNode.setProperty(DATABASE_STARTED_AT_PROPERTY, now);
+        databaseNode.setProperty(DATABASE_DEFAULT_LANGUAGE_PROPERTY, defaultLanguage.persistedValue);
         var randomId = ThreadLocalRandom.current().nextLong();
         databaseNode.setProperty(DATABASE_STORE_RANDOM_ID_PROPERTY, randomId);
 
@@ -215,8 +225,16 @@ public class DefaultSystemGraphComponent extends AbstractSystemGraphComponent {
         nameNode.setProperty(NAME_PROPERTY, databaseName);
         nameNode.setProperty(NAMESPACE_PROPERTY, DEFAULT_NAMESPACE);
         nameNode.setProperty(DISPLAY_NAME_PROPERTY, databaseName);
+        nameNode.setProperty(QUOTED_DISPLAY_NAME_PROPERTY, Stringifier.backtick(databaseName));
         nameNode.setProperty(PRIMARY_PROPERTY, true);
         nameNode.createRelationshipTo(databaseNode, TARGETS_RELATIONSHIP);
         return databaseNode;
+    }
+
+    public static CypherVersion cypherVersionFromConfig(GraphDatabaseSettings.CypherVersion dbmsVersion) {
+        return switch (dbmsVersion) {
+            case GraphDatabaseSettings.CypherVersion.Cypher5 -> CypherVersion.Cypher5;
+            case GraphDatabaseSettings.CypherVersion.Cypher25 -> CypherVersion.Cypher25;
+        };
     }
 }

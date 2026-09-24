@@ -31,12 +31,16 @@ import static org.neo4j.values.storable.DurationValue.duration;
 import static org.neo4j.values.storable.LocalDateTimeValue.localDateTime;
 import static org.neo4j.values.storable.LocalTimeValue.localTime;
 import static org.neo4j.values.storable.TimeValue.time;
+import static org.neo4j.values.storable.ValueType.ALL_TYPES;
 import static org.neo4j.values.storable.Values.byteValue;
 import static org.neo4j.values.storable.Values.doubleValue;
 import static org.neo4j.values.storable.Values.floatValue;
 import static org.neo4j.values.storable.Values.intValue;
 import static org.neo4j.values.storable.Values.longValue;
 import static org.neo4j.values.storable.Values.shortValue;
+import static org.neo4j.values.storable.VectorValue.MAX_VECTOR_DIMENSIONS;
+import static org.neo4j.values.storable.VectorValue.MIN_VECTOR_DIMENSIONS;
+import static org.neo4j.values.utils.TemporalUtil.NANOS_PER_SECOND;
 
 import java.lang.reflect.Array;
 import java.time.Duration;
@@ -49,18 +53,35 @@ import java.time.Period;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.List;
 import java.util.Random;
 import java.util.SplittableRandom;
+import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Consumer;
 import java.util.function.IntFunction;
-import java.util.function.Predicate;
 import java.util.stream.IntStream;
 import java.util.stream.LongStream;
 import org.apache.commons.lang3.ArrayUtils;
+import org.eclipse.collections.api.IntIterable;
+import org.eclipse.collections.api.LongIterable;
 import org.eclipse.collections.api.RichIterable;
+import org.eclipse.collections.api.block.predicate.Predicate;
+import org.eclipse.collections.api.factory.Lists;
+import org.eclipse.collections.api.factory.Sets;
+import org.eclipse.collections.api.factory.SortedSets;
+import org.eclipse.collections.api.factory.primitive.IntLists;
+import org.eclipse.collections.api.list.ListIterable;
+import org.eclipse.collections.api.list.primitive.ImmutableIntList;
+import org.eclipse.collections.api.list.primitive.IntList;
 import org.eclipse.collections.api.list.primitive.LongList;
+import org.eclipse.collections.api.set.ImmutableSet;
+import org.eclipse.collections.api.set.SetIterable;
+import org.eclipse.collections.api.set.sorted.ImmutableSortedSet;
+import org.eclipse.collections.impl.list.fixed.ArrayAdapter;
+import org.eclipse.collections.impl.utility.Iterate;
+import org.eclipse.collections.impl.utility.LazyIterate;
 
 /**
  * Helper class that generates generator values of all supported types.
@@ -70,14 +91,16 @@ import org.eclipse.collections.api.list.primitive.LongList;
  * Can generate both {@link Value} and "raw" instances. The "raw" type of a value type means
  * the corresponding Core API type if such type exists. For example, {@code String[]} is the raw type of {@link TextArray}.
  * <p>
- * The length of strings will be governed by {@link RandomValues.Configuration#stringMinLength()} and
- * {@link RandomValues.Configuration#stringMaxLength()} and
- * the length of arrays will be governed by {@link RandomValues.Configuration#arrayMinLength()} and
- * {@link RandomValues.Configuration#arrayMaxLength()}
+ * The length of strings will be governed by {@link Configuration#stringMinLength()} and
+ * {@link Configuration#stringMaxLength()} and
+ * the length of arrays will be governed by {@link Configuration#arrayMinLength()} and
+ * {@link Configuration#arrayMaxLength()}
  * unless method provide explicit arguments for those configurations in which case the provided argument will be used instead.
  */
 public class RandomValues {
+
     public interface Configuration {
+
         int stringMinLength();
 
         int stringMaxLength();
@@ -89,46 +112,32 @@ public class RandomValues {
         int maxCodePoint();
 
         int minCodePoint();
+
+        boolean includeVectorTypes();
+
+        int maxVectorNumBytes();
+
+        int minVectorDimensions();
+
+        int maxVectorDimensions();
+
+        IntList vectorDimensionChoices();
+
+        SetIterable<ValueType> allowedTypes();
     }
 
-    public static class Default implements Configuration {
-        @Override
-        public int stringMinLength() {
-            return 5;
-        }
-
-        @Override
-        public int stringMaxLength() {
-            return 20;
-        }
-
-        @Override
-        public int arrayMinLength() {
-            return 1;
-        }
-
-        @Override
-        public int arrayMaxLength() {
-            return 10;
-        }
-
-        @Override
-        public int maxCodePoint() {
-            return Character.MAX_CODE_POINT;
-        }
-
-        @Override
-        public int minCodePoint() {
-            return Character.MIN_CODE_POINT;
-        }
+    public static ConfigurationBuilder newConfigurationBuilder() {
+        return new ConfigurationBuilder();
     }
+
+    public static final Configuration DEFAULT_CONFIGURATION =
+            newConfigurationBuilder().build();
+
+    // see maxSizeInKey, and assume one property for this helper constant
+    public static final int MAX_NUM_BYTES_IN_INDEX_KEY = maxSizeInIndexKey(1);
 
     public static final int MAX_BMP_CODE_POINT = 0xFFFF;
-    public static final Configuration DEFAULT_CONFIGURATION = new Default();
     static final int MAX_ASCII_CODE_POINT = 0x7F;
-    private static final ValueType[] ALL_TYPES = ValueType.values();
-    private static final ValueType[] ARRAY_TYPES = ValueType.arrayTypes();
-    private static final long NANOS_PER_SECOND = 1_000_000_000L;
 
     private final Generator generator;
     private final Configuration configuration;
@@ -140,6 +149,10 @@ public class RandomValues {
     private RandomValues(Generator generator, Configuration configuration) {
         this.generator = generator;
         this.configuration = configuration;
+    }
+
+    public Configuration configuration() {
+        return configuration;
     }
 
     /**
@@ -202,7 +215,7 @@ public class RandomValues {
      * @see RandomValues
      */
     public Value nextValue() {
-        return nextValueOfTypes(ALL_TYPES);
+        return nextValueOfType(among(configuration.allowedTypes()));
     }
 
     /**
@@ -211,7 +224,11 @@ public class RandomValues {
      * @see RandomValues
      */
     public Value nextValueOfTypes(ValueType... types) {
-        return nextValueOfType(among(types));
+        assert types.length > 0 : "No value types provided";
+        final ListIterable<ValueType> allowedTypes = ArrayAdapter.adapt(types).select(this::allowedType);
+        assert !allowedTypes.isEmpty()
+                : "No allowed types provided " + Arrays.toString(types) + " " + configuration.allowedTypes();
+        return nextValueOfType(among(allowedTypes));
     }
 
     /**
@@ -220,7 +237,7 @@ public class RandomValues {
      * @see RandomValues
      */
     public Value[] nextValues(int size) {
-        return nextValuesOfTypes(size, ALL_TYPES);
+        return nextValuesOfTypes(size, configuration.allowedTypes());
     }
 
     /**
@@ -229,22 +246,33 @@ public class RandomValues {
      * @see RandomValues
      */
     public Value[] nextValuesOfTypes(int size, ValueType... types) {
+        return nextValuesOfTypes(size, Lists.mutable.wrapCopy(types));
+    }
+
+    /**
+     * Returns the next size number of {@link Value}, distributed uniformly among the provided value types.
+     *
+     * @see RandomValues
+     */
+    public Value[] nextValuesOfTypes(int size, RichIterable<ValueType> types) {
+        var allowedTypes = types.select(this::allowedType);
+
         var values = new Value[size];
         for (int i = 0; i < size; i++) {
-            values[i] = nextValueOfType(among(types));
+            values[i] = nextValueOfType(among(allowedTypes));
         }
         return values;
     }
 
     public static ValueType[] including(Predicate<ValueType> include) {
-        return Arrays.stream(ValueType.values()).filter(include).toArray(ValueType[]::new);
+        return Arrays.stream(ALL_TYPES).filter(include).toArray(ValueType[]::new);
     }
 
     /**
      * Create an array containing all value types, excluding provided types.
      */
     public static ValueType[] excluding(ValueType... exclude) {
-        return excluding(ValueType.values(), exclude);
+        return excluding(ALL_TYPES, exclude);
     }
 
     public static ValueType[] excluding(ValueType[] among, ValueType... exclude) {
@@ -256,9 +284,15 @@ public class RandomValues {
                 (T[]) Array.newInstance(among.getClass().getComponentType(), length));
     }
 
-    public static ValueType[] typesOfGroup(ValueGroup valueGroup) {
-        return Arrays.stream(ValueType.values())
-                .filter(t -> t.valueGroup == valueGroup)
+    public static ValueType[] typesOfGroups(ValueGroup... valueGroups) {
+        return Arrays.stream(ALL_TYPES)
+                .filter(t -> ArrayUtils.contains(valueGroups, t.valueGroup))
+                .toArray(ValueType[]::new);
+    }
+
+    public static ValueType[] typesOfCategories(ValueCategory... valueCategories) {
+        return Arrays.stream(ALL_TYPES)
+                .filter(t -> ArrayUtils.contains(valueCategories, t.valueGroup.category()))
                 .toArray(ValueType[]::new);
     }
 
@@ -268,102 +302,197 @@ public class RandomValues {
      * @see RandomValues
      */
     public Value nextValueOfType(ValueType type) {
-        switch (type) {
-            case BOOLEAN:
-                return nextBooleanValue();
-            case BYTE:
-                return nextByteValue();
-            case SHORT:
-                return nextShortValue();
-            case STRING:
-                return nextTextValue();
-            case INT:
-                return nextIntValue();
-            case LONG:
-                return nextLongValue();
-            case FLOAT:
-                return nextFloatValue();
-            case DOUBLE:
-                return nextDoubleValue();
-            case CHAR:
-                return nextCharValue();
-            case STRING_ALPHANUMERIC:
-                return nextAlphaNumericTextValue();
-            case STRING_ASCII:
-                return nextAsciiTextValue();
-            case STRING_BMP:
-                return nextBasicMultilingualPlaneTextValue();
-            case LOCAL_DATE_TIME:
-                return nextLocalDateTimeValue();
-            case DATE:
-                return nextDateValue();
-            case LOCAL_TIME:
-                return nextLocalTimeValue();
-            case PERIOD:
-                return nextPeriod();
-            case DURATION:
-                return nextDuration();
-            case TIME:
-                return nextTimeValue();
-            case DATE_TIME:
-                return nextDateTimeValue();
-            case CARTESIAN_POINT:
-                return nextCartesianPoint();
-            case CARTESIAN_POINT_3D:
-                return nextCartesian3DPoint();
-            case GEOGRAPHIC_POINT:
-                return nextGeographicPoint();
-            case GEOGRAPHIC_POINT_3D:
-                return nextGeographic3DPoint();
-            case BOOLEAN_ARRAY:
-                return nextBooleanArray();
-            case BYTE_ARRAY:
-                return nextByteArray();
-            case SHORT_ARRAY:
-                return nextShortArray();
-            case INT_ARRAY:
-                return nextIntArray();
-            case LONG_ARRAY:
-                return nextLongArray();
-            case FLOAT_ARRAY:
-                return nextFloatArray();
-            case DOUBLE_ARRAY:
-                return nextDoubleArray();
-            case CHAR_ARRAY:
-                return nextCharArray();
-            case STRING_ARRAY:
-                return nextTextArray();
-            case STRING_ALPHANUMERIC_ARRAY:
-                return nextAlphaNumericTextArray();
-            case STRING_ASCII_ARRAY:
-                return nextAsciiTextArray();
-            case STRING_BMP_ARRAY:
-                return nextBasicMultilingualPlaneTextArray();
-            case LOCAL_DATE_TIME_ARRAY:
-                return nextLocalDateTimeArray();
-            case DATE_ARRAY:
-                return nextDateArray();
-            case LOCAL_TIME_ARRAY:
-                return nextLocalTimeArray();
-            case PERIOD_ARRAY:
-                return nextPeriodArray();
-            case DURATION_ARRAY:
-                return nextDurationArray();
-            case TIME_ARRAY:
-                return nextTimeArray();
-            case DATE_TIME_ARRAY:
-                return nextDateTimeArray();
-            case CARTESIAN_POINT_ARRAY:
-                return nextCartesianPointArray();
-            case CARTESIAN_POINT_3D_ARRAY:
-                return nextCartesian3DPointArray();
-            case GEOGRAPHIC_POINT_ARRAY:
-                return nextGeographicPointArray();
-            case GEOGRAPHIC_POINT_3D_ARRAY:
-                return nextGeographic3DPointArray();
-            default:
-                throw new IllegalArgumentException("Unknown value type: " + type);
+        if (!allowedType(type)) {
+            throw new IllegalStateException("%s is not configured to generate %s values."
+                    .formatted(getClass().getSimpleName(), type));
         }
+
+        return switch (type) {
+            case BOOLEAN -> nextBooleanValue();
+            case BYTE -> nextByteValue();
+            case SHORT -> nextShortValue();
+            case STRING -> nextTextValue();
+            case INT -> nextIntValue();
+            case LONG -> nextLongValue();
+            case FLOAT -> nextFloatValue();
+            case DOUBLE -> nextDoubleValue();
+            case CHAR -> nextCharValue();
+            case STRING_ALPHANUMERIC -> nextAlphaNumericTextValue();
+            case STRING_ASCII -> nextAsciiTextValue();
+            case STRING_BMP -> nextBasicMultilingualPlaneTextValue();
+            case LOCAL_DATE_TIME -> nextLocalDateTimeValue();
+            case DATE -> nextDateValue();
+            case LOCAL_TIME -> nextLocalTimeValue();
+            case PERIOD -> nextPeriod();
+            case DURATION -> nextDuration();
+            case TIME -> nextTimeValue();
+            case DATE_TIME -> nextDateTimeValue();
+            case CARTESIAN_POINT -> nextCartesianPoint();
+            case CARTESIAN_POINT_3D -> nextCartesian3DPoint();
+            case GEOGRAPHIC_POINT -> nextGeographicPoint();
+            case GEOGRAPHIC_POINT_3D -> nextGeographic3DPoint();
+            case BOOLEAN_ARRAY -> nextBooleanArray();
+            case BYTE_ARRAY -> nextByteArray();
+            case SHORT_ARRAY -> nextShortArray();
+            case INT_ARRAY -> nextIntArray();
+            case LONG_ARRAY -> nextLongArray();
+            case FLOAT_ARRAY -> nextFloatArray();
+            case DOUBLE_ARRAY -> nextDoubleArray();
+            case CHAR_ARRAY -> nextCharArray();
+            case STRING_ARRAY -> nextTextArray();
+            case STRING_ALPHANUMERIC_ARRAY -> nextAlphaNumericTextArray();
+            case STRING_ASCII_ARRAY -> nextAsciiTextArray();
+            case STRING_BMP_ARRAY -> nextBasicMultilingualPlaneTextArray();
+            case LOCAL_DATE_TIME_ARRAY -> nextLocalDateTimeArray();
+            case DATE_ARRAY -> nextDateArray();
+            case LOCAL_TIME_ARRAY -> nextLocalTimeArray();
+            case PERIOD_ARRAY -> nextPeriodArray();
+            case DURATION_ARRAY -> nextDurationArray();
+            case TIME_ARRAY -> nextTimeArray();
+            case DATE_TIME_ARRAY -> nextDateTimeArray();
+            case CARTESIAN_POINT_ARRAY -> nextCartesianPointArray();
+            case CARTESIAN_POINT_3D_ARRAY -> nextCartesian3DPointArray();
+            case GEOGRAPHIC_POINT_ARRAY -> nextGeographicPointArray();
+            case GEOGRAPHIC_POINT_3D_ARRAY -> nextGeographic3DPointArray();
+            case INT8_VECTOR -> nextInt8Vector();
+            case INT16_VECTOR -> nextInt16Vector();
+            case INT32_VECTOR -> nextInt32Vector();
+            case INT64_VECTOR -> nextInt64Vector();
+            case FLOAT16_VECTOR -> nextFloat16Vector(Float16Format.FLOAT16);
+            case BFLOAT16_VECTOR -> nextFloat16Vector(Float16Format.BFLOAT16);
+            case FLOAT32_VECTOR -> nextFloat32Vector();
+            case FLOAT64_VECTOR -> nextFloat64Vector();
+            case VECTOR_ARRAY -> nextVectorArray();
+            case UUID -> nextUUIDValue();
+            case UUID_ARRAY -> nextUUIDArray();
+        };
+    }
+
+    public Int8Vector nextInt8Vector(int minDim, int maxDim) {
+        assert MIN_VECTOR_DIMENSIONS <= minDim && minDim <= maxDim && maxDim <= MAX_VECTOR_DIMENSIONS
+                : "Require (%d,%d) in [%d, %d]".formatted(minDim, maxDim, MIN_VECTOR_DIMENSIONS, MAX_VECTOR_DIMENSIONS);
+        return Values.int8Vector(nextByteArrayRaw(minDim, maxDim));
+    }
+
+    public Int8Vector nextInt8Vector() {
+        final int dimension = chooseDimension(Byte.BYTES);
+        return nextInt8Vector(dimension, dimension);
+    }
+
+    public Int16Vector nextInt16Vector(int minDim, int maxDim) {
+        assert MIN_VECTOR_DIMENSIONS <= minDim && minDim <= maxDim && maxDim <= MAX_VECTOR_DIMENSIONS
+                : "Require (%d,%d) in [%d, %d]".formatted(minDim, maxDim, MIN_VECTOR_DIMENSIONS, MAX_VECTOR_DIMENSIONS);
+        return Values.int16Vector(nextShortArrayRaw(minDim, maxDim));
+    }
+
+    public Int16Vector nextInt16Vector() {
+        final int dimension = chooseDimension(Short.BYTES);
+        return nextInt16Vector(dimension, dimension);
+    }
+
+    public Int32Vector nextInt32Vector(int minDim, int maxDim) {
+        assert MIN_VECTOR_DIMENSIONS <= minDim && minDim <= maxDim && maxDim <= MAX_VECTOR_DIMENSIONS
+                : "Require (%d,%d) in [%d, %d]".formatted(minDim, maxDim, MIN_VECTOR_DIMENSIONS, MAX_VECTOR_DIMENSIONS);
+        return Values.int32Vector(nextIntArrayRaw(minDim, maxDim));
+    }
+
+    public Int32Vector nextInt32Vector() {
+        final int dimension = chooseDimension(Integer.BYTES);
+        return nextInt32Vector(dimension, dimension);
+    }
+
+    public Int64Vector nextInt64Vector(int minDim, int maxDim) {
+        assert MIN_VECTOR_DIMENSIONS <= minDim && minDim <= maxDim && maxDim <= MAX_VECTOR_DIMENSIONS
+                : "Require (%d,%d) in [%d, %d]".formatted(minDim, maxDim, MIN_VECTOR_DIMENSIONS, MAX_VECTOR_DIMENSIONS);
+        return Values.int64Vector(nextLongArrayRaw(minDim, maxDim));
+    }
+
+    public Int64Vector nextInt64Vector() {
+        final int dimension = chooseDimension(Long.BYTES);
+        return nextInt64Vector(dimension, dimension);
+    }
+
+    public AbstractFloat16Vector nextFloat16Vector(Float16Format format) {
+        final int dimension = chooseDimension(Short.BYTES);
+        return nextFloat16Vector(format, dimension, dimension);
+    }
+
+    public AbstractFloat16Vector nextFloat16Vector(Float16Format format, int minDim, int maxDim) {
+        assert MIN_VECTOR_DIMENSIONS <= minDim && minDim <= maxDim && maxDim <= MAX_VECTOR_DIMENSIONS
+                : "Require (%d,%d) in [%d, %d]".formatted(minDim, maxDim, MIN_VECTOR_DIMENSIONS, MAX_VECTOR_DIMENSIONS);
+        short[] coordinates = new short[intBetween(minDim, maxDim)];
+        for (int i = 0; i < coordinates.length; i++) {
+            short positiveValue = (short) intBetween(format.minValue(), format.maxValue());
+            coordinates[i] = nextBoolean() ? positiveValue : format.negative(positiveValue);
+        }
+        return Values.float16Vector(format, coordinates);
+    }
+
+    public Float32Vector nextFloat32Vector(int minDim, int maxDim) {
+        assert MIN_VECTOR_DIMENSIONS <= minDim && minDim <= maxDim && maxDim <= MAX_VECTOR_DIMENSIONS
+                : "Require (%d,%d) in [%d, %d]".formatted(minDim, maxDim, MIN_VECTOR_DIMENSIONS, MAX_VECTOR_DIMENSIONS);
+        return Values.float32Vector(nextFloatArrayRaw(minDim, maxDim));
+    }
+
+    public Float32Vector nextFloat32Vector() {
+        final int dimension = chooseDimension(Float.BYTES);
+        return nextFloat32Vector(dimension, dimension);
+    }
+
+    public Float64Vector nextFloat64Vector(int minDim, int maxDim) {
+        assert MIN_VECTOR_DIMENSIONS <= minDim && minDim <= maxDim && maxDim <= MAX_VECTOR_DIMENSIONS
+                : "Require (%d,%d) in [%d, %d]".formatted(minDim, maxDim, MIN_VECTOR_DIMENSIONS, MAX_VECTOR_DIMENSIONS);
+        return Values.float64Vector(nextDoubleArrayRaw(minDim, maxDim));
+    }
+
+    public Float64Vector nextFloat64Vector() {
+        final int dimension = chooseDimension(Double.BYTES);
+        return nextFloat64Vector(dimension, dimension);
+    }
+
+    public VectorArray nextVectorArray() {
+        return nextVectorArray(minArray(), maxArray());
+    }
+
+    private int adaptDimensionsToVectorArrayItem(int dimensions) {
+        return Math.clamp(dimensions / 100, Math.min(dimensions, 40), dimensions);
+    }
+
+    public VectorArray nextVectorArray(int minLength, int maxLength) {
+        int length = intBetween(minLength, maxLength);
+        int minDim = adaptDimensionsToVectorArrayItem(configuration.minVectorDimensions());
+        int maxDim = adaptDimensionsToVectorArrayItem(configuration.maxVectorDimensions());
+        VectorValue[] vectors = new VectorValue[length];
+        for (int i = 0; i < length; i++) {
+            vectors[i] = nextVectorValue(minDim, maxDim);
+        }
+        return Values.vectorArray(vectors);
+    }
+
+    public UUID nextUUID() {
+        long msb = generator.nextLong();
+        long lsb = generator.nextLong();
+
+        // See javadoc for java.util.UUID. We need to set some parts of these bytes to recognizable values.
+        // Basically the version and the variant.
+        msb &= 0xffffffffffff0fffL;
+        msb |= 0x0000000000004000L;
+        lsb &= 0x3fffffffffffffffL;
+        lsb |= 0x8000000000000000L;
+
+        return new UUID(msb, lsb);
+    }
+
+    public UUIDValue nextUUIDValue() {
+        return Values.uuidValue(nextUUID());
+    }
+
+    public UUIDArray nextUUIDArray() {
+        return new UUIDArray(nextUUIDArrayRaw(minArray(), maxArray()));
+    }
+
+    public UUID[] nextUUIDArrayRaw(int minLength, int maxLength) {
+        return nextArray(UUID[]::new, this::nextUUID, minLength, maxLength);
     }
 
     /**
@@ -372,7 +501,9 @@ public class RandomValues {
      * @see RandomValues
      */
     public ArrayValue nextArray() {
-        return (ArrayValue) nextValueOfType(among(ARRAY_TYPES));
+        final ListIterable<ValueType> allowedTypes =
+                ArrayAdapter.adapt(ValueType.ARRAY_TYPES).select(this::allowedType);
+        return (ArrayValue) nextValueOfType(among(allowedTypes));
     }
 
     /**
@@ -577,22 +708,15 @@ public class RandomValues {
      */
     public NumberValue nextNumberValue() {
         int type = generator.nextInt(6);
-        switch (type) {
-            case 0:
-                return nextByteValue();
-            case 1:
-                return nextShortValue();
-            case 2:
-                return nextIntValue();
-            case 3:
-                return nextLongValue();
-            case 4:
-                return nextFloatValue();
-            case 5:
-                return nextDoubleValue();
-            default:
-                throw new IllegalArgumentException("Unknown value type " + type);
-        }
+        return switch (type) {
+            case 0 -> nextByteValue();
+            case 1 -> nextShortValue();
+            case 2 -> nextIntValue();
+            case 3 -> nextLongValue();
+            case 4 -> nextFloatValue();
+            case 5 -> nextDoubleValue();
+            default -> throw new IllegalArgumentException("Unknown value type " + type);
+        };
     }
 
     public CharValue nextCharValue() {
@@ -674,6 +798,33 @@ public class RandomValues {
      */
     public TextValue nextTextValue(int minLength, int maxLength) {
         return nextTextValue(minLength, maxLength, this::nextValidCodePoint);
+    }
+
+    /**
+     * @return {@link VectorValue}.
+     * @see RandomValues
+     */
+    public Value nextVectorValue() {
+        return nextValueOfTypes(typesOfCategories(ValueCategory.VECTOR));
+    }
+
+    public VectorValue nextVectorValue(int minDim, int maxDim) {
+        final ValueType type = among(typesOfCategories(ValueCategory.VECTOR));
+        return nextVectorValue(type, minDim, maxDim);
+    }
+
+    public VectorValue nextVectorValue(ValueType type, int minDim, int maxDim) {
+        return switch (type) {
+            case INT8_VECTOR -> nextInt8Vector(minDim, maxDim);
+            case INT16_VECTOR -> nextInt16Vector(minDim, maxDim);
+            case INT32_VECTOR -> nextInt32Vector(minDim, maxDim);
+            case INT64_VECTOR -> nextInt64Vector(minDim, maxDim);
+            case FLOAT16_VECTOR -> nextFloat16Vector(Float16Format.FLOAT16, minDim, maxDim);
+            case BFLOAT16_VECTOR -> nextFloat16Vector(Float16Format.BFLOAT16, minDim, maxDim);
+            case FLOAT32_VECTOR -> nextFloat32Vector(minDim, maxDim);
+            case FLOAT64_VECTOR -> nextFloat64Vector(minDim, maxDim);
+            default -> throw new IllegalStateException("Unexpected vector type: " + type);
+        };
     }
 
     private TextValue nextTextValue(int minLength, int maxLength, CodePointFactory codePointFactory) {
@@ -810,28 +961,15 @@ public class RandomValues {
      */
     public Value nextTemporalValue() {
         int nextInt = generator.nextInt(6);
-        switch (nextInt) {
-            case 0:
-                return nextDateValue();
-
-            case 1:
-                return nextLocalDateTimeValue();
-
-            case 2:
-                return nextDateTimeValue();
-
-            case 3:
-                return nextLocalTimeValue();
-
-            case 4:
-                return nextTimeValue();
-
-            case 5:
-                return nextDuration();
-
-            default:
-                throw new IllegalArgumentException(nextInt + " not a valid temporal type");
-        }
+        return switch (nextInt) {
+            case 0 -> nextDateValue();
+            case 1 -> nextLocalDateTimeValue();
+            case 2 -> nextDateTimeValue();
+            case 3 -> nextLocalTimeValue();
+            case 4 -> nextTimeValue();
+            case 5 -> nextDuration();
+            default -> throw new IllegalArgumentException(nextInt + " not a valid temporal type");
+        };
     }
 
     /**
@@ -901,22 +1039,13 @@ public class RandomValues {
      */
     public PointValue nextPointValue() {
         int nextInt = generator.nextInt(4);
-        switch (nextInt) {
-            case 0:
-                return nextCartesianPoint();
-
-            case 1:
-                return nextCartesian3DPoint();
-
-            case 2:
-                return nextGeographicPoint();
-
-            case 3:
-                return nextGeographic3DPoint();
-
-            default:
-                throw new IllegalStateException(nextInt + " not a valid point type");
-        }
+        return switch (nextInt) {
+            case 0 -> nextCartesianPoint();
+            case 1 -> nextCartesian3DPoint();
+            case 2 -> nextGeographicPoint();
+            case 3 -> nextGeographic3DPoint();
+            default -> throw new IllegalStateException(nextInt + " not a valid point type");
+        };
     }
 
     public CharArray nextCharArray() {
@@ -1090,13 +1219,22 @@ public class RandomValues {
         return booleans;
     }
 
+    private static TextArray stringArrayAsTextArray(String[] array) {
+        StringValue[] values = new StringValue[array.length];
+        for (int i = 0; i < array.length; i++) {
+            String s = array[i];
+            values[i] = s == null ? null : Values.utf8Value(s);
+        }
+        return Values.stringArray(values);
+    }
+
     /**
      * @return the next {@link TextArray} containing strings with only alpha-numeric characters.
      * @see RandomValues
      */
     public TextArray nextAlphaNumericTextArray() {
         String[] array = nextAlphaNumericStringArrayRaw(minArray(), maxArray(), minString(), maxString());
-        return Values.stringArray(array);
+        return stringArrayAsTextArray(array);
     }
 
     /**
@@ -1118,7 +1256,7 @@ public class RandomValues {
      */
     private TextArray nextAsciiTextArray() {
         String[] array = nextArray(String[]::new, () -> nextStringRaw(this::asciiCodePoint), minArray(), maxArray());
-        return Values.stringArray(array);
+        return stringArrayAsTextArray(array);
     }
 
     /**
@@ -1131,7 +1269,7 @@ public class RandomValues {
                 () -> nextStringRaw(minString(), maxString(), this::bmpCodePoint),
                 minArray(),
                 maxArray());
-        return Values.stringArray(array);
+        return stringArrayAsTextArray(array);
     }
 
     /**
@@ -1139,7 +1277,7 @@ public class RandomValues {
      */
     public TextArray nextTextArray() {
         String[] array = nextStringArrayRaw(minArray(), maxArray(), minString(), maxString());
-        return Values.stringArray(array);
+        return stringArrayAsTextArray(array);
     }
 
     /**
@@ -1262,22 +1400,13 @@ public class RandomValues {
      */
     public PointArray nextPointArray() {
         int nextInt = generator.nextInt(4);
-        switch (nextInt) {
-            case 0:
-                return nextCartesianPointArray();
-
-            case 1:
-                return nextCartesian3DPointArray();
-
-            case 2:
-                return nextGeographicPointArray();
-
-            case 3:
-                return nextGeographic3DPointArray();
-
-            default:
-                throw new IllegalStateException(nextInt + " not a valid point type");
-        }
+        return switch (nextInt) {
+            case 0 -> nextCartesianPointArray();
+            case 1 -> nextCartesian3DPointArray();
+            case 2 -> nextGeographicPointArray();
+            case 3 -> nextGeographic3DPointArray();
+            default -> throw new IllegalStateException(nextInt + " not a valid point type");
+        };
     }
 
     /**
@@ -1474,7 +1603,58 @@ public class RandomValues {
         return among.get(nextInt(among.size()));
     }
 
+    public long among(LongIterable among) {
+        if (among instanceof final LongList intList) {
+            return among(intList);
+        }
+
+        int offset = nextInt(among.size());
+        final var iterator = among.longIterator();
+        while (offset-- > 0) {
+            iterator.next();
+        }
+        return iterator.next();
+    }
+
+    public int among(IntList among) {
+        return among.get(nextInt(among.size()));
+    }
+
+    public int among(IntIterable among) {
+        if (among instanceof final IntList intList) {
+            return among(intList);
+        }
+
+        int offset = nextInt(among.size());
+        final var iterator = among.intIterator();
+        while (offset-- > 0) {
+            iterator.next();
+        }
+        return iterator.next();
+    }
+
+    public <T> T among(ListIterable<T> among) {
+        return among.get(generator.nextInt(among.size()));
+    }
+
     public <T> T among(RichIterable<T> among) {
+        if (among instanceof final ListIterable<T> list) {
+            return among(list);
+        }
+
+        int offset = nextInt(among.size());
+        final var iterator = among.iterator();
+        while (offset-- > 0) {
+            iterator.next();
+        }
+        return iterator.next();
+    }
+
+    public <T> T among(Collection<T> among) {
+        if (among instanceof final List<T> list) {
+            return among(list);
+        }
+
         int offset = nextInt(among.size());
         final var iterator = among.iterator();
         while (offset-- > 0) {
@@ -1543,6 +1723,14 @@ public class RandomValues {
                 .toArray();
     }
 
+    // This information is duplicated and could end up out-of-sync, but since it is a major hassle to decouple this
+    // everywhere the tradeoff is reasonable.
+    // Account for some extra type information in the key, and a 20% buffer just in case.
+    public static int maxSizeInIndexKey(int numberOfProperties) {
+        // 8 + numberOfProperties * (1 + sizeInIndexKey) <= 8175
+        return ((8175 - 8) / numberOfProperties - 1) * 8 / 10;
+    }
+
     private int maxArray() {
         return configuration.arrayMaxLength();
     }
@@ -1559,6 +1747,38 @@ public class RandomValues {
         return configuration.stringMinLength();
     }
 
+    private int chooseDimension(int size) {
+        final IntList dimensions = configuration.vectorDimensionChoices();
+        final int dimension;
+        if (dimensions != null) {
+            assert dimensions.notEmpty();
+            dimension = among(dimensions);
+        } else {
+            final int min = minDimensions();
+            final int max = Math.min(maxVectorNumBytes() / size, maxDimensions());
+            assert min <= max : "Cannot choose dimensions from [" + min + " to " + max + "]";
+            dimension = intBetween(min, max);
+        }
+        assert dimension * size <= maxVectorNumBytes();
+        return dimension;
+    }
+
+    private int minDimensions() {
+        return Math.max(configuration.minVectorDimensions(), MIN_VECTOR_DIMENSIONS);
+    }
+
+    private int maxDimensions() {
+        return Math.min(configuration.maxVectorDimensions(), MAX_VECTOR_DIMENSIONS);
+    }
+
+    private int maxVectorNumBytes() {
+        return configuration.maxVectorNumBytes();
+    }
+
+    private boolean allowedType(ValueType type) {
+        return configuration.allowedTypes().contains(type);
+    }
+
     @FunctionalInterface
     private interface ElementFactory<T> {
         T generate();
@@ -1567,5 +1787,357 @@ public class RandomValues {
     @FunctionalInterface
     private interface CodePointFactory {
         int generate();
+    }
+
+    public static final Predicate<ValueType> IS_VECTOR_TYPE = t -> {
+        ValueCategory category = t.valueRepresentation.valueGroup().category();
+        return category == ValueCategory.VECTOR || category == ValueCategory.VECTOR_ARRAY;
+    };
+
+    /**
+     * An immutable and thread-safe configuration builder.
+     */
+    public static class ConfigurationBuilder {
+        private final int stringMinLength;
+        private final int stringMaxLength;
+        private final int arrayMinLength;
+        private final int arrayMaxLength;
+        private final int minCodePoint;
+        private final int maxCodePoint;
+        private final int minVectorDimensions;
+        private final int maxVectorDimensions;
+        private final ImmutableIntList vectorDimensionChoices;
+        private final int maxVectorNumBytes;
+        private final ImmutableSortedSet<ValueType> allowedTypes;
+
+        private ConfigurationBuilder() {
+            this(
+                    5,
+                    20,
+                    1,
+                    10,
+                    Character.MIN_CODE_POINT,
+                    Character.MAX_CODE_POINT,
+                    MIN_VECTOR_DIMENSIONS,
+                    MAX_VECTOR_DIMENSIONS,
+                    null,
+                    MAX_VECTOR_DIMENSIONS * Double.BYTES,
+                    SortedSets.immutable.ofAll(Arrays.asList(ValueType.ALL_TYPES)));
+        }
+
+        private ConfigurationBuilder(
+                int stringMinLength,
+                int stringMaxLength,
+                int arrayMinLength,
+                int arrayMaxLength,
+                int minCodePoint,
+                int maxCodePoint,
+                int minVectorDimensions,
+                int maxVectorDimensions,
+                ImmutableIntList vectorDimensionChoices,
+                int maxVectorNumBytes,
+                ImmutableSortedSet<ValueType> allowedTypes) {
+            this.stringMinLength = stringMinLength;
+            this.stringMaxLength = stringMaxLength;
+            this.arrayMinLength = arrayMinLength;
+            this.arrayMaxLength = arrayMaxLength;
+            this.minCodePoint = minCodePoint;
+            this.maxCodePoint = maxCodePoint;
+            this.minVectorDimensions = minVectorDimensions;
+            this.maxVectorDimensions = maxVectorDimensions;
+            this.vectorDimensionChoices = vectorDimensionChoices;
+            this.maxVectorNumBytes = maxVectorNumBytes;
+            this.allowedTypes = allowedTypes;
+        }
+
+        public Configuration build() {
+            // Even if vector dimension choices explicitly set
+            // Configuration interface can still query min/max vector dimensions
+            int minVectorDimensions = this.minVectorDimensions;
+            int maxVectorDimensions = this.maxVectorDimensions;
+
+            if (vectorDimensionChoices != null) {
+                minVectorDimensions = vectorDimensionChoices.getFirst();
+                maxVectorDimensions = vectorDimensionChoices.getLast();
+            }
+
+            return new ConfigurationRecord(
+                    stringMinLength,
+                    stringMaxLength,
+                    arrayMinLength,
+                    arrayMaxLength,
+                    minCodePoint,
+                    maxCodePoint,
+                    minVectorDimensions,
+                    maxVectorDimensions,
+                    vectorDimensionChoices,
+                    maxVectorNumBytes,
+                    allowedTypes);
+        }
+
+        public ConfigurationBuilder stringMinLength(int length) {
+            return new ConfigurationBuilder(
+                    length,
+                    this.stringMaxLength,
+                    this.arrayMinLength,
+                    this.arrayMaxLength,
+                    this.minCodePoint,
+                    this.maxCodePoint,
+                    this.minVectorDimensions,
+                    this.maxVectorDimensions,
+                    this.vectorDimensionChoices,
+                    this.maxVectorNumBytes,
+                    this.allowedTypes);
+        }
+
+        public ConfigurationBuilder stringMaxLength(int length) {
+            return new ConfigurationBuilder(
+                    this.stringMinLength,
+                    length,
+                    this.arrayMinLength,
+                    this.arrayMaxLength,
+                    this.minCodePoint,
+                    this.maxCodePoint,
+                    this.minVectorDimensions,
+                    this.maxVectorDimensions,
+                    this.vectorDimensionChoices,
+                    this.maxVectorNumBytes,
+                    this.allowedTypes);
+        }
+
+        public ConfigurationBuilder stringLength(int min, int max) {
+            assert min <= max : "min must be greater or equal to max";
+            return stringMinLength(min).stringMaxLength(max);
+        }
+
+        public ConfigurationBuilder stringLength(int length) {
+            return stringLength(length, length);
+        }
+
+        public ConfigurationBuilder arrayMinLength(int length) {
+            return new ConfigurationBuilder(
+                    this.stringMinLength,
+                    this.stringMaxLength,
+                    length,
+                    this.arrayMaxLength,
+                    this.minCodePoint,
+                    this.maxCodePoint,
+                    this.minVectorDimensions,
+                    this.maxVectorDimensions,
+                    this.vectorDimensionChoices,
+                    this.maxVectorNumBytes,
+                    this.allowedTypes);
+        }
+
+        public ConfigurationBuilder arrayMaxLength(int length) {
+            return new ConfigurationBuilder(
+                    this.stringMinLength,
+                    this.stringMaxLength,
+                    this.arrayMinLength,
+                    length,
+                    this.minCodePoint,
+                    this.maxCodePoint,
+                    this.minVectorDimensions,
+                    this.maxVectorDimensions,
+                    this.vectorDimensionChoices,
+                    this.maxVectorNumBytes,
+                    this.allowedTypes);
+        }
+
+        public ConfigurationBuilder arrayLength(int min, int max) {
+            assert min <= max : "min must be greater or equal to max";
+            return arrayMinLength(min).arrayMaxLength(max);
+        }
+
+        public ConfigurationBuilder arrayLength(int length) {
+            return arrayLength(length, length);
+        }
+
+        public ConfigurationBuilder minCodePoint(int codePoint) {
+            return new ConfigurationBuilder(
+                    this.stringMinLength,
+                    this.stringMaxLength,
+                    this.arrayMinLength,
+                    this.arrayMaxLength,
+                    codePoint,
+                    this.maxCodePoint,
+                    this.minVectorDimensions,
+                    this.maxVectorDimensions,
+                    this.vectorDimensionChoices,
+                    this.maxVectorNumBytes,
+                    this.allowedTypes);
+        }
+
+        public ConfigurationBuilder maxCodePoint(int codePoint) {
+            return new ConfigurationBuilder(
+                    this.stringMinLength,
+                    this.stringMaxLength,
+                    this.arrayMinLength,
+                    this.arrayMaxLength,
+                    this.minCodePoint,
+                    codePoint,
+                    this.minVectorDimensions,
+                    this.maxVectorDimensions,
+                    this.vectorDimensionChoices,
+                    this.maxVectorNumBytes,
+                    this.allowedTypes);
+        }
+
+        public ConfigurationBuilder codePoints(int min, int max) {
+            assert min <= max : "min must be greater or equal to max";
+            return minCodePoint(min).maxCodePoint(max);
+        }
+
+        public ConfigurationBuilder minVectorDimensions(int dimensions) {
+            assert vectorDimensionChoices == null
+                    : "cannot set minimum vector dimensions with explicit vector dimension choices";
+            return new ConfigurationBuilder(
+                    this.stringMinLength,
+                    this.stringMaxLength,
+                    this.arrayMinLength,
+                    this.arrayMaxLength,
+                    this.minCodePoint,
+                    this.maxCodePoint,
+                    dimensions,
+                    this.maxVectorDimensions,
+                    null,
+                    this.maxVectorNumBytes,
+                    this.allowedTypes);
+        }
+
+        public ConfigurationBuilder maxVectorDimensions(int dimensions) {
+            assert vectorDimensionChoices == null
+                    : "cannot set maximum vector dimensions with explicit vector dimension choices";
+            return new ConfigurationBuilder(
+                    this.stringMinLength,
+                    this.stringMaxLength,
+                    this.arrayMinLength,
+                    this.arrayMaxLength,
+                    this.minCodePoint,
+                    this.maxCodePoint,
+                    this.minVectorDimensions,
+                    dimensions,
+                    null,
+                    this.maxVectorNumBytes,
+                    this.allowedTypes);
+        }
+
+        public ConfigurationBuilder vectorDimensions(int min, int max) {
+            assert min <= max : "min must be greater or equal to max";
+            return minVectorDimensions(min).maxVectorDimensions(max);
+        }
+
+        public ConfigurationBuilder vectorDimensionChoices(int... dimensions) {
+            final ImmutableIntList localDimensions;
+            if (dimensions != null) {
+                assert dimensions.length > 0 : "must provide at least one vector dimension";
+                localDimensions =
+                        IntLists.mutable.wrapCopy(dimensions).sortThis().toImmutable();
+            } else {
+                localDimensions = null;
+            }
+
+            return new ConfigurationBuilder(
+                    this.stringMinLength,
+                    this.stringMaxLength,
+                    this.arrayMinLength,
+                    this.arrayMaxLength,
+                    this.minCodePoint,
+                    this.maxCodePoint,
+                    this.minVectorDimensions,
+                    this.maxVectorDimensions,
+                    localDimensions,
+                    this.maxVectorNumBytes,
+                    this.allowedTypes);
+        }
+
+        public ConfigurationBuilder maxVectorNumBytes(int maxVectorNumBytes) {
+            return new ConfigurationBuilder(
+                    this.stringMinLength,
+                    this.stringMaxLength,
+                    this.arrayMinLength,
+                    this.arrayMaxLength,
+                    this.minCodePoint,
+                    this.maxCodePoint,
+                    this.minVectorDimensions,
+                    this.maxVectorDimensions,
+                    this.vectorDimensionChoices,
+                    maxVectorNumBytes,
+                    this.allowedTypes);
+        }
+
+        public ConfigurationBuilder includeVectorTypes(boolean includeVectorTypes) {
+            final var allowedTypes = includeVectorTypes
+                    ? this.allowedTypes.newWithAll(LazyIterate.select(Arrays.asList(ALL_TYPES), IS_VECTOR_TYPE))
+                    : this.allowedTypes.reject(IS_VECTOR_TYPE);
+            return allowedTypes(allowedTypes);
+        }
+
+        public ConfigurationBuilder allowedTypes(ValueType... allowedTypes) {
+            return allowedTypes(SortedSets.immutable.of(allowedTypes));
+        }
+
+        public ConfigurationBuilder allowedTypes(Iterable<ValueType> allowedTypes) {
+            assert Iterate.notEmpty(allowedTypes) : "must provide at least one type";
+            return new ConfigurationBuilder(
+                    this.stringMinLength,
+                    this.stringMaxLength,
+                    this.arrayMinLength,
+                    this.arrayMaxLength,
+                    this.minCodePoint,
+                    this.maxCodePoint,
+                    this.minVectorDimensions,
+                    this.maxVectorDimensions,
+                    this.vectorDimensionChoices,
+                    this.maxVectorNumBytes,
+                    SortedSets.immutable.ofAll(allowedTypes));
+        }
+
+        public ConfigurationBuilder disallowedTypes(ValueType... disallowedTypes) {
+            assert disallowedTypes != null && disallowedTypes.length > 0 : "must provide at least one type";
+            ImmutableSet<ValueType> set = Sets.immutable.of(disallowedTypes);
+            return disallowedTypes(set::contains);
+        }
+
+        public ConfigurationBuilder disallowedTypes(Predicate<ValueType> predicate) {
+            return allowedTypes(this.allowedTypes.reject(predicate));
+        }
+    }
+
+    private record ConfigurationRecord(
+            int stringMinLength,
+            int stringMaxLength,
+            int arrayMinLength,
+            int arrayMaxLength,
+            int minCodePoint,
+            int maxCodePoint,
+            int minVectorDimensions,
+            int maxVectorDimensions,
+            ImmutableIntList vectorDimensionChoices,
+            int maxVectorNumBytes,
+            ImmutableSortedSet<ValueType> allowedTypes)
+            implements Configuration {
+
+        private ConfigurationRecord {
+            // configuration invariants
+            assert stringMinLength <= stringMaxLength : stringMinLength + "must be <= " + stringMaxLength;
+            assert arrayMinLength <= arrayMaxLength : arrayMinLength + "must be <= " + arrayMaxLength;
+            assert minCodePoint <= maxCodePoint : minCodePoint + "must be <= " + maxCodePoint;
+            if (vectorDimensionChoices != null) {
+                assert vectorDimensionChoices.notEmpty();
+                assert vectorDimensionChoices.getFirst() == minVectorDimensions;
+                assert vectorDimensionChoices.getLast() == maxVectorDimensions;
+            }
+            assert MIN_VECTOR_DIMENSIONS <= minVectorDimensions;
+            assert minVectorDimensions <= maxVectorDimensions;
+            assert maxVectorDimensions <= MAX_VECTOR_DIMENSIONS;
+            assert maxVectorNumBytes <= maxVectorNumBytes * Double.BYTES;
+            assert allowedTypes != null && allowedTypes.notEmpty();
+        }
+
+        @Override
+        public boolean includeVectorTypes() {
+            return allowedTypes.detect(IS_VECTOR_TYPE) != null;
+        }
     }
 }

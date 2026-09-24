@@ -19,6 +19,8 @@
  */
 package org.neo4j.exceptions;
 
+import static java.lang.String.format;
+
 import java.util.List;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
@@ -29,35 +31,33 @@ import org.neo4j.kernel.api.exceptions.Status;
 
 public class CypherTypeException extends Neo4jException {
 
-    @Deprecated
-    public CypherTypeException(String message, Throwable cause) {
-        super(message, cause);
-    }
-
-    public CypherTypeException(ErrorGqlStatusObject gqlStatusObject, String message, Throwable cause) {
+    protected CypherTypeException(ErrorGqlStatusObject gqlStatusObject, String message, Throwable cause) {
         super(gqlStatusObject, message, cause);
     }
 
-    @Deprecated
-    public CypherTypeException(String message) {
-        super(message);
+    protected CypherTypeException(ErrorGqlStatusObject gqlStatusObject, String message) {
+        super(gqlStatusObject, message);
     }
 
-    public CypherTypeException(ErrorGqlStatusObject gqlStatusObject, String message) {
-        super(gqlStatusObject, message);
+    public static CypherTypeException internalError(String msgTitle, String message) {
+        var gql = GqlHelper.get50N00(msgTitle, message);
+        return new CypherTypeException(gql, message);
     }
 
     public static CypherTypeException invalidType(
             String value, List<String> expectedTypes, String actualType, String signature) {
+        var gql = GqlHelper.getGql22G03_22N01(value, expectedTypes, actualType);
+        return new CypherTypeException(gql, String.format("Wrong type. Expected %s, got %s", signature, actualType));
+    }
+
+    public static CypherTypeException invalidTypeForLabelExpression(
+            String value, String prettyValue, String actualType, String actualCypherType) {
+        var gql = GqlHelper.getGql22G03_22N01(prettyValue, List.of("NODE", "RELATIONSHIP"), actualCypherType);
         return new CypherTypeException(
-                ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22G03)
-                        .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N01)
-                                .withParam(GqlParams.StringParam.value, value)
-                                .withParam(GqlParams.ListParam.valueTypeList, expectedTypes)
-                                .withParam(GqlParams.StringParam.valueType, actualType)
-                                .build())
-                        .build(),
-                String.format("Wrong type. Expected %s, got %s", signature, actualType));
+                gql,
+                String.format(
+                        "Invalid input for function 'hasALabelOrType()': Expected %s to be a node or relationship, but it was `%s`",
+                        value, actualType));
     }
 
     public static CypherTypeException nodeCreationNotAMap(String value, String gotCypherType) {
@@ -118,7 +118,7 @@ public class CypherTypeException extends Neo4jException {
 
     public static CypherTypeException expectedCollection(String got, String gotPretty, String gotCypherType) {
         var gql = GqlHelper.getGql22G03_22N01(gotPretty, List.of("LIST"), gotCypherType);
-        return new CypherTypeException(gql, String.format("Expected a collection, got `$x`", got));
+        return new CypherTypeException(gql, String.format("Expected a collection, got `%s`", got));
     }
 
     public static CypherTypeException expectedCollectionWasNot(String got, String gotPretty, String gotCypherType) {
@@ -164,8 +164,26 @@ public class CypherTypeException extends Neo4jException {
         return new CypherTypeException(gql, msg);
     }
 
+    public static CypherTypeException expectedListOfNumber(String msg, String gotPretty, String gotCypherType) {
+        var gql = GqlHelper.getGql22G03_22N01(
+                gotPretty, List.of("LIST<INTEGER NOT NULL>", "LIST<FLOAT NOT NULL>"), gotCypherType);
+        return new CypherTypeException(gql, msg);
+    }
+
     public static CypherTypeException expectedNumber(String msg, String gotPretty, String gotCypherType) {
         var gql = GqlHelper.getGql22G03_22N01(gotPretty, List.of("INTEGER", "FLOAT"), gotCypherType);
+        return new CypherTypeException(gql, msg);
+    }
+
+    public static CypherTypeException expectedInteger(String msg, String gotPretty, String gotCypherType) {
+        var gql = GqlHelper.getGql22G03_22N01(gotPretty, List.of("INTEGER"), gotCypherType);
+        return new CypherTypeException(gql, msg);
+    }
+
+    public static CypherTypeException functionArgumentWrongType(
+            String msg, String functionName, String gotPretty, List<String> expectedList, String gotCypherType) {
+        var gql = GqlHelper.getGql22N38_22N01(
+                GqlParams.StringParam.fun.process(functionName), gotPretty, expectedList, gotCypherType);
         return new CypherTypeException(gql, msg);
     }
 
@@ -183,6 +201,12 @@ public class CypherTypeException extends Neo4jException {
     public static CypherTypeException expectedVirtualNode(String gotPretty, String gotTypeName, String gotCypherType) {
         var gql = GqlHelper.getGql22G03_22N01(gotPretty, List.of("NODE"), gotCypherType);
         return new CypherTypeException(gql, String.format("Expected VirtualNodeValue got %s", gotTypeName));
+    }
+
+    public static CypherTypeException expectedVirtualRelationship(
+            String gotPretty, String gotTypeName, String gotCypherType) {
+        var gql = GqlHelper.getGql22G03_22N01(gotPretty, List.of("RELATIONSHIP"), gotCypherType);
+        return new CypherTypeException(gql, String.format("Expected VirtualRelationshipValue got %s", gotTypeName));
     }
 
     public static CypherTypeException expectedNodeValue(String gotPretty, String gotTypeName, String gotCypherType) {
@@ -244,6 +268,27 @@ public class CypherTypeException extends Neo4jException {
                 gql, String.format("Expected %s to be a %s, but it was a %s", got, expectedType, gotType));
     }
 
+    public static CypherTypeException wrongVectorDimension(
+            String gotPretty, String nestedTypeName, long expectedDimension, int gotDimension) {
+        var expectedType = String.format("VECTOR<%s>(%d)", nestedTypeName, expectedDimension);
+        var gotCypherType = String.format("VECTOR<%s>(%d)", nestedTypeName, gotDimension);
+        var gql = GqlHelper.getGql22G03_22N01(gotPretty, List.of(expectedType), gotCypherType);
+        return new CypherTypeException(gql, String.format("Expected a %s, but got %s", expectedType, gotCypherType));
+    }
+
+    public static CypherTypeException wrongVectorDimension(String indexName, int indexDim, int vectorDim) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N65)
+                .withParam(GqlParams.StringParam.idx, indexName)
+                .withParam(GqlParams.NumberParam.dim1, indexDim)
+                .withParam(GqlParams.NumberParam.dim2, vectorDim)
+                .build();
+
+        return new CypherTypeException(
+                gql,
+                "Vector index '%s' has a configured dimensionality of %d, but the provided vector has dimension %d."
+                        .formatted(indexName, indexDim, vectorDim));
+    }
+
     public static CypherTypeException howTreatPredicate(String got, String gotPretty, String gotCypherType) {
         var gql = GqlHelper.getGql22G03_22N01(gotPretty, List.of("BOOLEAN"), gotCypherType);
         return new CypherTypeException(gql, String.format("Don't know how to treat a predicate: %s", got), null);
@@ -269,9 +314,7 @@ public class CypherTypeException extends Neo4jException {
                         "LOCAL DATETIME",
                         "ZONED DATETIME",
                         "DURATION",
-                        "POINT",
-                        "NODE",
-                        "RELATIONSHIP"),
+                        "POINT"),
                 gotCypherType);
         String msg = "Property values can only be of primitive types or arrays thereof";
         if (withEncountered) msg += String.format(". Encountered: %s.", got);
@@ -316,73 +359,185 @@ public class CypherTypeException extends Neo4jException {
     }
 
     public static CypherTypeException addTypeMismatch(
-            String leftPretty,
-            String leftTypeName,
-            String rightTypeName,
-            String leftCypherType,
-            String rightCypherType) {
-        var gql = GqlHelper.getGql22G03_22N01(leftPretty, List.of(rightCypherType), leftCypherType);
-        return new CypherTypeException(gql, String.format("Cannot add `%s` and `%s`", leftTypeName, rightTypeName));
+            String rightPretty,
+            String legacyLeftTypeName,
+            String legacyRightTypeName,
+            String rightCypherType,
+            List<String> expectedRightCypherTypes) {
+        var gql = GqlHelper.getGql22G03_22N01(rightPretty, expectedRightCypherTypes, rightCypherType);
+        return new CypherTypeException(
+                gql, String.format("Cannot add `%s` and `%s`", legacyLeftTypeName, legacyRightTypeName));
     }
 
     public static CypherTypeException subtractTypeMismatch(
-            String leftPretty,
-            String leftTypeName,
-            String rightTypeName,
-            String leftCypherType,
-            String rightCypherType) {
-        var gql = GqlHelper.getGql22G03_22N01(leftPretty, List.of(rightCypherType), leftCypherType);
+            String rightPretty,
+            String legacyLeftTypeName,
+            String legacyRightTypeName,
+            String rightCypherType,
+            String expectedRightCypherType) {
+        var gql = GqlHelper.getGql22G03_22N01(rightPretty, List.of(expectedRightCypherType), rightCypherType);
         return new CypherTypeException(
-                gql, String.format("Cannot subtract `%s` from `%s`", rightTypeName, leftTypeName));
+                gql, String.format("Cannot subtract `%s` from `%s`", legacyRightTypeName, legacyLeftTypeName));
     }
 
     public static CypherTypeException divideTypeMismatch(
-            String leftPretty,
-            String leftTypeName,
-            String rightTypeName,
-            String leftCypherType,
-            String rightCypherType) {
-        var gql = GqlHelper.getGql22G03_22N01(leftPretty, List.of(rightCypherType), leftCypherType);
-        return new CypherTypeException(gql, String.format("Cannot divide `%s` by `%s`", leftTypeName, rightTypeName));
+            String rightPretty,
+            String legacyLeftTypeName,
+            String legacyRightTypeName,
+            String rightCypherType,
+            List<String> expectedRightCypherTypes) {
+        var gql = GqlHelper.getGql22G03_22N01(rightPretty, expectedRightCypherTypes, rightCypherType);
+        return new CypherTypeException(
+                gql, String.format("Cannot divide `%s` by `%s`", legacyLeftTypeName, legacyRightTypeName));
     }
 
     public static CypherTypeException multiplyTypeMismatch(
-            String leftPretty,
-            String leftTypeName,
-            String rightTypeName,
-            String leftCypherType,
-            String rightCypherType) {
-        var gql = GqlHelper.getGql22G03_22N01(leftPretty, List.of(rightCypherType), leftCypherType);
+            String rightPretty,
+            String legacyLeftTypeName,
+            String legacyRightTypeName,
+            String rightCypherType,
+            List<String> expectedRightCypherTypes) {
+        var gql = GqlHelper.getGql22G03_22N01(rightPretty, expectedRightCypherTypes, rightCypherType);
         return new CypherTypeException(
-                gql, String.format("Cannot multiply `%s` and `%s`", leftTypeName, rightTypeName));
+                gql, String.format("Cannot multiply `%s` and `%s`", legacyLeftTypeName, legacyRightTypeName));
     }
 
     public static CypherTypeException modulusTypeMismatch(
-            String leftPretty,
-            String leftTypeName,
-            String rightTypeName,
-            String leftCypherType,
-            String rightCypherType) {
-        var gql = GqlHelper.getGql22G03_22N01(leftPretty, List.of(rightCypherType), leftCypherType);
+            String rightPretty,
+            String legacyLeftTypeName,
+            String legacyRightTypeName,
+            String rightCypherType,
+            List<String> expectedRightCypherTypes) {
+        var gql = GqlHelper.getGql22G03_22N01(rightPretty, expectedRightCypherTypes, rightCypherType);
         return new CypherTypeException(
-                gql, String.format("Cannot calculate modulus of `%s` and `%s`", leftTypeName, rightTypeName));
+                gql,
+                String.format("Cannot calculate modulus of `%s` and `%s`", legacyLeftTypeName, legacyRightTypeName));
     }
 
     public static CypherTypeException powerTypeMismatch(
-            String leftPretty,
-            String leftTypeName,
-            String rightTypeName,
-            String leftCypherType,
-            String rightCypherType) {
-        var gql = GqlHelper.getGql22G03_22N01(leftPretty, List.of(rightCypherType), leftCypherType);
+            String rightPretty,
+            String legacyLeftTypeName,
+            String legacyRightTypeName,
+            String rightCypherType,
+            List<String> expectedRightCypherTypes) {
+        var gql = GqlHelper.getGql22G03_22N01(rightPretty, expectedRightCypherTypes, rightCypherType);
         return new CypherTypeException(
-                gql, String.format("Cannot raise `%s` to the power of `%s`", leftTypeName, rightTypeName));
+                gql, String.format("Cannot raise `%s` to the power of `%s`", legacyLeftTypeName, legacyRightTypeName));
+    }
+
+    public static CypherTypeException concatenationTypeMismatch(
+            String rightPretty,
+            String legacyLeftTypeName,
+            String legacyRightTypeName,
+            String rightCypherType,
+            String expectedRightCypherType) {
+        var gql = GqlHelper.getGql22G03_22N01(rightPretty, List.of(expectedRightCypherType), rightCypherType);
+        return new CypherTypeException(
+                gql, String.format("Cannot concatenate `%s` and `%s`", legacyLeftTypeName, legacyRightTypeName));
     }
 
     public static CypherTypeException propertyParamIsNotMap(String got, String gotPretty, String gotCypherType) {
         var gql = GqlHelper.getGql22G03_22N01(gotPretty, List.of("MAP"), gotCypherType);
         return new CypherTypeException(
                 gql, String.format("Parameter provided for setting properties is not a Map, instead got %s", got));
+    }
+
+    public static CypherTypeException propertyWithRelCollection(List<?> collection) {
+        var gql = GqlHelper.getGql22G03_22N39(String.valueOf(collection));
+        return new CypherTypeException(
+                gql, "Collections containing relationship values can not be stored in properties.");
+    }
+
+    public static CypherTypeException propertyWithNullInCollection(String serializedList) {
+        var gql = GqlHelper.getGql22G03_22N39(serializedList);
+        return new CypherTypeException(gql, "Collections containing null values can not be stored in properties.");
+    }
+
+    public static CypherTypeException propertyWithCollectionInCollection(String serializedList) {
+        var gql = GqlHelper.getGql22G03_22N39(serializedList);
+        return new CypherTypeException(gql, "Collections containing collections can not be stored in properties.");
+    }
+
+    public static CypherTypeException genericPropertyError(String value) {
+        var gql = GqlHelper.getGql22G03_22N39(value);
+        return new CypherTypeException(
+                gql,
+                "Neo4j only supports a subset of Cypher types for storage as singleton or array properties. "
+                        + "Please refer to section cypher/syntax/values of the manual for more details.");
+    }
+
+    public static CypherTypeException collectionDifferentCRSPoints(String collection) {
+        var gql = GqlHelper.getGql22G03_22N39(String.valueOf(collection));
+        return new CypherTypeException(
+                gql, "Collections containing point values with different CRS can not be stored in properties.");
+    }
+
+    public static CypherTypeException collectionDifferentDimPoints(String collection) {
+        var gql = GqlHelper.getGql22G03_22N39(String.valueOf(collection));
+        return new CypherTypeException(
+                gql, "Collections containing point values with different dimensions can not be stored in properties.");
+    }
+
+    public static CypherTypeException expectedNodeAtRow(String row, String got) {
+        var gql = GqlHelper.getGql22G03_22N27(row, got, List.of("NODE"));
+        return new CypherTypeException(gql, String.format("Expected a node at `%s` but got %s", row, got));
+    }
+
+    public static CypherTypeException onlyNumericalValuesOrNullAllowed(
+            String function, String value, String actualType, String actualCypherType) {
+        var gql = GqlHelper.getGql22N38_22N01(function, value, List.of("INTEGER", "FLOAT"), actualCypherType);
+        return new CypherTypeException(
+                gql,
+                String.format("%s can only handle numerical values or null, but received: %s", function, actualType));
+    }
+
+    public static CypherTypeException onlyNumericalValuesDurationsOrNullAllowed(
+            String function, String value, String actualType, String actualCypherType) {
+        var gql =
+                GqlHelper.getGql22N38_22N01(function, value, List.of("INTEGER", "FLOAT", "DURATION"), actualCypherType);
+        return new CypherTypeException(
+                gql,
+                String.format(
+                        "%s can only handle numerical values, duration, or null, but received: %s",
+                        function, actualType));
+    }
+
+    public static CypherTypeException onlyNumericalValuesAllowed(
+            String function, String value, String actualCypherType) {
+        var gql = GqlHelper.getGql22N38_22N01(function, value, List.of("INTEGER", "FLOAT"), actualCypherType);
+        return new CypherTypeException(gql, String.format("%s cannot mix number and duration", function));
+    }
+
+    public static CypherTypeException onlyDurationValuesAllowed(
+            String function, String value, String actualCypherType) {
+        var gql = GqlHelper.getGql22N38_22N01(function, value, List.of("DURATION"), actualCypherType);
+        return new CypherTypeException(gql, String.format("%s cannot mix number and duration", function));
+    }
+
+    public static CypherTypeException onlyDurationValuesAllowedButNumberFound(String function) {
+        var gql = GqlHelper.getGql22N38_22NB1(function, List.of("DURATION"), "NUMERIC");
+        return new CypherTypeException(gql, String.format("%s cannot mix number and duration", function));
+    }
+
+    public static CypherTypeException onlyNumberValuesAllowedButDurationFound(String function) {
+        var gql = GqlHelper.getGql22N38_22NB1(function, List.of("NUMERIC"), "DURATION");
+        return new CypherTypeException(gql, String.format("%s cannot mix number and duration", function));
+    }
+
+    public static CypherTypeException invalidCoercion(String value, String expectedType, String legacyMessage) {
+        return new CypherTypeException(
+                ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22G03)
+                        .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N37)
+                                .withParam(GqlParams.StringParam.value, value)
+                                .withParam(GqlParams.StringParam.valueType, expectedType)
+                                .build())
+                        .build(),
+                legacyMessage);
+    }
+
+    public static CypherTypeException integerOutOfBounds(String component, Number lower, Number upper, String input) {
+        var gql = GqlHelper.getGql22003_22N03(component, "INTEGER", lower, upper, input);
+        return new CypherTypeException(gql, format("integer, %s, is too large", input));
     }
 
     @Override

@@ -59,18 +59,13 @@ import picocli.CommandLine.Mixin;
 import picocli.CommandLine.Option;
 import picocli.CommandLine.Parameters;
 
-@Command(
-        name = "check",
-        header = "Check the consistency of a database.",
-        description =
-                """
+@Command(name = "check", header = "Check the consistency of a database.", description = """
                 This command allows for checking the consistency of a database, or a dump or backup thereof.
                 It cannot be used with a database which is currently in use.
 
                 Some checks can be quite expensive, so it may be useful to turn some of them off
                 for very large databases. Increasing the heap size can also be a good idea.
-                See 'neo4j-admin help' for details.""",
-        sortOptions = false)
+                See 'neo4j-admin help' for details.""", sortOptions = false)
 public class CheckCommand extends AbstractAdminCommand {
     private final ConsistencyCheckService consistencyCheckService;
 
@@ -120,8 +115,9 @@ public class CheckCommand extends AbstractAdminCommand {
             final var tempPath = (fromAndTemp.tempPath == null)
                     ? fromPath
                     : fromAndTemp.tempPath.toAbsolutePath().normalize();
+            final var tempDir = fs.isDirectory(tempPath) ? tempPath : tempPath.getParent();
 
-            return new PathSource(fromPath, tempPath);
+            return new PathSource(fromPath, tempDir);
         }
 
         private DataTxnSource toDataTxnSource() {
@@ -129,14 +125,12 @@ public class CheckCommand extends AbstractAdminCommand {
         }
 
         private static final class FromAndTemp {
-            @Option(
-                    names = "--from-path",
-                    paramLabel = "<path>",
-                    required = true,
-                    description =
-                            "Path to the directory containing dump/backup artifacts that need to be checked for consistency. "
-                                    + "If the directory contains multiple backups, it will select the most recent backup chain, "
-                                    + "based on the transaction IDs found, to perform the consistency check. ")
+            @Option(names = "--from-path", paramLabel = "<path>", required = true, description = """
+                            Path to a backup file or a directory containing dump/backup artifacts.
+                              If the path is to a single file, that artifact is selected and checked for consistency.
+                              If a directory is provided, the tool selects the most recent backup chain
+                              (based on transaction IDs) within it and checks that chain for consistency.
+                            """)
             private String fromPath;
 
             @Option(
@@ -197,13 +191,11 @@ public class CheckCommand extends AbstractAdminCommand {
                 layout = CheckDatabase.selectAndExtract(
                         fs, source, database, logProvider, verbose, config, force, autoClosables);
             } catch (IOException e) {
-                throw new CommandFailedException(
-                        "Failed to prepare for consistency check: " + e.getMessage(), e, ExitCode.IOERR);
+                throw new CommandFailedException("Failed to prepare for consistency check", e, ExitCode.IOERR);
             } catch (UnsupportedOperationException e) {
                 throw new CommandFailedException(e.getMessage(), ExitCode.USAGE);
             } catch (Exception e) {
-                throw new CommandFailedException(
-                        "Failed to prepare for consistency check: " + e.getMessage(), e, ExitCode.SOFTWARE);
+                throw new CommandFailedException("Failed to prepare for consistency check", e, ExitCode.SOFTWARE);
             }
 
             try (var ignored = LockChecker.checkDatabaseLock(layout)) {
@@ -227,8 +219,7 @@ public class CheckCommand extends AbstractAdminCommand {
                     }
                     return result;
                 } catch (ConsistencyCheckIncompleteException e) {
-                    throw new CommandFailedException(
-                            "Consistency checking failed. " + e.getMessage(), e, ExitCode.SOFTWARE);
+                    throw new CommandFailedException("Consistency checking failed.", e, ExitCode.SOFTWARE);
                 }
 
             } catch (FileLockException e) {
@@ -244,7 +235,7 @@ public class CheckCommand extends AbstractAdminCommand {
         } catch (CommandFailedException e) {
             throw e;
         } catch (Exception e) {
-            throw new CommandFailedException("Consistency checking failed. " + e.getMessage(), e, ExitCode.SOFTWARE);
+            throw new CommandFailedException("Consistency checking failed. ", e, ExitCode.SOFTWARE);
         }
     }
 
@@ -266,12 +257,10 @@ public class CheckCommand extends AbstractAdminCommand {
             Config additionalConfiguration,
             MemoryTracker memoryTracker) {
         if (checkRecoveryState(fs, databaseLayout, additionalConfiguration, memoryTracker)) {
-            throw new CommandFailedException(
-                    """
+            throw new CommandFailedException("""
                     Active logical log detected, this might be a source of inconsistencies.
                     Please recover database before running the consistency check.
-                    To perform recovery please start database and perform clean shutdown.""",
-                    ExitCode.FAIL);
+                    To perform recovery please start database and perform clean shutdown.""", ExitCode.FAIL);
         }
     }
 
@@ -283,8 +272,7 @@ public class CheckCommand extends AbstractAdminCommand {
         try {
             return isRecoveryRequired(fs, databaseLayout, additionalConfiguration, memoryTracker);
         } catch (Exception e) {
-            throw new CommandFailedException(
-                    "Failure when checking for recovery state: " + e.getMessage(), e, ExitCode.IOERR);
+            throw new CommandFailedException("Failure when checking for recovery state: ", e, ExitCode.IOERR);
         }
     }
 }

@@ -26,7 +26,7 @@ import org.neo4j.cypher.internal.util.symbols.ClosedDynamicUnionType
 case object Id extends Function {
   def name = "id"
 
-  override val signatures = Vector(
+  override val signatures: Vector[FunctionTypeSignature] = Vector(
     FunctionTypeSignature(
       function = this,
       names = Vector("input"),
@@ -35,6 +35,7 @@ case object Id extends Function {
       description = "Returns the id of a `NODE` or `RELATIONSHIP`.",
       category = Category.SCALAR,
       deprecated = true,
+      deprecatedBy = Some(s"${ElementId.name} or consider using an application-generated id"),
       argumentDescriptions = Map("input" -> "A node or a relationship.")
     )
   )

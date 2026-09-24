@@ -21,8 +21,6 @@ package org.neo4j.internal.id;
 
 import java.io.IOException;
 import java.nio.file.OpenOption;
-import java.nio.file.Path;
-import java.util.Collection;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import org.eclipse.collections.api.set.ImmutableSet;
@@ -31,6 +29,7 @@ import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.kernel.lifecycle.LifecycleAdapter;
 import org.neo4j.memory.MemoryTracker;
 
@@ -43,10 +42,10 @@ public abstract class AbstractBufferingIdGeneratorFactory extends LifecycleAdapt
 
     public abstract void initialize(
             FileSystemAbstraction fs,
-            Path bufferBasePath,
+            StoreFile storeFile,
             Config config,
             Supplier<IdController.TransactionSnapshot> snapshotSupplier,
-            IdController.TransactionIdVisibilityBoundary visibilityBoundary,
+            IdController.VisibilityHorizonVisibilityBoundary visibilityBoundary,
             IdController.IdFreeCondition condition,
             MemoryTracker memoryTracker)
             throws IOException;
@@ -54,7 +53,7 @@ public abstract class AbstractBufferingIdGeneratorFactory extends LifecycleAdapt
     @Override
     public IdGenerator open(
             PageCache pageCache,
-            Path filename,
+            StoreFile storeFile,
             IdType idType,
             LongSupplier highIdScanner,
             long maxId,
@@ -66,7 +65,7 @@ public abstract class AbstractBufferingIdGeneratorFactory extends LifecycleAdapt
             throws IOException {
         IdGenerator generator = delegate.open(
                 pageCache,
-                filename,
+                storeFile,
                 idType,
                 highIdScanner,
                 maxId,
@@ -81,7 +80,7 @@ public abstract class AbstractBufferingIdGeneratorFactory extends LifecycleAdapt
     @Override
     public IdGenerator create(
             PageCache pageCache,
-            Path filename,
+            StoreFile storeFile,
             IdType idType,
             long highId,
             boolean throwIfFileExists,
@@ -94,7 +93,7 @@ public abstract class AbstractBufferingIdGeneratorFactory extends LifecycleAdapt
             throws IOException {
         IdGenerator idGenerator = delegate.create(
                 pageCache,
-                filename,
+                storeFile,
                 idType,
                 highId,
                 throwIfFileExists,
@@ -105,11 +104,6 @@ public abstract class AbstractBufferingIdGeneratorFactory extends LifecycleAdapt
                 openOptions,
                 slotDistribution);
         return wrapAndKeep(idType, idGenerator);
-    }
-
-    @Override
-    public Collection<Path> listIdFiles() {
-        return delegate.listIdFiles();
     }
 
     protected abstract IdGenerator wrapAndKeep(IdType idType, IdGenerator generator);

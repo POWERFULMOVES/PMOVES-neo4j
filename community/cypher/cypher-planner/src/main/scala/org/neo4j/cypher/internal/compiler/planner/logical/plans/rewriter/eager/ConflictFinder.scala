@@ -26,10 +26,13 @@ import org.neo4j.cypher.internal.compiler.planner.logical.plans.rewriter.eager.R
 import org.neo4j.cypher.internal.compiler.planner.logical.plans.rewriter.eager.ReadsAndWritesFinder.PlanWithAccessor
 import org.neo4j.cypher.internal.compiler.planner.logical.plans.rewriter.eager.ReadsAndWritesFinder.PossibleDeleteConflictPlans
 import org.neo4j.cypher.internal.compiler.planner.logical.plans.rewriter.eager.ReadsAndWritesFinder.ReadsAndWrites
+import org.neo4j.cypher.internal.expressions.EntityType
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.LabelName
 import org.neo4j.cypher.internal.expressions.LogicalVariable
+import org.neo4j.cypher.internal.expressions.NODE_TYPE
 import org.neo4j.cypher.internal.expressions.PropertyKeyName
+import org.neo4j.cypher.internal.expressions.RELATIONSHIP_TYPE
 import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.ir.EagernessReason
 import org.neo4j.cypher.internal.ir.EagernessReason.Conflict
@@ -59,12 +62,15 @@ import org.neo4j.cypher.internal.logical.plans.ForeachApply
 import org.neo4j.cypher.internal.logical.plans.LogicalLeafPlan
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 import org.neo4j.cypher.internal.logical.plans.Merge
+import org.neo4j.cypher.internal.logical.plans.MergeInto
 import org.neo4j.cypher.internal.logical.plans.NestedPlanExpression
 import org.neo4j.cypher.internal.logical.plans.NodeLogicalLeafPlan
 import org.neo4j.cypher.internal.logical.plans.RelationshipLogicalLeafPlan
 import org.neo4j.cypher.internal.logical.plans.RemoveLabels
 import org.neo4j.cypher.internal.logical.plans.StableLeafPlan
 import org.neo4j.cypher.internal.logical.plans.UpdatingPlan
+import org.neo4j.cypher.internal.planner.spi.LeafStability
+import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.StableLeafPlans
 import org.neo4j.cypher.internal.util.Foldable.SkipChildren
 import org.neo4j.cypher.internal.util.Ref
 import org.neo4j.cypher.internal.util.helpers.MapSupport.PowerMap
@@ -86,7 +92,10 @@ sealed trait ConflictFinder {
     leftMostLeaf: LogicalPlan,
     writtenProperties: ReadsAndWritesFinder.Sets => Iterator[(Option[PropertyKeyName], Set[PlanWithAccessor])],
     plansReadingProperty: (ReadsAndWritesFinder.Reads, Option[PropertyKeyName]) => Iterator[PlanWithAccessor]
-  )(implicit planChildrenLookup: PlanChildrenLookup): Iterator[ConflictingPlanPair] = {
+  )(
+    implicit planChildrenLookup: PlanChildrenLookup,
+    stableLeafPlans: StableLeafPlans
+  ): Iterator[ConflictingPlanPair] = {
     for {
       (prop, writePlans) <- writtenProperties(readsAndWrites.writes.sets)
       read @ PlanWithAccessor(Ref(readPlan), _) <- plansReadingProperty(readsAndWrites.reads, prop)
@@ -128,8 +137,10 @@ sealed trait ConflictFinder {
     } ++ Seq((Option.empty, readsAndWrites.writes.sets.writtenUnknownLabels))
   }
 
-  private def labelConflicts(readsAndWrites: ReadsAndWrites, leftMostLeaf: LogicalPlan)(implicit
-    planChildrenLookup: PlanChildrenLookup): Iterator[ConflictingPlanPair] = {
+  private def labelConflicts(readsAndWrites: ReadsAndWrites, leftMostLeaf: LogicalPlan)(
+    implicit planChildrenLookup: PlanChildrenLookup,
+    stableLeafPlans: StableLeafPlans
+  ): Iterator[ConflictingPlanPair] = {
     for {
       (maybeLabel, writePlans) <- allWrittenLabels(readsAndWrites)
       read @ PlanWithAccessor(Ref(readPlan), _) <- readsAndWrites.reads.plansReadingLabel(maybeLabel)
@@ -173,8 +184,9 @@ sealed trait ConflictFinder {
     }
   }
 
-  private def canConflictWithCreateOrDelete(lp: LogicalPlan): Boolean = {
-    !lp.isUpdatingPlan || containsNestedPlanExpression(lp)
+  private def canConflictWithCreateOrDelete(lp: LogicalPlan): Boolean = lp match {
+    case _: MergeInto => true
+    case _            => !lp.isUpdatingPlan || containsNestedPlanExpression(lp)
   }
 
   protected[eager] def containsNestedPlanExpression(lp: LogicalPlan): Boolean = {
@@ -188,7 +200,7 @@ sealed trait ConflictFinder {
   private def createNodeConflicts(
     readsAndWrites: ReadsAndWrites,
     leftMostLeaf: LogicalPlan
-  )(implicit planChildrenLookup: PlanChildrenLookup): Iterator[ConflictingPlanPair] =
+  )(implicit planChildrenLookup: PlanChildrenLookup, stableLeafPlans: StableLeafPlans): Iterator[ConflictingPlanPair] =
     for {
       (Ref(writePlan), createdNodes) <- readsAndWrites.writes.creates.createdNodes.iterator
 
@@ -216,7 +228,7 @@ sealed trait ConflictFinder {
   private def createRelationshipConflicts(
     readsAndWrites: ReadsAndWrites,
     leftMostLeaf: LogicalPlan
-  )(implicit planChildrenLookup: PlanChildrenLookup): Iterator[ConflictingPlanPair] =
+  )(implicit planChildrenLookup: PlanChildrenLookup, stableLeafPlans: StableLeafPlans): Iterator[ConflictingPlanPair] =
     for {
       (Ref(writePlan), createdRelationships) <- readsAndWrites.writes.creates.createdRelationships.iterator
 
@@ -272,7 +284,7 @@ sealed trait ConflictFinder {
       case nodeOverlap: CreateOverlaps.NodeOverlap =>
         nodeOverlap.nodeLabelsOverlap match {
           case NodeLabelsOverlap.Static(labelNames) =>
-            labelNames.view.map(LabelReadSetConflict)
+            labelNames.view.map(LabelReadSetConflict.apply)
           case NodeLabelsOverlap.Dynamic =>
             View.empty
         }
@@ -344,8 +356,12 @@ sealed trait ConflictFinder {
     possibleDeleteConflictPlanSnapshots: (
       ReadsAndWritesFinder.Deletes,
       Ref[LogicalPlan]
-    ) => Map[LogicalVariable, PossibleDeleteConflictPlans]
-  )(implicit planChildrenLookup: PlanChildrenLookup): Iterator[ConflictingPlanPair] = {
+    ) => Map[LogicalVariable, PossibleDeleteConflictPlans],
+    entityType: EntityType
+  )(
+    implicit planChildrenLookup: PlanChildrenLookup,
+    stableLeafPlans: StableLeafPlans
+  ): Iterator[ConflictingPlanPair] = {
     for {
       (wpref @ Ref(writePlan), deletedEntities) <- deletedEntities(readsAndWrites.writes.deletes).iterator
 
@@ -370,7 +386,7 @@ sealed trait ConflictFinder {
 
       FilterExpressions(_, deletedExpression) =
         filterExpressions(readsAndWrites.reads).getOrElse(deletedEntity, FilterExpressions(Set.empty))
-      if deleteOverlaps(plansThatIntroduceVar, Seq(deletedExpression))
+      if deleteOverlaps(plansThatIntroduceVar, Seq(deletedExpression), entityType)
 
       // For a ReadWriteConflict we need to place the Eager between the plans that reference the variable and the Delete plan.
       // For a WriteReadConflict we need to place the Eager between the Delete plan and the plan that introduced the variable.
@@ -398,7 +414,10 @@ sealed trait ConflictFinder {
       ReadsAndWritesFinder.Deletes,
       Ref[LogicalPlan]
     ) => Map[LogicalVariable, PossibleDeleteConflictPlans]
-  )(implicit planChildrenLookup: PlanChildrenLookup): Iterator[ConflictingPlanPair] = {
+  )(
+    implicit planChildrenLookup: PlanChildrenLookup,
+    stableLeafPlans: StableLeafPlans
+  ): Iterator[ConflictingPlanPair] = {
     for {
       Ref(writePlan) <-
         deleteExpressions(
@@ -466,7 +485,8 @@ sealed trait ConflictFinder {
    */
   private def deleteOverlaps(
     plansThatIntroduceVariable: Set[PlanThatIntroducesVariable],
-    predicatesOnDeletedEntity: Seq[Expression]
+    predicatesOnDeletedEntity: Seq[Expression],
+    entityType: EntityType
   ): Boolean = {
     val readEntityPredicateCombinations: Set[Seq[Expression]] =
       if (plansThatIntroduceVariable.isEmpty) {
@@ -475,7 +495,7 @@ sealed trait ConflictFinder {
       } else {
         plansThatIntroduceVariable.map(_.predicates)
       }
-    readEntityPredicateCombinations.exists(DeleteOverlaps.overlap(_, predicatesOnDeletedEntity) match {
+    readEntityPredicateCombinations.exists(DeleteOverlaps.overlap(_, predicatesOnDeletedEntity, entityType) match {
       case DeleteOverlaps.NoLabelOverlap => false
       case _: DeleteOverlaps.Overlap     => true
     })
@@ -531,7 +551,7 @@ sealed trait ConflictFinder {
   private[eager] def findConflictingPlans(
     readsAndWrites: ReadsAndWrites,
     wholePlan: LogicalPlan
-  )(implicit planChildrenLookup: PlanChildrenLookup): Seq[ConflictingPlanPair] = {
+  )(implicit planChildrenLookup: PlanChildrenLookup, stableLeafPlans: StableLeafPlans): Seq[ConflictingPlanPair] = {
     val leftMostLeaf = wholePlan.leftmostLeaf
     val map = mutable.Map[ConflictingPlans, mutable.Set[EagernessReason]]()
 
@@ -581,7 +601,8 @@ sealed trait ConflictFinder {
       _.deletedNodeVariables,
       _.nodeFilterExpressions,
       _.possibleNodeDeleteConflictPlans,
-      _.possibleNodeDeleteConflictPlanSnapshots(_)
+      _.possibleNodeDeleteConflictPlanSnapshots(_),
+      NODE_TYPE
     ).foreach(addConflict)
 
     // Conflicts between a MATCH and a DELETE with a relationship variable
@@ -591,7 +612,8 @@ sealed trait ConflictFinder {
       _.deletedRelationshipVariables,
       _.relationshipFilterExpressions,
       _.possibleRelDeleteConflictPlans,
-      _.possibleRelationshipDeleteConflictPlanSnapshots(_)
+      _.possibleRelationshipDeleteConflictPlanSnapshots(_),
+      RELATIONSHIP_TYPE
     ).foreach(addConflict)
 
     // Conflicts between a MATCH and a DELETE with a node expression
@@ -626,15 +648,14 @@ sealed trait ConflictFinder {
    * and if that variable is distinct when reading.
    */
   private def distinctConflictOnSameSymbol(
-    read: PlanWithAccessor,
-    write: PlanWithAccessor
+    upstream: PlanWithAccessor,
+    downstream: PlanWithAccessor
   )(implicit planChildrenLookup: PlanChildrenLookup): Boolean = {
-    read.accessor match {
+    upstream.accessor match {
       case Some(variable) =>
-        write.accessor.contains(variable) && isGloballyUniqueAndCursorInitialized(
-          variable,
-          read.plan.value,
-          write.plan.value
+        downstream.accessor.contains(variable) && (
+          isGloballyUniqueAndCursorInitialized(variable, upstream.plan.value, downstream.plan.value) ||
+            isApplyScopedDistinctAndIdempotent(variable, upstream.plan.value, downstream.plan.value)
         )
       case None => false
     }
@@ -644,7 +665,7 @@ sealed trait ConflictFinder {
     readPlan: LogicalPlan,
     writePlan: LogicalPlan,
     leftMostLeaf: LogicalPlan
-  )(implicit planChildrenLookup: PlanChildrenLookup): Boolean = {
+  )(implicit planChildrenLookup: PlanChildrenLookup, stableLeafPlans: StableLeafPlans): Boolean = {
     // A plan can never conflict with itself
     def conflictsWithItself = writePlan eq readPlan
 
@@ -672,10 +693,12 @@ sealed trait ConflictFinder {
       false
     }
 
-    // We consider the leftmost plan to be potentially stable unless we are in a call in transactions.
+    // We consider the leftmost plan to be potentially stable unless we are in a call in transactions, or, on an
+    // MVCC store, the transaction state is non-empty (in which case the leftmost iterator cannot be stable).
     def conflictsWithUnstablePlan =
       (readPlan ne leftMostLeaf) ||
         !readPlan.isInstanceOf[StableLeafPlan] ||
+        stableLeafPlans.get(readPlan.id) == LeafStability.MvccNonEmptyTx ||
         planChildrenLookup.isInTransactionalApply(writePlan)
 
     /**
@@ -694,28 +717,46 @@ sealed trait ConflictFinder {
     conflictsWithUnstablePlan
   }
 
-  private def isDistinctLeafPlan(readPlan: LogicalPlan): Boolean = readPlan match {
+  private def isDistinctLeafPlan(upstream: LogicalPlan): Boolean = upstream match {
     case _: NodeLogicalLeafPlan           => true
     case rlp: RelationshipLogicalLeafPlan => rlp.directed
     case _                                => false
   }
 
-  private def isSimpleDeleteAndDistinctLeaf(readPlan: LogicalPlan, writePlan: LogicalPlan): Boolean =
-    simpleDeletingPlan(writePlan) && isDistinctLeafPlan(readPlan)
+  private def isSimpleDeleteAndDistinctLeaf(upstream: LogicalPlan, downstream: LogicalPlan): Boolean =
+    simpleDeletingPlan(downstream) && isDistinctLeafPlan(upstream)
 
   private def isGloballyUniqueAndCursorInitialized(
     variable: LogicalVariable,
-    readPlan: LogicalPlan,
-    writePlan: LogicalPlan
+    upstream: LogicalPlan,
+    downstream: LogicalPlan
   )(implicit planChildrenLookup: PlanChildrenLookup): Boolean = {
-    // plan.distinctness is "per argument"
-    // In order to make sure a column is "globally unique", i.e. over multiple invocations,
-    // we need to make sure the operator does only execute once.
-    // Also, we must make sure that the cursor performing the read will be initialized at the point in
-    // time the write for the same variable happens.
-    (isSimpleDeleteAndDistinctLeaf(readPlan, writePlan) || readPlan.distinctness.covers(
-      Seq(variable)
-    )) && !planChildrenLookup.readMightNotBeInitialized(readPlan)
+    // plan.distinctness is "per argument" on the RHS of an apply plan.
+    // In order to make sure a column is "globally unique", i.e. over multiple invocations, we need to make sure
+    //   (a) the operator does only execute once
+    (isSimpleDeleteAndDistinctLeaf(upstream, downstream) || upstream.distinctness.covers(Seq(variable))) &&
+    //   (b) that the upstream's cursor is initialized by the time the downstream operator runs.
+    !planChildrenLookup.cursorMightNotBeInitialized(upstream)
+  }
+
+  private def isApplyScopedDistinctAndIdempotent(
+    variable: LogicalVariable,
+    upstream: LogicalPlan,
+    downstream: LogicalPlan
+  )(implicit planChildrenLookup: PlanChildrenLookup): Boolean = {
+    // Within a single Apply RHS invocation, the upstream's per-invocation distinctness is
+    // sufficient to discard the conflict, even though the upstream is re-invoked across invocations.
+    // We can discard the conflict if these three conditions hold:
+    //   (a) the upstream is locally distinct on the variable (within one invocation),
+    upstream.distinctness.covers(Seq(variable)) &&
+    //   (b) the downstream is idempotent.
+    //       This is the case for delete for which it does not have any effect to be called on a deleted entity.
+    //       Property writes, on the other hand, are NOT idempotent: a property write can shift an entity's position in
+    //       an index, causing the index to re-yield the same entity.
+    simpleDeletingPlan(downstream) &&
+    //   (c) both plans are in the same Apply RHS, so cursor initialisation is structurally
+    //       guaranteed (upstream runs first within the invocation).
+    planChildrenLookup.sameApplyRhsScope(upstream, downstream)
   }
 
   /**

@@ -65,12 +65,12 @@ public abstract class PackstreamValueWriter implements AnyValueWriter<RuntimeExc
 
     @Override
     public void writeFloatingPoint(float value) {
-        this.buf.writeFloat(value);
+        this.buf.writeFloat64(value);
     }
 
     @Override
     public void writeFloatingPoint(double value) {
-        this.buf.writeFloat(value);
+        this.buf.writeFloat64(value);
     }
 
     @Override

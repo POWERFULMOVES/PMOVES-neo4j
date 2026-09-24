@@ -19,25 +19,26 @@
  */
 package org.neo4j.cypher.internal.compiler.planner.logical.plans.rewriter.eager
 
-import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
 import org.neo4j.cypher.internal.ast.semantics.SemanticTable
 import org.neo4j.cypher.internal.compiler.defaultUpdateStrategy
 import org.neo4j.cypher.internal.compiler.eagerUpdateStrategy
 import org.neo4j.cypher.internal.compiler.phases.CompilationContains
-import org.neo4j.cypher.internal.compiler.phases.LogicalPlanCondition
 import org.neo4j.cypher.internal.compiler.phases.LogicalPlanState
 import org.neo4j.cypher.internal.compiler.phases.PlannerContext
+import org.neo4j.cypher.internal.compiler.planner.logical.ExpressionEvaluator
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.CompressPlanIDs
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.MarkStableLeafPlans
 import org.neo4j.cypher.internal.frontend.phases.CompilationPhaseTracer
 import org.neo4j.cypher.internal.frontend.phases.CompilationPhaseTracer.CompilationPhase.LOGICAL_PLANNING
 import org.neo4j.cypher.internal.frontend.phases.Phase
 import org.neo4j.cypher.internal.frontend.phases.Transformer
+import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerConfig
 import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerFactory
 import org.neo4j.cypher.internal.ir.EagernessReason
 import org.neo4j.cypher.internal.logical.plans.Eager
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
-import org.neo4j.cypher.internal.options.CypherEagerAnalyzerOption
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.Cardinalities
+import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.StableLeafPlans
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.cypher.internal.util.CancellationChecker
 import org.neo4j.cypher.internal.util.StepSequencer
@@ -64,12 +65,13 @@ case object EagerRewriter extends Phase[PlannerContext, LogicalPlanState, Logica
   override def phase: CompilationPhaseTracer.CompilationPhase = LOGICAL_PLANNING
 
   override def process(from: LogicalPlanState, context: PlannerContext): LogicalPlanState = {
-    if (!from.maybeEagerAnalyzerOption.contains(CypherEagerAnalyzerOption.lp)) return from
     if (from.logicalPlan.readOnly) return from
 
     val attributes: Attributes[LogicalPlan] = from.planningAttributes.asAttributes(context.logicalPlanIdGen)
     val cardinalities = from.planningAttributes.cardinalities
-    val lPStateWithEagerProcedureCall = eagerizeProcedureCalls(from, cardinalities, attributes.without(cardinalities))
+    val stableLeafPlans = from.planningAttributes.stableLeafPlans
+    val lPStateWithEagerProcedureCall =
+      eagerizeProcedureCalls(from, cardinalities, attributes.without(cardinalities), context.expressionEvaluator)
 
     val newPlan = context.updateStrategy match {
       case `eagerUpdateStrategy` => EagerEverywhereRewriter(attributes).eagerize(
@@ -81,9 +83,21 @@ case object EagerRewriter extends Phase[PlannerContext, LogicalPlanState, Logica
         val rewriter = {
           val shouldCompressReasons = !context.debugOptions.verboseEagernessReasons
           if (context.config.lpEagerFallbackEnabled())
-            defaultRewriterWithFallback(cardinalities, attributes, shouldCompressReasons, context.cancellationChecker)
+            defaultRewriterWithFallback(
+              cardinalities,
+              stableLeafPlans,
+              attributes,
+              shouldCompressReasons,
+              context.cancellationChecker
+            )
           else
-            defaultRewriter(cardinalities, attributes, shouldCompressReasons, context.cancellationChecker)
+            defaultRewriter(
+              cardinalities,
+              stableLeafPlans,
+              attributes,
+              shouldCompressReasons,
+              context.cancellationChecker
+            )
         }
 
         rewriter.eagerize(
@@ -98,21 +112,23 @@ case object EagerRewriter extends Phase[PlannerContext, LogicalPlanState, Logica
 
   def defaultRewriter(
     cardinalities: Cardinalities,
+    stableLeafPlans: StableLeafPlans,
     attributes: Attributes[LogicalPlan],
     shouldCompressReasons: Boolean,
     cancellationChecker: CancellationChecker
   ): EagerWhereNeededRewriter = {
-    EagerWhereNeededRewriter(cardinalities, attributes, shouldCompressReasons, cancellationChecker)
+    EagerWhereNeededRewriter(cardinalities, stableLeafPlans, attributes, shouldCompressReasons, cancellationChecker)
   }
 
   def defaultRewriterWithFallback(
     cardinalities: Cardinalities,
+    stableLeafPlans: StableLeafPlans,
     attributes: Attributes[LogicalPlan],
     shouldCompressReasons: Boolean,
     cancellationChecker: CancellationChecker
   ): EagerRewriterWithFallback = {
     EagerRewriterWithFallback(
-      defaultRewriter(cardinalities, attributes, shouldCompressReasons, cancellationChecker),
+      defaultRewriter(cardinalities, stableLeafPlans, attributes, shouldCompressReasons, cancellationChecker),
       EagerEverywhereRewriter(attributes),
       attributes
     )
@@ -121,27 +137,28 @@ case object EagerRewriter extends Phase[PlannerContext, LogicalPlanState, Logica
   private def eagerizeProcedureCalls(
     from: LogicalPlanState,
     cardinalities: Cardinalities,
-    attributesWithoutCardinalities: Attributes[LogicalPlan]
+    attributesWithoutCardinalities: Attributes[LogicalPlan],
+    expressionEvaluator: ExpressionEvaluator
   ): LogicalPlanState =
     from.withMaybeLogicalPlan(Some(
-      EagerProcedureCallRewriter(cardinalities, attributesWithoutCardinalities).eagerize(
-        from.logicalPlan,
-        from.semanticTable(),
-        from.anonymousVariableNameGenerator
-      )
+      EagerProcedureCallRewriter(cardinalities, attributesWithoutCardinalities, expressionEvaluator)
+        .eagerize(from.logicalPlan, from.semanticTable(), from.anonymousVariableNameGenerator)
     ))
 
   override def preConditions: Set[StepSequencer.Condition] = Set(
     // The rewriter operates on the LogicalPlan
     CompilationContains[LogicalPlan](),
     // In order to release as much memory as possible before the phase
-    CompressPlanIDs.completed
+    CompressPlanIDs.completed,
+    // We need to MarkStableLeafPlans before eagerness analysis due to the leaf plan stability.
+    // Do not remove it without a replacement ordering.
+    MarkStableLeafPlans.completed
   )
 
   override def postConditions: Set[StepSequencer.Condition] = Set(
     LogicalPlanContainsEagerIfNeeded,
     LogicalPlanContainsIDReferences,
-    LogicalPlanCondition(ConflictsReferenceValidIds)
+    ConflictsReferenceValidIds
   )
 
   override def invalidatedConditions: Set[StepSequencer.Condition] = Set(
@@ -149,10 +166,8 @@ case object EagerRewriter extends Phase[PlannerContext, LogicalPlanState, Logica
     CompressPlanIDs.completed
   )
 
-  override def getTransformer(
-    pushdownPropertyReads: Boolean,
-    semanticFeatures: Seq[SemanticFeature]
-  ): Transformer[PlannerContext, LogicalPlanState, LogicalPlanState] = this
+  override def getTransformer(planPipelineConfig: PlanPipelineTransformerConfig)
+    : Transformer[PlannerContext, LogicalPlanState, LogicalPlanState] = this
 }
 
 abstract class EagerRewriter(attributes: Attributes[LogicalPlan]) {

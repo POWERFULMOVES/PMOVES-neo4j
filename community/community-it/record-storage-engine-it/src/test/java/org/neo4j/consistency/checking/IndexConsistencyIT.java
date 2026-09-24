@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.neo4j.configuration.GraphDatabaseSettings.logs_directory;
 import static org.neo4j.io.fs.FileUtils.copyDirectory;
+import static org.neo4j.test.LatestVersions.LATEST_KERNEL_VERSION;
 import static org.neo4j.test.TestLabels.LABEL_ONE;
 import static org.neo4j.test.TestLabels.LABEL_THREE;
 import static org.neo4j.test.TestLabels.LABEL_TWO;
@@ -37,7 +38,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.neo4j.common.EntityType;
@@ -56,8 +56,6 @@ import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.kernel.impl.api.index.IndexProviderMap;
 import org.neo4j.kernel.impl.store.format.aligned.PageAligned;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.logging.AssertableLogProvider;
 import org.neo4j.test.RandomSupport;
@@ -65,10 +63,12 @@ import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.DbmsExtension;
 import org.neo4j.test.extension.ExtensionCallback;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
 
 @DbmsExtension(configurationCallback = "configure")
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class IndexConsistencyIT {
     @Inject
     private GraphDatabaseAPI db;
@@ -110,9 +110,11 @@ class IndexConsistencyIT {
         DatabaseLayout databaseLayout = db.databaseLayout();
         someData(entityType);
         checkPointer.forceCheckPoint(new SimpleTriggerInfo("forcedCheckpoint"));
-        Path indexesCopy = databaseLayout.file("indexesCopy");
-        Path indexSources =
-                indexProviderMap.getDefaultProvider().directoryStructure().rootDirectory();
+        Path indexesCopy = databaseLayout.file("indexesCopy").baseSegment();
+        Path indexSources = indexProviderMap
+                .getDefaultProvider(LATEST_KERNEL_VERSION)
+                .directoryStructure()
+                .rootDirectory();
         copyDirectory(indexSources, indexesCopy, SOURCE_COPY_FILE_FILTER);
 
         try (Transaction tx = db.beginTx()) {
@@ -138,9 +140,11 @@ class IndexConsistencyIT {
         DatabaseLayout databaseLayout = db.databaseLayout();
         someData(entityType);
         checkPointer.forceCheckPoint(new SimpleTriggerInfo("forcedCheckpoint"));
-        Path indexesCopy = databaseLayout.file("indexesCopy");
-        Path indexSources =
-                indexProviderMap.getDefaultProvider().directoryStructure().rootDirectory();
+        Path indexesCopy = databaseLayout.file("indexesCopy").baseSegment();
+        Path indexSources = indexProviderMap
+                .getDefaultProvider(LATEST_KERNEL_VERSION)
+                .directoryStructure()
+                .rootDirectory();
         copyDirectory(indexSources, indexesCopy, SOURCE_COPY_FILE_FILTER);
 
         managementService.shutdown();
@@ -194,7 +198,7 @@ class IndexConsistencyIT {
     }
 
     private void randomNodeModifications(Transaction tx, int numberOfModifications) {
-        List<Pair<Long, Label[]>> existingNodes = new ArrayList<>();
+        List<Pair<String, Label[]>> existingNodes = new ArrayList<>();
         for (int i = 0; i < numberOfModifications; i++) {
             double selectModification = random.nextDouble();
             if (existingNodes.size() < ENTITY_COUNT_BASELINE || selectModification >= DELETE_RATIO + UPDATE_RATIO) {
@@ -208,7 +212,7 @@ class IndexConsistencyIT {
     }
 
     private void randomRelationshipModifications(Transaction tx, int numberOfModifications) {
-        List<Long> existingRelationships = new ArrayList<>();
+        List<String> existingRelationships = new ArrayList<>();
         for (int i = 0; i < numberOfModifications; i++) {
             double selectModification = random.nextDouble();
             if (existingRelationships.size() < ENTITY_COUNT_BASELINE
@@ -222,10 +226,10 @@ class IndexConsistencyIT {
         }
     }
 
-    private void createNewNode(Transaction transaction, List<Pair<Long, Label[]>> existingNodes) {
+    private void createNewNode(Transaction transaction, List<Pair<String, Label[]>> existingNodes) {
         Label[] labels = randomLabels();
         Node node = createNewNode(transaction, labels);
-        existingNodes.add(Pair.of(node.getId(), labels));
+        existingNodes.add(Pair.of(node.getElementId(), labels));
     }
 
     private Node createNewNode(Transaction tx, Label[] labels) {
@@ -243,19 +247,19 @@ class IndexConsistencyIT {
         }
     }
 
-    private void createNewRelationship(Transaction transaction, List<Long> existingRelationships) {
+    private void createNewRelationship(Transaction transaction, List<String> existingRelationships) {
         Node node = transaction.createNode();
         existingRelationships.add(set(
                         node.createRelationshipTo(node, random.among(TYPES)),
                         property(random.among(PROPERTY_KEYS), random.nextInt()))
-                .getId());
+                .getElementId());
     }
 
-    private void modifyLabelsOnExistingNode(Transaction transaction, List<Pair<Long, Label[]>> existingNodes) {
+    private void modifyLabelsOnExistingNode(Transaction transaction, List<Pair<String, Label[]>> existingNodes) {
         int targetIndex = random.nextInt(existingNodes.size());
-        Pair<Long, Label[]> existingPair = existingNodes.get(targetIndex);
-        long nodeId = existingPair.first();
-        Node node = transaction.getNodeById(nodeId);
+        Pair<String, Label[]> existingPair = existingNodes.get(targetIndex);
+        String nodeId = existingPair.first();
+        Node node = transaction.getNodeByElementId(nodeId);
         node.getLabels().forEach(node::removeLabel);
         Label[] newLabels = randomLabels();
         for (Label label : newLabels) {
@@ -265,10 +269,10 @@ class IndexConsistencyIT {
         existingNodes.add(Pair.of(nodeId, newLabels));
     }
 
-    private void modifyPropertiesOnExistingRelationship(Transaction transaction, List<Long> existingRelationships) {
+    private void modifyPropertiesOnExistingRelationship(Transaction transaction, List<String> existingRelationships) {
         int targetIndex = random.nextInt(existingRelationships.size());
-        long relId = existingRelationships.get(targetIndex);
-        Relationship relationship = transaction.getRelationshipById(relId);
+        String relId = existingRelationships.get(targetIndex);
+        Relationship relationship = transaction.getRelationshipByElementId(relId);
         relationship.getPropertyKeys().forEach(relationship::removeProperty);
         String[] properties = random.selection(PROPERTY_KEYS, 0, PROPERTY_KEYS.length, false);
         for (String property : properties) {
@@ -276,17 +280,17 @@ class IndexConsistencyIT {
         }
     }
 
-    private void deleteExistingNode(Transaction transaction, List<Pair<Long, Label[]>> existingNodes) {
+    private void deleteExistingNode(Transaction transaction, List<Pair<String, Label[]>> existingNodes) {
         int targetIndex = random.nextInt(existingNodes.size());
-        Pair<Long, Label[]> existingPair = existingNodes.get(targetIndex);
-        Node node = transaction.getNodeById(existingPair.first());
+        Pair<String, Label[]> existingPair = existingNodes.get(targetIndex);
+        Node node = transaction.getNodeByElementId(existingPair.first());
         node.delete();
         existingNodes.remove(targetIndex);
     }
 
-    private void deleteExistingRelationship(Transaction transaction, List<Long> existingRelationship) {
+    private void deleteExistingRelationship(Transaction transaction, List<String> existingRelationship) {
         int targetIndex = random.nextInt(existingRelationship.size());
-        Relationship relationship = transaction.getRelationshipById(existingRelationship.get(targetIndex));
+        Relationship relationship = transaction.getRelationshipByElementId(existingRelationship.get(targetIndex));
         relationship.delete();
         existingRelationship.remove(targetIndex);
     }

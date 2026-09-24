@@ -33,8 +33,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
-import org.neo4j.bolt.protocol.common.message.response.FailureMessage;
-import org.neo4j.bolt.protocol.common.message.response.FailureMetadata;
+import org.neo4j.boltmessages.response.FailureMessage;
+import org.neo4j.boltmessages.response.FailureMetadata;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.packstream.io.PackstreamBuf;
 import org.neo4j.packstream.testing.PackstreamBufAssertions;
@@ -78,7 +78,7 @@ class FailureMessageEncoderTest {
         PackstreamBufAssertions.assertThat(buf)
                 .containsMap(meta -> assertThat(meta).isNotNull().isEqualTo(expectedMetadata));
 
-        assertThat(buf.getTarget().isReadable()).isFalse();
+        assertThat(buf.raw().isReadable()).isFalse();
     }
 
     private static List<Arguments> failureMessageAndExpectedMetadata() {
@@ -109,6 +109,7 @@ class FailureMessageEncoderTest {
                 new FailureMessage(
                         new FailureMetadata(
                                 Status.General.UnknownError,
+                                "50N42: something, unknown error but in gql",
                                 "Unknown error, mate",
                                 "error: something, unknown error but in gql",
                                 "50N42",
@@ -139,6 +140,7 @@ class FailureMessageEncoderTest {
                 new FailureMessage(
                         new FailureMetadata(
                                 Status.General.UnknownError,
+                                "50N42: something, unknown error but in gql",
                                 "Unknown error, mate",
                                 "error: something, unknown error but in gql",
                                 "50N42",
@@ -190,6 +192,7 @@ class FailureMessageEncoderTest {
                 new FailureMessage(
                         new FailureMetadata(
                                 Status.General.UnknownError,
+                                "50N42: something, unknown error but in gql",
                                 "Unknown error, mate",
                                 "error: something, unknown error but in gql",
                                 "50N42",
@@ -222,6 +225,7 @@ class FailureMessageEncoderTest {
                 new FailureMessage(
                         new FailureMetadata(
                                 Status.General.UnknownError,
+                                "50N42: something, unknown error but in gql",
                                 "Unknown error, mate",
                                 "error: something, unknown error but in gql",
                                 "50N42",
@@ -263,6 +267,7 @@ class FailureMessageEncoderTest {
                 new FailureMessage(
                         new FailureMetadata(
                                 Status.General.UnknownError,
+                                "50N42: something, unknown error but in gql",
                                 "Unknown error, mate",
                                 "error: something, unknown error but in gql",
                                 "50N42",
@@ -297,6 +302,7 @@ class FailureMessageEncoderTest {
                 new FailureMessage(
                         new FailureMetadata(
                                 Status.General.UnknownError,
+                                "50N42: something, unknown error but in gql",
                                 "Unknown error, mate",
                                 "error: something, unknown error but in gql",
                                 "50N42",
@@ -321,6 +327,7 @@ class FailureMessageEncoderTest {
                 new FailureMessage(
                         new FailureMetadata(
                                 Status.General.UnknownError,
+                                "50N42: something, unknown error but in gql",
                                 "Unknown error, mate",
                                 "error: something, unknown error but in gql",
                                 "50N42",
@@ -348,6 +355,7 @@ class FailureMessageEncoderTest {
                 new FailureMetadata(
                         sourceFailure.metadata().status(),
                         sourceFailure.metadata().message(),
+                        sourceFailure.metadata().legacyMessage(),
                         sourceFailure.metadata().description(),
                         sourceFailure.metadata().gqlStatus(),
                         sourceFailure.metadata().diagnosticRecord(),
@@ -360,6 +368,8 @@ class FailureMessageEncoderTest {
                 // Causes doesn't have neo4j_code
                 .filter(e -> !e.getKey().equals("neo4j_code"))
                 .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+
+        causeMap.put("message", causeFailure.metadata().message());
         failureMap.put("cause", causeMap);
         return Pair.of(failure, failureMap);
     }
@@ -368,12 +378,14 @@ class FailureMessageEncoderTest {
         return new FailureMessage(
                 new FailureMetadata(
                         Status.Request.InvalidFormat,
+                        "50N42: some wrong, but in gql phrasing",
                         "Something wrong",
                         "some wrong, but in gql phrasing",
                         "50N52",
                         Map.of("OPERATION", "", "OPERATION_CODE", "0", "CURRENT_SCHEMA", "/"),
                         new FailureMetadata(
                                 Status.Request.InvalidFormat,
+                                "50N42: some wrong, but in gql phrasing",
                                 "Something wrong",
                                 "some wrong, but in gql phrasing",
                                 "50N52",

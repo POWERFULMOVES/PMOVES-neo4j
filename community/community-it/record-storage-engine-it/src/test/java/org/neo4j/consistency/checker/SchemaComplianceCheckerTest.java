@@ -27,7 +27,7 @@ import static org.neo4j.common.EntityType.RELATIONSHIP;
 import static org.neo4j.internal.schema.SchemaDescriptors.forLabel;
 import static org.neo4j.internal.schema.SchemaDescriptors.forRelType;
 import static org.neo4j.kernel.impl.api.index.IndexUpdateMode.ONLINE;
-import static org.neo4j.storageengine.api.IndexEntryUpdate.add;
+import static org.neo4j.storageengine.api.EagerValueIndexEntryUpdate.add;
 import static org.neo4j.values.storable.Values.intValue;
 import static org.neo4j.values.storable.Values.pointValue;
 import static org.neo4j.values.storable.Values.stringValue;
@@ -157,14 +157,14 @@ class SchemaComplianceCheckerTest extends CheckerTestBase {
                 long propId = propertyIdGenerator.nextId(CursorContext.NULL_CONTEXT);
                 nodeId = node(nodeIdGenerator.nextId(CursorContext.NULL_CONTEXT), false, propId, label1);
                 property(propId, NULL, NULL, propertyValue(propertyKey1, value));
-                indexValue(descriptor, index, nodeId, value);
+                indexValue(index, nodeId, value);
             }
             // (N2) indexed w/ property A
             {
                 long propId = propertyIdGenerator.nextId(CursorContext.NULL_CONTEXT);
                 long nodeId2 = node(nodeIdGenerator.nextId(CursorContext.NULL_CONTEXT), false, propId, label1);
                 property(propId, NULL, NULL, propertyValue(propertyKey1, value));
-                indexValue(descriptor, index, nodeId2, value);
+                indexValue(index, nodeId2, value);
             }
         }
 
@@ -239,7 +239,7 @@ class SchemaComplianceCheckerTest extends CheckerTestBase {
                 long propId = propertyIdGenerator.nextId(CursorContext.NULL_CONTEXT);
                 nodeId = node(nodeIdGenerator.nextId(CursorContext.NULL_CONTEXT), false, propId, label1);
                 property(propId, NULL, NULL, propertyValue(propertyKey1, value));
-                indexValue(descriptor, index, nodeId, value);
+                indexValue(index, nodeId, value);
             }
 
             // (N2) w/ property
@@ -247,7 +247,7 @@ class SchemaComplianceCheckerTest extends CheckerTestBase {
                 long propId = propertyIdGenerator.nextId(CursorContext.NULL_CONTEXT);
                 long nodeId2 = node(nodeIdGenerator.nextId(CursorContext.NULL_CONTEXT), false, propId, label1);
                 property(propId, NULL, NULL, propertyValue(propertyKey1, value));
-                indexValue(descriptor, index, nodeId2, value);
+                indexValue(index, nodeId2, value);
             }
         }
 
@@ -260,12 +260,12 @@ class SchemaComplianceCheckerTest extends CheckerTestBase {
                 report -> report.uniqueIndexNotUnique(any(), any(), anyLong()));
     }
 
-    private void indexValue(LabelSchemaDescriptor descriptor, IndexDescriptor index, long nodeId, Value value)
+    private void indexValue(IndexDescriptor index, long nodeId, Value value)
             throws IndexNotFoundKernelException, IndexEntryConflictException {
         IndexingService indexingService = db.getDependencyResolver().resolveDependency(IndexingService.class);
         try (IndexUpdater indexUpdater =
                 indexingService.getIndexProxy(index).newUpdater(ONLINE, CursorContext.NULL_CONTEXT, false)) {
-            indexUpdater.process(add(nodeId, () -> descriptor, value));
+            indexUpdater.process(add(nodeId, index, value));
         }
     }
 

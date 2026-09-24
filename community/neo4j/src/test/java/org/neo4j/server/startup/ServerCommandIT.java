@@ -40,6 +40,7 @@ import java.util.Map;
 import java.util.Set;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.EnabledOnOs;
@@ -121,17 +122,45 @@ abstract class ServerCommandIT extends ServerProcessTestBase {
     }
 
     @Test
+    void startShouldFindLog4jConfigWithConfiguredConfDir() throws IOException {
+        Path customLog4jPath = home.resolve("customconf");
+        fs.mkdirs(customLog4jPath);
+
+        // Lets write a broken conf, because its easy to verify that we found it
+        FileSystemUtils.writeString(
+                fs,
+                customLog4jPath.resolve(GraphDatabaseSettings.user_logging_config_path
+                        .defaultValue()
+                        .getFileName()),
+                "<Configuration></Cunfigoratzion>",
+                EmptyMemoryTracker.INSTANCE);
+        int exitCode = execute(List.of("start"), Map.of(Bootloader.ENV_NEO4J_CONF, customLog4jPath.toString()));
+        assertThat(exitCode).isEqualTo(ExitCode.FAIL);
+        assertThat(err.toString())
+                .contains(
+                        "Error at 1:18: The element type \"Configuration\" must be terminated by the matching end-tag \"</Configuration>\".",
+                        "Configuration contains errors.");
+    }
+
+    @Test
     @DisabledOnOs(OS.WINDOWS)
     void startShouldBeAllowedWithWarningsOnInvalidServerLog4jConfig() throws IOException {
         Path log4jConfig = config.get(GraphDatabaseSettings.server_logging_config_path);
         FileSystemUtils.writeString(fs, log4jConfig, "<Configuration></Cunfigoratzion>", EmptyMemoryTracker.INSTANCE);
         int exitCode = execute("start");
-        assertThat(exitCode).isEqualTo(ExitCode.OK);
+        assertServerStartExitCode(ExitCode.OK, exitCode);
         assertThat(err.toString())
+                .contains(
+                        "Warning at 1:18: The element type \"Configuration\" must be terminated by the matching end-tag \"</Configuration>\".");
+        Path neo4jLogFile = config.get(GraphDatabaseSettings.logs_directory).resolve("neo4j.log");
+        // Warnings should also be in the neo4j.log file
+        String neo4jLogText = FileSystemUtils.readString(fs, neo4jLogFile, EmptyMemoryTracker.INSTANCE);
+        assertThat(neo4jLogText)
                 .contains(
                         "Warning at 1:18: The element type \"Configuration\" must be terminated by the matching end-tag \"</Configuration>\".");
     }
 
+    @Disabled("Testing windows services needs a new test infrastructure")
     @Test
     @EnabledOnOs(OS.WINDOWS)
     void startShouldBeAllowedWithWarningsOnInvalidServerLog4jConfigOnWindows() throws IOException {
@@ -152,6 +181,7 @@ abstract class ServerCommandIT extends ServerProcessTestBase {
         assertThat(err.toString()).contains("WARNING: Using incubator modules: jdk.incubator.vector");
     }
 
+    @Disabled("Testing windows services needs a new test infrastructure")
     @EnabledOnOs(OS.WINDOWS)
     @Test
     void shouldBeAbleToStartAndStopRealServerOnWindows() {
@@ -166,6 +196,7 @@ abstract class ServerCommandIT extends ServerProcessTestBase {
         assertThat(err.toString()).isEmpty();
     }
 
+    @Disabled("Testing windows services needs a new test infrastructure")
     @EnabledOnOs(OS.WINDOWS)
     @Test
     void shouldBeAbleToUpdateRealServerOnWindows() throws InterruptedException, IOException {
@@ -220,19 +251,28 @@ abstract class ServerCommandIT extends ServerProcessTestBase {
         }
     }
 
+    /**
+     * The child process is the only place that knows why it refused to start, so surface its output on mismatch
+     * instead of leaving the reader with a bare exit code.
+     */
+    private void assertServerStartExitCode(int expected, int actual) {
+        assertThat(actual)
+                .withFailMessage(() -> String.format(
+                        "Expected server start to exit with %d but was %d.%nOut: %s%nErr: %s%nDebug log:%n%s",
+                        expected, actual, out, err, getDebugLogLines()))
+                .isEqualTo(expected);
+    }
+
     private void shouldBeAbleToStartAndStopRealServer() {
         shouldBeAbleToStartAndStopRealServer(INITIAL_HEAP_MB);
     }
 
     private void shouldBeAbleToStartAndStopRealServer(int initialHeapSize) {
         int startSig = execute(List.of("start"), Map.of());
-        assertThat(startSig).isEqualTo(EXIT_CODE_OK);
-        assertEventually(
-                this::getDebugLogLines,
-                s -> s.contains(String.format("-Xms%dk, -Xmx%dk", initialHeapSize * 1024, MAX_HEAP_MB * 1024)),
-                5,
-                MINUTES);
-        assertEventually(this::getDebugLogLines, s -> s.contains("NeoWebServer] ========"), 5, MINUTES);
+        assertServerStartExitCode(EXIT_CODE_OK, startSig);
+        String format = String.format("-Xms%dk, -Xmx%dk", initialHeapSize * 1024, MAX_HEAP_MB * 1024);
+        assertEventually(this::getDebugLogLines, s -> s.contains(format), 5, MINUTES);
+        assertEventually(this::getDebugLogLines, s -> s.contains("Remote interface available at"), 5, MINUTES);
         assertEventually(this::getUserLogLines, s -> s.contains("Remote interface available at"), 5, MINUTES);
         assertThat(execute("stop")).isEqualTo(EXIT_CODE_OK);
     }

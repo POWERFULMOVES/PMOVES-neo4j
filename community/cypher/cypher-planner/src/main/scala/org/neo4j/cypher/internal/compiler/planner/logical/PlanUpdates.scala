@@ -21,8 +21,8 @@ package org.neo4j.cypher.internal.compiler.planner.logical
 
 import org.neo4j.cypher.internal.compiler.planner.logical.ordering.InterestingOrderConfig
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.LogicalPlanProducer
-import org.neo4j.cypher.internal.compiler.planner.logical.steps.mergeNodeUniqueIndexSeekLeafPlanner
-import org.neo4j.cypher.internal.compiler.planner.logical.steps.mergeRelationshipUniqueIndexSeekLeafPlanner
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.leafplanner.index.mergeNodeUniqueIndexSeekLeafPlanner
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.leafplanner.index.mergeRelationshipUniqueIndexSeekLeafPlanner
 import org.neo4j.cypher.internal.expressions.ContainerIndex
 import org.neo4j.cypher.internal.expressions.PathExpression
 import org.neo4j.cypher.internal.expressions.Variable
@@ -35,7 +35,6 @@ import org.neo4j.cypher.internal.ir.MergeNodePattern
 import org.neo4j.cypher.internal.ir.MergeRelationshipPattern
 import org.neo4j.cypher.internal.ir.MutatingPattern
 import org.neo4j.cypher.internal.ir.QueryGraph
-import org.neo4j.cypher.internal.ir.RegularSinglePlannerQuery
 import org.neo4j.cypher.internal.ir.RemoveLabelPattern
 import org.neo4j.cypher.internal.ir.SetDynamicPropertyPattern
 import org.neo4j.cypher.internal.ir.SetLabelPattern
@@ -52,7 +51,6 @@ import org.neo4j.cypher.internal.ir.SetRelationshipPropertyPattern
 import org.neo4j.cypher.internal.ir.SimpleMutatingPattern
 import org.neo4j.cypher.internal.ir.SinglePlannerQuery
 import org.neo4j.cypher.internal.ir.ast.IRExpression
-import org.neo4j.cypher.internal.logical.plans.CachedProperties
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 import org.neo4j.cypher.internal.util.Foldable.FoldableAny
 import org.neo4j.cypher.internal.util.symbols.CTList
@@ -65,67 +63,37 @@ import org.neo4j.exceptions.InternalException
  */
 case object PlanUpdates extends UpdatesPlanner {
 
-  private def computePlan(
-    plan: LogicalPlan,
-    query: SinglePlannerQuery,
-    eagerAnalyzer: EagerAnalyzer,
-    context: LogicalPlanningContext
-  ) = {
-    val orderForPlanning = InterestingOrderConfig(query.interestingOrder)
-
-    case class Acc(updatePlan: LogicalPlan, patternsToPlan: IndexedSeq[MutatingPattern])
-
-    val Acc(updatePlan, _) = query.queryGraph.mutatingPatterns.foldLeft(Acc(plan, query.queryGraph.mutatingPatterns)) {
-      case (Acc(updatePlan, pattersToPlan), nextPatternToPlan) =>
-        val nextUpdatePlan = planUpdate(updatePlan, nextPatternToPlan, orderForPlanning, context)
-        val remainingPatternToPlan = pattersToPlan.tail
-
-        // This query is constructed such that the current write is placed on its own QueryGraph
-        // and all remaining writes are placed in the next query graph.
-        val queryToCheckForConflicts = RegularSinglePlannerQuery(
-          queryGraph = QueryGraph(
-            argumentIds = nextPatternToPlan.dependencies,
-            mutatingPatterns = IndexedSeq(nextPatternToPlan)
-          ),
-          tail = Some(RegularSinglePlannerQuery(
-            queryGraph = QueryGraph(
-              argumentIds = remainingPatternToPlan.flatMap(_.dependencies).toSet,
-              mutatingPatterns = remainingPatternToPlan
-            )
-          ))
-        )
-
-        val eagerizedNextUpdatePlan = eagerAnalyzer.writeReadEagerize(
-          eagerAnalyzer.tailReadWriteEagerizeRecursive(nextUpdatePlan, queryToCheckForConflicts),
-          queryToCheckForConflicts
-        )
-        Acc(eagerizedNextUpdatePlan, remainingPatternToPlan)
-    }
-    updatePlan
-  }
-
   override def plan(
     query: SinglePlannerQuery,
-    in: LogicalPlan,
+    plan: LogicalPlan,
     firstPlannerQuery: Boolean,
     context: LogicalPlanningContext
   ): LogicalPlan = {
-    val eagerAnalyzer = EagerAnalyzer(context)
-    // Eagerness pass 1 -- does previously planned reads conflict with future writes?
-    val plan =
-      if (firstPlannerQuery)
-        eagerAnalyzer.headReadWriteEagerize(in, query)
-      else
-        // // NOTE: tailReadWriteEagerizeRecursive is done after updates, below
-        eagerAnalyzer.tailReadWriteEagerizeNonRecursive(in, query)
+    if (query.queryGraph.mutatingPatterns.isEmpty)
+      return plan
 
-    val updatePlan = computePlan(plan, query, eagerAnalyzer, context)
+    context.staticComponents.planningStepsLogger.log(
+      s"""Planning UPDATES for ${query.queryGraph.mutatingPatterns}
+         |  on top of Plan #${plan.debugId}
+         |    ${plan.toString.replace("\n", "\n    ")}
+         |""".stripMargin
+    )
 
-    if (firstPlannerQuery)
-      eagerAnalyzer.writeReadEagerize(updatePlan, query)
-    else {
-      eagerAnalyzer.writeReadEagerize(eagerAnalyzer.tailReadWriteEagerizeRecursive(updatePlan, query), query)
-    }
+    val orderForPlanning = InterestingOrderConfig(query.interestingOrder)
+
+    val updatePlan =
+      query.queryGraph.mutatingPatterns.foldLeft(plan) {
+        case (updatePlan, nextPatternToPlan) =>
+          planUpdate(updatePlan, nextPatternToPlan, orderForPlanning, context)
+      }
+
+    context.staticComponents.planningStepsLogger.log(
+      s"""  Resulted in:
+         |    Plan #${updatePlan.debugId}
+         |    ${updatePlan.toString.replace("\n", "\n    ")}
+         |""".stripMargin
+    )
+    updatePlan
   }
 
   private def planUpdate(
@@ -135,10 +103,14 @@ case object PlanUpdates extends UpdatesPlanner {
     context: LogicalPlanningContext
   ) = {
 
-    def planAllUpdatesRecursively(query: SinglePlannerQuery, plan: LogicalPlan): LogicalPlan = {
+    def planAllUpdatesRecursively(
+      query: SinglePlannerQuery,
+      plan: LogicalPlan,
+      updatedContext: LogicalPlanningContext
+    ): LogicalPlan = {
       query.allPlannerQueries.foldLeft((plan, true)) {
         case ((accPlan, innerFirst), plannerQuery) =>
-          val newPlan = this.plan(plannerQuery, accPlan, innerFirst, context)
+          val newPlan = this.plan(plannerQuery, accPlan, innerFirst, updatedContext)
           (newPlan, false)
       }._1
     }
@@ -157,8 +129,7 @@ case object PlanUpdates extends UpdatesPlanner {
             source,
             foreach,
             context,
-            foreach.expression,
-            sideEffects
+            foreach.expression
           )
         } else {
           val innerLeaf = context.staticComponents.logicalPlanProducer.planArgument(
@@ -166,14 +137,19 @@ case object PlanUpdates extends UpdatesPlanner {
             Set.empty,
             foreach.innerUpdates.queryGraph.argumentIds,
             context,
-            CachedProperties.empty
+            context.plannerState.previouslyCachedProperties
           )
-          val innerUpdatePlan = planAllUpdatesRecursively(foreach.innerUpdates, innerLeaf)
+          val updatedContext = context.withModifiedPlannerState(
+            _.withPreviouslyCachedProperties(
+              context.staticComponents.planningAttributes.cachedPropertiesPerPlan.get(source.id)
+            )
+          )
+          val innerUpdatePlan = planAllUpdatesRecursively(foreach.innerUpdates, innerLeaf, updatedContext)
           context.staticComponents.logicalPlanProducer.planForeachApply(
             source,
             innerUpdatePlan,
             foreach,
-            context,
+            updatedContext,
             foreach.expression
           )
         }
@@ -335,7 +311,8 @@ case object PlanUpdates extends UpdatesPlanner {
       val solvedGraph =
         context.staticComponents.planningAttributes.solveds.get(mergeReadPart.id).asSinglePlannerQuery.queryGraph
       if (solvedGraph != matchGraph)
-        throw new InternalException(
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
           s"The planner was unable to successfully plan the MERGE read:\n$solvedGraph\n not equal to \n$matchGraph"
         )
       mergeReadPart
@@ -353,6 +330,9 @@ case object PlanUpdates extends UpdatesPlanner {
       context
         .withModifiedPlannerState(_
           .withUpdatedLabelInfo(source, context.staticComponents.planningAttributes.solveds)
+          .withPreviouslyCachedProperties(
+            context.staticComponents.planningAttributes.cachedPropertiesPerPlan.get(source.id)
+          )
           .copy(config = context.plannerState.config.withLeafPlanners(leafPlanners)))
 
     val read = mergeRead(innerContext)

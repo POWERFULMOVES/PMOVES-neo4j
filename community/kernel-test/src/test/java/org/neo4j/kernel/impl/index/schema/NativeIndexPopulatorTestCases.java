@@ -26,7 +26,10 @@ import java.io.IOException;
 import org.eclipse.collections.api.factory.Sets;
 import org.neo4j.common.TokenNameLookup;
 import org.neo4j.configuration.Config;
+import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.internal.schema.IndexDescriptor;
+import org.neo4j.kernel.api.index.IndexPopulator;
+import org.neo4j.logging.NullLogProvider;
 import org.neo4j.values.ElementIdMapper;
 
 class NativeIndexPopulatorTestCases {
@@ -40,13 +43,16 @@ class NativeIndexPopulatorTestCases {
                         layout,
                         descriptor,
                         false,
-                        heapBufferFactory(10 * 1024),
+                        heapBufferFactory(config.get(GraphDatabaseInternalSettings.index_populator_block_size)
+                                .intValue()),
                         config,
                         INSTANCE,
                         tokenNameLookup,
                         ElementIdMapper.PLACEHOLDER,
                         BlockBasedIndexPopulator.NO_MONITOR,
-                        Sets.immutable.empty());
+                        Sets.immutable.empty(),
+                        NullLogProvider.getInstance(),
+                        IndexPopulator.DEFAULT_CONFIGURATION);
     }
 
     @FunctionalInterface

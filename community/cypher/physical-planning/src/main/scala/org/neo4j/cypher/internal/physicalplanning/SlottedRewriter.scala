@@ -22,9 +22,11 @@ package org.neo4j.cypher.internal.physicalplanning
 import org.neo4j.cypher.internal.expressions
 import org.neo4j.cypher.internal.expressions.ASTCachedProperty
 import org.neo4j.cypher.internal.expressions.And
+import org.neo4j.cypher.internal.expressions.Ands
 import org.neo4j.cypher.internal.expressions.CachedHasProperty
 import org.neo4j.cypher.internal.expressions.CachedProperty
 import org.neo4j.cypher.internal.expressions.Equals
+import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.False
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
 import org.neo4j.cypher.internal.expressions.GetDegree
@@ -40,16 +42,17 @@ import org.neo4j.cypher.internal.expressions.HasLabelsOrTypes
 import org.neo4j.cypher.internal.expressions.HasTypes
 import org.neo4j.cypher.internal.expressions.IsNotNull
 import org.neo4j.cypher.internal.expressions.IsNull
+import org.neo4j.cypher.internal.expressions.IsRepeatAcyclic
 import org.neo4j.cypher.internal.expressions.IsRepeatTrailUnique
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.NODE_TYPE
 import org.neo4j.cypher.internal.expressions.Not
+import org.neo4j.cypher.internal.expressions.NotEquals
 import org.neo4j.cypher.internal.expressions.Or
 import org.neo4j.cypher.internal.expressions.Property
 import org.neo4j.cypher.internal.expressions.PropertyKeyName
 import org.neo4j.cypher.internal.expressions.RELATIONSHIP_TYPE
 import org.neo4j.cypher.internal.expressions.RelTypeName
-import org.neo4j.cypher.internal.expressions.SymbolicName
 import org.neo4j.cypher.internal.expressions.True
 import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.logical.plans.AbstractVarExpand
@@ -63,7 +66,9 @@ import org.neo4j.cypher.internal.logical.plans.NestedPlanGetByNameExpression
 import org.neo4j.cypher.internal.logical.plans.RollUpApply
 import org.neo4j.cypher.internal.logical.plans.StatefulShortestPath
 import org.neo4j.cypher.internal.logical.plans.ValueHashJoin
-import org.neo4j.cypher.internal.macros.AssertMacros.checkOnlyWhenAssertionsAreEnabled
+import org.neo4j.cypher.internal.logical.plans.ValueMergeJoin
+import org.neo4j.cypher.internal.macros.AssertMacros3.checkOnlyWhenAssertionsAreEnabled
+import org.neo4j.cypher.internal.physicalplanning.PhysicalPlanningAttributes.AcyclicPlans
 import org.neo4j.cypher.internal.physicalplanning.PhysicalPlanningAttributes.SlotConfigurations
 import org.neo4j.cypher.internal.physicalplanning.PhysicalPlanningAttributes.TrailPlans
 import org.neo4j.cypher.internal.physicalplanning.SlottedRewriter.rewriteVariable
@@ -91,7 +96,10 @@ import org.neo4j.cypher.internal.physicalplanning.ast.NullCheck
 import org.neo4j.cypher.internal.physicalplanning.ast.NullCheckProperty
 import org.neo4j.cypher.internal.physicalplanning.ast.NullCheckReferenceProperty
 import org.neo4j.cypher.internal.physicalplanning.ast.NullCheckVariable
+import org.neo4j.cypher.internal.physicalplanning.ast.PrimitiveAnds
+import org.neo4j.cypher.internal.physicalplanning.ast.PrimitiveComparison
 import org.neo4j.cypher.internal.physicalplanning.ast.PrimitiveEquals
+import org.neo4j.cypher.internal.physicalplanning.ast.PrimitiveNotEquals
 import org.neo4j.cypher.internal.physicalplanning.ast.ReferenceFromSlot
 import org.neo4j.cypher.internal.physicalplanning.ast.RelationshipFromSlot
 import org.neo4j.cypher.internal.physicalplanning.ast.RelationshipProperty
@@ -106,9 +114,11 @@ import org.neo4j.cypher.internal.runtime.ast.RuntimeVariable
 import org.neo4j.cypher.internal.runtime.ast.VariableRef
 import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.RewriterStopper
+import org.neo4j.cypher.internal.util.SymbolicName
 import org.neo4j.cypher.internal.util.attribution.Id
 import org.neo4j.cypher.internal.util.attribution.SameId
 import org.neo4j.cypher.internal.util.bottomUp
+import org.neo4j.cypher.internal.util.collection.immutable.ListSet
 import org.neo4j.cypher.internal.util.symbols.CTNode
 import org.neo4j.cypher.internal.util.symbols.CTRelationship
 import org.neo4j.cypher.internal.util.topDown
@@ -122,7 +132,12 @@ import org.neo4j.exceptions.InternalException
  */
 class SlottedRewriter(tokenContext: ReadTokenContext) {
 
-  def apply(in: LogicalPlan, slotConfigurations: SlotConfigurations, trailPlans: TrailPlans): LogicalPlan = {
+  def apply(
+    in: LogicalPlan,
+    slotConfigurations: SlotConfigurations,
+    trailPlans: TrailPlans,
+    acyclicPlans: AcyclicPlans
+  ): LogicalPlan = {
 
     val rewritePlanWithSlots =
       topDown(Rewriter.lift {
@@ -132,7 +147,8 @@ class SlottedRewriter(tokenContext: ReadTokenContext) {
         We need to use the incoming slot configuration for predicate rewriting
            */
           val incomingSlotConfiguration = slotConfigurations(oldPlan.source.id)
-          val incomingRewriter = rewriteCreator(incomingSlotConfiguration, oldPlan, slotConfigurations, trailPlans)
+          val incomingRewriter =
+            rewriteCreator(incomingSlotConfiguration, oldPlan, slotConfigurations, trailPlans, acyclicPlans)
 
           val newNodePredicates =
             oldPlan.nodePredicates.map(x => VariablePredicate(x.variable, x.predicate.endoRewrite(incomingRewriter)))
@@ -145,14 +161,25 @@ class SlottedRewriter(tokenContext: ReadTokenContext) {
             oldPlan.withNewPredicates(newNodePredicates, newRelationshipPredicates)(SameId(oldPlan.id))
 
           val slotConfiguration = slotConfigurations(oldPlan.id)
-          val rewriter = rewriteCreator(slotConfiguration, oldPlan, slotConfigurations, trailPlans)
+          val rewriter = rewriteCreator(slotConfiguration, oldPlan, slotConfigurations, trailPlans, acyclicPlans)
           val newPlan = oldPlanWithNewPredicates.endoRewrite(rewriter)
 
           newPlan
 
         case plan @ ValueHashJoin(lhs, rhs, e @ Equals(lhsExp, rhsExp)) =>
-          val lhsRewriter = rewriteCreator(slotConfigurations(lhs.id), plan, slotConfigurations, trailPlans)
-          val rhsRewriter = rewriteCreator(slotConfigurations(rhs.id), plan, slotConfigurations, trailPlans)
+          val lhsRewriter =
+            rewriteCreator(slotConfigurations(lhs.id), plan, slotConfigurations, trailPlans, acyclicPlans)
+          val rhsRewriter =
+            rewriteCreator(slotConfigurations(rhs.id), plan, slotConfigurations, trailPlans, acyclicPlans)
+          val lhsExpAfterRewrite = lhsExp.endoRewrite(lhsRewriter)
+          val rhsExpAfterRewrite = rhsExp.endoRewrite(rhsRewriter)
+          plan.copy(join = Equals(lhsExpAfterRewrite, rhsExpAfterRewrite)(e.position))(SameId(plan.id))
+
+        case plan @ ValueMergeJoin(lhs, rhs, e @ Equals(lhsExp, rhsExp)) =>
+          val lhsRewriter =
+            rewriteCreator(slotConfigurations(lhs.id), plan, slotConfigurations, trailPlans, acyclicPlans)
+          val rhsRewriter =
+            rewriteCreator(slotConfigurations(rhs.id), plan, slotConfigurations, trailPlans, acyclicPlans)
           val lhsExpAfterRewrite = lhsExp.endoRewrite(lhsRewriter)
           val rhsExpAfterRewrite = rhsExp.endoRewrite(rhsRewriter)
           plan.copy(join = Equals(lhsExpAfterRewrite, rhsExpAfterRewrite)(e.position))(SameId(plan.id))
@@ -160,10 +187,14 @@ class SlottedRewriter(tokenContext: ReadTokenContext) {
         case oldPlan: AggregatingPlan =>
           // Grouping and aggregation expressions needs to be rewritten using the incoming slot configuration
           // as these slots are not available on the outgoing rows
-          val leftPlan = oldPlan.lhs.getOrElse(throw new InternalException("Leaf plans cannot be rewritten this way"))
+          val leftPlan = oldPlan.lhs.getOrElse(throw InternalException.internalError(
+            this.getClass.getSimpleName,
+            "Leaf plans cannot be rewritten this way"
+          ))
           val slotConfiguration = slotConfigurations(oldPlan.id)
           val incomingSlotConfiguration = slotConfigurations(leftPlan.id)
-          val incomingRewriter = rewriteCreator(incomingSlotConfiguration, oldPlan, slotConfigurations, trailPlans)
+          val incomingRewriter =
+            rewriteCreator(incomingSlotConfiguration, oldPlan, slotConfigurations, trailPlans, acyclicPlans)
           val newGroupingExpressions = oldPlan.groupingExpressions collect {
             case (column, expression) =>
               rewriteVariable(oldPlan, column, slotConfiguration) -> expression.endoRewrite(incomingRewriter)
@@ -192,7 +223,7 @@ class SlottedRewriter(tokenContext: ReadTokenContext) {
 
         case oldPlan: LogicalPlan =>
           val slotConfiguration = slotConfigurations(oldPlan.id)
-          val rewriter = rewriteCreator(slotConfiguration, oldPlan, slotConfigurations, trailPlans)
+          val rewriter = rewriteCreator(slotConfiguration, oldPlan, slotConfigurations, trailPlans, acyclicPlans)
           val newPlan = oldPlan.endoRewrite(rewriter)
 
           newPlan
@@ -204,7 +235,10 @@ class SlottedRewriter(tokenContext: ReadTokenContext) {
       .endoRewrite(PostSlottedRewriter)
 
     checkOnlyWhenAssertionsAreEnabled(!resultPlan.folder.findAllByClass[Variable].exists(v =>
-      throw new CantCompileQueryException(s"Failed to rewrite away $v\n$resultPlan")
+      throw CantCompileQueryException.internalError(
+        this.getClass.getSimpleName,
+        s"Failed to rewrite away $v\n$resultPlan"
+      )
     ))
 
     resultPlan
@@ -214,16 +248,20 @@ class SlottedRewriter(tokenContext: ReadTokenContext) {
     slotConfiguration: SlotConfigurationBuilder,
     thisPlan: LogicalPlan,
     slotConfigurations: SlotConfigurations,
-    trailPlans: TrailPlans
+    trailPlans: TrailPlans,
+    acyclicPlans: AcyclicPlans
   ): Rewriter = {
     val innerRewriter = Rewriter.lift {
       case e: NestedPlanExpression =>
         // NOTE: The top-down rewriter will descend into the nested plan, so no need to explicitly rewrite it here
         val innerSlotConf = slotConfigurations.getOrElse(
           e.plan.id,
-          throw new InternalException(s"Missing slot configuration for plan with ${e.plan.id}")
+          throw InternalException.internalError(
+            this.getClass.getSimpleName,
+            s"Missing slot configuration for plan with ${e.plan.id}"
+          )
         )
-        val rewriter = rewriteCreator(innerSlotConf, thisPlan, slotConfigurations, trailPlans)
+        val rewriter = rewriteCreator(innerSlotConf, thisPlan, slotConfigurations, trailPlans, acyclicPlans)
         e match {
           case ce @ NestedPlanCollectExpression(_, projection, _) =>
             val rewrittenProjection = projection.endoRewrite(rewriter)
@@ -244,7 +282,8 @@ class SlottedRewriter(tokenContext: ReadTokenContext) {
               case (CTNode, None)                => NodePropertyLate(offset, propKey, s"$key.$propKey")(prop)
               case (CTRelationship, Some(token)) => RelationshipProperty(offset, token, s"$key.$propKey")(prop)
               case (CTRelationship, None)        => RelationshipPropertyLate(offset, propKey, s"$key.$propKey")(prop)
-              case _ => throw new InternalException(
+              case _ => throw InternalException.internalError(
+                  this.getClass.getSimpleName,
                   s"Expressions on object other then nodes and relationships are not yet supported"
                 )
             }
@@ -265,6 +304,12 @@ class SlottedRewriter(tokenContext: ReadTokenContext) {
       case prop: CachedProperty =>
         rewriteCachedProperies(slotConfiguration, prop, needsValue = true, prop.failOnMissingEntity)
 
+      case and @ And(lhs, rhs) =>
+        makePrimitiveAnds(slotConfiguration, and, ListSet(lhs, rhs))
+
+      case ands @ Ands(predicates) =>
+        makePrimitiveAnds(slotConfiguration, ands, predicates)
+
       case e @ Equals(Variable(k1), Variable(k2)) =>
         primitiveEqualityChecks(slotConfiguration, e, k1, k2, positiveCheck = true)
 
@@ -275,7 +320,7 @@ class SlottedRewriter(tokenContext: ReadTokenContext) {
         val slot = slotConfiguration(key)
         slot match {
           case LongSlot(offset, true, _) => IsPrimitiveNull(offset)
-          case LongSlot(_, false, _)     => False()(e.position)
+          case LongSlot(_, false, _)     => False()(e.position.zeroLength)
           case _                         => e
         }
 
@@ -398,12 +443,12 @@ class SlottedRewriter(tokenContext: ReadTokenContext) {
               } else {
                 // Else if not using DISTINCT, the Count() function only cares if the value != Values.NO_VALUE, so we just use a static Literal expression in place of the entity
                 slot match {
-                  case LongSlot(offset, true, CTNode) => Some(NullCheck(offset, True()(v.position)))
+                  case LongSlot(offset, true, CTNode) => Some(NullCheck(offset, True()(v.position.zeroLength)))
                   case LongSlot(_, false, CTNode) =>
-                    Some(True()(v.position)) // Can never be null so we do not even have to check the slot
-                  case LongSlot(offset, true, CTRelationship) => Some(NullCheck(offset, True()(v.position)))
+                    Some(True()(v.position.zeroLength)) // Can never be null so we do not even have to check the slot
+                  case LongSlot(offset, true, CTRelationship) => Some(NullCheck(offset, True()(v.position.zeroLength)))
                   case LongSlot(_, false, CTRelationship) =>
-                    Some(True()(v.position)) // Can never be null so we do not even have to check the slot
+                    Some(True()(v.position.zeroLength)) // Can never be null so we do not even have to check the slot
                   case _ => None // Don't know how to specialize this
                 }
               }
@@ -460,7 +505,7 @@ class SlottedRewriter(tokenContext: ReadTokenContext) {
             NullCheck(offset, HasALabelFromSlot(offset))
 
           case LongSlot(_, _, CTRelationship) =>
-            True()(e.position)
+            True()(e.position.zeroLength)
 
           case _ => e // Don't know how to specialize this
         }
@@ -513,12 +558,36 @@ class SlottedRewriter(tokenContext: ReadTokenContext) {
         } else
           e
 
+      case IsRepeatAcyclic(innerNode: Variable) =>
+        val acyclicId: Id = acyclicPlans.getOrElse(
+          thisPlan.id,
+          throw InternalException.internalError(
+            this.getClass.getSimpleName,
+            "Expected IsRepeatAcyclic to be under AcyclicRepeat"
+          )
+        )
+        ast.NodeUniqueness(SlotAllocation.ACYCLIC_STATE_METADATA_KEY, acyclicId.x, innerNode)
+
       case IsRepeatTrailUnique(innerRel: Variable) =>
         val trailId: Id = trailPlans.getOrElse(
           thisPlan.id,
-          throw new InternalException("Expected IsRepeatTrailUnique to be under Trail")
+          throw InternalException.internalError(
+            this.getClass.getSimpleName,
+            "Expected IsRepeatTrailUnique to be under Trail or Acyclic"
+          )
         )
-        ast.TrailRelationshipUniqueness(SlotAllocation.TRAIL_STATE_METADATA_KEY, trailId.x, innerRel)
+        if (trailId == Id.INVALID_ID) { // TODO: improve this solution
+          val acyclicId = acyclicPlans.getOrElse(
+            thisPlan.id,
+            throw InternalException.internalError(
+              this.getClass.getSimpleName,
+              "Expected IsRepeatTrailUnique to be under Trail or Acyclic"
+            )
+          )
+          ast.TrailRelationshipUniqueness(SlotAllocation.ACYCLIC_STATE_METADATA_KEY, acyclicId.x, innerRel)
+        } else {
+          ast.TrailRelationshipUniqueness(SlotAllocation.TRAIL_STATE_METADATA_KEY, trailId.x, innerRel)
+        }
 
       case ssp: StatefulShortestPath =>
         val nonExpressionVariables = (ssp.nfa.variables -- ssp.boundNodes).collect { case Variable(name) => name }
@@ -578,7 +647,10 @@ class SlottedRewriter(tokenContext: ReadTokenContext) {
         propExpression
 
       case slot @ LongSlot(_, _, _) =>
-        throw new InternalException(s"Unexpected type on slot '$slot' for cached property $prop")
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"Unexpected type on slot '$slot' for cached property $prop"
+        )
 
       // We can skip checking the type of the refslot. We will only get cached properties, if semantic analysis determined that an expression is
       // a node or a relationship. We loose this information for RefSlots for some expressions, otherwise we would have allocated long slots
@@ -629,21 +701,54 @@ class SlottedRewriter(tokenContext: ReadTokenContext) {
     (resolvedTypeTokens.flatMap(_._1), lateTypes.map(_._2))
   }
 
+  private def makePrimitiveAnds(
+    slotConfiguration: SlotConfigurationBuilder,
+    e: Expression,
+    predicates: ListSet[Expression]
+  ) = {
+    val rewrittenPredicates = rewriteToPrimitiveEqualities(predicates, slotConfiguration)
+    val (primitive: ListSet[Expression], nonPrimitive: ListSet[Expression]) = rewrittenPredicates.partition {
+      case _: PrimitiveComparison => true
+      case _                      => false
+    }
+    if (primitive.size > 1) {
+      Ands(ListSet(PrimitiveAnds(primitive.toSeq.map(_.asInstanceOf[PrimitiveComparison]))) ++ nonPrimitive)(e.position)
+    } else {
+      Ands(rewrittenPredicates)(e.position)
+    }
+  }
+
+  private def rewriteToPrimitiveEqualities(
+    predicates: ListSet[Expression],
+    slotConfiguration: SlotConfigurationBuilder
+  ) = predicates.map {
+    case e @ Equals(Variable(k1), Variable(k2)) =>
+      primitiveEqualityChecks(slotConfiguration, e, k1, k2, positiveCheck = true)
+    case e @ NotEquals(Variable(k1), Variable(k2)) =>
+      primitiveEqualityChecks(slotConfiguration, e, k1, k2, positiveCheck = false)
+    case Not(e @ Equals(Variable(k1), Variable(k2))) =>
+      primitiveEqualityChecks(slotConfiguration, e, k1, k2, positiveCheck = false)
+    case other => other
+  }
+
   private def primitiveEqualityChecks(
     slots: SlotConfigurationBuilder,
-    e: Equals,
+    e: Expression,
     k1: String,
     k2: String,
     positiveCheck: Boolean
   ) = {
     def makeNegativeIfNeeded(e: expressions.Expression) =
-      if (!positiveCheck)
-        Not(e)(e.position)
-      else
+      if (!positiveCheck) {
+        e match {
+          case ne: NotEquals => ne
+          case e             => Not(e)(e.position)
+        }
+      } else
         e
 
     val shortcutWhenDifferentTypes: expressions.Expression =
-      if (positiveCheck) False()(e.position) else True()(e.position)
+      if (positiveCheck) False()(e.position.zeroLength) else True()(e.position.zeroLength)
     val slot1 = slots(k1)
     val slot2 = slots(k2)
 
@@ -657,15 +762,16 @@ class SlottedRewriter(tokenContext: ReadTokenContext) {
         shortcutWhenDifferentTypes
 
       case (LongSlot(_, false, typ1), LongSlot(_, false, typ2)) if typ1 == typ2 =>
-        val eq = PrimitiveEquals(IdFromSlot(slot1.offset), IdFromSlot(slot2.offset))
-        makeNegativeIfNeeded(eq)
+        if (positiveCheck) PrimitiveEquals(slot1.offset, slot2.offset)
+        else PrimitiveNotEquals(slot1.offset, slot2.offset)
 
       case (LongSlot(_, null1, typ1), LongSlot(_, null2, typ2)) if (null1 || null2) && (typ1 != typ2) =>
         makeNullChecksExplicit(slot1, slot2, shortcutWhenDifferentTypes)
 
       case (LongSlot(_, null1, typ1), LongSlot(_, null2, typ2)) if (null1 || null2) && (typ1 == typ2) =>
-        val eq = PrimitiveEquals(IdFromSlot(slot1.offset), IdFromSlot(slot2.offset))
-        makeNullChecksExplicit(slot1, slot2, makeNegativeIfNeeded(eq))
+        val eq = if (positiveCheck) PrimitiveEquals(slot1.offset, slot2.offset)
+        else PrimitiveNotEquals(slot1.offset, slot2.offset)
+        makeNullChecksExplicit(slot1, slot2, eq)
 
       case _ =>
         makeNegativeIfNeeded(e)
@@ -757,16 +863,21 @@ object SlottedRewriter {
               case LongSlot(offset, true, CTRelationship)  => NullCheckVariable(offset, RelationshipFromSlot(offset, k))
               case RefSlot(offset, _, _)                   => ReferenceFromSlot(offset, k)
               case _ =>
-                throw new CantCompileQueryException("Unknown type for `" + k + "` in the slot configuration")
+                throw CantCompileQueryException.internalError(
+                  this.getClass.getSimpleName,
+                  "Unknown type for `" + k + "` in the slot configuration"
+                )
             }
           case _ =>
-            throw new CantCompileQueryException(
+            throw CantCompileQueryException.internalError(
+              this.getClass.getSimpleName,
               s"Did not find `$k` in the slot configuration of ${thisPlan.getClass.getSimpleName} (${thisPlan.id})"
             )
         }
       case ev: ExpressionVariable => ev
       case _ =>
-        throw new CantCompileQueryException(
+        throw CantCompileQueryException.internalError(
+          this.getClass.getSimpleName,
           s"Don't know how to rewrite variable $v in ${thisPlan.getClass.getSimpleName} (${thisPlan.id})"
         )
     }

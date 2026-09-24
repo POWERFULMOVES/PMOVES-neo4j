@@ -27,11 +27,13 @@ import java.time.OffsetTime;
 import java.time.ZonedDateTime;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 import org.neo4j.bolt.protocol.common.connector.connection.Connection;
-import org.neo4j.bolt.protocol.io.writer.StructWriter;
+import org.neo4j.bolt.protocol.io.writer.VersionedValueWriter;
 import org.neo4j.packstream.io.PackstreamBuf;
 import org.neo4j.values.AnyValue;
 import org.neo4j.values.storable.CoordinateReferenceSystem;
+import org.neo4j.values.storable.Float16Format;
 import org.neo4j.values.storable.TextArray;
 import org.neo4j.values.storable.TextValue;
 import org.neo4j.values.virtual.MapValue;
@@ -53,7 +55,7 @@ public class WriterPipeline {
         return new Context(buf);
     }
 
-    public WriterPipeline addLast(StructWriter writer) {
+    public WriterPipeline addLast(VersionedValueWriter writer) {
         this.lock.lock();
 
         try {
@@ -74,7 +76,7 @@ public class WriterPipeline {
         return this;
     }
 
-    public WriterPipeline addFirst(StructWriter writer) {
+    public WriterPipeline addFirst(VersionedValueWriter writer) {
         this.lock.lock();
 
         try {
@@ -95,7 +97,7 @@ public class WriterPipeline {
         return this;
     }
 
-    public WriterPipeline remove(StructWriter writer) {
+    public WriterPipeline remove(VersionedValueWriter writer) {
         this.lock.lock();
 
         try {
@@ -128,7 +130,7 @@ public class WriterPipeline {
         return this;
     }
 
-    public StructWriter removeFirst() {
+    public VersionedValueWriter removeFirst() {
         this.lock.lock();
 
         ChainElement first;
@@ -149,7 +151,7 @@ public class WriterPipeline {
         return first.writer;
     }
 
-    public StructWriter removeLast() {
+    public VersionedValueWriter removeLast() {
         this.lock.lock();
 
         ChainElement last;
@@ -173,15 +175,15 @@ public class WriterPipeline {
     private static class ChainElement {
         private volatile ChainElement next;
         private volatile ChainElement prev;
-        private final StructWriter writer;
+        private final VersionedValueWriter writer;
 
-        public ChainElement(ChainElement prev, ChainElement next, StructWriter writer) {
+        public ChainElement(ChainElement prev, ChainElement next, VersionedValueWriter writer) {
             this.prev = prev;
             this.next = next;
             this.writer = writer;
         }
 
-        public ChainElement(ChainElement prev, StructWriter writer) {
+        public ChainElement(ChainElement prev, VersionedValueWriter writer) {
             this(prev, null, writer);
         }
     }
@@ -207,7 +209,7 @@ public class WriterPipeline {
             return this.buf;
         }
 
-        private void fire(String eventName, Consumer<StructWriter> consumer) {
+        private void fire(String eventName, Consumer<VersionedValueWriter> consumer) {
             var prev = this.current;
             var next = prev.next;
             if (next == null) {
@@ -227,7 +229,7 @@ public class WriterPipeline {
             value.writeTo(this.valueWriter);
         }
 
-        private void write(Consumer<StructWriter> consumer) {
+        private void write(Consumer<VersionedValueWriter> consumer) {
             var origin = this.current;
             var next = head;
 
@@ -319,6 +321,51 @@ public class WriterPipeline {
         }
 
         @Override
+        public void writeVector(byte[] values) {
+            this.write(writer -> writer.writeVector(this, values));
+        }
+
+        @Override
+        public void writeVector(short[] values) {
+            this.write(writer -> writer.writeVector(this, values));
+        }
+
+        @Override
+        public void writeVector(int[] values) {
+            this.write(writer -> writer.writeVector(this, values));
+        }
+
+        @Override
+        public void writeVector(long[] values) {
+            this.write(writer -> writer.writeVector(this, values));
+        }
+
+        @Override
+        public void writeFloatingPointVector(Float16Format format, short[] values) {
+            this.write(writer -> writer.writeFloatingPointVector(this, format, values));
+        }
+
+        @Override
+        public void writeVector(float[] values) {
+            this.write(writer -> writer.writeVector(this, values));
+        }
+
+        @Override
+        public void writeVector(double[] values) {
+            this.write(writer -> writer.writeVector(this, values));
+        }
+
+        @Override
+        public void writeUUID(long msb, long lsb) {
+            this.write(writer -> writer.writeUUID(this, msb, lsb));
+        }
+
+        @Override
+        public void writeUnsupportedType(String typeName, ProtocolVersion supportedSinceVersion, String message) {
+            this.write(writer -> writer.writeUnsupportedType(this, typeName, supportedSinceVersion, message));
+        }
+
+        @Override
         public void firePoint(CoordinateReferenceSystem crs, double[] coords) {
             this.fire("point", writer -> writer.writePoint(this, crs, coords));
         }
@@ -399,6 +446,53 @@ public class WriterPipeline {
         @Override
         public void firePath(NodeValue[] nodes, RelationshipValue[] relationships) {
             this.fire("path", writer -> writer.writePath(this, nodes, relationships));
+        }
+
+        @Override
+        public void fireVector(byte[] values) {
+            this.fire("byte_vector", writer -> writer.writeVector(this, values));
+        }
+
+        @Override
+        public void fireVector(short[] values) {
+            this.fire("short_vector", writer -> writer.writeVector(this, values));
+        }
+
+        @Override
+        public void fireVector(int[] values) {
+            this.fire("int_vector", writer -> writer.writeVector(this, values));
+        }
+
+        @Override
+        public void fireVector(long[] values) {
+            this.fire("long_vector", writer -> writer.writeVector(this, values));
+        }
+
+        @Override
+        public void fireFloatingPointVector(Float16Format format, short[] values) {
+            this.fire("float16_vector", writer -> writer.writeFloatingPointVector(this, format, values));
+        }
+
+        @Override
+        public void fireVector(float[] values) {
+            this.fire("float_vector", writer -> writer.writeVector(this, values));
+        }
+
+        @Override
+        public void fireVector(double[] values) {
+            this.fire("double_vector", writer -> writer.writeVector(this, values));
+        }
+
+        @Override
+        public void fireUUID(long msb, long lsb) {
+            this.fire("uuid", writer -> writer.writeUUID(this, msb, lsb));
+        }
+
+        @Override
+        public void fireUnsupportedType(String typeName, ProtocolVersion supportedSinceVersion, String message) {
+            this.fire(
+                    "unsupported_type",
+                    writer -> writer.writeUnsupportedType(this, typeName, supportedSinceVersion, message));
         }
     }
 }

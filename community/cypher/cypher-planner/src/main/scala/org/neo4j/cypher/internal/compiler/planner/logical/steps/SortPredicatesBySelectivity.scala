@@ -19,12 +19,12 @@
  */
 package org.neo4j.cypher.internal.compiler.planner.logical.steps
 
-import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
 import org.neo4j.cypher.internal.ast.semantics.SemanticTable
 import org.neo4j.cypher.internal.compiler.phases.LogicalPlanState
 import org.neo4j.cypher.internal.compiler.phases.PlannerContext
 import org.neo4j.cypher.internal.compiler.planner.logical.CardinalityCostModel
 import org.neo4j.cypher.internal.compiler.planner.logical.plans.rewriter.LogicalPlanRewritten
+import org.neo4j.cypher.internal.compiler.planner.logical.schema.GraphSchemaOptimizations
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.IndexCompatiblePredicatesProviderContext
 import org.neo4j.cypher.internal.expressions.Ands
 import org.neo4j.cypher.internal.expressions.AndsReorderable
@@ -34,6 +34,7 @@ import org.neo4j.cypher.internal.frontend.phases.CompilationPhaseTracer
 import org.neo4j.cypher.internal.frontend.phases.CompilationPhaseTracer.CompilationPhase.LOGICAL_PLANNING
 import org.neo4j.cypher.internal.frontend.phases.Phase
 import org.neo4j.cypher.internal.frontend.phases.Transformer
+import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerConfig
 import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerFactory
 import org.neo4j.cypher.internal.ir.QueryGraph
 import org.neo4j.cypher.internal.ir.RegularSinglePlannerQuery
@@ -41,7 +42,7 @@ import org.neo4j.cypher.internal.ir.SinglePlannerQuery
 import org.neo4j.cypher.internal.ir.UnionQuery
 import org.neo4j.cypher.internal.logical.plans.Selection
 import org.neo4j.cypher.internal.logical.plans.Selection.LabelAndRelTypeInfo
-import org.neo4j.cypher.internal.macros.AssertMacros
+import org.neo4j.cypher.internal.macros.AssertMacros3
 import org.neo4j.cypher.internal.util.PredicateCost
 import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.Selectivity
@@ -69,10 +70,8 @@ case object SortPredicatesBySelectivity extends Phase[PlannerContext, LogicalPla
 
   override def invalidatedConditions: Set[StepSequencer.Condition] = Set.empty
 
-  override def getTransformer(
-    pushdownPropertyReads: Boolean,
-    semanticFeatures: Seq[SemanticFeature]
-  ): Transformer[PlannerContext, LogicalPlanState, LogicalPlanState] = this
+  override def getTransformer(planPipelineConfig: PlanPipelineTransformerConfig)
+    : Transformer[PlannerContext, LogicalPlanState, LogicalPlanState] = this
 
   override def process(from: LogicalPlanState, context: PlannerContext): LogicalPlanState = {
     val rewriter = {
@@ -94,7 +93,7 @@ case object SortPredicatesBySelectivity extends Phase[PlannerContext, LogicalPla
     val LabelAndRelTypeInfo(labelInfo, relTypeInfo) = from.planningAttributes.labelAndRelTypeInfos.get(s.id) match {
       case Some(value) => value
       case None =>
-        AssertMacros.checkOnlyWhenAssertionsAreEnabled(
+        AssertMacros3.checkOnlyWhenAssertionsAreEnabled(
           false,
           s"labelAndRelTypeInfos should always be defined on selections. Selection plan id: ${s.id.x}"
         )
@@ -122,7 +121,8 @@ case object SortPredicatesBySelectivity extends Phase[PlannerContext, LogicalPla
           labelInfo,
           relTypeInfo,
           from.semanticTable(),
-          IndexCompatiblePredicatesProviderContext.default
+          IndexCompatiblePredicatesProviderContext.default,
+          GraphSchemaOptimizations.Disabled
         )
         val selectivity = (cardinality / incomingCardinality).getOrElse(Selectivity.ONE)
         PredicateCost(costPerRow, selectivity)

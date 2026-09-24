@@ -20,9 +20,8 @@
 package org.neo4j.internal.batchimport.staging;
 
 import static java.util.concurrent.TimeUnit.MINUTES;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.neo4j.batchimport.api.Configuration.DEFAULT;
 import static org.neo4j.internal.batchimport.staging.ExecutionMonitor.INVISIBLE;
 import static org.neo4j.internal.batchimport.staging.ExecutionSupervisors.superviseDynamicExecution;
@@ -36,7 +35,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.batchimport.api.Configuration;
 import org.neo4j.internal.batchimport.executor.ProcessorScheduler;
 import org.neo4j.internal.batchimport.stats.Keys;
@@ -46,9 +44,9 @@ import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class StageTest {
     private static final int TEST_BATCH_SIZE = 100;
     private static final CursorContextFactory CONTEXT_FACTORY =
@@ -106,7 +104,9 @@ class StageTest {
 
             // THEN
             for (Step<?> step : execution.steps()) {
-                assertEquals(batches, step.stats().stat(Keys.done_batches).asLong(), "For " + step);
+                assertThat(step.stats().stat(Keys.done_batches).asLong())
+                        .as("For " + step)
+                        .isEqualTo(batches);
             }
         }
     }
@@ -118,14 +118,14 @@ class StageTest {
         int customTickets = 1000;
         CountDownLatch processedBatches = new CountDownLatch(customTickets + 1);
 
-        ExecutorService executorService = Executors.newCachedThreadPool();
-        try (Stage stage = new Stage(
-                "Test stage",
-                null,
-                config,
-                Step.ORDER_SEND_DOWNSTREAM,
-                (job, name) -> executorService.submit(job),
-                DEFAULT_PANIC_MONITOR)) {
+        try (ExecutorService executorService = Executors.newCachedThreadPool();
+                Stage stage = new Stage(
+                        "Test stage",
+                        null,
+                        config,
+                        Step.ORDER_SEND_DOWNSTREAM,
+                        (job, name) -> executorService.submit(job),
+                        DEFAULT_PANIC_MONITOR)) {
             stage.add(new PullingProducerStep<TestProcessContext>(stage.control(), config) {
                 @Override
                 protected Object nextBatchOrNull(long ticket, int batchSize, TestProcessContext processContext) {
@@ -169,10 +169,8 @@ class StageTest {
             }
             new ExecutionSupervisor(INVISIBLE).supervise(execution);
 
-            assertTrue(processedBatches.await(5, MINUTES));
-            assertEquals((customTickets + 1) * TEST_BATCH_SIZE, globalCounterAccumulator.get());
-        } finally {
-            executorService.shutdown();
+            assertThat(processedBatches.await(5, MINUTES)).isTrue();
+            assertThat(globalCounterAccumulator.get()).isEqualTo((customTickets + 1) * TEST_BATCH_SIZE);
         }
     }
 
@@ -185,9 +183,9 @@ class StageTest {
         try (Stage stage = new CloseOnPanicStage(configuration, panicMonitor); ) {
 
             // when/then
-            assertThrows(RuntimeException.class, () -> superviseDynamicExecution(stage));
-            assertTrue(panicMonitor.hasReceivedPanic());
-            assertTrue(panicMonitor.getReceivedPanic().getMessage().contains("Chaos monkey"));
+            assertThatExceptionOfType(RuntimeException.class).isThrownBy(() -> superviseDynamicExecution(stage));
+            assertThat(panicMonitor.hasReceivedPanic()).isTrue();
+            assertThat(panicMonitor.getReceivedPanic().getMessage()).contains("Chaos monkey");
         }
     }
 
@@ -205,7 +203,7 @@ class StageTest {
 
         @Override
         public long receive(long ticket, Object batch) {
-            assertEquals(lastTicket.getAndIncrement(), ticket, "For " + batch + " in " + name());
+            assertThat(ticket).as("For " + batch + " in " + name()).isEqualTo(lastTicket.getAndIncrement());
             return super.receive(ticket, batch);
         }
 

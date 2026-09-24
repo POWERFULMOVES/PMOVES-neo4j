@@ -20,6 +20,7 @@
 package org.neo4j.internal.batchimport;
 
 import java.io.IOException;
+import java.io.PrintStream;
 import org.neo4j.batchimport.api.AdditionalInitialIds;
 import org.neo4j.batchimport.api.BatchImporter;
 import org.neo4j.batchimport.api.Configuration;
@@ -27,7 +28,9 @@ import org.neo4j.batchimport.api.IndexImporterFactory;
 import org.neo4j.batchimport.api.Monitor;
 import org.neo4j.batchimport.api.input.Collector;
 import org.neo4j.batchimport.api.input.Input;
+import org.neo4j.batchimport.api.input.PropertySizeCalculator;
 import org.neo4j.configuration.Config;
+import org.neo4j.importer.SchemaCommandSource;
 import org.neo4j.internal.batchimport.staging.ExecutionMonitor;
 import org.neo4j.internal.batchimport.store.BatchingNeoStores;
 import org.neo4j.io.fs.FileSystemAbstraction;
@@ -35,12 +38,14 @@ import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.layout.recordstorage.RecordDatabaseLayout;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
-import org.neo4j.kernel.database.MetadataCache;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.logging.internal.LogService;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.scheduler.JobScheduler;
 import org.neo4j.storageengine.api.LogFilesInitializer;
+import org.neo4j.storageengine.api.LogMetadataProvider;
+import org.neo4j.storageengine.api.LogMetadataProviderImpl;
+import org.neo4j.wal.LogTailMetadata;
 
 /**
  * {@link BatchImporter} which tries to exercise as much of the available resources to gain performance.
@@ -70,6 +75,7 @@ public class ParallelBatchImporter implements BatchImporter {
     private final IndexImporterFactory indexImporterFactory;
     private final MemoryTracker memoryTracker;
     private final CursorContextFactory contextFactory;
+    private final DatabaseCreationOptions databaseCreationOptions;
 
     public ParallelBatchImporter(
             DatabaseLayout databaseLayout,
@@ -87,7 +93,8 @@ public class ParallelBatchImporter implements BatchImporter {
             LogFilesInitializer logFilesInitializer,
             IndexImporterFactory indexImporterFactory,
             MemoryTracker memoryTracker,
-            CursorContextFactory contextFactory) {
+            CursorContextFactory contextFactory,
+            DatabaseCreationOptions databaseCreationOptions) {
         this.databaseLayout = RecordDatabaseLayout.convert(databaseLayout);
         this.fileSystem = fileSystem;
         this.pageCacheTracer = pageCacheTracer;
@@ -104,14 +111,33 @@ public class ParallelBatchImporter implements BatchImporter {
         this.indexImporterFactory = indexImporterFactory;
         this.memoryTracker = memoryTracker;
         this.contextFactory = contextFactory;
+        this.databaseCreationOptions = databaseCreationOptions;
+    }
+
+    public static void outputEstimates(Input input, int numberOfThreads, PrintStream output) throws IOException {
+        var estimates = input.validateAndEstimate(
+                (PropertySizeCalculator) (values, cursorContext, memoryTracker) -> 0, numberOfThreads);
+        output.println("Estimated entity counts:");
+        output.println("  Nodes: " + estimates.numberOfNodes());
+        output.println("    Labels: " + estimates.numberOfNodeLabels());
+        output.println("    Total property count: " + estimates.numberOfNodeProperties());
+        output.println("  Relationships: " + estimates.numberOfRelationships());
+        output.println("    Total property count: " + estimates.numberOfRelationshipProperties());
+        output.println();
+    }
+
+    @Override
+    public void doDryRun(Input input, PrintStream output) throws IOException {
+        outputEstimates(input, config.maxNumberOfWorkerThreads(), output);
     }
 
     @Override
     public void doImport(Input input) throws IOException {
-        if (!input.schemaCommands().isEmpty()) {
+        if (SchemaCommandSource.mayHaveCommands(input.schemaCommandSource())) {
             throw new UnsupportedOperationException("Record format batch import does not support schema changes");
         }
 
+        LogMetadataProvider logMetadataProvider = new LogMetadataProviderImpl(logTailMetadata);
         try (BatchingNeoStores store = ImportLogic.instantiateNeoStores(
                         fileSystem,
                         databaseLayout,
@@ -119,11 +145,12 @@ public class ParallelBatchImporter implements BatchImporter {
                         config,
                         logService,
                         additionalInitialIds,
-                        logTailMetadata,
+                        logMetadataProvider,
                         dbConfig,
                         jobScheduler,
                         memoryTracker,
-                        contextFactory);
+                        contextFactory,
+                        databaseCreationOptions);
                 ImportLogic logic = new ImportLogic(
                         databaseLayout,
                         store,
@@ -140,7 +167,6 @@ public class ParallelBatchImporter implements BatchImporter {
             store.createNew();
             logic.initialize(input);
             logic.importNodes();
-            logic.prepareIdMapper();
             logic.importRelationships();
             logic.calculateNodeDegrees();
             logic.linkRelationshipsOfAllTypes();
@@ -148,10 +174,11 @@ public class ParallelBatchImporter implements BatchImporter {
             logFilesInitializer.initializeLogFiles(
                     databaseLayout,
                     store.getNeoStores().getMetaDataStore(),
-                    new MetadataCache(logTailMetadata),
+                    logMetadataProvider,
                     fileSystem,
-                    BATCH_IMPORTER_CHECKPOINT);
-            logic.buildAuxiliaryStores();
+                    BATCH_IMPORTER_CHECKPOINT,
+                    dbConfig);
+            logic.buildAuxiliaryStores(logMetadataProvider);
             logic.success();
         }
     }

@@ -23,7 +23,7 @@ import org.neo4j.memory.MemoryTracker;
 
 @FunctionalInterface
 public interface PropertyValueLookup {
-    Lookup newLookup();
+    Lookup newLookup(boolean readOnly);
 
     interface Lookup extends AutoCloseable {
         Object lookupProperty(long nodeId, MemoryTracker memoryTracker);

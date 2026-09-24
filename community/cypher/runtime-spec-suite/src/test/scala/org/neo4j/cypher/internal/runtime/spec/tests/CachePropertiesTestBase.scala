@@ -33,10 +33,14 @@ import org.neo4j.cypher.internal.runtime.ast.PropertiesUsingCachedProperties
 import org.neo4j.cypher.internal.runtime.spec.Edition
 import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
+import org.neo4j.cypher.internal.runtime.spec.rewriters.TestPlanCombinationRewriter.NoRewrites
+import org.neo4j.cypher.internal.runtime.spec.rewriters.TestPlanCombinationRewriter.TestPlanCombinationRewriterHint
 import org.neo4j.graphdb.Label
 
 import scala.jdk.CollectionConverters.IteratorHasAsScala
 import scala.util.Random
+
+object CachePropertiesTestBase
 
 abstract class CachePropertiesTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
@@ -155,7 +159,8 @@ abstract class CachePropertiesTestBase[CONTEXT <: RuntimeContext](
       .nodeByLabelScan("a", "A")
       .build()
 
-    val runtimeResult = profile(logicalQuery, runtime)
+    val hints: Set[TestPlanCombinationRewriterHint] = if (isParallel) Set(NoRewrites) else Set.empty
+    val runtimeResult = profile(logicalQuery, runtime, hints)
     consume(runtimeResult)
 
     // then
@@ -183,7 +188,8 @@ abstract class CachePropertiesTestBase[CONTEXT <: RuntimeContext](
       .relationshipTypeScan("(a)-[r:R]->(b)")
       .build()
 
-    val runtimeResult = profile(logicalQuery, runtime)
+    val hints: Set[TestPlanCombinationRewriterHint] = if (isParallel) Set(NoRewrites) else Set.empty
+    val runtimeResult = profile(logicalQuery, runtime, hints)
     consume(runtimeResult)
 
     // then
@@ -395,6 +401,141 @@ abstract class CachePropertiesTestBase[CONTEXT <: RuntimeContext](
     runtimeResult should beColumns("b").withSingleRow(b)
   }
 
+  test("handle cached properties in node index seek with multiple matches per seek") {
+    val expected = givenGraph {
+      nodeIndex("B", "id")
+      nodePropertyGraph(sizeHint, { case i => Map("id" -> i) }, "A")
+      nodePropertyGraph(3, { case _ => Map("id" -> 1) }, "B")
+    }
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("b")
+      .apply()
+      .|.nodeIndexOperator("b:B(id = ???)", paramExpr = Some(cachedNodeProp("a", "id")), argumentIds = Set("b"))
+      .nodeByLabelScan("a", "A")
+      .build()
+    val runtimeResult = execute(logicalQuery, runtime)
+    runtimeResult should beColumns("b").withRows(singleColumn(expected))
+  }
+
+  test("handle cached properties in node index seek when some seeks miss") {
+    val b = givenGraph {
+      nodeIndex("B", "id")
+      nodePropertyGraph(sizeHint, { case i => Map("id" -> i) }, "A")
+      nodePropertyGraph(1, { case _ => Map("id" -> 0) }, "B").head
+    }
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("b")
+      .apply()
+      .|.nodeIndexOperator("b:B(id = ???)", paramExpr = Some(cachedNodeProp("a", "id")), argumentIds = Set("b"))
+      .nodeByLabelScan("a", "A")
+      .build()
+    val runtimeResult = execute(logicalQuery, runtime)
+    runtimeResult should beColumns("b").withSingleRow(b)
+  }
+
+  test("handle cached property when it is not the root expression, on the RHS of an apply") {
+    val b = givenGraph {
+      nodeIndex("B", "id")
+      nodePropertyGraph(sizeHint, { case i => Map("id" -> i) }, "A")
+      nodePropertyGraph(1, { case _ => Map("id" -> 1) }, "B").head // matches a.id == 0
+    }
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("b")
+      .apply()
+      .|.nodeIndexOperator(
+        "b:B(id = ???)",
+        paramExpr = Some(add(cachedNodeProp("a", "id"), literalInt(1))),
+        argumentIds = Set("b")
+      )
+      .nodeByLabelScan("a", "A")
+      .build()
+    val runtimeResult = execute(logicalQuery, runtime)
+    runtimeResult should beColumns("b").withSingleRow(b)
+  }
+
+  test("handle cached property seek values combined with indexed property values") {
+    givenGraph {
+      nodeIndex("B", "id")
+      nodePropertyGraph(sizeHint, { case i => Map("id" -> i) }, "A")
+      nodePropertyGraph(sizeHint, { case i => Map("id" -> i) }, "B")
+    }
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("bid")
+      .projection("cacheN[b.id] AS bid")
+      .apply()
+      .|.nodeIndexOperator(
+        "b:B(id = ???)",
+        paramExpr = Some(cachedNodeProp("a", "id")),
+        argumentIds = Set("b"),
+        getValue = _ => GetValue
+      )
+      .nodeByLabelScan("a", "A")
+      .build()
+    val runtimeResult = execute(logicalQuery, runtime)
+    runtimeResult should beColumns("bid").withRows(singleColumn(0 until sizeHint))
+  }
+
+  test("handle cached properties in unique node index seek on the RHS of an apply") {
+    val b = givenGraph {
+      uniqueNodeIndex("B", "id")
+      nodePropertyGraph(sizeHint, { case i => Map("id" -> i) }, "A")
+      nodePropertyGraph(1, { case _ => Map("id" -> 1) }, "B").head
+    }
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("b")
+      .apply()
+      .|.nodeIndexOperator(
+        "b:B(id = ???)",
+        paramExpr = Some(cachedNodeProp("a", "id")),
+        argumentIds = Set("b"),
+        unique = true
+      )
+      .nodeByLabelScan("a", "A")
+      .build()
+    val runtimeResult = execute(logicalQuery, runtime)
+    runtimeResult should beColumns("b").withSingleRow(b)
+  }
+
+  test("handle cached property seek value populated in the argument prefix on the RHS of an apply") {
+    val b = givenGraph {
+      nodeIndex("B", "id")
+      nodePropertyGraph(sizeHint, { case i => Map("id" -> i) }, "A")
+      nodePropertyGraph(1, { case _ => Map("id" -> 1) }, "B").head
+    }
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("b")
+      .apply()
+      .|.nodeIndexOperator("b:B(id = ???)", paramExpr = Some(cachedNodeProp("a", "id")), argumentIds = Set("b"))
+      .cacheProperties("cache[a.id]")
+      .nodeByLabelScan("a", "A")
+      .build()
+    val runtimeResult = execute(logicalQuery, runtime)
+    runtimeResult should beColumns("b").withSingleRow(b)
+  }
+
+  test("handle cached property seek value when the seek-value entity is null from an optional expand") {
+    val presentCount = sizeHint / 2
+    val expectedBs = givenGraph {
+      nodeIndex("B", "id")
+      val as = nodePropertyGraph(presentCount, { case i => Map("id" -> i) }, "A")
+      val bs = nodePropertyGraph(presentCount, { case i => Map("id" -> i) }, "B")
+      val connectedStarts = nodeGraph(presentCount, "START")
+      nodeGraph(presentCount, "START") // start nodes with no outgoing relationship -> null a
+      connect(connectedStarts ++ as, (0 until presentCount).map(i => (i, presentCount + i, "R")))
+      bs
+    }
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("b")
+      .apply()
+      .|.nodeIndexOperator("b:B(id = ???)", paramExpr = Some(cachedNodeProp("a", "id")), argumentIds = Set("b"))
+      .cacheProperties("cache[a.id]")
+      .optionalExpandAll("(s)-[r]->(a)")
+      .nodeByLabelScan("s", "START")
+      .build()
+    val runtimeResult = execute(logicalQuery, runtime)
+    runtimeResult should beColumns("b").withRows(singleColumn(expectedBs))
+  }
+
   test("should handle missing long entities") {
     // given
     val size = 10
@@ -412,7 +553,7 @@ abstract class CachePropertiesTestBase[CONTEXT <: RuntimeContext](
     val runtimeResult = execute(logicalQuery, runtime, inputValues(nodes.map(n => Array[Any](n)): _*))
 
     // then
-    val expected = nodes.map(_ => Array(null, null))
+    val expected = nodes.map(_ => Array[Any](null, null))
     runtimeResult should beColumns("x", "y").withRows(expected)
   }
 
@@ -447,7 +588,7 @@ abstract class CachePropertiesTestBase[CONTEXT <: RuntimeContext](
     val runtimeResult = execute(logicalQuery, runtime)
 
     // then
-    val expected = nodes.map(_ => Array(null))
+    val expected = nodes.map(_ => Array[Any](null))
     runtimeResult should beColumns("x").withRows(expected)
   }
 
@@ -509,7 +650,7 @@ abstract class CachePropertiesTestBase[CONTEXT <: RuntimeContext](
 
     // when
     val executablePlan: ExecutionPlan = buildPlan(logicalQuery.copy(doProfile = true), runtime)
-    val result1 = profile(executablePlan, NoInput, readOnly = true)
+    val result1 = profile(executablePlan, NoInput)
 
     // then
     result1 should beColumns("x1", "x2", "x3").withSingleRow("1", null, null)
@@ -521,7 +662,7 @@ abstract class CachePropertiesTestBase[CONTEXT <: RuntimeContext](
     givenGraph {
       node.setProperty("x2", "2")
     }
-    val result2 = profile(executablePlan, NoInput, readOnly = true)
+    val result2 = profile(executablePlan, NoInput)
 
     // then
     result2 should beColumns("x1", "x2", "x3").withSingleRow("1", "2", null)
@@ -556,7 +697,7 @@ abstract class CachePropertiesTestBase[CONTEXT <: RuntimeContext](
 
     // when
     val executionPlan = buildPlan(logicalQuery.copy(doProfile = true), runtime)
-    val resultNoTokenUpdates = profile(executionPlan, NoInput, readOnly = true)
+    val resultNoTokenUpdates = profile(executionPlan, NoInput)
 
     // then
     resultNoTokenUpdates should beColumns(resultColumnNames: _*).withSingleRow(resultColumns.map(i =>
@@ -584,7 +725,7 @@ abstract class CachePropertiesTestBase[CONTEXT <: RuntimeContext](
     givenGraph {
       (numStoreProperties until numExistingProperties).map(i => node.setProperty("p" + i, i))
     }
-    val resultTokenWithUpdates = profile(executionPlan, NoInput, readOnly = true)
+    val resultTokenWithUpdates = profile(executionPlan, NoInput)
 
     // then
     resultTokenWithUpdates should beColumns(resultColumnNames: _*).withSingleRow(resultColumns.map(i =>
@@ -1163,5 +1304,23 @@ trait CachePropertiesTxStateTestBase[CONTEXT <: RuntimeContext] {
 
     // then
     runtimeResult should beColumns("r").withRows(singleColumn(rels))
+  }
+
+  test("handle cached property seek value that is changed in the transaction") {
+    val (a, b) = givenGraph {
+      nodeIndex("B", "id")
+      val as = nodePropertyGraph(1, { case _ => Map("id" -> 0) }, "A")
+      val bs = nodePropertyGraph(1, { case _ => Map("id" -> 99) }, "B")
+      (as.head, bs.head)
+    }
+    a.setProperty("id", 99)
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("b")
+      .apply()
+      .|.nodeIndexOperator("b:B(id = ???)", paramExpr = Some(cachedNodeProp("a", "id")), argumentIds = Set("b"))
+      .nodeByLabelScan("a", "A")
+      .build()
+    val runtimeResult = execute(logicalQuery, runtime)
+    runtimeResult should beColumns("b").withSingleRow(b)
   }
 }

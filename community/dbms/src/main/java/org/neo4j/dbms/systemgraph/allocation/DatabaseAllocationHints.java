@@ -26,6 +26,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel;
+import org.neo4j.exceptions.InvalidArgumentException;
 import org.neo4j.graphdb.Label;
 import org.neo4j.graphdb.Node;
 import org.neo4j.internal.helpers.collection.Iterables;
@@ -37,15 +38,15 @@ import org.neo4j.values.virtual.MapValue;
 import org.neo4j.values.virtual.MapValueBuilder;
 
 public record DatabaseAllocationHints(Set<Hint<?>> hints) {
-    public static DatabaseAllocationHints EMPTY = new DatabaseAllocationHints(Set.of());
+    public static final DatabaseAllocationHints EMPTY = new DatabaseAllocationHints(Set.of());
 
-    public static DatabaseAllocationHints DEFAULT =
+    public static final DatabaseAllocationHints DEFAULT =
             new DatabaseAllocationHints(Arrays.stream(Hint.class.getPermittedSubclasses())
                     .filter(hint -> defaultValue(hint).isPresent())
                     .map(hintClass -> defaultValue(hintClass).orElseThrow())
                     .collect(Collectors.toSet()));
 
-    public static Set<String> VALID_HINT_KEYS = Arrays.stream(Hint.class.getPermittedSubclasses())
+    public static final Set<String> VALID_HINT_KEYS = Arrays.stream(Hint.class.getPermittedSubclasses())
             .map(DatabaseAllocationHints::key)
             .collect(Collectors.toSet());
 
@@ -84,7 +85,7 @@ public record DatabaseAllocationHints(Set<Hint<?>> hints) {
     }
 
     /**
-     * Throws {@link IllegalArgumentException} if the provided key and value do not combine to form a valid {@link Hint}. Otherwise, does nothing.
+     * Throws {@link InvalidArgumentException} if the provided key and value do not combine to form a valid {@link Hint}. Otherwise, does nothing.
      *
      * @param key   a string key provided within the allocationHints OPTION for CREATE and ALTER DATABASE commands
      * @param value a Cypher value provided within the allocationHints OPTION for CREATE and ALTER DATABASE commands
@@ -100,14 +101,11 @@ public record DatabaseAllocationHints(Set<Hint<?>> hints) {
                 if (value instanceof IntegralValue v) {
                     return new DatabaseWeight((int) v.longValue());
                 } else {
-                    throw new IllegalArgumentException(String.format(
-                            "Incorrect value type provided for allocation hint '%s'. Expected an Integer but found a %s.",
-                            DatabaseWeight.KEY, value.getTypeName()));
+                    throw InvalidArgumentException.incorrectTypeForAllocationHint(
+                            value.prettify(), DatabaseWeight.KEY, value.getTypeName());
                 }
             default:
-                var validKeys = VALID_HINT_KEYS.stream().collect(Collectors.joining(", ", "'", "'"));
-                throw new IllegalArgumentException(String.format(
-                        "The key %s is not a recognised allocation hint key! Valid hint keys are: %s", key, validKeys));
+                throw InvalidArgumentException.invalidAllocationHintKey(key, VALID_HINT_KEYS);
         }
     }
 
@@ -117,14 +115,13 @@ public record DatabaseAllocationHints(Set<Hint<?>> hints) {
                 if (value instanceof Integer v) {
                     return new DatabaseWeight(v);
                 } else {
-                    throw new IllegalArgumentException(String.format(
-                            "Incorrect value type provided for allocation hint '%s'. Expected an Integer but found a %s.",
-                            DatabaseWeight.KEY, value.getClass().getSimpleName()));
+                    throw InvalidArgumentException.incorrectTypeForAllocationHint(
+                            String.valueOf(value),
+                            DatabaseWeight.KEY,
+                            value.getClass().getSimpleName());
                 }
             default:
-                var validKeys = VALID_HINT_KEYS.stream().collect(Collectors.joining(", ", "'", "'"));
-                throw new IllegalArgumentException(String.format(
-                        "The key %s is not a recognised allocation hint key! Valid hint keys are: %s", key, validKeys));
+                throw InvalidArgumentException.invalidAllocationHintKey(key, VALID_HINT_KEYS);
         }
     }
 
@@ -178,6 +175,12 @@ public record DatabaseAllocationHints(Set<Hint<?>> hints) {
                 .map(clazz::cast)
                 .map(Hint::getValue)
                 .findFirst();
+    }
+
+    public DatabaseAllocationHints multiply(int multiplier) {
+        return new DatabaseAllocationHints(hints.stream()
+                .map(hint -> hint instanceof DatabaseWeight weight ? weight.multiply(multiplier) : hint)
+                .collect(Collectors.toSet()));
     }
 
     public MapValue toMapValue() {

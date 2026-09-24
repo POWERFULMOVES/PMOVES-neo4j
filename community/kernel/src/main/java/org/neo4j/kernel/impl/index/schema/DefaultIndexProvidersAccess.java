@@ -24,6 +24,7 @@ import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.imme
 import static org.neo4j.kernel.impl.factory.DbmsInfo.TOOL;
 import static org.neo4j.kernel.impl.index.schema.SchemaIndexExtensionLoader.instantiateExtensions;
 
+import java.io.IOException;
 import org.neo4j.collection.Dependencies;
 import org.neo4j.configuration.Config;
 import org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker;
@@ -34,7 +35,9 @@ import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.impl.muninn.VersionStorage;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.KernelVersionProviders;
 import org.neo4j.kernel.api.index.IndexProvidersAccess;
+import org.neo4j.kernel.extension.DatabaseExtensions;
 import org.neo4j.kernel.impl.api.index.IndexProviderMap;
 import org.neo4j.kernel.impl.transaction.state.StaticIndexProviderMapFactory;
 import org.neo4j.kernel.lifecycle.LifeContainer;
@@ -78,7 +81,7 @@ public class DefaultIndexProvidersAccess extends LifeContainer implements IndexP
             DatabaseLayout layout,
             DatabaseReadOnlyChecker readOnlyChecker,
             MemoryTracker memoryTracker) {
-        var tokenHolders = storageEngineFactory.loadReadOnlyTokens(
+        TokenHolders tokenHolders = storageEngineFactory.loadReadOnlyTokens(
                 fileSystem, layout, databaseConfig, pageCache, pageCacheTracer, false, contextFactory, memoryTracker);
         return access(pageCache, layout, readOnlyChecker, tokenHolders);
     }
@@ -89,8 +92,8 @@ public class DefaultIndexProvidersAccess extends LifeContainer implements IndexP
             DatabaseLayout layout,
             DatabaseReadOnlyChecker readOnlyChecker,
             TokenHolders tokenHolders) {
-        var monitors = new Monitors();
-        var extensions = life.add(instantiateExtensions(
+        Monitors monitors = new Monitors();
+        DatabaseExtensions extensions = life.add(instantiateExtensions(
                 layout,
                 fileSystem,
                 databaseConfig,
@@ -109,6 +112,7 @@ public class DefaultIndexProvidersAccess extends LifeContainer implements IndexP
         return life.add(StaticIndexProviderMapFactory.create(
                 life,
                 databaseConfig,
+                KernelVersionProviders.latestFromConfig(databaseConfig),
                 pageCache,
                 fileSystem,
                 logService,
@@ -122,5 +126,10 @@ public class DefaultIndexProvidersAccess extends LifeContainer implements IndexP
                 contextFactory,
                 pageCacheTracer,
                 dependencies));
+    }
+
+    @Override
+    public void close() throws IOException {
+        shutdown();
     }
 }

@@ -38,10 +38,10 @@ import org.neo4j.io.layout.recordstorage.RecordDatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.store.format.FormatFamily;
 import org.neo4j.kernel.impl.store.format.PageCacheOptionsSelector;
 import org.neo4j.kernel.impl.store.format.RecordFormats;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.logging.InternalLogProvider;
 
 /**
@@ -58,7 +58,7 @@ public class StoreFactory {
     private final RecordFormats recordFormats;
     private final CursorContextFactory contextFactory;
     private final boolean readOnly;
-    private final LogTailLogVersionsMetadata logTailMetadata;
+    private final DatabaseCreationOptions databaseCreationOptions;
     private final ImmutableSet<OpenOption> openOptions;
 
     public StoreFactory(
@@ -71,7 +71,7 @@ public class StoreFactory {
             InternalLogProvider logProvider,
             CursorContextFactory contextFactory,
             boolean readOnly,
-            LogTailLogVersionsMetadata logTailMetadata) {
+            DatabaseCreationOptions databaseCreationOptions) {
         this(
                 directoryStructure,
                 config,
@@ -89,8 +89,7 @@ public class StoreFactory {
                 logProvider,
                 contextFactory,
                 readOnly,
-                logTailMetadata,
-                immutable.empty());
+                databaseCreationOptions);
     }
 
     public StoreFactory(
@@ -104,8 +103,7 @@ public class StoreFactory {
             InternalLogProvider logProvider,
             CursorContextFactory contextFactory,
             boolean readOnly,
-            LogTailLogVersionsMetadata logTailMetadata,
-            ImmutableSet<OpenOption> openOptions) {
+            DatabaseCreationOptions databaseCreationOptions) {
         this.databaseLayout = RecordDatabaseLayout.convert(databaseLayout);
         this.config = config;
         this.idGeneratorFactory = idGeneratorFactory;
@@ -113,8 +111,8 @@ public class StoreFactory {
         this.recordFormats = recordFormats;
         this.contextFactory = contextFactory;
         this.readOnly = readOnly;
-        this.logTailMetadata = logTailMetadata;
-        this.openOptions = buildOpenOptions(config, recordFormats, openOptions);
+        this.databaseCreationOptions = databaseCreationOptions;
+        this.openOptions = buildOpenOptions(config, recordFormats, immutable.empty());
         this.logProvider = logProvider;
         this.pageCache = pageCache;
         this.pageCacheTracer = pageCacheTracer;
@@ -155,9 +153,9 @@ public class StoreFactory {
                 recordFormats,
                 contextFactory,
                 readOnly,
-                logTailMetadata,
                 storeTypes,
-                openOptions);
+                openOptions,
+                databaseCreationOptions);
     }
 
     private static ImmutableSet<OpenOption> buildOpenOptions(

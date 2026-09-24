@@ -24,12 +24,13 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import org.neo4j.bolt.protocol.common.connector.connection.Connection;
+import org.neo4j.bolt.protocol.common.connector.connection.ConnectionHandle;
 import org.neo4j.bolt.protocol.common.connector.connection.listener.ConnectionListener;
 import org.neo4j.bolt.protocol.common.fsm.response.metadata.MetadataHandler;
 import org.neo4j.bolt.protocol.common.message.Error;
-import org.neo4j.bolt.protocol.common.message.response.IgnoredMessage;
-import org.neo4j.bolt.protocol.common.message.response.SuccessMessage;
 import org.neo4j.bolt.protocol.error.streaming.BoltStreamingWriteException;
+import org.neo4j.boltmessages.response.IgnoredMessage;
+import org.neo4j.boltmessages.response.SuccessMessage;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.logging.Log;
 import org.neo4j.logging.internal.LogService;
@@ -37,29 +38,25 @@ import org.neo4j.values.AnyValue;
 import org.neo4j.values.virtual.MapValue;
 import org.neo4j.values.virtual.MapValueBuilder;
 
-public class NetworkResponseHandler extends AbstractMetadataAwareResponseHandler {
+public final class NetworkResponseHandler extends AbstractMetadataAwareResponseHandler {
     private static final Set<Status> CLIENT_MID_OP_DISCONNECT_ERRORS =
             new HashSet<>(Arrays.asList(Status.Transaction.Terminated, Status.Transaction.LockClientStopped));
 
     private final Connection connection;
-    private final int bufferSize;
-    private final int flushThreshold;
     private final Log log;
-
+    private final RecordHandler.Factory recordHandlerFactory;
     private MapValueBuilder metadataBuilder;
-    private NetworkRecordHandler recordHandler;
+    private RecordHandler recordHandler;
 
     public NetworkResponseHandler(
-            Connection connection,
+            ConnectionHandle connection,
             MetadataHandler metadataHandler,
-            int bufferSize,
-            int flushThreshold,
+            RecordHandler.Factory recordHandlerFactory,
             LogService logging) {
-        super(metadataHandler);
+        super(metadataHandler, connection.notificationManager());
 
         this.connection = connection;
-        this.bufferSize = bufferSize;
-        this.flushThreshold = flushThreshold;
+        this.recordHandlerFactory = recordHandlerFactory;
         this.log = logging.getInternalLog(NetworkResponseHandler.class);
     }
 
@@ -74,8 +71,7 @@ public class NetworkResponseHandler extends AbstractMetadataAwareResponseHandler
 
     @Override
     public RecordHandler onBeginStreaming(List<String> fieldNames) {
-        return this.recordHandler =
-                new NetworkRecordHandler(this.connection, fieldNames.size(), this.bufferSize, this.flushThreshold);
+        return this.recordHandler = this.recordHandlerFactory.newInstance(fieldNames.size());
     }
 
     @Override

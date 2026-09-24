@@ -1,0 +1,95 @@
+/*
+ * Copyright (c) "Neo4j"
+ * Neo4j Sweden AB [https://neo4j.com]
+ *
+ * This file is part of Neo4j.
+ *
+ * Neo4j is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+package org.neo4j.server.queryapi.request.common;
+
+import com.fasterxml.jackson.core.JacksonException;
+import com.fasterxml.jackson.databind.MapperFeature;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.annotation.Annotation;
+import java.lang.reflect.Type;
+import javax.ws.rs.BadRequestException;
+import javax.ws.rs.WebApplicationException;
+import javax.ws.rs.core.MediaType;
+import javax.ws.rs.core.MultivaluedMap;
+import javax.ws.rs.ext.MessageBodyReader;
+import org.neo4j.server.queryapi.exception.QueryApiException;
+import org.neo4j.server.queryapi.request.QueryRequest;
+
+/**
+ * A generic message body reader for query request.
+ * @param <Q> The query request type.
+ */
+abstract class AbstractQueryRequestGenericMessageBodyReader<Q extends QueryRequest> implements MessageBodyReader<Q> {
+    private final Class<Q> type;
+    private final JsonMapper jsonMapper;
+
+    protected AbstractQueryRequestGenericMessageBodyReader(Class<Q> type, QueryRequestModule queryRequestModule) {
+        this.type = type;
+        this.jsonMapper = JsonMapper.builder()
+                .addModule(queryRequestModule)
+                .enable(MapperFeature.ACCEPT_CASE_INSENSITIVE_ENUMS)
+                .build();
+    }
+
+    @Override
+    public boolean isReadable(Class<?> type, Type genericType, Annotation[] annotations, MediaType mediaType) {
+        return type.isAssignableFrom(this.type);
+    }
+
+    @Override
+    public Q readFrom(
+            Class<Q> type,
+            Type genericType,
+            Annotation[] annotations,
+            MediaType mediaType,
+            MultivaluedMap<String, String> httpHeaders,
+            InputStream entityStream)
+            throws IOException, WebApplicationException {
+
+        return readQueryRequestFromStream(jsonMapper, entityStream);
+    }
+
+    public Q readQueryRequestFromStream(JsonMapper jsonMapper, InputStream entityStream) throws IOException {
+        var buffStream = new PeekedFirstByteInputStream(entityStream);
+
+        var hasBytes = buffStream.peek() != -1;
+
+        if (hasBytes) {
+            try {
+                return jsonMapper.readValue(buffStream, type);
+            } catch (JacksonException e) {
+                var cause = e.getCause();
+                while (cause != null) {
+                    if (cause instanceof QueryApiException queryApiException) {
+                        throw queryApiException;
+                    }
+                    cause = cause.getCause();
+                }
+                throw new BadRequestException(e);
+            }
+        } else {
+            return defaultQueryRequest();
+        }
+    }
+
+    protected abstract Q defaultQueryRequest();
+}

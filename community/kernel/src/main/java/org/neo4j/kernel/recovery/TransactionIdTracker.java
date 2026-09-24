@@ -20,10 +20,15 @@
 package org.neo4j.kernel.recovery;
 
 import static org.neo4j.kernel.recovery.TransactionStatus.INCOMPLETE;
+import static org.neo4j.kernel.recovery.TransactionStatus.INCOMPLETE_RECOVERABLE;
 import static org.neo4j.kernel.recovery.TransactionStatus.RECOVERABLE;
 import static org.neo4j.kernel.recovery.TransactionStatus.ROLLED_BACK;
 
+import java.util.Collection;
+import java.util.Comparator;
+import org.eclipse.collections.api.factory.primitive.LongObjectMaps;
 import org.eclipse.collections.api.factory.primitive.LongSets;
+import org.eclipse.collections.api.map.primitive.MutableLongObjectMap;
 import org.eclipse.collections.api.set.primitive.MutableLongSet;
 import org.neo4j.kernel.impl.transaction.CommittedCommandBatchRepresentation;
 import org.neo4j.storageengine.api.CommandBatch;
@@ -32,11 +37,21 @@ public class TransactionIdTracker {
 
     private final MutableLongSet completedTransactionsWindow = LongSets.mutable.empty();
     private final MutableLongSet rollbackTransactions = LongSets.mutable.empty();
-    private final MutableLongSet notCompletedTransactions = LongSets.mutable.empty();
+    private final MutableLongObjectMap<PartialLastTransactionChunk> notCompletedTransactionChunks =
+            LongObjectMaps.mutable.empty();
+
+    private final IncompleteTransactionAction incompleteTransactionAction;
+
+    public TransactionIdTracker(IncompleteTransactionAction incompleteTransactionAction) {
+        this.incompleteTransactionAction = incompleteTransactionAction;
+    }
 
     TransactionStatus transactionStatus(long transactionId) {
-        if (notCompletedTransactions.contains(transactionId)) {
-            return INCOMPLETE;
+        if (notCompletedTransactionChunks.containsKey(transactionId)) {
+            return switch (incompleteTransactionAction) {
+                case ROLLBACK, STOP -> INCOMPLETE;
+                case APPLY -> INCOMPLETE_RECOVERABLE;
+            };
         }
         if (rollbackTransactions.contains(transactionId)) {
             return ROLLED_BACK;
@@ -45,7 +60,14 @@ public class TransactionIdTracker {
     }
 
     long[] notCompletedTransactions() {
-        return notCompletedTransactions.toSortedArray();
+        return notCompletedTransactionChunks.keySet().toSortedArray();
+    }
+
+    long[] notCompletedTransactionAppendIndexes() {
+        return notCompletedTransactionChunks.values().stream()
+                .mapToLong(PartialLastTransactionChunk::lastSeenAppendIndex)
+                .sorted()
+                .toArray();
     }
 
     public void trackBatch(CommittedCommandBatchRepresentation committedBatch) {
@@ -54,6 +76,7 @@ public class TransactionIdTracker {
             return;
         }
         long transactionId = committedBatch.txId();
+        long chunkId = commandBatch.chunkId();
 
         if (commandBatch.isLast()) {
             completedTransactionsWindow.add(transactionId);
@@ -62,14 +85,38 @@ public class TransactionIdTracker {
             }
         } else {
             if (!completedTransactionsWindow.contains(transactionId)) {
-                // we encountered transaction that we never completed, so we will need to rollback it
-                notCompletedTransactions.add(transactionId);
+                // we encountered transaction that we never completed, so we will need to rollback/commit it once the db
+                // starts.
+                PartialLastTransactionChunk lastSeenTransactionChunk = notCompletedTransactionChunks.get(transactionId);
+                lastSeenTransactionChunk = lastSeenTransactionChunk == null
+                        ? new PartialLastTransactionChunk(
+                                transactionId, commandBatch.appendIndex(), committedBatch.appendIndex(), chunkId)
+                        : lastSeenTransactionChunk.updateEarliestSeenAppendIndex(commandBatch.appendIndex());
+                notCompletedTransactionChunks.put(transactionId, lastSeenTransactionChunk);
             }
             // we are not really interested in keeping the whole set; window of this transaction is gone now
             // so, we can stop tracking it now
             if (commandBatch.isFirst()) {
                 completedTransactionsWindow.remove(transactionId);
             }
+        }
+    }
+
+    public Collection<PartialLastTransactionChunk> getPartialLastTransactionChunks() {
+        return notCompletedTransactionChunks.values().stream()
+                .sorted(Comparator.comparingLong(PartialLastTransactionChunk::lastSeenAppendIndex))
+                .toList();
+    }
+
+    public PartialLastTransactionChunk getPartialLastTransactionChunk(long transactionId) {
+        return notCompletedTransactionChunks.get(transactionId);
+    }
+
+    public record PartialLastTransactionChunk(
+            long transactionId, long earliestSeenAppendIndex, long lastSeenAppendIndex, long lastSeenChunkId) {
+        public PartialLastTransactionChunk updateEarliestSeenAppendIndex(long earliestSeenAppendIndex) {
+            return new PartialLastTransactionChunk(
+                    transactionId, earliestSeenAppendIndex, lastSeenAppendIndex, lastSeenChunkId);
         }
     }
 }

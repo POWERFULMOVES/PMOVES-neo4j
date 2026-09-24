@@ -26,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.neo4j.index.internal.gbptree.DataTree.W_BATCHED_SINGLE_THREADED;
 import static org.neo4j.index.internal.gbptree.GBPTreeTestUtil.consistencyCheckStrict;
 import static org.neo4j.index.internal.gbptree.SimpleLongLayout.longLayout;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 
 import java.io.IOException;
@@ -35,7 +36,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Stream;
 import org.eclipse.collections.api.set.ImmutableSet;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -46,12 +46,12 @@ import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.test.FormatCompatibilityVerifier;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.extension.pagecache.PageCacheSupportExtension;
 import org.neo4j.test.tags.MultiVersionedTag;
 import org.neo4j.test.utils.PageCacheConfig;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 public class GBPTreeFormatTest<KEY, VALUE> extends FormatCompatibilityVerifier {
 
     private static final String STORE = "store";
@@ -208,7 +208,7 @@ public class GBPTreeFormatTest<KEY, VALUE> extends FormatCompatibilityVerifier {
         allKeys.sort(Long::compare);
         PageCacheConfig overriddenConfig = PageCacheConfig.config().withPageSize(pageSize);
         if (pageSize == PAGE_SIZE_4M) {
-            overriddenConfig.withMemory("16MiB");
+            overriddenConfig.withMemory("32MiB");
         }
         pageCache = PageCacheSupportExtension.getPageCache(globalFs, overriddenConfig);
     }
@@ -248,7 +248,7 @@ public class GBPTreeFormatTest<KEY, VALUE> extends FormatCompatibilityVerifier {
                     put(writer, key);
                 }
             }
-            tree.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            tree.checkpoint(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
         }
     }
 
@@ -287,7 +287,7 @@ public class GBPTreeFormatTest<KEY, VALUE> extends FormatCompatibilityVerifier {
                 // WHEN writing more to the tree
                 // THEN we should not see any format conflicts
                 try (Writer<KEY, VALUE> writer = tree.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT)) {
-                    while (keysToAdd.size() > 0) {
+                    while (!keysToAdd.isEmpty()) {
                         int next = random.nextInt(keysToAdd.size());
                         Long key = keysToAdd.get(next);
                         put(writer, key);

@@ -21,16 +21,15 @@ package org.neo4j.fabric.executor;
 
 import org.neo4j.fabric.transaction.parent.ChildTransaction;
 import org.neo4j.kernel.api.exceptions.Status;
-import reactor.core.publisher.Mono;
 
 /**
  * A transaction executing against a single database.
  * Fabric transactions are composite transactions consisting of transactions of this type.
  */
 public interface SingleDbTransaction extends ChildTransaction {
-    Mono<Void> commit();
+    void commit();
 
-    Mono<Void> rollback();
+    void rollback();
 
-    Mono<Void> terminate(Status reason);
+    void terminate(Status reason);
 }

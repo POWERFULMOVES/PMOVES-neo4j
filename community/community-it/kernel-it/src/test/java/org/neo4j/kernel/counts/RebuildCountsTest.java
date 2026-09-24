@@ -27,6 +27,7 @@ import static org.neo4j.internal.kernel.api.security.LoginContext.AUTH_DISABLED;
 import static org.neo4j.kernel.api.KernelTransaction.Type.EXPLICIT;
 import static org.neo4j.logging.AssertableLogProvider.Level.WARN;
 import static org.neo4j.logging.LogAssertions.assertThat;
+import static org.neo4j.test.extension.SkipOnSpd.Note.incompatible;
 
 import java.io.IOException;
 import org.junit.jupiter.api.AfterEach;
@@ -47,15 +48,17 @@ import org.neo4j.kernel.api.Kernel;
 import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.impl.coreapi.InternalTransaction;
 import org.neo4j.kernel.impl.store.MetaDataStore;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.logging.AssertableLogProvider;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.EphemeralNeo4jLayoutExtension;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
 
 @EphemeralNeo4jLayoutExtension
+@SkipOnSpd(reason = "Relies on a RecordDatabaseLayout", notes = incompatible)
 class RebuildCountsTest {
     private static final int ALIENS = 16;
     private static final int HUMANS = 16;
@@ -160,7 +163,7 @@ class RebuildCountsTest {
     }
 
     private void deleteCounts(FileSystemAbstraction snapshot) throws IOException {
-        snapshot.deleteFile(databaseLayout.countStore());
+        databaseLayout.countStore().delete(snapshot);
     }
 
     private FileSystemAbstraction shutdown() {

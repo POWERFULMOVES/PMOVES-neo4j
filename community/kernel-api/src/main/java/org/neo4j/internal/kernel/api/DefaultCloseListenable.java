@@ -19,9 +19,12 @@
  */
 package org.neo4j.internal.kernel.api;
 
+import org.neo4j.lang.AutoCloseablePlus;
+import org.neo4j.lang.CloseListener;
+
 public abstract class DefaultCloseListenable implements AutoCloseablePlus {
     protected CloseListener closeListener;
-    private int token = UNTRACKED;
+    private int trackingHandle = UNTRACKED;
 
     @Override
     public final void setCloseListener(CloseListener closeListener) {
@@ -42,13 +45,13 @@ public abstract class DefaultCloseListenable implements AutoCloseablePlus {
     }
 
     @Override
-    public final void setToken(int token) {
-        this.token = token;
+    public final void setTrackingHandle(int handle) {
+        this.trackingHandle = handle;
     }
 
     @Override
-    public final int getToken() {
-        return token;
+    public final int getTrackingHandle() {
+        return trackingHandle;
     }
 
     public static DefaultCloseListenable wrap(AutoCloseable c) {

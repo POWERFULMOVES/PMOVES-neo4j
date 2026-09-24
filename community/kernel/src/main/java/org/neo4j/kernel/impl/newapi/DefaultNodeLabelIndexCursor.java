@@ -26,14 +26,21 @@ import org.eclipse.collections.api.set.primitive.LongSet;
 import org.neo4j.internal.kernel.api.KernelReadTracer;
 import org.neo4j.internal.kernel.api.NodeCursor;
 import org.neo4j.internal.kernel.api.NodeLabelIndexCursor;
+import org.neo4j.internal.kernel.api.PropertyCursor;
+import org.neo4j.internal.kernel.api.RelationshipTraversalCursor;
+import org.neo4j.internal.kernel.api.TokenSet;
 import org.neo4j.internal.schema.IndexOrder;
+import org.neo4j.kernel.api.StatementConstants;
 import org.neo4j.kernel.api.txstate.TransactionState;
+import org.neo4j.storageengine.api.Degrees;
+import org.neo4j.storageengine.api.PropertySelection;
+import org.neo4j.storageengine.api.Reference;
+import org.neo4j.storageengine.api.RelationshipSelection;
 
-class DefaultNodeLabelIndexCursor extends DefaultEntityTokenIndexCursor<DefaultNodeLabelIndexCursor>
+public class DefaultNodeLabelIndexCursor extends DefaultEntityTokenIndexCursor<DefaultNodeLabelIndexCursor>
         implements NodeLabelIndexCursor {
     private final InternalCursorFactory internalCursors;
-    private final boolean applyAccessModeToTxState;
-    private DefaultNodeCursor securityNodeCursor;
+    private DefaultNodeCursor internalNodeCursor;
 
     DefaultNodeLabelIndexCursor(
             CursorPool<DefaultNodeLabelIndexCursor> pool,
@@ -41,7 +48,6 @@ class DefaultNodeLabelIndexCursor extends DefaultEntityTokenIndexCursor<DefaultN
             boolean applyAccessModeToTxState) {
         super(pool, applyAccessModeToTxState);
         this.internalCursors = internalCursors;
-        this.applyAccessModeToTxState = applyAccessModeToTxState;
     }
 
     @Override
@@ -82,11 +88,9 @@ class DefaultNodeLabelIndexCursor extends DefaultEntityTokenIndexCursor<DefaultN
         if (accessModeProvider.getAccessMode().allowsTraverseAllLabels()) {
             return true;
         }
-        if (securityNodeCursor == null) {
-            securityNodeCursor = internalCursors.allocateNodeCursor();
-        }
-        read.singleNode(entityReference, securityNodeCursor);
-        return securityNodeCursor.next();
+        ensureInternalCursor();
+        read.singleNode(entityReference, internalNodeCursor);
+        return internalNodeCursor.next();
     }
 
     @Override
@@ -97,6 +101,117 @@ class DefaultNodeLabelIndexCursor extends DefaultEntityTokenIndexCursor<DefaultN
     @Override
     public long nodeReference() {
         return entityReference();
+    }
+
+    // NodeCursor interface
+    @Override
+    public TokenSet labels() {
+        checkReadFromStore();
+        return internalNodeCursor.labels();
+    }
+
+    @Override
+    public TokenSet labelsIgnoringTxStateSetRemove() {
+        checkReadFromStore();
+        return internalNodeCursor.labelsIgnoringTxStateSetRemove();
+    }
+
+    @Override
+    public boolean hasLabel(int label) {
+        checkReadFromStore();
+        return internalNodeCursor.hasLabel(label);
+    }
+
+    @Override
+    public boolean hasLabel() {
+        checkReadFromStore();
+        return internalNodeCursor.hasLabel();
+    }
+
+    @Override
+    public void relationships(RelationshipTraversalCursor relationships, RelationshipSelection selection) {
+        checkReadFromStore();
+        internalNodeCursor.relationships(relationships, selection);
+    }
+
+    @Override
+    public boolean supportsFastRelationshipsTo() {
+        checkReadFromStore();
+        return internalNodeCursor.supportsFastRelationshipsTo();
+    }
+
+    @Override
+    public void relationshipsTo(
+            RelationshipTraversalCursor relationships, RelationshipSelection selection, long neighbourNodeReference) {
+        checkReadFromStore();
+        internalNodeCursor.relationshipsTo(relationships, selection, neighbourNodeReference);
+    }
+
+    @Override
+    public long relationshipsReference() {
+        checkReadFromStore();
+        return internalNodeCursor.relationshipsReference();
+    }
+
+    @Override
+    public boolean supportsFastDegreeLookup() {
+        checkReadFromStore();
+        return internalNodeCursor.supportsFastDegreeLookup();
+    }
+
+    @Override
+    public int[] relationshipTypes() {
+        checkReadFromStore();
+        return internalNodeCursor.relationshipTypes();
+    }
+
+    @Override
+    public Degrees degrees(RelationshipSelection selection) {
+        checkReadFromStore();
+        return internalNodeCursor.degrees(selection);
+    }
+
+    @Override
+    public long degree(RelationshipSelection selection) {
+        checkReadFromStore();
+        return internalNodeCursor.degree(selection);
+    }
+
+    @Override
+    public long degreeWithMax(long maxDegree, RelationshipSelection selection) {
+        checkReadFromStore();
+        return internalNodeCursor.degreeWithMax(maxDegree, selection);
+    }
+
+    @Override
+    public void properties(PropertyCursor cursor, PropertySelection selection) {
+        checkReadFromStore();
+        internalNodeCursor.properties(cursor, selection);
+    }
+
+    @Override
+    public Reference propertiesReference() {
+        checkReadFromStore();
+        return internalNodeCursor.propertiesReference();
+    }
+
+    @Override
+    public boolean readFromStore() {
+        ensureInternalCursor();
+        if (entity != StatementConstants.NO_SUCH_NODE && internalNodeCursor.nodeReference() == entity) {
+            // A security check, or a previous call to this method for this node already seems to have loaded
+            // this node
+            return true;
+        }
+
+        internalNodeCursor.single(entity, read, txStateHolder, accessModeProvider);
+        return internalNodeCursor.next();
+    }
+
+    private void checkReadFromStore() {
+        if (internalNodeCursor.nodeReference() != entity) {
+            throw new IllegalStateException("Node hasn't been read from store");
+        }
     }
 
     @Override
@@ -115,10 +230,16 @@ class DefaultNodeLabelIndexCursor extends DefaultEntityTokenIndexCursor<DefaultN
 
     @Override
     public void release() {
-        if (securityNodeCursor != null) {
-            securityNodeCursor.close();
-            securityNodeCursor.release();
-            securityNodeCursor = null;
+        if (internalNodeCursor != null) {
+            internalNodeCursor.close();
+            internalNodeCursor.release();
+            internalNodeCursor = null;
+        }
+    }
+
+    private void ensureInternalCursor() {
+        if (internalNodeCursor == null) {
+            internalNodeCursor = internalCursors.allocateNodeCursor();
         }
     }
 }

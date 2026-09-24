@@ -30,18 +30,18 @@ import org.neo4j.kernel.api.exceptions.Status;
 @SuppressWarnings("serial")
 public class JsonParseException extends GqlException implements Status.HasStatus {
 
-    public JsonParseException(String message, Throwable cause) {
-        super(message, cause);
+    private JsonParseException(ErrorGqlStatusObject gqlStatusObject, String message, Throwable cause) {
+        super(gqlStatusObject, message, cause);
     }
 
-    public JsonParseException(ErrorGqlStatusObject gqlStatusObject, String message, Throwable cause) {
-        super(gqlStatusObject, message, cause);
+    private JsonParseException(ErrorGqlStatusObject gqlStatusObject, Throwable cause) {
+        super(gqlStatusObject, ErrorMessageHolder.getOldCauseMessage(cause), cause);
     }
 
     public static JsonParseException jsonParsingException(int line, int column, String message, Throwable cause) {
         var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_08N11)
                 .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N95)
-                        .atPosition(line, column, -1)
+                        .atPosition(-1, line, column)
                         .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NA8)
                                 .withParam(
                                         GqlParams.StringParam.cause,
@@ -50,14 +50,6 @@ public class JsonParseException extends GqlException implements Status.HasStatus
                         .build())
                 .build();
         return new JsonParseException(gql, message, cause);
-    }
-
-    public JsonParseException(Throwable cause) {
-        super(ErrorMessageHolder.getOldCauseMessage(cause), cause);
-    }
-
-    public JsonParseException(ErrorGqlStatusObject gqlStatusObject, Throwable cause) {
-        super(gqlStatusObject, ErrorMessageHolder.getOldCauseMessage(cause), cause);
     }
 
     public static JsonParseException jsonParsingException(Throwable cause) {

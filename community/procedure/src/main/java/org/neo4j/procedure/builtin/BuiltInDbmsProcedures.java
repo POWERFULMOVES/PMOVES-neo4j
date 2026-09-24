@@ -26,7 +26,6 @@ import static org.neo4j.configuration.GraphDatabaseInternalSettings.upgrade_proc
 import static org.neo4j.configuration.GraphDatabaseSettings.SYSTEM_DATABASE_NAME;
 import static org.neo4j.dbms.database.SystemGraphComponent.Status.REQUIRES_UPGRADE;
 import static org.neo4j.dbms.database.SystemGraphComponent.Status.UNINITIALIZED;
-import static org.neo4j.kernel.api.exceptions.Status.Procedure.ProcedureCallFailed;
 import static org.neo4j.procedure.Mode.DBMS;
 import static org.neo4j.procedure.Mode.READ;
 import static org.neo4j.procedure.Mode.WRITE;
@@ -41,6 +40,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
@@ -117,6 +117,9 @@ public class BuiltInDbmsProcedures {
     @Context
     public SystemGraphComponents systemGraphComponents;
 
+    @Context
+    public SpdBuiltInProcedures spdBuiltInProcedures;
+
     @SystemProcedure
     @Description("Provides information regarding the DBMS.")
     @Procedure(name = "dbms.info", mode = DBMS)
@@ -144,14 +147,14 @@ public class BuiltInDbmsProcedures {
                             defaultValue = "",
                             description = "A string that filters on the name of config settings.")
                     String searchString) {
-        String lowerCasedSearchString = searchString.toLowerCase();
+        String lowerCasedSearchString = searchString.toLowerCase(Locale.ROOT);
         List<ConfigResult> results = new ArrayList<>();
 
         Config config = graph.getDependencyResolver().resolveDependency(Config.class);
 
         config.getDeclaredSettings().values().forEach(setting -> {
             if (!((SettingImpl<?>) setting).internal()
-                    && setting.name().toLowerCase().contains(lowerCasedSearchString)) {
+                    && setting.name().toLowerCase(Locale.ROOT).contains(lowerCasedSearchString)) {
                 results.add(new ConfigResult(setting, config));
             }
         });
@@ -178,7 +181,7 @@ public class BuiltInDbmsProcedures {
 
         Config config = graph.getDependencyResolver().resolveDependency(Config.class);
         config.getDeclaredSettings().values().forEach(setting -> {
-            if (browserSettings.contains(setting.name().toLowerCase())) {
+            if (browserSettings.contains(setting.name().toLowerCase(Locale.ROOT))) {
                 results.add(new ConfigResult(setting, config));
             }
         });
@@ -231,17 +234,15 @@ public class BuiltInDbmsProcedures {
         // There cannot be a query that is at the same in Composite caches and Query router caches.
         // The reason is that Composite queries don't go through Query Router at all.
         long clearedRouterAndCompositeQueries = 0;
-        if (graph.getDependencyResolver().containsDependency(FabricExecutor.class)) {
-            FabricExecutor fabricExecutor = graph.getDependencyResolver().resolveDependency(FabricExecutor.class);
-            clearedRouterAndCompositeQueries = fabricExecutor.clearQueryCachesForDatabase(graph.databaseName());
+        var optionalExecutor = graph.getDependencyResolver().resolveOptionalDependency(FabricExecutor.class);
+        if (optionalExecutor.isPresent()) {
+            // only if databases is composite
+            clearedRouterAndCompositeQueries = optionalExecutor.get().clearQueryCachesForDatabase(graph.databaseName());
         }
-        if (graph.getDependencyResolver().containsDependency(QueryRouter.class)) {
-            QueryRouter queryRouter = graph.getDependencyResolver().resolveDependency(QueryRouter.class);
-            clearedRouterAndCompositeQueries += queryRouter.clearQueryCachesForDatabase(graph.databaseName());
-        }
-
-        if (kernelTransaction.isSPDTransaction()) {
-            kernelTransaction.clearSPDQueryCaches();
+        var optionalRouter = graph.getDependencyResolver().resolveOptionalDependency(QueryRouter.class);
+        if (optionalRouter.isPresent()) {
+            // database name is ignored when clearing the query cache
+            clearedRouterAndCompositeQueries += optionalRouter.get().clearQueryCachesForDatabase(graph.databaseName());
         }
 
         // we subtract 1 because the query "CALL db.queryClearCaches()" is compiled and thus populates the caches by 1
@@ -263,9 +264,7 @@ public class BuiltInDbmsProcedures {
     @QueryLanguageScope(scope = {QueryLanguage.CYPHER_5})
     public Stream<SystemGraphComponentStatusResult> upgradeStatus() throws ProcedureException {
         if (!callContext.isSystemDatabase()) {
-            throw new ProcedureException(
-                    ProcedureCallFailed,
-                    "This is an administration command and it should be executed against the system database: dbms.upgradeStatus");
+            throw ProcedureException.shouldBeExecutedAgainstSystemDb("dbms.upgradeStatus");
         }
         return Stream.of(getAggregateUpgradeStatus(systemGraphComponents, resolver, transaction));
     }
@@ -278,9 +277,7 @@ public class BuiltInDbmsProcedures {
     @QueryLanguageScope(scope = {QueryLanguage.CYPHER_5})
     public Stream<SystemGraphComponentUpgradeResult> upgrade() throws ProcedureException {
         if (!callContext.isSystemDatabase()) {
-            throw new ProcedureException(
-                    ProcedureCallFailed,
-                    "This is an administration command and it should be executed against the system database: dbms.upgrade");
+            throw ProcedureException.shouldBeExecutedAgainstSystemDb("dbms.upgrade");
         }
         var upgradeCheckResult =
                 resolver.resolveDependency(UpgradeChecker.class).upgradeCheck();
@@ -396,7 +393,7 @@ public class BuiltInDbmsProcedures {
                 return new ConnectionTerminationResult(id, connection.username());
             }
 
-            throw kernelTransaction
+            kernelTransaction
                     .securityAuthorizationHandler()
                     .logAndGetAuthorizationException(
                             securityContext,
@@ -470,9 +467,14 @@ public class BuiltInDbmsProcedures {
     }
 
     public record SystemGraphComponentStatusResult(
-            @Description("The upgrade status of the system database.") String status,
-            @Description("Information describing the upgrade status.") String description,
-            @Description("Information about the steps necessary to upgrade.") String resolution) {
+            @Description("The upgrade status of the system database.")
+            String status,
+
+            @Description("Information describing the upgrade status.")
+            String description,
+
+            @Description("Information about the steps necessary to upgrade.")
+            String resolution) {
         public static final String CANNOT_UPGRADE_STATUS = "CANNOT_UPGRADE";
         public static final String CANNOT_UPGRADE_RESOLUTION =
                 "Wait for upgraded versions to be observed, or upgrade other cluster members so all are on the same version.";

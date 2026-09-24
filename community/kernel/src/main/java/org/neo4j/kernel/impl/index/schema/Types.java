@@ -25,6 +25,14 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import org.neo4j.kernel.impl.index.schema.VectorKeyType.Float16VectorKey;
+import org.neo4j.kernel.impl.index.schema.VectorKeyType.Float32VectorKey;
+import org.neo4j.kernel.impl.index.schema.VectorKeyType.Float64VectorKey;
+import org.neo4j.kernel.impl.index.schema.VectorKeyType.Int16VectorKey;
+import org.neo4j.kernel.impl.index.schema.VectorKeyType.Int32VectorKey;
+import org.neo4j.kernel.impl.index.schema.VectorKeyType.Int64VectorKey;
+import org.neo4j.kernel.impl.index.schema.VectorKeyType.Int8VectorKey;
+import org.neo4j.values.storable.Float16Format;
 import org.neo4j.values.storable.ValueGroup;
 import org.neo4j.values.storable.ValueWriter;
 
@@ -53,6 +61,17 @@ class Types {
     static final TextArrayType TEXT_ARRAY = new TextArrayType((byte) 17);
     static final BooleanArrayType BOOLEAN_ARRAY = new BooleanArrayType((byte) 18);
     static final NumberArrayType NUMBER_ARRAY = new NumberArrayType((byte) 19);
+    static final Int8VectorKey VECTOR_INT8 = new Int8VectorKey((byte) 20);
+    static final Int16VectorKey VECTOR_INT16 = new Int16VectorKey((byte) 21);
+    static final Int32VectorKey VECTOR_INT32 = new Int32VectorKey((byte) 22);
+    static final Int64VectorKey VECTOR_INT64 = new Int64VectorKey((byte) 23);
+    static final Float32VectorKey VECTOR_FLOAT32 = new Float32VectorKey((byte) 24);
+    static final Float64VectorKey VECTOR_FLOAT64 = new Float64VectorKey((byte) 25);
+    static final UUIDType UUID = new UUIDType((byte) 26);
+    static final UUIDArrayType UUID_ARRAY = new UUIDArrayType((byte) 27);
+    static final VectorArrayType VECTOR_ARRAY = new VectorArrayType((byte) 28);
+    static final Float16VectorKey VECTOR_FLOAT16 = new Float16VectorKey((byte) 29, Float16Format.FLOAT16);
+    static final Float16VectorKey VECTOR_BFLOAT16 = new Float16VectorKey((byte) 30, Float16Format.BFLOAT16);
 
     /* Geometry constants are located in PointKeyUtil */
     public static final int SIZE_ZONED_DATE_TIME =
@@ -76,6 +95,7 @@ class Types {
     public static final int SIZE_NUMBER_FLOAT = Integer.BYTES; /* raw value bits */
     public static final int SIZE_NUMBER_DOUBLE = Long.BYTES; /* raw value bits */
     public static final int SIZE_ARRAY_LENGTH = Short.BYTES;
+    public static final int SIZE_UUID = Long.BYTES * 2;
 
     private static AbstractArrayType<?> typeOf(
             ValueWriter.ArrayType arrayType, AbstractArrayType<?> geometryArrayType) {
@@ -90,6 +110,8 @@ class Types {
             case LOCAL_TIME -> LOCAL_TIME_ARRAY;
             case ZONED_DATE_TIME -> ZONED_DATE_TIME_ARRAY;
             case ZONED_TIME -> ZONED_TIME_ARRAY;
+            case UUID -> UUID_ARRAY;
+            case VECTOR -> VECTOR_ARRAY;
         };
     }
 
@@ -117,6 +139,17 @@ class Types {
         types.add(TEXT_ARRAY);
         types.add(BOOLEAN_ARRAY);
         types.add(NUMBER_ARRAY);
+        types.add(VECTOR_INT8);
+        types.add(VECTOR_INT16);
+        types.add(VECTOR_INT32);
+        types.add(VECTOR_INT64);
+        types.add(VECTOR_FLOAT32);
+        types.add(VECTOR_FLOAT64);
+        types.add(UUID);
+        types.add(UUID_ARRAY);
+        types.add(VECTOR_ARRAY);
+        types.add(VECTOR_FLOAT16);
+        types.add(VECTOR_BFLOAT16);
 
         // Assert order of typeId
         byte expectedTypeId = 0;
@@ -143,6 +176,7 @@ class Types {
         /**
          * Holds {@link ValueWriter.ArrayType} --> {@link Type} mapping.
          */
+        @SuppressWarnings("rawtypes")
         static final AbstractArrayType[] BY_ARRAY_TYPE = new AbstractArrayType[ValueWriter.ArrayType.values().length];
 
         /**

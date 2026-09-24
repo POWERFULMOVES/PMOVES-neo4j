@@ -31,9 +31,11 @@ import org.neo4j.cypher.internal.expressions.LabelName
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.Ors
 import org.neo4j.cypher.internal.expressions.Unique
+import org.neo4j.cypher.internal.expressions.UniqueNodes
 import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.ir.Predicate
 import org.neo4j.cypher.internal.ir.Selections
+import org.neo4j.cypher.internal.ir.Selections.AsHasLabelsPredicate
 import org.neo4j.cypher.internal.util.helpers.MapSupport.PowerMap
 
 /**
@@ -46,6 +48,7 @@ import org.neo4j.cypher.internal.util.helpers.MapSupport.PowerMap
  *                            localLabelInfo U previousLabelInfo
  * @param previousLabelInfo   previously known nodes labels
  * @param uniqueRelationships relationships with Unique predicates as introduced by AddUniquenessPredicates.
+ * @param uniqueNodes         nodes with UniqueNodes predicates as introduced by AddUniquenessPredicates.
  * @param otherPredicates     kitchen sink, all the predicates that weren't picked up in the other parameters.
  */
 case class QueryGraphPredicates(
@@ -54,6 +57,7 @@ case class QueryGraphPredicates(
   allLabelInfo: LabelInfo,
   previousLabelInfo: LabelInfo,
   uniqueRelationships: Set[LogicalVariable],
+  uniqueNodes: Set[LogicalVariable],
   otherPredicates: Set[Predicate]
 ) {
 
@@ -129,13 +133,16 @@ object QueryGraphPredicates {
     localLabelInfo: LabelInfo,
     selections: Selections
   ): QueryGraphPredicates = {
-    val (uniqueRelationships, otherPredicates) =
-      selections.predicates.foldLeft((Set.empty[LogicalVariable], Set.empty[Predicate])) {
-        case ((uniqueRelationships, otherPredicates), Predicate(_, HasLabels(_: Variable, _))) =>
-          (uniqueRelationships, otherPredicates)
-        case ((uniqueRelationships, otherPredicates), Predicate(_, Unique(VariableList(relationships)))) =>
-          (uniqueRelationships ++ relationships, otherPredicates)
-        case ((uniqueRelationships, otherPredicates), otherPred) => (uniqueRelationships, otherPredicates + otherPred)
+    val (uniqueRelationships, uniqueNodes, otherPredicates) =
+      selections.predicates.foldLeft((Set.empty[LogicalVariable], Set.empty[LogicalVariable], Set.empty[Predicate])) {
+        case (acc, AsHasLabelsPredicate(HasLabels(_: Variable, _))) =>
+          acc
+        case ((uniqueRelationships, uniqueNodes, otherPredicates), Predicate(_, Unique(VariableList(relationships)))) =>
+          (uniqueRelationships ++ relationships, uniqueNodes, otherPredicates)
+        case ((uniqueRelationships, uniqueNodes, otherPredicates), Predicate(_, UniqueNodes(VariableList(nodes), _))) =>
+          (uniqueRelationships, uniqueNodes ++ nodes, otherPredicates)
+        case ((uniqueRelationships, uniqueNodes, otherPredicates), otherPred) =>
+          (uniqueRelationships, uniqueNodes, otherPredicates + otherPred)
       }
 
     val localOnlyLabelInfo = localLabelInfo.fuseLeft(previousLabelInfo)(_ -- _)
@@ -146,12 +153,21 @@ object QueryGraphPredicates {
       allLabelInfo = localLabelInfo.fuse(previousLabelInfo)(_ ++ _),
       previousLabelInfo = previousLabelInfo,
       uniqueRelationships = uniqueRelationships,
+      uniqueNodes = uniqueNodes,
       otherPredicates = otherPredicates
     )
   }
 
   val empty: QueryGraphPredicates =
-    QueryGraphPredicates(LabelInfo.empty, LabelInfo.empty, LabelInfo.empty, LabelInfo.empty, Set.empty, Set.empty)
+    QueryGraphPredicates(
+      LabelInfo.empty,
+      LabelInfo.empty,
+      LabelInfo.empty,
+      LabelInfo.empty,
+      Set.empty,
+      Set.empty,
+      Set.empty
+    )
 
   val DISTRIBUTE_LABEL_DISJUNCTION_LIMIT = 8 // arbitrary chosen limit
 }

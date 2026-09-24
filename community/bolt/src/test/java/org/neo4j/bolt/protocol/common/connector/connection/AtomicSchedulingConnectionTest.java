@@ -39,26 +39,27 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
-import org.neo4j.bolt.fsm.StateMachine;
 import org.neo4j.bolt.fsm.StateMachineConfiguration;
+import org.neo4j.bolt.fsm.StateMachineHandle;
 import org.neo4j.bolt.fsm.error.StateMachineException;
 import org.neo4j.bolt.negotiation.message.ProtocolCapability;
 import org.neo4j.bolt.protocol.common.BoltProtocol;
 import org.neo4j.bolt.protocol.common.connection.Job;
 import org.neo4j.bolt.protocol.common.connector.Connector;
 import org.neo4j.bolt.protocol.common.connector.accounting.error.ErrorAccountant;
+import org.neo4j.bolt.protocol.common.connector.admissioncontrol.ConnectionAdmissionControlTracker;
 import org.neo4j.bolt.protocol.common.connector.connection.authentication.AuthenticationFlag;
 import org.neo4j.bolt.protocol.common.connector.connection.listener.ConnectionListener;
-import org.neo4j.bolt.protocol.common.message.request.RequestMessage;
-import org.neo4j.bolt.protocol.common.message.request.connection.RoutingContext;
-import org.neo4j.bolt.protocol.common.message.request.transaction.RunMessage;
+import org.neo4j.bolt.protocol.common.connector.notification.NotificationManager;
 import org.neo4j.bolt.protocol.error.streaming.BoltStreamingWriteException;
 import org.neo4j.bolt.security.Authentication;
 import org.neo4j.bolt.security.AuthenticationResult;
 import org.neo4j.bolt.security.error.AuthenticationException;
 import org.neo4j.bolt.testing.assertions.ClientConnectionInfoAssertions;
 import org.neo4j.bolt.testing.assertions.ConnectionHandleAssertions;
-import org.neo4j.dbms.admissioncontrol.AdmissionControlService;
+import org.neo4j.boltmessages.request.RequestMessage;
+import org.neo4j.boltmessages.request.connection.RoutingContext;
+import org.neo4j.boltmessages.request.transaction.RunMessage;
 import org.neo4j.dbms.admissioncontrol.AdmissionControlToken;
 import org.neo4j.internal.kernel.api.connectioninfo.ClientConnectionInfo;
 import org.neo4j.internal.kernel.api.security.AuthSubject;
@@ -91,6 +92,7 @@ class AtomicSchedulingConnectionTest {
     private Connector connector;
     private Channel channel;
     private MemoryTracker memoryTracker;
+    private NotificationManager notificationManager;
     private LogService logService;
     private AssertableLogProvider userLogProvider;
     private AssertableLogProvider internalLogProvider;
@@ -104,13 +106,13 @@ class AtomicSchedulingConnectionTest {
 
     private BoltProtocol protocol;
     private StateMachineConfiguration fsm;
-    private StateMachine fsmInstance;
+    private StateMachineHandle fsmInstance;
     private AuthenticationResult authenticationResult;
     private LoginContext loginContext;
     private AuthSubject authSubject;
 
     private AtomicSchedulingConnection connection;
-    private AdmissionControlService admissionControl;
+    private ConnectionAdmissionControlTracker admissionControlTracker;
 
     @BeforeEach
     void prepareConnection() {
@@ -119,6 +121,7 @@ class AtomicSchedulingConnectionTest {
         this.connector = Mockito.mock(Connector.class, Mockito.RETURNS_MOCKS);
         this.channel = Mockito.mock(Channel.class, Mockito.RETURNS_MOCKS);
         this.memoryTracker = Mockito.mock(MemoryTracker.class, Mockito.RETURNS_MOCKS);
+        this.notificationManager = Mockito.mock(NotificationManager.class);
         this.userLogProvider = new AssertableLogProvider();
         this.internalLogProvider = new AssertableLogProvider();
         this.logService = new SimpleLogService(this.userLogProvider, this.internalLogProvider);
@@ -143,18 +146,18 @@ class AtomicSchedulingConnectionTest {
         Mockito.doReturn(this.defaultDatabaseResolver).when(this.connector).defaultDatabaseResolver();
 
         this.protocol = Mockito.mock(BoltProtocol.class, Mockito.RETURNS_MOCKS);
-        this.fsmInstance = Mockito.mock(StateMachine.class, Mockito.RETURNS_MOCKS);
+        this.fsmInstance = Mockito.mock(StateMachineHandle.class, Mockito.RETURNS_MOCKS);
         this.fsm = Mockito.mock(StateMachineConfiguration.class, Mockito.RETURNS_MOCKS);
 
         Mockito.doReturn(this.fsm).when(this.protocol).stateMachine();
         Mockito.doReturn(this.fsmInstance)
                 .when(this.fsm)
-                .createInstance(ArgumentMatchers.any(), ArgumentMatchers.any(), ArgumentMatchers.any());
+                .createInstance(ArgumentMatchers.any(), ArgumentMatchers.any());
 
         this.authenticationResult = Mockito.mock(AuthenticationResult.class);
         this.loginContext = Mockito.mock(LoginContext.class, Mockito.RETURNS_MOCKS);
         this.authSubject = Mockito.mock(AuthSubject.class);
-        this.admissionControl = Mockito.mock(AdmissionControlService.class);
+        this.admissionControlTracker = Mockito.mock(ConnectionAdmissionControlTracker.class);
         Mockito.doReturn(this.loginContext).when(this.authenticationResult).getLoginContext();
         Mockito.doReturn(false).when(this.authenticationResult).credentialsExpired();
 
@@ -173,7 +176,8 @@ class AtomicSchedulingConnectionTest {
                 this.logService,
                 this.executorService,
                 this.clock,
-                this.admissionControl);
+                this.admissionControlTracker,
+                this.notificationManager);
 
         // this is to set user agent & bolt agent
         this.connection.negotiate(
@@ -254,7 +258,7 @@ class AtomicSchedulingConnectionTest {
 
         this.connection.selectProtocol(protocol, EnumSet.of(ProtocolCapability.HANDSHAKE_V2));
 
-        Assertions.assertThat(this.connection.selectedCapabilities())
+        Assertions.assertThat(this.connection.selectedProtocolCapabilities())
                 .hasSize(1)
                 .containsAll(EnumSet.of(ProtocolCapability.HANDSHAKE_V2));
     }
@@ -338,12 +342,10 @@ class AtomicSchedulingConnectionTest {
     @Test
     void processJobShouldPassAdmissionControlToken()
             throws BrokenBarrierException, InterruptedException, StateMachineException {
-        var token = Mockito.mock(AdmissionControlToken.class);
-        Mockito.doReturn(true).when(this.admissionControl).enabled();
-        Mockito.doReturn(token).when(this.admissionControl).requestToken();
-
         var message = Mockito.mock(RunMessage.class);
-        Mockito.doReturn(true).when(message).requiresAdmissionControl();
+
+        var token = Mockito.mock(AdmissionControlToken.class);
+        Mockito.doReturn(token).when(this.admissionControlTracker).onMessage(message, null);
 
         this.selectProtocol();
 
@@ -723,12 +725,11 @@ class AtomicSchedulingConnectionTest {
 
         // a state machine should have been created for the selected protocol version
         Mockito.verify(this.protocol).stateMachine();
-        Mockito.verify(this.fsm).createInstance(Mockito.eq(this.connection), Mockito.any(), Mockito.any());
+        Mockito.verify(this.fsm).createInstance(Mockito.eq(this.connection), Mockito.any());
         Mockito.verify(this.protocol).registerStructReaders(Mockito.any());
         Mockito.verify(this.protocol).registerStructWriters(Mockito.any());
         Mockito.verify(this.protocol).features();
         Mockito.verify(this.protocol).metadataHandler();
-        Mockito.verify(this.protocol).onConnectionNegotiated(this.connection);
         Mockito.verifyNoMoreInteractions(this.fsm);
         Mockito.verifyNoMoreInteractions(this.protocol);
 
@@ -741,11 +742,10 @@ class AtomicSchedulingConnectionTest {
     void selectProtocolShouldFailWithIllegalStateWhenInvokedTwice() {
         this.selectProtocol();
         Mockito.verify(this.protocol).stateMachine();
-        Mockito.verify(this.fsm).createInstance(Mockito.eq(this.connection), Mockito.any(), Mockito.any());
+        Mockito.verify(this.fsm).createInstance(Mockito.eq(this.connection), Mockito.any());
         Mockito.verify(this.protocol).registerStructReaders(Mockito.any());
         Mockito.verify(this.protocol).registerStructWriters(Mockito.any());
         Mockito.verify(this.protocol).features();
-        Mockito.verify(this.protocol).onConnectionNegotiated(this.connection);
         Mockito.verify(this.protocol).metadataHandler();
         Mockito.verifyNoMoreInteractions(this.protocol);
 
@@ -1156,42 +1156,11 @@ class AtomicSchedulingConnectionTest {
     }
 
     @Test
-    void shouldRequestATokenWhenMessageRequiresAndEnabled() {
-        var token = Mockito.mock(AdmissionControlToken.class);
-        Mockito.doReturn(true).when(this.admissionControl).enabled();
-        Mockito.doReturn(token).when(this.admissionControl).requestToken();
-
+    void shouldRegisterMessageWithAdmissionControlTrackerWhenEnabled() {
         var message = Mockito.mock(RequestMessage.class);
-        Mockito.doReturn(true).when(message).requiresAdmissionControl();
 
         this.connection.submit(message);
 
-        Mockito.verify(this.admissionControl, Mockito.times(1)).requestToken();
-    }
-
-    @Test
-    void shouldValidateMessageRequiresAdmissionControl() {
-        Mockito.doReturn(true).when(this.admissionControl).enabled();
-
-        var message = Mockito.mock(RequestMessage.class);
-        Mockito.doReturn(false).when(message).requiresAdmissionControl();
-
-        this.connection.submit(message);
-
-        Mockito.verify(this.admissionControl, Mockito.never()).requestToken();
-    }
-
-    @Test
-    void shouldNotRequestTokenWhenNotEnabled() {
-        var token = Mockito.mock(AdmissionControlToken.class);
-        Mockito.doReturn(false).when(this.admissionControl).enabled();
-        Mockito.doReturn(token).when(this.admissionControl).requestToken();
-
-        var message = Mockito.mock(RequestMessage.class);
-        Mockito.doReturn(true).when(message).requiresAdmissionControl();
-
-        this.connection.submit(message);
-
-        Mockito.verify(this.admissionControl, Mockito.never()).requestToken();
+        Mockito.verify(this.admissionControlTracker, Mockito.times(1)).onMessage(message, null);
     }
 }

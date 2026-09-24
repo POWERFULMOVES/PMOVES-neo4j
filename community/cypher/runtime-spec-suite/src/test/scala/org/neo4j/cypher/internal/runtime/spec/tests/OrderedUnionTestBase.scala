@@ -19,8 +19,6 @@
  */
 package org.neo4j.cypher.internal.runtime.spec.tests
 
-import org.neo4j.configuration.GraphDatabaseInternalSettings.CypherOperatorEngine.INTERPRETED
-import org.neo4j.configuration.GraphDatabaseInternalSettings.cypher_operator_engine
 import org.neo4j.cypher.internal.CypherRuntime
 import org.neo4j.cypher.internal.RuntimeContext
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createNode
@@ -31,11 +29,12 @@ import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.runtime.spec.Edition
 import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
-import org.neo4j.exceptions.CantCompileQueryException
 import org.neo4j.graphdb.Label
 import org.neo4j.graphdb.Node
 import org.neo4j.graphdb.NotFoundException
 import org.neo4j.values.virtual.VirtualValues
+
+object OrderedUnionTestBase
 
 abstract class OrderedUnionTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
@@ -665,7 +664,7 @@ abstract class OrderedUnionTestBase[CONTEXT <: RuntimeContext](
 
     // then
     val expected = for {
-      res <- nodes ++ Seq(1, 2, 3, 4, 5, 6, 7)
+      res <- nodes ++ Seq[Any](1, 2, 3, 4, 5, 6, 7)
     } yield Array(res)
 
     runtimeResult should beColumns("res").withRows(expected)
@@ -815,7 +814,7 @@ abstract class OrderedUnionTestBase[CONTEXT <: RuntimeContext](
     // then
     val expected = for {
       x <- nodes
-      res <- x +: Seq(1, 2, 3, 4, 5, 6, 7)
+      res <- x +: Seq[Any](1, 2, 3, 4, 5, 6, 7)
     } yield Array[Any](res)
 
     runtimeResult should beColumns("res").withRows(inOrder(expected))
@@ -847,7 +846,7 @@ abstract class OrderedUnionTestBase[CONTEXT <: RuntimeContext](
     // then
     val expected = for {
       x <- nodes
-      res <- nodes ++ Seq(1, 2, 3, 4, 5, 6, 7)
+      res <- nodes ++ Seq[Any](1, 2, 3, 4, 5, 6, 7)
     } yield Array(x, res)
 
     runtimeResult should beColumns("x", "res").withRows(expected)
@@ -907,7 +906,7 @@ abstract class OrderedUnionTestBase[CONTEXT <: RuntimeContext](
     val runtimeResult = execute(logicalQuery, runtime)
 
     // then
-    val expected = nodes.flatMap(n => Array(Array(n, 1), Array(n, 2)))
+    val expected = nodes.flatMap(n => Array(Array[Any](n, 1), Array[Any](n, 2)))
     runtimeResult should beColumns("a", "x").withRows(inOrder(expected))
   }
 
@@ -1075,13 +1074,13 @@ abstract class OrderedUnionTestBase[CONTEXT <: RuntimeContext](
       .distinct("x AS x")
       .union()
       .|.projection("x AS x")
-      .|.orderedDistinct(Seq("x"), "x AS x")
+      .|.orderedDistinct(Seq("x"), "x AS x").withLeveragedOrder()
       .|.orderedUnion("x ASC")
       .|.|.nodeByLabelScan("x", "D", IndexOrderAscending)
       .|.nodeByLabelScan("x", "C", IndexOrderAscending)
       .projection("x AS x")
       .apply()
-      .|.orderedDistinct(Seq("x"), "y AS y", "x AS x")
+      .|.orderedDistinct(Seq("x"), "y AS y", "x AS x").withLeveragedOrder()
       .|.orderedUnion("x ASC")
       .|.|.nodeByLabelScan("x", "B", IndexOrderAscending, "y")
       .|.nodeByLabelScan("x", "A", IndexOrderAscending, "y")
@@ -1117,7 +1116,7 @@ abstract class OrderedUnionTestBase[CONTEXT <: RuntimeContext](
       .distinct("x AS x")
       .union()
       .|.projection("x AS x")
-      .|.orderedDistinct(Seq("x"), "x AS x")
+      .|.orderedDistinct(Seq("x"), "x AS x").withLeveragedOrder()
       .|.orderedUnion("x ASC")
       .|.|.nodeByLabelScan("x", "E", IndexOrderAscending)
       .|.orderedUnion("x ASC")
@@ -1125,7 +1124,7 @@ abstract class OrderedUnionTestBase[CONTEXT <: RuntimeContext](
       .|.nodeByLabelScan("x", "C", IndexOrderAscending)
       .projection("x AS x")
       .apply()
-      .|.orderedDistinct(Seq("x"), "y AS y", "x AS x")
+      .|.orderedDistinct(Seq("x"), "y AS y", "x AS x").withLeveragedOrder()
       .|.orderedUnion("x ASC")
       .|.|.nodeByLabelScan("x", "B", IndexOrderAscending, "y")
       .|.nodeByLabelScan("x", "A", IndexOrderAscending, "y")
@@ -1158,13 +1157,13 @@ abstract class OrderedUnionTestBase[CONTEXT <: RuntimeContext](
       .|.projection("size(`dst`) AS `size(dst)`")
       .|.aggregation(Seq("`src` AS `src`", "`y` AS `y`"), Seq("COLLECT(DISTINCT `z`) AS `dst`"))
       .|.apply()
-      .|.|.orderedDistinct(Seq("`z`"), "`src` AS `src`", "`y` AS `y`", "`z` AS `z`")
+      .|.|.orderedDistinct(Seq("`z`"), "`src` AS `src`", "`y` AS `y`", "`z` AS `z`").withLeveragedOrder()
       .|.|.orderedUnion("z ASC")
       .|.|.|.nodeByLabelScan("z", "H", IndexOrderAscending, "src", "y")
       .|.|.nodeByLabelScan("z", "G", IndexOrderAscending, "src", "y")
       .|.projection("[] AS y")
       .|.aggregation(Seq(), Seq("COLLECT(DISTINCT `x`) AS `src`"))
-      .|.orderedDistinct(Seq("`x`"), "`x` AS `x`")
+      .|.orderedDistinct(Seq("`x`"), "`x` AS `x`").withLeveragedOrder()
       .|.orderedUnion("x ASC")
       .|.|.nodeByLabelScan("x", "F", IndexOrderAscending)
       .|.orderedUnion("x ASC")
@@ -1174,7 +1173,7 @@ abstract class OrderedUnionTestBase[CONTEXT <: RuntimeContext](
       .projection("size(`dst`) AS `size(dst)`")
       .aggregation(Seq("`src` AS `src`", "`y` AS `y`"), Seq("COLLECT(DISTINCT `z`) AS `dst`"))
       .apply()
-      .|.orderedDistinct(Seq("`z`"), "`src` AS `src`", "`y` AS `y`", "`z` AS `z`")
+      .|.orderedDistinct(Seq("`z`"), "`src` AS `src`", "`y` AS `y`", "`z` AS `z`").withLeveragedOrder()
       .|.orderedUnion("z ASC")
       .|.|.nodeByLabelScan("z", "C", IndexOrderAscending, "src", "y")
       .|.nodeByLabelScan("z", "B", IndexOrderAscending, "src", "y")
@@ -1244,7 +1243,8 @@ abstract class OrderedUnionTestBase[CONTEXT <: RuntimeContext](
       .allNodeScan("n")
       .build()
 
-    val expected = nodes.head +: nodes.map(n => n) :+ VirtualValues.node(nNodes) // Sorry, this is a bit fragile
+    val expected: Seq[Any] =
+      nodes.head +: nodes.map(n => n) :+ VirtualValues.node(nNodes) // Sorry, this is a bit fragile
     execute(query, runtime) should beColumns("n").withRows(singleColumn(expected))
   }
 
@@ -1259,7 +1259,7 @@ abstract class OrderedUnionTestBase[CONTEXT <: RuntimeContext](
       .|.projection("NULL AS rhsNull")
       .|.cartesianProduct()
       .|.|.filter("r:B")
-      .|.|.orderedDistinct(Seq("r"), "r AS r")
+      .|.|.orderedDistinct(Seq("r"), "r AS r").withLeveragedOrder()
       .|.|.orderedUnion("r ASC")
       .|.|.|.filter("not r:A")
       .|.|.|.relationshipTypeScan("()-[r:D]->()", IndexOrderAscending)
@@ -1274,12 +1274,8 @@ abstract class OrderedUnionTestBase[CONTEXT <: RuntimeContext](
       .argument()
       .build()
 
-    if (edition.configs.contains(cypher_operator_engine -> INTERPRETED)) {
-      intercept[CantCompileQueryException](execute(logicalQuery, runtime))
-    } else {
-      val result = execute(logicalQuery, runtime)
-      result should beColumns("n0").withSingleRow(null)
-    }
+    val result = execute(logicalQuery, runtime)
+    result should beColumns("n0").withSingleRow(null)
   }
 
   test("github issue #13169 variant") {
@@ -1293,7 +1289,7 @@ abstract class OrderedUnionTestBase[CONTEXT <: RuntimeContext](
       .|.projection("NULL AS rhsNull")
       .|.union()
       .|.|.filter("r:B")
-      .|.|.orderedDistinct(Seq("r"), "r AS r")
+      .|.|.orderedDistinct(Seq("r"), "r AS r").withLeveragedOrder()
       .|.|.orderedUnion("r ASC")
       .|.|.|.filter("not r:A")
       .|.|.|.relationshipTypeScan("()-[r:D]->()", IndexOrderAscending)
@@ -1308,11 +1304,7 @@ abstract class OrderedUnionTestBase[CONTEXT <: RuntimeContext](
       .argument()
       .build()
 
-    if (edition.configs.contains(cypher_operator_engine -> INTERPRETED)) {
-      intercept[CantCompileQueryException](execute(logicalQuery, runtime))
-    } else {
-      val result = execute(logicalQuery, runtime)
-      result should beColumns("n0").withRows(inOrder(Seq(Array(null), Array(null))))
-    }
+    val result = execute(logicalQuery, runtime)
+    result should beColumns("n0").withRows(inOrder(Seq(Array[Any](null), Array[Any](null))))
   }
 }

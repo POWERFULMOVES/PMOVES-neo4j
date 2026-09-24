@@ -23,21 +23,26 @@ import java.nio.file.Path;
 import java.util.Objects;
 import org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker;
 import org.neo4j.io.fs.FileSystemAbstraction;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneContext;
 import org.neo4j.kernel.api.impl.index.storage.DirectoryFactory;
 import org.neo4j.kernel.api.impl.index.storage.PartitionedIndexStorage;
+import org.neo4j.logging.LogProvider;
 
 /**
  * Base class for lucene index builders.
  *
  * @param <T> actual index type
  */
+@SuppressWarnings("unchecked")
 public abstract class AbstractLuceneIndexBuilder<T extends AbstractLuceneIndexBuilder<T>> {
-    protected LuceneIndexStorageBuilder storageBuilder = LuceneIndexStorageBuilder.create();
+    protected final LuceneIndexStorageBuilder storageBuilder = LuceneIndexStorageBuilder.create();
     protected final DatabaseReadOnlyChecker readOnlyChecker;
     protected boolean permanentlyReadOnly;
+    protected final LogProvider logProvider;
 
-    public AbstractLuceneIndexBuilder(DatabaseReadOnlyChecker readOnlyChecker) {
+    public AbstractLuceneIndexBuilder(DatabaseReadOnlyChecker readOnlyChecker, LogProvider logProvider) {
         this.readOnlyChecker = Objects.requireNonNull(readOnlyChecker);
+        this.logProvider = logProvider;
     }
 
     /**
@@ -59,6 +64,17 @@ public abstract class AbstractLuceneIndexBuilder<T extends AbstractLuceneIndexBu
      */
     public T withDirectoryFactory(DirectoryFactory directoryFactory) {
         storageBuilder.withDirectoryFactory(directoryFactory);
+        return (T) this;
+    }
+
+    /**
+     * Specify lucene context to use.
+     *
+     * @param luceneContext the lucene context.
+     * @return index builder.
+     */
+    public T withLuceneContext(LuceneContext luceneContext) {
+        storageBuilder.withLuceneContext(luceneContext);
         return (T) this;
     }
 

@@ -32,43 +32,36 @@ public class AuthenticationException extends IOException implements Status.HasSt
     private final ErrorGqlStatusObject gqlStatusObject;
     private final String oldMessage;
 
-    @Deprecated
-    public AuthenticationException(Status status) {
-        this(status, status.code().description(), null);
-    }
-
-    public AuthenticationException(ErrorGqlStatusObject gqlStatusObject, Status status) {
+    private AuthenticationException(ErrorGqlStatusObject gqlStatusObject, Status status) {
         this(gqlStatusObject, status, status.code().description(), null);
-    }
-
-    @Deprecated
-    public AuthenticationException(Status status, String message) {
-        this(status, message, null);
     }
 
     public AuthenticationException(ErrorGqlStatusObject gqlStatusObject, Status status, String message) {
         this(gqlStatusObject, status, message, null);
     }
 
-    @Deprecated
-    public AuthenticationException(Status status, String message, Throwable e) {
-        super(message, e);
-        this.status = status;
-        gqlStatusObject = null;
-        oldMessage = message;
-    }
-
-    public AuthenticationException(ErrorGqlStatusObject gqlStatusObject, Status status, String message, Throwable e) {
+    private AuthenticationException(ErrorGqlStatusObject gqlStatusObject, Status status, String message, Throwable e) {
         super(ErrorMessageHolder.getMessage(gqlStatusObject, message), e);
         this.status = status;
         this.gqlStatusObject = GqlHelper.getInnerGqlStatusObject(gqlStatusObject, e);
         oldMessage = message;
     }
 
+    public static AuthenticationException internalError(String msgTitle, String message, Status status) {
+        var gql = GqlHelper.get50N00(msgTitle, message);
+        return new AuthenticationException(gql, status, message);
+    }
+
     public static AuthenticationException unauthorized() {
         var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42NFF)
                 .build();
         return new AuthenticationException(gql, Status.Security.Unauthorized);
+    }
+
+    public static AuthenticationException rateLimit() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42NFF)
+                .build();
+        return new AuthenticationException(gql, Status.Security.AuthenticationRateLimit);
     }
 
     @Override

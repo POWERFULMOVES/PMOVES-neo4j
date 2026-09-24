@@ -26,7 +26,6 @@ import static org.mockito.Mockito.when;
 import static org.neo4j.internal.recordstorage.Command.RelationshipGroupCommand;
 
 import java.io.IOException;
-import java.lang.reflect.InvocationTargetException;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -34,6 +33,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.neo4j.io.fs.ReadableChannel;
 import org.neo4j.kernel.impl.store.record.Record;
 import org.neo4j.kernel.impl.store.record.RelationshipGroupRecord;
+import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.CommandReader;
 import org.neo4j.storageengine.api.StorageCommand;
 
@@ -50,16 +50,17 @@ class PhysicalLogCommandReadersTest {
     @ParameterizedTest
     @ValueSource(classes = {LogCommandSerializationV4_2.class, LogCommandSerializationV4_3_D3.class})
     void readRelGroupWithHugeTypeBefore5_0(Class<CommandReader> readerClass)
-            throws IOException, IllegalAccessException, InstantiationException, NoSuchMethodException,
-                    InvocationTargetException {
-        CommandReader reader = readerClass.getDeclaredConstructor().newInstance();
-        StorageCommand command = reader.read(channelWithExtendedRelGroupRecordBefore5_0());
+            throws IOException, IllegalAccessException, NoSuchFieldException {
+        CommandReader reader =
+                (CommandReader) readerClass.getDeclaredField("INSTANCE").get(readerClass);
+        StorageCommand command = reader.read(channelWithExtendedRelGroupRecordBefore5_0(), EmptyMemoryTracker.INSTANCE);
         assertValidRelGroupCommand(command);
     }
 
     @Test
     void readRelGroupWithHugeType() throws IOException {
-        StorageCommand command = LogCommandSerializationV5_0.INSTANCE.read(channelWithRelGroupRecord());
+        StorageCommand command =
+                LogCommandSerializationV5_0.INSTANCE.read(channelWithRelGroupRecord(), EmptyMemoryTracker.INSTANCE);
         assertValidRelGroupCommand(command);
     }
 

@@ -75,7 +75,11 @@ class RecordRelationshipTraversalCursor extends RecordRelationshipCursor impleme
     }
 
     @Override
-    public void init(long nodeReference, long reference, RelationshipSelection selection) {
+    public void init(
+            long nodeReference,
+            long reference,
+            RelationshipSelection selection,
+            boolean includeChangesFromThisTransaction) {
         if (reference == LongReference.NULL) {
             resetState();
             return;
@@ -300,12 +304,6 @@ class RecordRelationshipTraversalCursor extends RecordRelationshipCursor impleme
     @Override
     public void removeTracer() {
         this.tracer = null;
-    }
-
-    @Override
-    public void setForceLoad() {
-        super.setForceLoad();
-        group.loadMode = loadMode;
     }
 
     @Override

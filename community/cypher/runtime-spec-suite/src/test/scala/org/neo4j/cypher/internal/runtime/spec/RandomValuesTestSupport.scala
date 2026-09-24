@@ -19,19 +19,28 @@
  */
 package org.neo4j.cypher.internal.runtime.spec
 
-import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
+import org.neo4j.configuration.Config
+import org.neo4j.configuration.GraphDatabaseInternalSettings
+import org.neo4j.cypher.internal.RuntimeContext
+import org.neo4j.cypher.internal.util.test_helpers.WithFixtureClue
+import org.neo4j.internal.kernel.api.procs.Neo4jTypes
+import org.neo4j.internal.kernel.api.procs.QualifiedName
+import org.neo4j.internal.kernel.api.procs.UserFunctionSignature
+import org.neo4j.kernel.api.procedure.CallableUserFunction.BasicUserFunction
+import org.neo4j.kernel.api.procedure.Context
+import org.neo4j.kernel.impl.factory.GraphDatabaseFacade
+import org.neo4j.values.AnyValue
 import org.neo4j.values.storable.RandomValues
+import org.neo4j.values.storable.RandomValuesUtils
 import org.neo4j.values.storable.Value
 import org.neo4j.values.storable.ValueType
-import org.scalatest.Failed
-import org.scalatest.Outcome
-import org.scalatest.TestSuite
-import org.scalatest.TestSuiteMixin
+import org.neo4j.values.storable.Values
 
 import scala.util.Random
+import scala.util.Try
 
-trait RandomValuesTestSupport extends TestSuiteMixin with TestSuite {
-  self: CypherFunSuite =>
+trait RandomValuesTestSupport[CONTEXT <: RuntimeContext] extends WithFixtureClue {
+  self: RuntimeTestSuite[CONTEXT] =>
 
   private val initialSeedSeed = Random.nextLong()
 
@@ -66,20 +75,28 @@ trait RandomValuesTestSupport extends TestSuiteMixin with TestSuite {
     if (_randomValues == null) {
       _randomValues = RandomValues.create(
         new java.util.Random(initialSeed),
-        randomValuesConfiguration()
+        Option(graphDb).map(
+          RandomValuesUtils.selectStorageEngineDependentConfigurationBuilder
+        ).getOrElse(RandomValues.newConfigurationBuilder)
+          .maxCodePoint(10_000)
+          .build
       )
     }
     _randomValues
   }
 
-  def randomValuesConfiguration(): RandomValues.Configuration = {
-    new RandomValues.Default {
-      override def maxCodePoint(): Int =
-        10000 // Because characters outside BMP have inconsistent or non-deterministic ordering
-      override def minCodePoint(): Int = Character.MIN_CODE_POINT
+  protected def effectivePipelinedBatchSizes: Option[(Int, Int)] =
+    Option(graphDb).flatMap { db =>
+      Try {
+        val config = db.asInstanceOf[GraphDatabaseFacade].getDependencyResolver.resolveDependency(classOf[Config])
+        (
+          config.get(GraphDatabaseInternalSettings.cypher_pipelined_batch_size_small).intValue(),
+          config.get(GraphDatabaseInternalSettings.cypher_pipelined_batch_size_big).intValue()
+        )
+      }.toOption
     }
-  }
 
+  // Scala compat
   def randomValue(valueType: ValueType): Value = randomValues.nextValueOfType(valueType)
 
   def randomValues(size: Int, valueTypes: ValueType*): Array[Value] =
@@ -87,35 +104,38 @@ trait RandomValuesTestSupport extends TestSuiteMixin with TestSuite {
   def randomAmong[T](values: Seq[T]): T = values(randomValues.nextInt(values.size))
   def shuffle[T](values: Seq[T]): Seq[T] = random.shuffle(values)
 
-  abstract override def withFixture(test: NoArgTest): Outcome = {
-    val clue = new { // Trick to defer evaluation since initialSeed is not available before the test is run.
+  override protected def testFailureClue: AnyRef =
+    new { // Trick to defer evaluation since initialSeed is not available before the test is run.
       override def toString: String =
-        s"""
-           |${classOf[RandomValuesTestSupport].getSimpleName} test failed with initial seed: ${initialSeed}L
-           |To reproduce, put the following line at the top of the test that failed:
-           |setInitialSeed(${initialSeed}L)
-           |
-           |""".stripMargin
+        RandomValuesTestSupport.reproductionClue(initialSeed, effectivePipelinedBatchSizes)
     }
-    withClue(clue) {
-      try {
-        val outcome = super.withFixture(test)
-        outcome match {
-          case Failed(_: org.scalatest.exceptions.ModifiableMessage[_]) =>
-          // Clue will be included in the exception by the wrapping withClue
-          case Failed(_) =>
-            // Print clue to stderr since withClue won't include it
-            System.err.println(clue)
-          case _ =>
-          // Do nothing
-        }
-        outcome
-      } catch {
-        case e: Throwable if !e.isInstanceOf[org.scalatest.exceptions.ModifiableMessage[_]] =>
-          // Print clue to stderr
-          System.err.println(clue)
-          throw e
-      }
-    }
+
+  def restartTxWithSeededRandFunction(name: String = "test.seededRand"): String = {
+    val seededRandom = new java.util.Random(random.nextLong())
+    registerFunction(new BasicUserFunction(
+      UserFunctionSignature.functionSignature(new QualifiedName(name))
+        .out(Neo4jTypes.NTFloat).threadSafe().build()
+    ) {
+      override def apply(ctx: Context, input: Array[AnyValue]): AnyValue =
+        Values.doubleValue(seededRandom.nextDouble())
+    })
+    restartTx()
+    name
+  }
+}
+
+object RandomValuesTestSupport {
+
+  def reproductionClue(initialSeed: Long, pipelinedBatchSizes: Option[(Int, Int)]): String = {
+    val lines =
+      Seq(
+        "",
+        s"RandomValuesTestSupport test failed with initial seed: ${initialSeed}L",
+        "To reproduce, put the following line at the top of the test that failed:",
+        s"setInitialSeed(${initialSeed}L)"
+      ) ++ pipelinedBatchSizes.map { case (small, big) =>
+        s"effective pipelined batch size: small=$small, big=$big"
+      } ++ Seq("", "")
+    lines.mkString("\n")
   }
 }

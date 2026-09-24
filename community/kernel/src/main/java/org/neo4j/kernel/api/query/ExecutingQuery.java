@@ -30,14 +30,15 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
-import java.util.function.Function;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import org.apache.commons.lang3.builder.ToStringBuilder;
+import org.neo4j.cypher.internal.CypherVersion;
 import org.neo4j.graphdb.ExecutionPlanDescription;
-import org.neo4j.graphdb.InputPosition;
 import org.neo4j.internal.kernel.api.ExecutionStatistics;
 import org.neo4j.internal.kernel.api.connectioninfo.ClientConnectionInfo;
+import org.neo4j.kernel.api.QueryLanguage;
+import org.neo4j.kernel.api.query.QueryObfuscator.ObfuscatedQuery;
 import org.neo4j.kernel.database.NamedDatabaseId;
 import org.neo4j.lock.ActiveLock;
 import org.neo4j.lock.LockTracer;
@@ -80,12 +81,18 @@ public class ExecutingQuery implements QueryTransactionStatisticsAggregator {
 
     private long compilationCompletedNanos;
 
-    private ObfuscatedQueryData obfuscatedQueryData;
+    /**
+     * Query-bound obfuscation holder, lazily memoising the two obfuscated views. Null until the obfuscator is
+     * ready (and reset on retry).
+     */
+    private volatile QueryObfuscationState obfuscation;
 
     private Supplier<ExecutionPlanDescription> planDescriptionSupplier;
+    private Supplier<ExtendedQueryStatistics> queryStatisticsSupplier;
     private DeprecationNotificationsProvider deprecationNotificationsProvider;
     private DeprecationNotificationsProvider fabricDeprecationNotificationsProvider;
     private int executionPlanCacheKeyHash;
+    private CypherVersion queryLanguage;
     private volatile ExecutingQueryStatus status = SimpleState.parsing();
     private volatile ExecutingQuery previousQuery;
 
@@ -276,6 +283,7 @@ public class ExecutingQuery implements QueryTransactionStatisticsAggregator {
     }
 
     @VisibleForTesting
+    @Override
     public void recordStatisticsOfTransactionAboutToClose(long hits, long faults, long transactionSequenceNumber) {
         aggregatedStatistics.recordStatisticsOfTransactionAboutToClose(hits, faults, transactionSequenceNumber);
     }
@@ -283,6 +291,7 @@ public class ExecutingQuery implements QueryTransactionStatisticsAggregator {
     /**
      * A transaction executing part of this query is closing; record its page cache statistics (including commit).
      */
+    @Override
     public void recordStatisticsOfClosedTransaction(
             long hits, long faults, long transactionSequenceNumber, CommitPhaseStatisticsListener listener) {
         aggregatedStatistics.recordStatisticsOfClosedTransaction(hits, faults, transactionSequenceNumber, listener);
@@ -293,17 +302,27 @@ public class ExecutingQuery implements QueryTransactionStatisticsAggregator {
         {
             return;
         }
-
-        try {
-            obfuscatedQueryData = new ObfuscatedQueryData(
-                    queryObfuscator.obfuscateText(rawQueryText, preparserOffset),
-                    queryObfuscator.obfuscatePosition(rawQueryText, preparserOffset),
-                    queryObfuscator.obfuscateParameters(rawQueryParameters));
-        } catch (Exception ignore) {
-            obfuscatedQueryData = new ObfuscatedQueryData(null, null, null);
-        }
-
+        this.obfuscation =
+                new QueryObfuscationState(queryObfuscator, rawQueryText, rawQueryParameters, preparserOffset);
         this.status = SimpleState.planning();
+    }
+
+    public void onPreparseReady(CypherVersion queryLanguage) {
+        this.queryLanguage = queryLanguage;
+    }
+
+    public QueryLanguage queryLanguage() {
+        assert this.queryLanguage != null; // Break in testing but not production
+        if (this.queryLanguage == null) return null;
+        return switch (this.queryLanguage) {
+            case Cypher5 -> QueryLanguage.CYPHER_5;
+            case Cypher25 -> QueryLanguage.CYPHER_25;
+        };
+    }
+
+    // Can be null
+    public CypherVersion cypherVersion() {
+        return this.queryLanguage;
     }
 
     public void onFabricDeprecationNotificationsProviderReady(
@@ -319,6 +338,9 @@ public class ExecutingQuery implements QueryTransactionStatisticsAggregator {
         assertExpectedStatus(SimpleState.planning());
 
         this.compilerInfo = compilerInfo;
+        if (compilerInfo != null) {
+            this.queryLanguage = compilerInfo.getCypherVersion();
+        }
         this.compilationCompletedNanos = clock.nanos();
         this.planDescriptionSupplier = planDescriptionSupplier;
         this.deprecationNotificationsProvider = deprecationNotificationsProvider;
@@ -326,10 +348,12 @@ public class ExecutingQuery implements QueryTransactionStatisticsAggregator {
         this.status = SimpleState.planned(); // write barrier - must be last
     }
 
-    public void onExecutionStarted(HeapHighWaterMarkTracker memoryTracker) {
+    public void onExecutionStarted(
+            HeapHighWaterMarkTracker memoryTracker, Supplier<ExtendedQueryStatistics> queryStatisticsSupplier) {
         assertExpectedStatus(SimpleState.planned());
 
         this.memoryTracker = memoryTracker;
+        this.queryStatisticsSupplier = queryStatisticsSupplier;
         this.status = SimpleState.running(); // write barrier - must be last
     }
 
@@ -342,7 +366,7 @@ public class ExecutingQuery implements QueryTransactionStatisticsAggregator {
         this.deprecationNotificationsProvider = null;
         this.fabricDeprecationNotificationsProvider = null;
         this.memoryTracker = HeapHighWaterMarkTracker.NONE;
-        this.obfuscatedQueryData = new ObfuscatedQueryData(null, null, null);
+        this.obfuscation = null;
         this.status = SimpleState.parsing();
     }
 
@@ -354,6 +378,9 @@ public class ExecutingQuery implements QueryTransactionStatisticsAggregator {
     @VisibleForTesting
     public void setCompilerInfoForTesting(CompilerInfo compilerInfo) {
         this.compilerInfo = compilerInfo;
+        if (this.compilerInfo != null) {
+            this.queryLanguage = compilerInfo.getCypherVersion();
+        }
     }
 
     public LockTracer lockTracer() {
@@ -368,17 +395,13 @@ public class ExecutingQuery implements QueryTransactionStatisticsAggregator {
         long waitTimeNanos;
         long currentTimeNanos;
         long cpuTimeNanos;
-        String queryText;
-        Function<InputPosition, InputPosition> queryPostions;
-        MapValue queryParameters;
+        QueryObfuscationState obfuscation;
         do {
             status = this.status; // read barrier, must be first
             waitTimeNanos = this.waitTimeNanos; // the reason for the retry loop: don't count the wait time twice
             cpuTimeNanos = cpuClock.cpuTimeNanos(threadExecutingTheQueryId);
             currentTimeNanos = clock.nanos(); // capture the time as close to the snapshot as possible
-            queryText = obfuscatedQueryData != null ? obfuscatedQueryData.obfuscatedQueryText : null;
-            queryPostions = obfuscatedQueryData != null ? obfuscatedQueryData.obfuscatePosition : null;
-            queryParameters = obfuscatedQueryData != null ? obfuscatedQueryData.obfuscatedQueryParameters : null;
+            obfuscation = this.obfuscation;
         } while (this.status != status);
         // guarded by barrier - unused if status is planning, stable otherwise
         long compilationCompletedNanos = this.compilationCompletedNanos;
@@ -394,6 +417,11 @@ public class ExecutingQuery implements QueryTransactionStatisticsAggregator {
             activeLocks += tx.getActiveLocks();
             hits += tx.hitsSupplier.getAsLong();
             faults += tx.faultsSupplier.getAsLong();
+        }
+
+        ExtendedQueryStatistics queryStatistics = null;
+        if (queryStatisticsSupplier != null) {
+            queryStatistics = queryStatisticsSupplier.get();
         }
 
         // - at this point we are done capturing the "live" state, and can start computing the snapshot -
@@ -417,19 +445,23 @@ public class ExecutingQuery implements QueryTransactionStatisticsAggregator {
                 waitingOnLocks,
                 activeLocks,
                 memoryTracker.heapHighWaterMark(),
-                Optional.ofNullable(queryText),
-                Optional.ofNullable(queryPostions),
-                Optional.ofNullable(queryParameters),
+                obfuscation,
+                queryLanguage,
                 outerTransactionSequenceNumber,
                 parentDbName,
                 parentTransactionSequenceNumber,
                 executableQueryCacheUsage,
                 logicalPlanCacheUsage,
-                executionPlanCacheKeyHash);
+                executionPlanCacheKeyHash,
+                queryStatistics);
     }
 
     public String cypherRuntime() {
         return this.compilerInfo == null ? "" : this.compilerInfo.runtime();
+    }
+
+    public boolean isParallelRuntime() {
+        return this.compilerInfo != null && this.compilerInfo.isParallelRuntime();
     }
 
     // basic methods
@@ -458,6 +490,13 @@ public class ExecutingQuery implements QueryTransactionStatisticsAggregator {
         return ToStringBuilder.reflectionToString(this);
     }
 
+    // access unstable state
+
+    /** Returns compilation time in nano seconds, or a negative number if compilation has not completed. */
+    public long compilationTimeNanos() {
+        return compilationCompletedNanos - startTimeNanos;
+    }
+
     // access stable state
 
     public long internalQueryId() {
@@ -474,6 +513,20 @@ public class ExecutingQuery implements QueryTransactionStatisticsAggregator {
 
     public String authenticatedUsername() {
         return authenticatedUsername;
+    }
+
+    public Optional<String> obfuscatedQueryText() {
+        QueryObfuscationState o = obfuscation;
+        return o == null
+                ? Optional.empty()
+                : ObfuscatedQuery.optional(o.defaultView()).map(ObfuscatedQuery::text);
+    }
+
+    public String fullyObfuscatedQueryText() {
+        QueryObfuscationState o = obfuscation;
+        return o == null
+                ? ""
+                : ObfuscatedQuery.optional(o.all()).map(ObfuscatedQuery::text).orElse("");
     }
 
     public String rawQueryText() {
@@ -563,18 +616,22 @@ public class ExecutingQuery implements QueryTransactionStatisticsAggregator {
         this.previousQuery = previousQuery;
     }
 
+    @Override
     public long pageHitsOfClosedTransactions() {
         return aggregatedStatistics.pageHitsOfClosedTransactions();
     }
 
+    @Override
     public long pageFaultsOfClosedTransactions() {
         return aggregatedStatistics.pageFaultsOfClosedTransactions();
     }
 
+    @Override
     public long pageHitsOfClosedTransactionCommits() {
         return aggregatedStatistics.pageHitsOfClosedTransactionCommits();
     }
 
+    @Override
     public long pageFaultsOfClosedTransactionCommits() {
         return aggregatedStatistics.pageFaultsOfClosedTransactionCommits();
     }
@@ -615,9 +672,4 @@ public class ExecutingQuery implements QueryTransactionStatisticsAggregator {
             aggregatedStatistics = new QueryTransactionStatisticsAggregator.ConcurrentImpl(current);
         }
     }
-
-    private record ObfuscatedQueryData(
-            String obfuscatedQueryText,
-            Function<InputPosition, InputPosition> obfuscatePosition,
-            MapValue obfuscatedQueryParameters) {}
 }

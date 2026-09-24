@@ -38,7 +38,7 @@ import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.topDown
 
 /**
- * If we have a query like `MATCH (n) CALL { WITH n DELETE DETACH n } IN TRANSACTIONS`, we know that deleting n will not interfere with the matching of nodes.
+ * If we have a query like `MATCH (n) CALL (n) { DETACH DELETE n } IN TRANSACTIONS`, we know that deleting n will not interfere with the matching of nodes.
  *
  * We therefore remove all `Eager` operators if we recognize such a pattern.
  */
@@ -86,6 +86,8 @@ case object truncateDatabaseDeeagerizer extends Rewriter {
           _,
           _,
           _,
+          _,
+          _,
           _
         ) if n == m => Some(n)
       case SubqueryForeach(
@@ -108,6 +110,8 @@ case object truncateDatabaseDeeagerizer extends Rewriter {
           _,
           _,
           _,
+          _,
+          _,
           _
         ) if n == m => Some(n)
       case Apply(
@@ -120,6 +124,8 @@ case object truncateDatabaseDeeagerizer extends Rewriter {
       case TransactionApply(
           NodeLeafPlan(n),
           DeletePlan(m),
+          _,
+          _,
           _,
           _,
           _,

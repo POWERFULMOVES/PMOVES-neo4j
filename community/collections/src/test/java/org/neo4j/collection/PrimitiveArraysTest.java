@@ -21,8 +21,6 @@ package org.neo4j.collection;
 
 import static org.apache.commons.lang3.ArrayUtils.EMPTY_INT_ARRAY;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.neo4j.collection.PrimitiveArrays.countUnique;
 import static org.neo4j.collection.PrimitiveArrays.intersect;
 import static org.neo4j.collection.PrimitiveArrays.subtract;
@@ -34,6 +32,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import org.assertj.core.api.AbstractAssert;
 import org.assertj.core.internal.Longs;
 import org.junit.jupiter.api.Test;
+import org.neo4j.collection.PrimitiveArrays.RemovalsAndAdditions;
 
 class PrimitiveArraysTest {
     private static final int[] ONE_INT = new int[] {1};
@@ -44,7 +43,7 @@ class PrimitiveArraysTest {
     void shouldDeduplicate() {
         int[] array = new int[] {1, 1, 2, 5, 6, 6};
 
-        assertArrayEquals(new int[] {1, 2, 5, 6}, PrimitiveArrays.deduplicate(array));
+        assertThat(PrimitiveArrays.deduplicate(array)).containsExactly(new int[] {1, 2, 5, 6});
     }
 
     @Test
@@ -64,10 +63,10 @@ class PrimitiveArraysTest {
             int[] dedupedExpected = new int[set.size()];
             Iterator<Integer> itr = set.iterator();
             for (int j = 0; j < dedupedExpected.length; j++) {
-                assertTrue(itr.hasNext());
+                assertThat(itr).hasNext();
                 dedupedExpected[j] = itr.next();
             }
-            assertArrayEquals(dedupedExpected, dedupedActual);
+            assertThat(dedupedActual).containsExactly(dedupedExpected);
         }
     }
 
@@ -117,7 +116,7 @@ class PrimitiveArraysTest {
 
     @Test
     void symDiff_shouldHandleNullInput() {
-        assertThat(PrimitiveArrays.symmetricDifference(null, null)).isEqualTo(null);
+        assertThat(PrimitiveArrays.symmetricDifference(null, null)).isNull();
         assertThat(PrimitiveArrays.symmetricDifference(null, EMPTY_INT_ARRAY)).isEmpty();
         assertThat(PrimitiveArrays.symmetricDifference(EMPTY_INT_ARRAY, null)).isEmpty();
         assertThat(PrimitiveArrays.symmetricDifference(null, ONE_INT)).isEqualTo(ONE_INT);
@@ -150,6 +149,51 @@ class PrimitiveArraysTest {
         assertThat(PrimitiveArrays.symmetricDifference(
                         new int[] {2, 3, 4, 7, 8, 9, 12, 16, 19}, new int[] {4, 6, 9, 11, 12, 15}))
                 .containsExactly(2, 3, 6, 7, 8, 11, 15, 16, 19);
+    }
+
+    // toAdditionsAndRemovals()
+
+    @Test
+    void toRemovalsAndAdditionsShouldHandleNullInput() {
+        assertThat(PrimitiveArrays.toRemovalsAndAdditions(null, null)).isEqualTo(RemovalsAndAdditions.NO_CHANGES);
+        assertThat(PrimitiveArrays.toRemovalsAndAdditions(null, EMPTY_INT_ARRAY))
+                .isEqualTo(RemovalsAndAdditions.NO_CHANGES);
+        ;
+        assertThat(PrimitiveArrays.toRemovalsAndAdditions(EMPTY_INT_ARRAY, null))
+                .isEqualTo(RemovalsAndAdditions.NO_CHANGES);
+        ;
+        assertThat(PrimitiveArrays.toRemovalsAndAdditions(null, ONE_INT))
+                .isEqualTo(new RemovalsAndAdditions(EMPTY_INT_ARRAY, ONE_INT));
+        assertThat(PrimitiveArrays.toRemovalsAndAdditions(ONE_INT, null))
+                .isEqualTo(new RemovalsAndAdditions(ONE_INT, EMPTY_INT_ARRAY));
+    }
+
+    @Test
+    void toRemovalsAndAdditionsShouldHandleNonIntersectingArrays() {
+        assertThat(PrimitiveArrays.toRemovalsAndAdditions(new int[] {1, 2, 3}, new int[] {4, 5, 6}))
+                .isEqualTo(new RemovalsAndAdditions(new int[] {1, 2, 3}, new int[] {4, 5, 6}));
+
+        assertThat(PrimitiveArrays.toRemovalsAndAdditions(new int[] {14, 15, 16}, new int[] {1, 2, 3}))
+                .isEqualTo(new RemovalsAndAdditions(new int[] {14, 15, 16}, new int[] {1, 2, 3}));
+    }
+
+    @Test
+    void toRemovalsAndAdditionsShouldHandleIntersectingArrays() {
+        assertThat(PrimitiveArrays.toRemovalsAndAdditions(new int[] {1, 2, 3}, new int[] {3, 4, 5}))
+                .isEqualTo(new RemovalsAndAdditions(new int[] {1, 2}, new int[] {4, 5}));
+
+        assertThat(PrimitiveArrays.toRemovalsAndAdditions(new int[] {3, 4, 5}, new int[] {1, 2, 3, 4}))
+                .isEqualTo(new RemovalsAndAdditions(new int[] {5}, new int[] {1, 2}));
+    }
+
+    @Test
+    void toRemovalsAndAdditionsShouldHandleComplexIntersectingArraysWithGaps() {
+        assertThat(PrimitiveArrays.toRemovalsAndAdditions(
+                        new int[] {4, 6, 9, 11, 12, 15}, new int[] {2, 3, 4, 7, 8, 9, 12, 16, 19}))
+                .isEqualTo(new RemovalsAndAdditions(new int[] {6, 11, 15}, new int[] {2, 3, 7, 8, 16, 19}));
+        assertThat(PrimitiveArrays.toRemovalsAndAdditions(
+                        new int[] {2, 3, 4, 7, 8, 9, 12, 16, 19}, new int[] {4, 6, 9, 11, 12, 15}))
+                .isEqualTo(new RemovalsAndAdditions(new int[] {2, 3, 7, 8, 16, 19}, new int[] {6, 11, 15}));
     }
 
     // count unique

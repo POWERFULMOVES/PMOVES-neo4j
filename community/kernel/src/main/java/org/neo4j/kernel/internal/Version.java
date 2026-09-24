@@ -27,7 +27,7 @@ import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-public class Version {
+public final class Version {
     static final String CUSTOM_VERSION_SETTING = "internal.neo4j.custom.version";
     private static final String DEFAULT_DEV_VERSION = "dev";
     private static final String KERNEL_ARTIFACT_ID = "neo4j-kernel";
@@ -37,11 +37,6 @@ public class Version {
         var versionString = getProperty(CUSTOM_VERSION_SETTING, getManifestVersion());
         return Objects.toString(versionString, DEFAULT_DEV_VERSION);
     }
-
-    private final String artifactId;
-    private final String title;
-    private final String version;
-    private final String releaseVersion;
 
     public static Version getKernel() {
         return KERNEL_VERSION;
@@ -57,6 +52,20 @@ public class Version {
 
     public static String getManifestVersion() {
         return Version.class.getPackage().getImplementationVersion();
+    }
+
+    private final String artifactId;
+    private final String title;
+    private final String version;
+    private final String releaseVersion;
+
+    Version(String artifactId, String version) {
+        requireNonNull(artifactId);
+        requireNonNull(version);
+        this.artifactId = artifactId;
+        this.title = artifactId;
+        this.version = version;
+        this.releaseVersion = parseReleaseVersion(version);
     }
 
     @Override
@@ -82,7 +91,7 @@ public class Version {
      * @return a detailed version string, including source control revision information if that is available, suitable
      * for internal use, logging and debugging.
      */
-    public final String getVersion() {
+    public String getVersion() {
         return version;
     }
 
@@ -91,15 +100,6 @@ public class Version {
      */
     public String getReleaseVersion() {
         return releaseVersion;
-    }
-
-    protected Version(String artifactId, String version) {
-        requireNonNull(artifactId);
-        requireNonNull(version);
-        this.artifactId = artifactId;
-        this.title = artifactId;
-        this.version = version;
-        this.releaseVersion = parseReleaseVersion(this.version);
     }
 
     /**

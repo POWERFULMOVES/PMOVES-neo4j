@@ -27,7 +27,6 @@ import org.neo4j.cypher.internal.ast.Statement
 import org.neo4j.cypher.internal.ast.SubqueryCall
 import org.neo4j.cypher.internal.expressions.AutoExtractedParameter
 import org.neo4j.cypher.internal.expressions.Expression
-import org.neo4j.cypher.internal.frontend.phases.BaseState
 import org.neo4j.cypher.internal.util.Foldable
 import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.Rewritable
@@ -59,6 +58,9 @@ sealed trait Fragment extends Fragment.RewritingSupport {
 
   /** Whether this fragment produces final query output */
   def producesResults: Boolean
+
+  /** Columns yielded as final query output; empty when the fragment produces no results */
+  def resultColumns: Seq[String] = if (producesResults) outputColumns else Seq.empty
 
   /** ExecutionPlanDescription */
   def description: Fragment.Description
@@ -114,10 +116,19 @@ object Fragment {
     override val pos: InputPosition = InputPosition.NONE
   }
 
+  sealed trait SubqueryImport
+
+  object SubqueryImport {
+    case object ScopeClause extends SubqueryImport
+    case object ImportingWith extends SubqueryImport
+  }
+
   final case class Apply(
     input: Fragment.Chain,
     inner: Fragment,
-    inTransactionsParameters: Option[SubqueryCall.InTransactionsParameters]
+    inTransactionsParameters: Option[SubqueryCall.InTransactionsParameters],
+    optional: Boolean = false,
+    importMode: SubqueryImport = SubqueryImport.ImportingWith
   )(
     val pos: InputPosition
   ) extends Fragment.Segment {
@@ -173,7 +184,6 @@ object Fragment {
   final case class Exec(
     input: Fragment.Chain,
     query: Statement,
-    localQuery: BaseState,
     remoteQuery: RemoteQuery,
     sensitive: Boolean,
     outputColumns: Seq[String]

@@ -19,10 +19,11 @@
  */
 package org.neo4j.kernel.impl.pagecache;
 
+import static java.util.function.Function.identity;
+import static org.neo4j.configuration.GraphDatabaseSettings.pagecache_async_io;
 import static org.neo4j.configuration.GraphDatabaseSettings.pagecache_memory;
 import static org.neo4j.configuration.GraphDatabaseSettings.preallocate_store_files;
 import static org.neo4j.configuration.SettingValueParsers.BYTES;
-import static org.neo4j.io.mem.MemoryAllocator.createAllocator;
 import static org.neo4j.memory.MemoryGroup.PAGE_CACHE;
 
 import java.util.function.Function;
@@ -32,17 +33,13 @@ import org.neo4j.configuration.pagecache.ConfigurableIOBufferFactory;
 import org.neo4j.internal.unsafe.UnsafeUtil;
 import org.neo4j.io.ByteUnit;
 import org.neo4j.io.fs.FileSystemAbstraction;
-import org.neo4j.io.mem.MemoryAllocator;
 import org.neo4j.io.os.OsBeanUtil;
 import org.neo4j.io.pagecache.PageCache;
-import org.neo4j.io.pagecache.PageSwapperFactory;
-import org.neo4j.io.pagecache.impl.SingleFilePageSwapperFactory;
 import org.neo4j.io.pagecache.impl.muninn.MuninnPageCache;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.logging.InternalLog;
 import org.neo4j.memory.MachineMemory;
 import org.neo4j.memory.MemoryPools;
-import org.neo4j.memory.MemoryTracker;
 import org.neo4j.scheduler.JobScheduler;
 import org.neo4j.time.SystemNanoClock;
 
@@ -65,7 +62,7 @@ public class ConfiguringPageCacheFactory {
             JobScheduler scheduler,
             SystemNanoClock clock,
             MemoryPools memoryPools) {
-        this(fs, config, pageCacheTracer, log, scheduler, clock, memoryPools, c -> c);
+        this(fs, config, pageCacheTracer, log, scheduler, clock, memoryPools, identity());
     }
 
     /**
@@ -107,30 +104,33 @@ public class ConfiguringPageCacheFactory {
     }
 
     private PageCache createPageCache() {
+        checkAccessMode(log);
         long pageCacheMaxMemory = getPageCacheMaxMemory(config);
+        boolean asyncIO = getAsyncSetting();
+
         var memoryPool = memoryPools.pool(PAGE_CACHE, pageCacheMaxMemory, false, null);
         var memoryTracker = memoryPool.getPoolMemoryTracker();
-        var swapperFactory = createAndConfigureSwapperFactory(fs, pageCacheTracer, memoryTracker, log);
-        MemoryAllocator memoryAllocator = buildMemoryAllocator(
-                pageCacheMaxMemory,
-                config.get(GraphDatabaseInternalSettings.page_cache_allocation_grab_size),
-                memoryTracker);
         var bufferFactory = new ConfigurableIOBufferFactory(config, memoryTracker);
-        MuninnPageCache.Configuration configuration = MuninnPageCache.config(memoryAllocator)
+        var configuration = MuninnPageCache.forMemory(pageCacheMaxMemory)
                 .memoryTracker(memoryTracker)
+                .preTouch(config.get(GraphDatabaseInternalSettings.page_cache_allocator_pre_touch))
+                .log(log::info)
                 .bufferFactory(bufferFactory)
                 .reservedPageBytes(PageCache.RESERVED_BYTES)
                 .preallocateStoreFiles(config.get(preallocate_store_files))
                 .clock(clock)
                 .pageCacheTracer(pageCacheTracer)
+                .withAsyncIO(asyncIO)
                 .closeAllocatorOnShutdown(config.get(GraphDatabaseInternalSettings.close_allocator_on_shutdown));
-        configuration = pageCacheConfigurator.apply(configuration);
-        return new MuninnPageCache(swapperFactory, scheduler, configuration);
+        return new MuninnPageCache(fs, scheduler, pageCacheConfigurator.apply(configuration));
     }
 
-    private static MemoryAllocator buildMemoryAllocator(
-            long pageCacheMaxMemory, Long grabSize, MemoryTracker memoryTracker) {
-        return createAllocator(pageCacheMaxMemory, grabSize, memoryTracker);
+    private Boolean getAsyncSetting() {
+        Boolean async = config.get(pagecache_async_io);
+        if (async) {
+            log.info("Page cache is configured to use async IO provider, if available.");
+        }
+        return async;
     }
 
     private long getPageCacheMaxMemory(Config config) {
@@ -176,7 +176,7 @@ public class ConfiguringPageCacheFactory {
                     // the per page overhead, 8192 / 72 ~= 114, plus leaving some extra room on the heap for the rest
                     // of the system. This means that we won't heuristically try to create a page cache that is too
                     // large to fit on the heap.
-                    return Math.min(max, Math.max(min, heuristic));
+                    return Math.clamp(heuristic, min, max);
                 }
             } catch (Exception ignore) {
             }
@@ -190,7 +190,7 @@ public class ConfiguringPageCacheFactory {
         String pageCacheMemory = pageCacheMemoryBytes != null
                 ? ByteUnit.bytesToStringWithoutScientificNotation(pageCacheMemoryBytes)
                 : "<not specified>";
-        long totalPhysicalMemory = OsBeanUtil.getTotalPhysicalMemory();
+        long totalPhysicalMemory = OsBeanUtil.getTotalMemory();
         String totalPhysicalMem = (totalPhysicalMemory == OsBeanUtil.VALUE_UNAVAILABLE)
                 ? "?"
                 : "" + ByteUnit.bytesToString(totalPhysicalMemory);
@@ -203,13 +203,11 @@ public class ConfiguringPageCacheFactory {
         log.info(msg);
     }
 
-    private static PageSwapperFactory createAndConfigureSwapperFactory(
-            FileSystemAbstraction fs, PageCacheTracer pageCacheTracer, MemoryTracker memoryTracker, InternalLog log) {
+    private static void checkAccessMode(InternalLog log) {
         if (!UnsafeUtil.unsafeByteBufferAccessAvailable()) {
             log.warn("Reflection access to java.nio.DirectByteBuffer is not available, using fallback mode. "
                     + "This could have negative impact on performance and memory usage. "
                     + "Consider adding --add-opens=java.base/java.nio=ALL-UNNAMED to VM options.");
         }
-        return new SingleFilePageSwapperFactory(fs, pageCacheTracer, memoryTracker);
     }
 }

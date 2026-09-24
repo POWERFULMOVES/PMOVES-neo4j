@@ -23,9 +23,9 @@ import org.neo4j.cypher.internal.ast.prettifier.Prettifier
 import org.neo4j.cypher.internal.compiler.planner.logical.LogicalPlanningContext
 import org.neo4j.cypher.internal.compiler.planner.logical.idp.expandSolverStep
 import org.neo4j.cypher.internal.compiler.planner.logical.idp.extractShortestPathPredicates
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.projection.MaybeReportedProjections
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
-import org.neo4j.cypher.internal.expressions.FunctionName
 import org.neo4j.cypher.internal.expressions.PathExpression
 import org.neo4j.cypher.internal.expressions.PathStep
 import org.neo4j.cypher.internal.expressions.PatternElement
@@ -42,12 +42,13 @@ import org.neo4j.cypher.internal.ir.ordering.InterestingOrder
 import org.neo4j.cypher.internal.logical.plans.Ascending
 import org.neo4j.cypher.internal.logical.plans.Expand.VariablePredicate
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
-import org.neo4j.cypher.internal.rewriting.rewriters.projectNamedPaths
+import org.neo4j.cypher.internal.notification.ExhaustiveShortestPathForbiddenNotification
+import org.neo4j.cypher.internal.rewriting.rewriters.ProjectNamedPaths
+import org.neo4j.cypher.internal.util.FunctionName
 import org.neo4j.cypher.internal.util.Rewritable.RewritableAny
 import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.topDown
 import org.neo4j.exceptions.ExhaustiveShortestPathForbiddenException.exhaustiveShortestPath
-import org.neo4j.notifications.ExhaustiveShortestPathForbiddenNotification
 
 case object planShortestRelationships {
 
@@ -115,7 +116,7 @@ case object planShortestRelationships {
   private def createPathExpression(pattern: PatternElement): PathExpression = {
     val pos = pattern.position
     val path = PatternPart(pattern)
-    val step: PathStep = projectNamedPaths.patternPartPathExpression(path)
+    val step: PathStep = ProjectNamedPaths.patternPartPathExpression(path)
     PathExpression(step)(pos)
   }
 
@@ -247,7 +248,9 @@ case object planShortestRelationships {
         rhsArgument,
         from,
         rhsArgument.availableSymbols,
-        context
+        context,
+        alwaysTrailSemantics =
+          true // Mixing shortestPath()/allShortestPath() with explicit match modes is not allowed, therefore we can always plan Trail-semantics which is the default match mode.
       )
 
     // Expressions solved in var expand
@@ -256,7 +259,7 @@ case object planShortestRelationships {
         rhsVarExpand.plan.id
       ).asSinglePlannerQuery.lastQueryGraph.selections.predicates
 
-    val rhsProjection = lpp.planRegularProjection(rhsVarExpand.plan, map, Some(map), context)
+    val rhsProjection = lpp.planRegularProjection(rhsVarExpand.plan, map, MaybeReportedProjections(Some(map)), context)
 
     // Filter out predicates solved in var expand
     val filteredPredicates =
@@ -272,13 +275,14 @@ case object planShortestRelationships {
     val column = varFor(context.staticComponents.anonymousVariableNameGenerator.nextName)
 
     val rhsProjMap = Map(column -> lengthOfPath)
-    val rhsProjected = lpp.planRegularProjection(rhsFiltered, rhsProjMap, Some(rhsProjMap), context)
+    val rhsProjected =
+      lpp.planRegularProjection(rhsFiltered, rhsProjMap, MaybeReportedProjections(Some(rhsProjMap)), context)
     val sortDescription = Seq(Ascending(column))
     val plan =
       if (shortestRelationship.single) {
         lpp.planTop(
           rhsProjected,
-          SignedDecimalIntegerLiteral("1")(pos),
+          SignedDecimalIntegerLiteral("1")(pos.zeroLength),
           sortDescription,
           Seq.empty,
           InterestingOrder.empty,

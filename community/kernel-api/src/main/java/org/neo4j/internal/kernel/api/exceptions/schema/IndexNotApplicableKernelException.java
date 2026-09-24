@@ -21,14 +21,44 @@ package org.neo4j.internal.kernel.api.exceptions.schema;
 
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
+import org.neo4j.gqlstatus.GqlHelper;
+import org.neo4j.gqlstatus.GqlParams;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.kernel.api.exceptions.Status;
+import org.neo4j.logging.Log;
 
 public class IndexNotApplicableKernelException extends KernelException {
-    public IndexNotApplicableKernelException(String msg) {
-        super(Status.Schema.IndexNotApplicable, msg);
+    private IndexNotApplicableKernelException(ErrorGqlStatusObject gqlStatusObject, String msg) {
+        super(gqlStatusObject, Status.Schema.IndexNotApplicable, msg);
     }
 
-    public IndexNotApplicableKernelException(ErrorGqlStatusObject gqlStatusObject, String msg) {
-        super(gqlStatusObject, Status.Schema.IndexNotApplicable, msg);
+    public static IndexNotApplicableKernelException internalError(String msgTitle, String message) {
+        var gql = GqlHelper.get50N00(msgTitle, message);
+        return new IndexNotApplicableKernelException(gql, message);
+    }
+
+    public static IndexNotApplicableKernelException indexNotApplicable(Log log, String indexName, String msg) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_50N15)
+                .withParam(GqlParams.StringParam.idx, indexName)
+                .build();
+
+        var e = new IndexNotApplicableKernelException(gql, msg);
+        log.error(msg, e);
+        return e;
+    }
+
+    public static IndexNotApplicableKernelException vectorIndexDimensionalityMismatch(
+            String indexName, int indexDim, int vectorDim) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N65)
+                .withParam(GqlParams.StringParam.idx, indexName)
+                .withParam(GqlParams.NumberParam.dim1, indexDim)
+                .withParam(GqlParams.NumberParam.dim2, vectorDim)
+                .build();
+
+        return new IndexNotApplicableKernelException(
+                gql,
+                "Index query vector has a dimensionality of %d, but indexed vectors have %d."
+                        .formatted(indexDim, vectorDim));
     }
 }

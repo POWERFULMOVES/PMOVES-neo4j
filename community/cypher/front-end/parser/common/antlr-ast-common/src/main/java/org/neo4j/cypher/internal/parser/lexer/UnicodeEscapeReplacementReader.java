@@ -25,14 +25,19 @@ import static org.antlr.v4.runtime.IntStream.UNKNOWN_SOURCE_NAME;
 import java.io.IOException;
 import java.io.Reader;
 import java.nio.CharBuffer;
+import java.util.Collections;
 import org.antlr.v4.runtime.CharStream;
 import org.antlr.v4.runtime.CodePointBuffer;
 import org.eclipse.collections.impl.list.mutable.primitive.IntArrayList;
 import org.neo4j.cypher.internal.util.InputPosition;
+import org.neo4j.gqlstatus.ErrorGqlStatusObject;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
+import org.neo4j.gqlstatus.GqlParams;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 
 /** Reader that replace cypher unicode escape codes and keep track of query offsets. */
 public class UnicodeEscapeReplacementReader extends Reader {
-    public static int DEFAULT_BUFFER_SIZE = 4096;
+    public static final int DEFAULT_BUFFER_SIZE = 4096;
     private final String cypher;
     private int srcPos;
     private OffsetTableBuilder offsetTable = null;
@@ -124,12 +129,12 @@ public class UnicodeEscapeReplacementReader extends Reader {
             return (char) Integer.parseInt(hexString, 16);
         } catch (Exception e) {
             var pos = inputPositionAt(charPos + 2);
-            var m = "Invalid input '%s': expected four hexadecimal digits specifying a unicode character";
-            throw new InvalidUnicodeLiteral(m.formatted(hexString), charPos, pos.line(), pos.column());
+            throw new InvalidUnicodeLiteral(hexString, pos.offset(), pos.line(), pos.column());
         }
     }
 
     public int[] offsetTable() {
+        if (offsetTable != null) offsetTable.updateOffsets(srcPos, ' ', ' ');
         return offsetTable != null ? offsetTable.offsets.toArray() : null;
     }
 
@@ -163,9 +168,19 @@ public class UnicodeEscapeReplacementReader extends Reader {
 
     public static class InvalidUnicodeLiteral extends RuntimeException {
         public final int offset, line, column;
+        public final ErrorGqlStatusObject gqlStatusObject;
 
-        private InvalidUnicodeLiteral(String message, int offset, int line, int column) {
-            super(message);
+        private static final String m =
+                "Invalid input '%s': expected four hexadecimal digits specifying a unicode character";
+
+        private InvalidUnicodeLiteral(String hexString, int offset, int line, int column) {
+            super(m.formatted(hexString));
+            var gqlCauseBuilder = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42I06)
+                    .withParam(GqlParams.StringParam.input, hexString)
+                    .withParam(
+                            GqlParams.ListParam.valueList,
+                            Collections.singletonList("four hexadecimal digits specifying a unicode character"));
+            this.gqlStatusObject = gqlCauseBuilder.build();
             this.offset = offset;
             this.line = line;
             this.column = column;

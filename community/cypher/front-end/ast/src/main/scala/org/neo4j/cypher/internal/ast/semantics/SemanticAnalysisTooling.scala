@@ -17,21 +17,25 @@
 package org.neo4j.cypher.internal.ast.semantics
 
 import org.neo4j.cypher.internal.ast.semantics.SemanticExpressionCheck.TypeMismatchContext
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.DisableTypeCheckingInSemanticAnalysis
 import org.neo4j.cypher.internal.expressions.DoubleLiteral
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.Expression.DefaultTypeMismatchMessageGenerator
 import org.neo4j.cypher.internal.expressions.Expression.SemanticContext
+import org.neo4j.cypher.internal.expressions.ExpressionWithComputedDependencies
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
 import org.neo4j.cypher.internal.expressions.IntegerLiteral
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.Parameter
+import org.neo4j.cypher.internal.expressions.StringDecimalInteger
 import org.neo4j.cypher.internal.expressions.TypeSignature
+import org.neo4j.cypher.internal.notification.InternalNotification
 import org.neo4j.cypher.internal.util.ASTNode
 import org.neo4j.cypher.internal.util.InputPosition
-import org.neo4j.cypher.internal.util.InternalNotification
 import org.neo4j.cypher.internal.util.symbols.CTAny
 import org.neo4j.cypher.internal.util.symbols.CypherType
 import org.neo4j.cypher.internal.util.symbols.TypeSpec
+import org.neo4j.cypher.internal.util.symbols.invariantTypeSpec
 import org.neo4j.gqlstatus.ErrorGqlStatusObject
 import org.neo4j.gqlstatus.GqlParams
 
@@ -148,6 +152,22 @@ trait SemanticAnalysisTooling {
     }
   }
 
+  def expectTypeWithoutCoercion(
+    possibleTypes: => TypeSpec,
+    expression: Expression
+  ): SemanticCheck = (s: SemanticState) => {
+    expression match {
+      case v: LogicalVariable =>
+        expectType(
+          s,
+          possibleTypes,
+          expression,
+          TypeMismatchContext.TypeMismatchContextVal(GqlParams.StringParam.ident.process(v.name))
+        )
+      case _ => expectType(s, possibleTypes, expression, TypeMismatchContext.EMPTY, coercion = false)
+    }
+  }
+
   def expectType(
     possibleTypes: => TypeSpec,
     expression: Expression,
@@ -162,35 +182,48 @@ trait SemanticAnalysisTooling {
     possibleTypes: => TypeSpec,
     expression: Expression,
     typeMismatchVal: TypeMismatchContext.TypeMismatchContextVal,
-    messageGen: (String, String) => String = DefaultTypeMismatchMessageGenerator
+    messageGen: (String, String) => String = DefaultTypeMismatchMessageGenerator,
+    coercion: Boolean = true
   ): SemanticCheckResult = {
-    s.expectType(expression, possibleTypes) match {
+    s.expectType(expression, possibleTypes, coercion) match {
       case (ss, TypeSpec.none) =>
-        val existingTypesString = ss.expressionType(expression).specified.mkString(", ", " or ")
+        val specifiedExistingTypes = ss.expressionType(expression).specified
+        // If no type is returned, then we don't know the type, so default to Any
+        val existingTypesString =
+          if (specifiedExistingTypes.isEmpty) "Any" else specifiedExistingTypes.mkString(", ", " or ")
+        val existingCypherTypeString =
+          TypeSpec.cypherTypeForTypeSpec(specifiedExistingTypes).normalizedCypherTypeString()
         val expectedTypesString = possibleTypes.mkString(", ", " or ")
         expression match {
           case p: Parameter
             if !p.name.matches(
               """\s\sAUTO(INT|STRING|DOUBLE|LIST)\d+"""
             ) => // See literalReplacement for list of all AUTOs
-            SemanticCheckResult.error(
-              ss,
-              SemanticError.invalidEntityType(
-                existingTypesString,
-                s"${typeMismatchVal.txt} parameter: ${p.name}",
-                possibleTypes.toStrings.toList,
-                "Type mismatch for parameter '" + p.name + "': " + messageGen(expectedTypesString, existingTypesString),
-                expression.position
+            if (ss.features.contains(DisableTypeCheckingInSemanticAnalysis)) {
+              SemanticCheckResult.success(ss)
+            } else {
+              SemanticCheckResult.error(
+                ss,
+                SemanticError.invalidEntityType(
+                  existingCypherTypeString,
+                  s"${typeMismatchVal.txt} parameter: ${p.name}",
+                  possibleTypes.toCypherStrings.toList,
+                  "Type mismatch for parameter '" + p.name + "': " + messageGen(
+                    expectedTypesString,
+                    existingTypesString
+                  ),
+                  expression.position
+                )
               )
-            )
+            }
           case _ =>
             val semanticError =
               if (typeMismatchVal == TypeMismatchContext.EMPTY) {
                 // No information is available about the context, so fall back to GQL code 22NB1:
                 //   Type mismatch: expected to be one of { $s } but was { $s }."
                 SemanticError.typeMismatch(
-                  possibleTypes.toStrings.toList,
-                  existingTypesString,
+                  possibleTypes.toCypherStrings.toList,
+                  existingCypherTypeString,
                   "Type mismatch: " + messageGen(expectedTypesString, existingTypesString),
                   expression.position
                 )
@@ -198,18 +231,19 @@ trait SemanticAnalysisTooling {
                 // Information about the context is available, so use it using GQL code 22N27:
                 //   Invalid input { %s } for { %s }. Expected to be one of { %s }.
                 SemanticError.invalidEntityType(
-                  existingTypesString,
+                  existingCypherTypeString,
                   typeMismatchVal.txt,
-                  possibleTypes.toStrings.toList,
+                  possibleTypes.toCypherStrings.toList,
                   "Type mismatch: " + messageGen(expectedTypesString, existingTypesString),
                   expression.position
                 )
               }
 
-            SemanticCheckResult.error(
-              ss,
-              semanticError
-            )
+            if (ss.features.contains(DisableTypeCheckingInSemanticAnalysis)) {
+              SemanticCheckResult.success(ss)
+            } else {
+              SemanticCheckResult.error(ss, semanticError)
+            }
         }
       case (ss, _) =>
         SemanticCheckResult.success(ss)
@@ -224,12 +258,12 @@ trait SemanticAnalysisTooling {
         case (accumulator @ (Seq(), _, _), _) =>
           accumulator
         case ((possibilities, argIdx, r1), arg) =>
-          val argTypes = possibilities.foldLeft(TypeSpec.none) { _ | _.argumentTypes.head.covariant }
+          val argTypes = possibilities.foldLeft(TypeSpec.none) { (acc, sig) => acc | sig.argumentTypes.head.covariant }
 
           val info = expression match {
-            case FunctionInvocation(functionName, _, _, _, _) =>
+            case f: FunctionInvocation =>
               TypeMismatchContext.TypeMismatchContextVal(
-                s"argument at index $argIdx of function ${functionName.name}()"
+                s"argument at index $argIdx of function ${f.name}()"
               )
             case _ => TypeMismatchContext.EMPTY
           }
@@ -247,7 +281,7 @@ trait SemanticAnalysisTooling {
 
     val outputType = remainingSignatures match {
       case Seq() => TypeSpec.all
-      case _     => remainingSignatures.foldLeft(TypeSpec.none) { _ | _.outputType.invariant }
+      case _     => remainingSignatures.foldLeft(TypeSpec.none) { (acc, sig) => acc | sig.outputType.invariant }
     }
 
     specifyType(outputType, expression)(result.state) match {
@@ -298,6 +332,13 @@ trait SemanticAnalysisTooling {
 
   def typeSwitch(expr: Expression)(choice: TypeSpec => SemanticCheck): SemanticCheck =
     SemanticCheck.fromState(state => choice(state.expressionType(expr).actual))
+
+  def validNumber(long: StringDecimalInteger): Boolean =
+    try {
+      long.value.isInstanceOf[Long]
+    } catch {
+      case _: java.lang.NumberFormatException => false
+    }
 
   def validNumber(long: IntegerLiteral): Boolean =
     try {
@@ -360,6 +401,36 @@ trait SemanticAnalysisTooling {
     SemanticCheckResult.success(state.importValuesFromScope(scopeToImportFrom))
   }
 
+  /**
+   * If the subquery expression is a property in a creating pattern
+   * the created variable should not be imported into the subquery expression.
+   * In [[SemanticPatternCheck.declareVariablesInSeparateScope]] we store the
+   * newly created variables to access and escape them from the import here.
+   */
+  def importValuesFromParentInExpressionWithScopeDependencies(expr: ExpressionWithComputedDependencies)
+    : SemanticCheck = {
+    (state: SemanticState) =>
+      val outerLoc = state.currentScope.parent.get
+      val outerParentScope = outerLoc.parent.fold(Scope.empty)(_.scope)
+      val escapedSymbols = state.recordedScopes.get(expr).fold(Set.empty[String])(_.scope.symbolNames)
+      val dependencies = if (expr.computedScopeDependencies.isDefined)
+        outerParentScope.symbolNames.diff(expr.dependencies.map(_.name))
+      else Set.empty
+      SemanticCheckResult.success(state
+        .importValuesFromScope(outerLoc.scope, escapedSymbols)
+        .importValuesFromScope(outerParentScope, escapedSymbols ++ dependencies))
+  }
+
+  def importValuesFromParentInExpression(expr: Expression): SemanticCheck = {
+    (state: SemanticState) =>
+      val outerLoc = state.currentScope.parent.get
+      val outerParentScope = outerLoc.parent.fold(Scope.empty)(_.scope)
+      val escapedSymbols = state.recordedScopes.get(expr).fold(Set.empty[String])(_.scope.symbolNames)
+      SemanticCheckResult.success(state
+        .importValuesFromScope(outerLoc.scope, escapedSymbols)
+        .importValuesFromScope(outerParentScope, escapedSymbols ++ outerLoc.scope.symbolNames))
+  }
+
   def importValuesFromScope(scope: Scope): SemanticCheck = {
     SemanticCheck.fromFunction(state => SemanticCheckResult.success(state.importValuesFromScope(scope)))
   }
@@ -369,10 +440,9 @@ trait SemanticAnalysisTooling {
       if (!s.features(feature))
         SemanticCheckResult.error(
           s,
-          FeatureError(
-            s"$msg is not available in this implementation of Cypher " +
-              s"due to lack of support for $feature.",
+          FeatureError.notAvailableInThisImplementation(
             feature,
+            msg,
             position
           )
         )
@@ -380,34 +450,10 @@ trait SemanticAnalysisTooling {
         SemanticCheckResult.success(s)
     }
 
-  def error(msg: String, position: InputPosition): SemanticCheck = SemanticCheck.error(SemanticError(msg, position))
-
   def error(gqlStatusObject: ErrorGqlStatusObject, msg: String, position: InputPosition): SemanticCheck =
     SemanticCheck.error(SemanticError(gqlStatusObject, msg, position))
 
   def error(semanticError: SemanticError): SemanticCheck = SemanticCheck.error(semanticError)
-
-  def specifiedNumberOutOfRangeError(
-    component: String,
-    valueType: String,
-    lower: Number,
-    upper: Number,
-    inputValue: String,
-    legacyMessage: String,
-    position: InputPosition
-  ): SemanticCheck =
-    SemanticCheck.error(SemanticError.specifiedNumberOutOfRange(
-      component,
-      valueType,
-      lower,
-      upper,
-      inputValue,
-      legacyMessage,
-      position
-    ))
-
-  def invalidPlacementOfUseClauseError(position: InputPosition): SemanticCheck =
-    SemanticCheck.error(SemanticError.invalidPlacementOfUseClause(position))
 
   def warn(notification: InternalNotification): SemanticCheck = SemanticCheck.warn(notification)
 
@@ -415,6 +461,13 @@ trait SemanticAnalysisTooling {
     types(expression)(_).unwrapLists
 
   def types(expression: Expression): TypeGenerator = _.expressionType(expression).actual
+
+  def unwrapLists(typeGen: TypeGenerator): TypeGenerator =
+    (state: SemanticState) => typeGen(state).unwrapLists
+
+  def ifOkChainAll(checks: SemanticCheck*): SemanticCheck = {
+    checks.foldLeft(SemanticCheck.success)(_ ifOkChain _)
+  }
 }
 
 object SemanticAnalysisTooling {

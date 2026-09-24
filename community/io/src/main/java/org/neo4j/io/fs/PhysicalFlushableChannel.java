@@ -64,7 +64,7 @@ public class PhysicalFlushableChannel implements FlushableChannel {
         this.channel = channel;
         this.scopedBuffer = scopedBuffer;
         this.buffer = scopedBuffer.getBuffer();
-        this.checksumView = this.buffer.duplicate();
+        this.checksumView = this.buffer.duplicate().order(buffer.order());
         checksum = CHECKSUM_FACTORY.get();
     }
 
@@ -164,6 +164,11 @@ public class PhysicalFlushableChannel implements FlushableChannel {
     @Override
     public PhysicalFlushableChannel putVersion(byte version) throws IOException {
         return put(version);
+    }
+
+    @Override
+    public WritableChannel putAppendIndex(long appendIndex) throws IOException {
+        return putLong(appendIndex);
     }
 
     @Override

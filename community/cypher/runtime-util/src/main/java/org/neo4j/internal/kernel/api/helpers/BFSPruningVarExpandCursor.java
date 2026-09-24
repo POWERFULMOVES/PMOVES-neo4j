@@ -23,7 +23,6 @@ import static org.neo4j.internal.kernel.api.helpers.RelationshipSelections.allCu
 import static org.neo4j.internal.kernel.api.helpers.RelationshipSelections.incomingCursor;
 import static org.neo4j.internal.kernel.api.helpers.RelationshipSelections.outgoingCursor;
 import static org.neo4j.kernel.api.StatementConstants.NO_SUCH_NODE;
-import static org.neo4j.kernel.impl.newapi.Cursors.emptyTraversalCursor;
 
 import java.util.function.LongPredicate;
 import java.util.function.Predicate;
@@ -32,13 +31,13 @@ import org.neo4j.collection.trackable.HeapTrackingArrayDeque;
 import org.neo4j.collection.trackable.HeapTrackingCollections;
 import org.neo4j.collection.trackable.HeapTrackingLongHashSet;
 import org.neo4j.collection.trackable.HeapTrackingLongLongHashMap;
-import org.neo4j.internal.kernel.api.Cursor;
 import org.neo4j.internal.kernel.api.DefaultCloseListenable;
 import org.neo4j.internal.kernel.api.KernelReadTracer;
 import org.neo4j.internal.kernel.api.NodeCursor;
 import org.neo4j.internal.kernel.api.Read;
 import org.neo4j.internal.kernel.api.RelationshipTraversalCursor;
 import org.neo4j.internal.kernel.api.RelationshipTraversalEntities;
+import org.neo4j.lang.AutoCloseablePlus;
 import org.neo4j.memory.MemoryTracker;
 
 /**
@@ -68,7 +67,7 @@ import org.neo4j.memory.MemoryTracker;
  * }
  * </pre>
  */
-public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable implements Cursor {
+public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable implements AutoCloseablePlus {
     final int[] types;
     final Read read;
     final int maxDepth;
@@ -78,6 +77,8 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
     final LongPredicate nodeFilter;
     final Predicate<RelationshipTraversalEntities> relFilter;
     final long soughtEndNode;
+
+    public abstract boolean next();
 
     public static BFSPruningVarExpandCursor outgoingExpander(
             long startNode,
@@ -90,7 +91,8 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
             LongPredicate nodeFilter,
             Predicate<RelationshipTraversalEntities> relFilter,
             long soughtEndNode,
-            MemoryTracker memoryTracker) {
+            MemoryTracker memoryTracker,
+            boolean nodeUniqueness) {
         return new OutgoingBFSPruningVarExpandCursor(
                 startNode,
                 types,
@@ -102,7 +104,8 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
                 nodeFilter,
                 relFilter,
                 soughtEndNode,
-                memoryTracker);
+                memoryTracker,
+                nodeUniqueness);
     }
 
     public static BFSPruningVarExpandCursor incomingExpander(
@@ -116,7 +119,8 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
             LongPredicate nodeFilter,
             Predicate<RelationshipTraversalEntities> relFilter,
             long endNode,
-            MemoryTracker memoryTracker) {
+            MemoryTracker memoryTracker,
+            boolean nodeUniqueness) {
         return new IncomingBFSPruningVarExpandCursor(
                 startNode,
                 types,
@@ -128,7 +132,8 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
                 nodeFilter,
                 relFilter,
                 endNode,
-                memoryTracker);
+                memoryTracker,
+                nodeUniqueness);
     }
 
     public static BFSPruningVarExpandCursor allExpander(
@@ -142,6 +147,8 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
             LongPredicate nodeFilter,
             Predicate<RelationshipTraversalEntities> relFilter,
             long soughtEndNode,
+            boolean relationshipUniqueness,
+            boolean nodeUniqueness,
             MemoryTracker memoryTracker) {
         if (includeStartNode) {
             return new AllBFSPruningVarExpandCursorIncludingStartNode(
@@ -154,7 +161,8 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
                     nodeFilter,
                     relFilter,
                     soughtEndNode,
-                    memoryTracker);
+                    memoryTracker,
+                    nodeUniqueness);
         } else {
             return new AllBFSPruningVarExpandCursor(
                     startNode,
@@ -166,6 +174,8 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
                     nodeFilter,
                     relFilter,
                     soughtEndNode,
+                    relationshipUniqueness,
+                    nodeUniqueness,
                     memoryTracker);
         }
     }
@@ -202,14 +212,17 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
         this.nodeFilter = nodeFilter;
         this.relFilter = relFilter;
         this.soughtEndNode = soughtEndNode;
-        // start with empty cursor and will expand from the start node
+        // start with a null cursor and will expand from the start node
         // that is added at the top of the queue
-        this.selectionCursor = emptyTraversalCursor(read);
+        this.selectionCursor = null;
     }
 
     protected boolean done = false;
 
     protected final boolean validEndNode() {
+        if (endNode() == startNode() && nodeUniqueness()) {
+            return false;
+        }
         if (soughtEndNode == NO_SUCH_NODE) {
             return true;
         }
@@ -222,17 +235,19 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
 
     public abstract long endNode();
 
+    public abstract long startNode();
+
+    public abstract boolean nodeUniqueness();
+
     protected abstract void closeMore();
 
     public abstract int currentDepth();
 
-    @Override
     public void setTracer(KernelReadTracer tracer) {
         nodeCursor.setTracer(tracer);
         relCursor.setTracer(tracer);
     }
 
-    @Override
     public void removeTracer() {
         nodeCursor.removeTracer();
         relCursor.removeTracer();
@@ -269,6 +284,7 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
         private final HeapTrackingLongHashSet seen;
         private final HeapTrackingArrayDeque<NodeState> queue;
         private EmitState state;
+        private final boolean nodeUniqueness;
 
         private DirectedBFSPruningVarExpandCursor(
                 long startNode,
@@ -281,11 +297,13 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
                 LongPredicate nodeFilter,
                 Predicate<RelationshipTraversalEntities> relFilter,
                 long endNode,
-                MemoryTracker memoryTracker) {
+                MemoryTracker memoryTracker,
+                boolean nodeUniqueness) {
             super(types, maxDepth, read, nodeCursor, relCursor, nodeFilter, relFilter, endNode);
             this.startNode = startNode;
             queue = HeapTrackingCollections.newArrayDeque(memoryTracker);
             seen = HeapTrackingCollections.newLongSet(memoryTracker);
+            this.nodeUniqueness = nodeUniqueness;
             if (currentDepth < maxDepth) {
                 queue.offer(new NodeState(startNode, currentDepth));
             }
@@ -304,6 +322,10 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
                 return true;
             }
 
+            if (selectionCursor == null && !pollAndExpand()) {
+                return false;
+            }
+
             while (true) {
                 while (selectionCursor.next()) {
                     if (relFilter.test(selectionCursor)) {
@@ -320,11 +342,15 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
                     }
                 }
 
-                var next = queue.poll();
-                if (next == null || !expand(next)) {
+                if (!pollAndExpand()) {
                     return false;
                 }
             }
+        }
+
+        private boolean pollAndExpand() {
+            var next = queue.poll();
+            return next != null && expand(next);
         }
 
         @Override
@@ -338,6 +364,16 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
         }
 
         @Override
+        public long startNode() {
+            return startNode;
+        }
+
+        @Override
+        public boolean nodeUniqueness() {
+            return nodeUniqueness;
+        }
+
+        @Override
         protected void closeMore() {
             seen.close();
             queue.close();
@@ -347,6 +383,9 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
                 RelationshipTraversalCursor relCursor, NodeCursor nodeCursor, int[] types);
 
         private boolean shouldIncludeStartNode() {
+            if (nodeUniqueness) {
+                return false;
+            } // Skip self-loop if ACYCLIC
             if (state == EmitState.SHOULD_EMIT) {
                 seen.add(startNode);
                 state = EmitState.EMIT;
@@ -381,7 +420,8 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
                 LongPredicate nodeFilter,
                 Predicate<RelationshipTraversalEntities> relFilter,
                 long soughtEndNode,
-                MemoryTracker memoryTracker) {
+                MemoryTracker memoryTracker,
+                boolean nodeUniqueness) {
             super(
                     startNode,
                     types,
@@ -393,7 +433,8 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
                     nodeFilter,
                     relFilter,
                     soughtEndNode,
-                    memoryTracker);
+                    memoryTracker,
+                    nodeUniqueness);
         }
 
         @Override
@@ -415,7 +456,8 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
                 LongPredicate nodeFilter,
                 Predicate<RelationshipTraversalEntities> relFilter,
                 long soughtEndNode,
-                MemoryTracker memoryTracker) {
+                MemoryTracker memoryTracker,
+                boolean nodeUniqueness) {
             super(
                     startNode,
                     types,
@@ -427,7 +469,8 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
                     nodeFilter,
                     relFilter,
                     soughtEndNode,
-                    memoryTracker);
+                    memoryTracker,
+                    nodeUniqueness);
         }
 
         @Override
@@ -443,7 +486,8 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
      * The main algorithm uses two frontiers making sure we never back-track in the graph.
      * However, the fact that the start node is not included adds an extra complexity if there
      * are loops in the graph, in which case we need to include the start node at the correct
-     * depth in the BFS search (this is not required for correctness, but for future optimizations that make use of depth order). For loop detection we keep track of the parent of each seen node,
+     * depth in the BFS search (this is not required for correctness, but for future optimizations
+     * that make use of depth order). For loop detection we keep track of the parent of each seen node,
      * if we encounter a node, and we are coming from a node that is not the same as the seen parent
      * means we have detected a loop.
      */
@@ -465,6 +509,8 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
         private final HeapTrackingLongLongHashMap seenNodesWithAncestors;
         private LongIterator currentExpand;
         private final long startNode;
+        private final boolean relationshipUniqueness;
+        private final boolean nodeUniqueness;
 
         private AllBFSPruningVarExpandCursor(
                 long startNode,
@@ -476,12 +522,16 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
                 LongPredicate nodeFilter,
                 Predicate<RelationshipTraversalEntities> relFilter,
                 long soughtEndNode,
+                boolean relationshipUniqueness,
+                boolean nodeUniqueness,
                 MemoryTracker memoryTracker) {
             super(types, maxDepth, read, nodeCursor, cursor, nodeFilter, relFilter, soughtEndNode);
             this.startNode = startNode;
             this.prevFrontier = HeapTrackingCollections.newLongSet(memoryTracker);
             this.currFrontier = HeapTrackingCollections.newLongSet(memoryTracker);
             this.seenNodesWithAncestors = HeapTrackingCollections.newLongLongMap(memoryTracker);
+            this.relationshipUniqueness = relationshipUniqueness;
+            this.nodeUniqueness = nodeUniqueness;
             expand(startNode);
             currentDepth = 1;
         }
@@ -493,15 +543,15 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
             }
             while (currentDepth <= maxDepth) {
                 clearLoopCount();
-                while (selectionCursor.next()) {
+                while (selectionCursor != null && selectionCursor.next()) {
                     if (relFilter.test(selectionCursor)) {
 
                         long origin = selectionCursor.originNodeReference();
                         long other = selectionCursor.otherNodeReference();
 
-                        // in this loop we consider startNode as seen
+                        // in this loop in TRAIL mode we consider startNode as seen
                         // and only retrace later if a loop has been detected
-                        if (other == startNode) {
+                        if (relationshipUniqueness && other == startNode) {
                             // special case, self-loop for start node
                             if (origin == other) {
                                 assert currentDepth == 1
@@ -595,6 +645,16 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
             return loopCounter == EMIT_START_NODE ? startNode : selectionCursor.otherNodeReference();
         }
 
+        @Override
+        public long startNode() {
+            return startNode;
+        }
+
+        @Override
+        public boolean nodeUniqueness() {
+            return nodeUniqueness;
+        }
+
         /*
          * We only need to check for loops if we aren't currently processing one and have never found one before OR
          * if there is still a possibility to find a shorter one
@@ -664,6 +724,7 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
         private LongIterator currentExpand;
         private final long startNode;
         private EmitState state = EmitState.SHOULD_EMIT;
+        private boolean nodeUniqueness;
 
         private AllBFSPruningVarExpandCursorIncludingStartNode(
                 long startNode,
@@ -675,7 +736,8 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
                 LongPredicate nodeFilter,
                 Predicate<RelationshipTraversalEntities> relFilter,
                 long endNode,
-                MemoryTracker memoryTracker) {
+                MemoryTracker memoryTracker,
+                boolean nodeUniqueness) {
             super(types, maxDepth, read, nodeCursor, cursor, nodeFilter, relFilter, endNode);
             this.startNode = startNode;
             this.prevFrontier = HeapTrackingCollections.newLongSet(memoryTracker);
@@ -683,6 +745,7 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
             this.seen = HeapTrackingCollections.newLongSet(memoryTracker);
             this.currentDepth = 0;
             this.lastSuccessfulDepth = -1;
+            this.nodeUniqueness = nodeUniqueness;
         }
 
         @Override
@@ -705,7 +768,7 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
             }
 
             while (currentDepth <= maxDepth) {
-                while (selectionCursor.next()) {
+                while (selectionCursor != null && selectionCursor.next()) {
                     if (relFilter.test(selectionCursor)) {
                         long other = selectionCursor.otherNodeReference();
                         if (seen.add(other) && nodeFilter.test(other)) {
@@ -742,6 +805,16 @@ public abstract class BFSPruningVarExpandCursor extends DefaultCloseListenable i
         @Override
         public long endNode() {
             return state == EmitState.EMIT ? startNode : selectionCursor.otherNodeReference();
+        }
+
+        @Override
+        public long startNode() {
+            return startNode;
+        }
+
+        @Override
+        public boolean nodeUniqueness() {
+            return nodeUniqueness;
         }
 
         private void swapFrontiers() {

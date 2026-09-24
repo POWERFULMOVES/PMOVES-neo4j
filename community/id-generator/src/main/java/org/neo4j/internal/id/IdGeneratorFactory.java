@@ -21,8 +21,6 @@ package org.neo4j.internal.id;
 
 import java.io.IOException;
 import java.nio.file.OpenOption;
-import java.nio.file.Path;
-import java.util.Collection;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 import org.eclipse.collections.api.set.ImmutableSet;
@@ -30,11 +28,12 @@ import org.neo4j.configuration.Config;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 
-public interface IdGeneratorFactory {
+public interface IdGeneratorFactory extends IdGeneratorSupplier {
     IdGenerator open(
             PageCache pageCache,
-            Path filename,
+            StoreFile storeFile,
             IdType idType,
             LongSupplier highIdScanner,
             long maxId,
@@ -47,7 +46,7 @@ public interface IdGeneratorFactory {
 
     IdGenerator create(
             PageCache pageCache,
-            Path filename,
+            StoreFile storeFile,
             IdType idType,
             long highId,
             boolean throwIfFileExists,
@@ -59,13 +58,9 @@ public interface IdGeneratorFactory {
             IdSlotDistribution slotDistribution)
             throws IOException;
 
-    IdGenerator get(IdType idType);
-
     void visit(Consumer<IdGenerator> visitor);
 
     void clearCache(boolean allocationEnabled, CursorContext cursorContext);
-
-    Collection<Path> listIdFiles();
 
     default void notifyTransactionRollback(long transactionId) {}
 }

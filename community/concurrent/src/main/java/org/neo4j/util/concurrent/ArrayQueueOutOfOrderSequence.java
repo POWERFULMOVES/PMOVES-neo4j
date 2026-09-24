@@ -20,6 +20,7 @@
 package org.neo4j.util.concurrent;
 
 import static org.apache.commons.lang3.ArrayUtils.EMPTY_LONG_ARRAY;
+import static org.apache.commons.lang3.ArrayUtils.isSorted;
 
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -42,6 +43,20 @@ public class ArrayQueueOutOfOrderSequence implements OutOfOrderSequence {
                 new AtomicReference<>(new ReverseSnapshot(startingNumber, startingNumber, EMPTY_LONG_ARRAY));
     }
 
+    public ArrayQueueOutOfOrderSequence(
+            long startingNumber, int initialArraySize, Meta initialMeta, long[] missingNumbers) {
+        this(startingNumber, initialArraySize, initialMeta);
+
+        if (missingNumbers == null || missingNumbers.length == 0) {
+            return;
+        }
+        assert isSorted(missingNumbers);
+
+        long base = missingNumbers[0] - 1;
+        outOfOrderQueue.set(base, startingNumber, missingNumbers, initialMeta);
+        highestGapFreeNumber.setRelease(new NumberWithMeta(base, initialMeta));
+    }
+
     @Override
     public synchronized boolean offer(long number, Meta meta) {
         highestEverSeen.setRelease(Math.max(highestEverSeen.getAcquire(), number));
@@ -54,7 +69,8 @@ public class ArrayQueueOutOfOrderSequence implements OutOfOrderSequence {
 
         if (number <= localGapFree.number()) {
             throw new IllegalStateException("Was offered " + number + ", but highest gap-free is "
-                    + highestGapFreeNumber + " and was only expecting values higher than that");
+                    + highestGapFreeNumber
+                    + " and was only expecting values higher than that. Observed gap free state: " + localGapFree);
         }
         outOfOrderQueue.offer(localGapFree.number(), number, meta);
         reverseSnapshot.setRelease(null);
@@ -81,6 +97,24 @@ public class ArrayQueueOutOfOrderSequence implements OutOfOrderSequence {
         highestEverSeen.setRelease(number);
         highestGapFreeNumber.setRelease(new NumberWithMeta(number, meta));
         outOfOrderQueue.clear();
+    }
+
+    @Override
+    public synchronized void set(long highestSeen, Meta meta, long[] missingNumbers) {
+        reverseSnapshot.setRelease(null);
+        highestEverSeen.setRelease(highestSeen);
+
+        if (missingNumbers.length == 0) {
+            highestGapFreeNumber.setRelease(new NumberWithMeta(highestSeen, meta));
+            outOfOrderQueue.clear();
+            return;
+        }
+
+        assert isSorted(missingNumbers);
+
+        long base = missingNumbers[0] - 1;
+        outOfOrderQueue.set(base, highestSeen, missingNumbers, meta);
+        highestGapFreeNumber.setRelease(new NumberWithMeta(base, meta));
     }
 
     @Override

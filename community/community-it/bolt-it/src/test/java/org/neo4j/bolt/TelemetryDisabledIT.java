@@ -20,36 +20,28 @@
 
 package org.neo4j.bolt;
 
-import java.io.IOException;
-import java.util.Map;
 import org.neo4j.bolt.test.annotation.BoltTestExtension;
 import org.neo4j.bolt.test.annotation.connection.initializer.Authenticated;
-import org.neo4j.bolt.test.annotation.setup.SettingsFunction;
+import org.neo4j.bolt.test.annotation.setup.preset.EnableTelemetry;
 import org.neo4j.bolt.test.annotation.test.ProtocolTest;
-import org.neo4j.bolt.test.annotation.wire.selector.ExcludeWire;
+import org.neo4j.bolt.test.annotation.wire.selector.IncludeWire;
 import org.neo4j.bolt.testing.annotation.Version;
 import org.neo4j.bolt.testing.assertions.BoltConnectionAssertions;
 import org.neo4j.bolt.testing.client.BoltTestConnection;
 import org.neo4j.bolt.testing.messages.BoltWire;
 import org.neo4j.bolt.testing.messages.factory.TelemetryMessageBuilder;
 import org.neo4j.bolt.transport.Neo4jWithSocketExtension;
-import org.neo4j.configuration.connectors.BoltConnector;
-import org.neo4j.graphdb.config.Setting;
 import org.neo4j.test.extension.testdirectory.EphemeralTestDirectoryExtension;
 
 @EphemeralTestDirectoryExtension
 @Neo4jWithSocketExtension
 @BoltTestExtension
+@EnableTelemetry
+@IncludeWire(since = @Version(major = 5, minor = 4))
 public class TelemetryDisabledIT {
 
-    @SettingsFunction
-    static void customizeSettings(Map<Setting<?>, Object> settings) {
-        settings.put(BoltConnector.server_bolt_telemetry_enabled, false);
-    }
-
     @ProtocolTest
-    @ExcludeWire({@Version(major = 4), @Version(major = 5, minor = 3, range = 3)})
-    void shouldProcessTelemetryMessage(@Authenticated BoltTestConnection connection, BoltWire wire) throws IOException {
+    void shouldProcessTelemetryMessage(@Authenticated BoltTestConnection connection, BoltWire wire) {
         connection
                 .send(wire.telemetry(TelemetryMessageBuilder::withExecute))
                 .send(wire.telemetry(TelemetryMessageBuilder::withUnmanagedTransactions))

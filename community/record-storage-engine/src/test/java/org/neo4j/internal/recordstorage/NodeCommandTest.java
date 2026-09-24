@@ -46,6 +46,7 @@ import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.store.DynamicAllocatorProvider;
 import org.neo4j.kernel.impl.store.DynamicAllocatorProviders;
 import org.neo4j.kernel.impl.store.NeoStores;
@@ -54,15 +55,15 @@ import org.neo4j.kernel.impl.store.NodeStore;
 import org.neo4j.kernel.impl.store.StoreFactory;
 import org.neo4j.kernel.impl.store.record.DynamicRecord;
 import org.neo4j.kernel.impl.store.record.NodeRecord;
-import org.neo4j.kernel.impl.transaction.log.InMemoryClosableChannel;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.logging.NullLogProvider;
+import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.LongReference;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.test.LatestVersions;
 import org.neo4j.test.extension.EphemeralNeo4jLayoutExtension;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.pagecache.EphemeralPageCacheExtension;
+import org.neo4j.wal.InMemoryClosableChannel;
 
 @EphemeralPageCacheExtension
 @EphemeralNeo4jLayoutExtension
@@ -96,7 +97,7 @@ class NodeCommandTest {
                 NullLogProvider.getInstance(),
                 new CursorContextFactory(pageCacheTracer, EMPTY_CONTEXT_SUPPLIER),
                 false,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL);
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
         neoStores = storeFactory.openAllNeoStores();
         allocatorProvider = DynamicAllocatorProviders.nonTransactionalAllocator(neoStores);
         nodeStore = neoStores.getNodeStore();
@@ -214,7 +215,8 @@ class NodeCommandTest {
         // When
         Command.NodeCommand cmd = new Command.NodeCommand(commandSerialization, before, after);
         cmd.serialize(channel);
-        Command.NodeCommand result = (Command.NodeCommand) commandSerialization.read(channel);
+        Command.NodeCommand result =
+                (Command.NodeCommand) commandSerialization.read(channel, EmptyMemoryTracker.INSTANCE);
         // Then
         assertThat(result).isEqualTo(cmd);
         assertThat(result.getMode()).isEqualTo(cmd.getMode());
@@ -237,7 +239,8 @@ class NodeCommandTest {
     private void assertSerializationWorksFor(Command.NodeCommand cmd) throws IOException {
         channel.reset();
         cmd.serialize(channel);
-        Command.NodeCommand result = (Command.NodeCommand) commandSerialization.read(channel);
+        Command.NodeCommand result =
+                (Command.NodeCommand) commandSerialization.read(channel, EmptyMemoryTracker.INSTANCE);
         // Then
         assertThat(result).isEqualTo(cmd);
         assertThat(result.getMode()).isEqualTo(cmd.getMode());
@@ -275,7 +278,7 @@ class NodeCommandTest {
 
     private Set<Integer> labels(NodeRecord record) {
         int[] rawLabels = parseLabelsField(record).get(nodeStore, StoreCursors.NULL);
-        Set<Integer> labels = new HashSet<>(rawLabels.length);
+        Set<Integer> labels = HashSet.newHashSet(rawLabels.length);
         for (int label : rawLabels) {
             labels.add(label);
         }

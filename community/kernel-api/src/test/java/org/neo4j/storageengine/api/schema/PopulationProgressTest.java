@@ -19,18 +19,17 @@
  */
 package org.neo4j.storageengine.api.schema;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.neo4j.internal.kernel.api.PopulationProgress.multiple;
 import static org.neo4j.internal.kernel.api.PopulationProgress.single;
 
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.internal.kernel.api.PopulationProgress;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class PopulationProgressTest {
     @Inject
     protected RandomSupport random;
@@ -44,7 +43,7 @@ class PopulationProgressTest {
         float progress = populationProgress.getProgress();
 
         // then
-        assertEquals(0.5f, progress);
+        assertThat(progress).isEqualTo(0.5f);
     }
 
     @Test
@@ -58,7 +57,7 @@ class PopulationProgressTest {
         float progress = multi.getProgress();
 
         // then
-        assertEquals(0.5f + 0.2f, progress);
+        assertThat(progress).isEqualTo(0.5f + 0.2f);
     }
 
     @Test
@@ -72,7 +71,7 @@ class PopulationProgressTest {
         float progress = multi.getProgress();
 
         // then
-        assertEquals(((1f / 3f) * (3f / 4f)) + ((4f / 10) * (1f / 4f)), progress);
+        assertThat(progress).isEqualTo(((1f / 3f) * (3f / 4f)) + ((4f / 10) * (1f / 4f)));
     }
 
     @Test
@@ -90,7 +89,7 @@ class PopulationProgressTest {
         float progress = populationProgress.getProgress();
 
         // then
-        assertEquals(1f, progress);
+        assertThat(progress).isEqualTo(1f);
     }
 
     @Test
@@ -98,16 +97,16 @@ class PopulationProgressTest {
         // given
         PopulationProgress multiPart1 =
                 multiple().add(single(1, 1), 1).add(single(1, 5), 1).build(); // should result in 60%
-        assertEquals(0.6f, multiPart1.getProgress());
+        assertThat(multiPart1.getProgress()).isEqualTo(0.6f);
         PopulationProgress multiPart2 =
                 multiple().add(single(6, 10), 1).add(single(1, 5), 1).build(); // should result in 40%
-        assertEquals(0.4f, multiPart2.getProgress());
+        assertThat(multiPart2.getProgress()).isEqualTo(0.4f);
 
         // when
         PopulationProgress.MultiBuilder builder = multiple();
         PopulationProgress all = builder.add(multiPart1, 1).add(multiPart2, 1).build();
 
         // then
-        assertEquals(0.5, all.getProgress());
+        assertThat(all.getProgress()).isEqualTo(0.5f);
     }
 }

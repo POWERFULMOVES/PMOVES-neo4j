@@ -20,15 +20,16 @@
 package org.neo4j.cypher.internal.compiler.ast.convert.plannerQuery.composite
 
 import org.neo4j.cypher.internal.ast
+import org.neo4j.cypher.internal.ast.FreeProjection
 import org.neo4j.cypher.internal.ast.ReturnItems
 import org.neo4j.cypher.internal.ast.ScopeClauseSubqueryCall
 import org.neo4j.cypher.internal.ast.SubqueryCall
-import org.neo4j.cypher.internal.compiler.helpers.SeqSupport.RichSeq
 import org.neo4j.cypher.internal.expressions.ExplicitParameter
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.Parameter
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.cypher.internal.util.CancellationChecker
+import org.neo4j.cypher.internal.util.SeqSupport.RichSeq
 import org.neo4j.cypher.internal.util.symbols.CTAny
 
 object CompositeQueryFragmenter {
@@ -66,20 +67,49 @@ object CompositeQueryFragmenter {
         CompositeQuery.Union(
           unionType = CompositeQuery.Union.Type.All,
           lhs = fragmentQuery(cancellationChecker, nameGenerator, existingParameterNames, lhs, scopeImports),
-          rhs = fragmentSingleQuery(cancellationChecker, nameGenerator, existingParameterNames, rhs, scopeImports),
+          rhs = fragmentSingleQuery(
+            cancellationChecker,
+            nameGenerator,
+            existingParameterNames,
+            rhs.singleQuery,
+            scopeImports
+          ),
           unionMappings = mappings
         )
       case ast.ProjectingUnionDistinct(lhs, rhs, mappings) =>
         CompositeQuery.Union(
           unionType = CompositeQuery.Union.Type.Distinct,
           lhs = fragmentQuery(cancellationChecker, nameGenerator, existingParameterNames, lhs, scopeImports),
-          rhs = fragmentSingleQuery(cancellationChecker, nameGenerator, existingParameterNames, rhs, scopeImports),
+          rhs = fragmentSingleQuery(
+            cancellationChecker,
+            nameGenerator,
+            existingParameterNames,
+            rhs.singleQuery,
+            scopeImports
+          ),
           unionMappings = mappings
         )
       case _: ast.UnmappedUnion =>
         throw new IllegalStateException(
           "Unmapped union should have been rewritten to projecting union by the namespacer."
         )
+      case _: ast.TopLevelBraces =>
+        throw new IllegalStateException(
+          "TopLevelBraces should have been rewritten to single queries by preparatory rewriting."
+        )
+      case _: ast.ConditionalQueryWhen =>
+        throw new IllegalStateException(
+          "When should have been rewritten to single queries by AST rewriting."
+        )
+      case _: ast.NextStatement =>
+        throw new IllegalStateException(
+          "Next should have been rewritten to single queries by AST rewriting."
+        )
+      case _: ast.QueryWithLocalDefinitions =>
+        throw new IllegalStateException(
+          "QueryWithLocalDefinitions should have been rewritten to single queries by AST rewriting."
+        )
+
     }
   }
 
@@ -208,7 +238,10 @@ object CompositeQueryFragmenter {
           else
             alias.name // otherwise name the parameter after the alias.
         val parameter = ExplicitParameter(parameterName, CTAny)(item.position)
-        (parameter -> alias, ast.AliasedReturnItem(parameter, alias)(item.position))
+        (
+          parameter -> alias,
+          ast.AliasedReturnItem(parameter, alias)(item.position, ast.AliasedReturnItem.wasAutoAliasedDefault)
+        )
     }.unzip
     // For convenience, return both a map of the new parameters and the rewritten WITH clause.
     ParameterisedWithClause(parameters.toMap, importWith.withReturnItems(rewrittenItems))
@@ -236,10 +269,16 @@ object CompositeQueryFragmenter {
         else
           importVariable.name // otherwise name the parameter after the alias.
       val parameter = ExplicitParameter(parameterName, CTAny)(importVariable.position)
-      (parameter -> importVariable, ast.AliasedReturnItem(parameter, importVariable)(importVariable.position))
+      (
+        parameter -> importVariable,
+        ast.AliasedReturnItem(parameter, importVariable)(
+          importVariable.position,
+          ast.AliasedReturnItem.wasAutoAliasedDefault
+        )
+      )
     }.unzip
     val position = scopeImports.head.position
-    val returnItems = ReturnItems(false, rewrittenItems)(position)
+    val returnItems = ReturnItems(FreeProjection, rewrittenItems)(position)
     // For convenience, return both a map of the new parameters and the rewritten WITH clause.
     ParameterisedWithClause(parameters.toMap, ast.With(returnItems)(position))
   }

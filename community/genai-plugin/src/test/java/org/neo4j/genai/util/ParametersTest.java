@@ -51,7 +51,7 @@ public class ParametersTest {
     static class MyParams {
         String model;
         Optional<String> taskType;
-        Optional<Long> dimensions;
+        OptionalLong dimensions;
     }
 
     static class DefaultParams {
@@ -271,7 +271,7 @@ public class ParametersTest {
     static class MyClassParams {
         public String model;
         public String taskType = "defaultTaskType";
-        public Optional<Long> dimensions;
+        public OptionalLong dimensions;
 
         long defaultedLong = 0;
     }
@@ -359,8 +359,9 @@ public class ParametersTest {
     @Test
     void shouldIgnoreInaccessibleFields() {
         final var parameters = Parameters.getParameters(PrivateField.class);
-        assertThat(parameters).satisfiesExactlyInAnyOrder(parameter -> assertThat(parameter.name())
-                .isEqualTo("model"));
+        assertThat(parameters)
+                .satisfiesExactlyInAnyOrder(
+                        parameter -> assertThat(parameter.name()).isEqualTo("model"));
     }
 
     static class UnmappableType {

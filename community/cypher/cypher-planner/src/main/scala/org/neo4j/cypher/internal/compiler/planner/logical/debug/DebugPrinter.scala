@@ -20,6 +20,7 @@
 package org.neo4j.cypher.internal.compiler.planner.logical.debug
 
 import org.neo4j.cypher.internal.ast.AliasedReturnItem
+import org.neo4j.cypher.internal.ast.FreeProjection
 import org.neo4j.cypher.internal.ast.Return
 import org.neo4j.cypher.internal.ast.ReturnItems
 import org.neo4j.cypher.internal.ast.SingleQuery
@@ -90,10 +91,11 @@ case object DebugPrinter extends Phase[PlannerContext, LogicalPlanState, Logical
     val logicalPlan = ProduceResult(unwind, Seq(Column(varFor("col"), Set.empty)))
 
     val variable = Variable("col")(pos, Variable.isIsolatedDefault)
-    val returnItem = AliasedReturnItem(variable, variable)(pos)
+    val returnItem = AliasedReturnItem(variable, variable)(pos, AliasedReturnItem.wasAutoAliasedDefault)
     val returnClause = Return(
       distinct = false,
-      ReturnItems(includeExisting = false, Seq(returnItem))(pos),
+      ReturnItems(FreeProjection, Seq(returnItem))(pos),
+      None,
       None,
       None,
       None,

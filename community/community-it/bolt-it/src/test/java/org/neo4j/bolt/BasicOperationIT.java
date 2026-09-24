@@ -25,19 +25,22 @@ import static org.neo4j.bolt.testing.assertions.BoltConnectionAssertions.diagnos
 import static org.neo4j.values.storable.Values.longValue;
 import static org.neo4j.values.storable.Values.stringValue;
 
-import java.io.IOException;
 import java.util.Map;
 import org.assertj.core.api.Assertions;
 import org.neo4j.bolt.test.annotation.BoltTestExtension;
 import org.neo4j.bolt.test.annotation.connection.initializer.Authenticated;
 import org.neo4j.bolt.test.annotation.test.ProtocolTest;
-import org.neo4j.bolt.test.annotation.wire.selector.ExcludeWire;
 import org.neo4j.bolt.test.annotation.wire.selector.IncludeWire;
 import org.neo4j.bolt.testing.annotation.Version;
 import org.neo4j.bolt.testing.assertions.BoltConnectionAssertions;
+import org.neo4j.bolt.testing.assertions.DiagnosticRecordAssertions;
+import org.neo4j.bolt.testing.assertions.FailureCauseAssertions;
+import org.neo4j.bolt.testing.assertions.FailureMetadataAssertions;
+import org.neo4j.bolt.testing.assertions.GqlMessageParameters;
 import org.neo4j.bolt.testing.client.BoltTestConnection;
 import org.neo4j.bolt.testing.messages.BoltWire;
 import org.neo4j.bolt.transport.Neo4jWithSocketExtension;
+import org.neo4j.gqlstatus.ErrorClassification;
 import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.graphdb.NotificationCategory;
 import org.neo4j.graphdb.SeverityLevel;
@@ -61,7 +64,7 @@ public class BasicOperationIT {
             "\\d+:[\\da-f]{8}\\-[\\da-f]{4}\\-[\\da-f]{4}\\-[\\da-f]{4}\\-[\\da-f]{12}:\\d+";
 
     @ProtocolTest
-    void shouldRunSimpleStatement(BoltWire wire, @Authenticated BoltTestConnection connection) throws IOException {
+    void shouldRunSimpleStatement(BoltWire wire, @Authenticated BoltTestConnection connection) {
         // When
         connection
                 .send(wire.run("UNWIND [1,2,3] AS a RETURN a, a * a AS a_squared"))
@@ -71,10 +74,11 @@ public class BasicOperationIT {
         assertThat(connection)
                 .receivesSuccess(meta -> Assertions.assertThat(meta)
                         .containsKey("t_first")
-                        .hasEntrySatisfying("fields", fields -> Assertions.assertThat(fields)
-                                .asInstanceOf(list(String.class))
-                                .hasSize(2)
-                                .containsExactly("a", "a_squared")))
+                        .hasEntrySatisfying(
+                                "fields",
+                                fields -> Assertions.assertThat(fields)
+                                        .asInstanceOf(list(String.class))
+                                        .containsExactly("a", "a_squared")))
                 .receivesRecord(longValue(1), longValue(1))
                 .receivesRecord(longValue(2), longValue(4))
                 .receivesRecord(longValue(3), longValue(9))
@@ -83,8 +87,7 @@ public class BasicOperationIT {
     }
 
     @ProtocolTest
-    void shouldRespondWithMetadataToDiscardAll(BoltWire wire, @Authenticated BoltTestConnection connection)
-            throws IOException {
+    void shouldRespondWithMetadataToDiscardAll(BoltWire wire, @Authenticated BoltTestConnection connection) {
         // When
         connection
                 .send(wire.run("UNWIND [1,2,3] AS a RETURN a, a * a AS a_squared"))
@@ -94,23 +97,39 @@ public class BasicOperationIT {
         BoltConnectionAssertions.assertThat(connection)
                 .receivesSuccess(meta -> Assertions.assertThat(meta)
                         .containsKey("t_first")
-                        .hasEntrySatisfying("fields", fields -> Assertions.assertThat(fields)
-                                .asInstanceOf(list(String.class))
-                                .hasSize(2)
-                                .containsExactly("a", "a_squared")))
+                        .hasEntrySatisfying(
+                                "fields",
+                                fields -> Assertions.assertThat(fields)
+                                        .asInstanceOf(list(String.class))
+                                        .containsExactly("a", "a_squared")))
                 .receivesSuccess(meta ->
                         Assertions.assertThat(meta).containsKey("t_last").containsEntry("type", "r"));
     }
 
     @ProtocolTest
-    @IncludeWire({@Version(major = 5, minor = 6, range = 6), @Version(major = 4)})
-    void shouldBeAbleToRunQueryAfterAckFailureV40(BoltWire wire, @Authenticated BoltTestConnection connection)
-            throws IOException {
+    void shouldBeAbleToRunQueryAfterAckFailure(BoltWire wire, @Authenticated BoltTestConnection connection) {
         // Given
         connection.send(wire.run("QINVALID")).send(wire.pull());
 
         assertThat(connection)
-                .receivesFailureFuzzyV40(Status.Statement.SyntaxError, "line 1, column 1")
+                .receivesFailure(FailureMetadataAssertions.create()
+                        .hasLegacyStatus(Status.Statement.SyntaxError)
+                        .hasLegacyMessageFuzzy("line 1, column 1")
+                        .hasStatus(GqlStatusInfoCodes.STATUS_42001)
+                        .hasDescription("error: syntax error or access rule violation - invalid syntax")
+                        .hasDiagnosticRecord(DiagnosticRecordAssertions.create()
+                                .hasClassification(ErrorClassification.CLIENT_ERROR)
+                                .hasPosition(1, 1, 0))
+                        .hasCause(FailureCauseAssertions.create()
+                                // skipping validation of message here since it contains a list of
+                                // valid cypher keywords
+                                .assertLeniently()
+                                .hasStatus(GqlStatusInfoCodes.STATUS_42I06.getGqlStatus())
+                                .hasDescriptionFuzzy(
+                                        "error: syntax error or access rule violation - invalid input. Invalid input 'QINVALID', expected:")
+                                .hasDiagnosticRecord(DiagnosticRecordAssertions.create()
+                                        .hasClassification(ErrorClassification.CLIENT_ERROR)
+                                        .hasPosition(1, 1, 0))))
                 .receivesIgnored();
 
         // When
@@ -125,33 +144,7 @@ public class BasicOperationIT {
     }
 
     @ProtocolTest
-    @ExcludeWire({@Version(major = 5, minor = 6, range = 6), @Version(major = 4)})
-    void shouldBeAbleToRunQueryAfterAckFailure(BoltWire wire, @Authenticated BoltTestConnection connection)
-            throws IOException {
-        // Given
-        connection.send(wire.run("QINVALID")).send(wire.pull());
-
-        assertThat(connection)
-                .receivesFailureFuzzy(
-                        Status.Statement.SyntaxError,
-                        "line 1, column 1",
-                        GqlStatusInfoCodes.STATUS_50N42.getGqlStatus(),
-                        "error: general processing exception - unexpected error. Unexpected error has occurred. See debug log for details.")
-                .receivesIgnored();
-
-        // When
-        connection.send(wire.reset()).send(wire.run("RETURN 1")).send(wire.pull());
-
-        // Then
-        assertThat(connection)
-                .receivesSuccess()
-                .receivesSuccess()
-                .receivesRecord(longValue(1))
-                .receivesSuccess();
-    }
-
-    @ProtocolTest
-    void shouldRunProcedure(BoltWire wire, @Authenticated BoltTestConnection connection) throws IOException {
+    void shouldRunProcedure(BoltWire wire, @Authenticated BoltTestConnection connection) {
         // Given
         connection
                 .send(wire.run("CREATE (n:Test {age: 2}) RETURN n.age AS age"))
@@ -160,10 +153,11 @@ public class BasicOperationIT {
         assertThat(connection)
                 .receivesSuccess(meta -> Assertions.assertThat(meta)
                         .containsKey("t_first")
-                        .hasEntrySatisfying("fields", fields -> Assertions.assertThat(fields)
-                                .asInstanceOf(list(String.class))
-                                .hasSize(1)
-                                .containsExactly("age")))
+                        .hasEntrySatisfying(
+                                "fields",
+                                fields -> Assertions.assertThat(fields)
+                                        .asInstanceOf(list(String.class))
+                                        .containsExactly("age")))
                 .receivesRecord(longValue(2))
                 .receivesSuccess(meta -> Assertions.assertThat(meta).containsKey("t_last"));
 
@@ -174,16 +168,17 @@ public class BasicOperationIT {
         assertThat(connection)
                 .receivesSuccess(meta -> Assertions.assertThat(meta)
                         .containsKey("t_first")
-                        .hasEntrySatisfying("fields", fields -> Assertions.assertThat(fields)
-                                .asInstanceOf(list(String.class))
-                                .hasSize(1)
-                                .containsExactly("label")))
+                        .hasEntrySatisfying(
+                                "fields",
+                                fields -> Assertions.assertThat(fields)
+                                        .asInstanceOf(list(String.class))
+                                        .containsExactly("label")))
                 .receivesRecord(stringValue("Test"))
                 .receivesSuccess();
     }
 
     @ProtocolTest
-    void shouldHandleDeletedNodes(BoltWire wire, @Authenticated BoltTestConnection connection) throws IOException {
+    void shouldHandleDeletedNodes(BoltWire wire, @Authenticated BoltTestConnection connection) {
         // When
         connection.send(wire.run("CREATE (n:Test) DELETE n RETURN n")).send(wire.pull());
 
@@ -191,10 +186,11 @@ public class BasicOperationIT {
         assertThat(connection)
                 .receivesSuccess(meta -> Assertions.assertThat(meta)
                         .containsKey("t_first")
-                        .hasEntrySatisfying("fields", fields -> Assertions.assertThat(fields)
-                                .asInstanceOf(list(String.class))
-                                .hasSize(1)
-                                .containsExactly("n")))
+                        .hasEntrySatisfying(
+                                "fields",
+                                fields -> Assertions.assertThat(fields)
+                                        .asInstanceOf(list(String.class))
+                                        .containsExactly("n")))
                 .packstreamSatisfies(pack -> pack.receivesMessage()
                         // Record(0x71) {
                         //  fields: [
@@ -227,8 +223,7 @@ public class BasicOperationIT {
     }
 
     @ProtocolTest
-    void shouldHandleDeletedRelationships(BoltWire wire, @Authenticated BoltTestConnection connection)
-            throws IOException {
+    void shouldHandleDeletedRelationships(BoltWire wire, @Authenticated BoltTestConnection connection) {
         // When
         connection
                 .send(wire.run("CREATE (a)-[r:T {prop: 42}]->(b) DELETE r RETURN r"))
@@ -238,10 +233,11 @@ public class BasicOperationIT {
         assertThat(connection)
                 .receivesSuccess(meta -> Assertions.assertThat(meta)
                         .containsKey("t_first")
-                        .hasEntrySatisfying("fields", fields -> Assertions.assertThat(fields)
-                                .asInstanceOf(list(String.class))
-                                .hasSize(1)
-                                .containsExactly("r")))
+                        .hasEntrySatisfying(
+                                "fields",
+                                fields -> Assertions.assertThat(fields)
+                                        .asInstanceOf(list(String.class))
+                                        .containsExactly("r")))
                 .packstreamSatisfies(pack -> pack.receivesMessage()
                         // Record(0x71) {
                         //  fields: [
@@ -280,8 +276,7 @@ public class BasicOperationIT {
     }
 
     @ProtocolTest
-    void shouldNotLeakStatsToNextStatement(BoltWire wire, @Authenticated BoltTestConnection connection)
-            throws IOException {
+    void shouldNotLeakStatsToNextStatement(BoltWire wire, @Authenticated BoltTestConnection connection) {
         // Given
         connection.send(wire.run("CREATE (n)")).send(wire.pull());
 
@@ -299,8 +294,8 @@ public class BasicOperationIT {
     }
 
     @ProtocolTest
-    @IncludeWire({@Version(major = 5, minor = 4, range = 4), @Version(major = 4)})
-    void shouldSendNotifications(BoltWire wire, @Authenticated BoltTestConnection connection) throws IOException {
+    @IncludeWire(until = @Version(major = 5, minor = 5))
+    void shouldSendNotifications(BoltWire wire, @Authenticated BoltTestConnection connection) {
         // When
         connection
                 .send(wire.run("EXPLAIN MATCH (a:THIS_IS_NOT_A_LABEL) RETURN count(*)"))
@@ -323,8 +318,8 @@ public class BasicOperationIT {
     }
 
     @ProtocolTest
-    @ExcludeWire({@Version(major = 5, minor = 4, range = 4), @Version(major = 4)})
-    void shouldSendGqlStatus(BoltWire wire, @Authenticated BoltTestConnection connection) throws IOException {
+    @IncludeWire(since = @Version(major = 5, minor = 5))
+    void shouldSendGqlStatus(BoltWire wire, @Authenticated BoltTestConnection connection) {
         // When
         connection
                 .send(wire.run("EXPLAIN MATCH (a:THIS_IS_NOT_A_LABEL) RETURN count(*)"))
@@ -335,7 +330,7 @@ public class BasicOperationIT {
                 .receivesSuccess()
                 .receivesSuccessWithStatus(
                         GqlStatusInfoCodes.STATUS_01N50,
-                        "The label `THIS_IS_NOT_A_LABEL` does not exist. Verify that the spelling is correct.",
+                        "The label `THIS_IS_NOT_A_LABEL` does not exist in database `neo4j`. Verify that the spelling is correct.",
                         "One of the labels in your query is not available in the database, "
                                 + "make sure you didn't misspell it or that the label is available when "
                                 + "you run this statement in your application (the missing label name is: "
@@ -345,62 +340,58 @@ public class BasicOperationIT {
                         BoltConnectionAssertions.assertDiagnosticRecord(
                                 SeverityLevel.WARNING,
                                 NotificationCategory.UNRECOGNIZED,
-                                Map.of("label", "THIS_IS_NOT_A_LABEL"),
+                                Map.of("label", "THIS_IS_NOT_A_LABEL", "db", "neo4j"),
                                 diagnosticRecordPosition(18L, 1L, 17L)));
     }
 
     @ProtocolTest
-    @IncludeWire({@Version(major = 5, minor = 6, range = 6), @Version(major = 4)})
-    void shouldFailNicelyWhenDroppingUnknownIndexV40(BoltWire wire, @Authenticated BoltTestConnection connection)
-            throws IOException {
+    @IncludeWire(since = @Version(major = 6, minor = 0))
+    void shouldFailNicelyWhenDroppingUnknownIndex(BoltWire wire, @Authenticated BoltTestConnection connection) {
         // When
         connection.send(wire.run("DROP INDEX my_index")).send(wire.pull());
 
         // Then
         assertThat(connection)
-                .receivesFailureV40(
-                        Status.Schema.IndexDropFailed,
-                        "Unable to drop index called `my_index`. There is no such index.")
+                .receivesFailure(FailureMetadataAssertions.create()
+                        .hasLegacyStatus(Status.Schema.IndexDropFailed)
+                        .hasLegacyMessage("Unable to drop index called `my_index`. There is no such index.")
+                        .hasStatus(
+                                GqlStatusInfoCodes.STATUS_50N10,
+                                GqlMessageParameters.create().withString("my_index"))
+                        .hasDescription(
+                                "error: general processing exception - index drop failed. Unable to drop 'my_index'.")
+                        .hasDiagnosticRecord(DiagnosticRecordAssertions.create()
+                                .hasClassification(ErrorClassification.DATABASE_ERROR))
+                        .hasCause(FailureCauseAssertions.create()
+                                .hasStatus(
+                                        GqlStatusInfoCodes.STATUS_22N69,
+                                        GqlMessageParameters.create().withString("my_index"))
+                                .hasDescription(
+                                        "error: data exception - index does not exist. The index 'my_index' does not exist.")
+                                .hasDiagnosticRecord(DiagnosticRecordAssertions.create()
+                                        .hasClassification(ErrorClassification.CLIENT_ERROR))))
                 .receivesIgnored();
     }
 
     @ProtocolTest
-    @ExcludeWire({@Version(major = 5, minor = 6, range = 6), @Version(major = 4)})
-    void shouldFailNicelyWhenDroppingUnknownIndex(BoltWire wire, @Authenticated BoltTestConnection connection)
-            throws IOException {
-        // When
-        connection.send(wire.run("DROP INDEX my_index")).send(wire.pull());
-
-        // Then
-        assertThat(connection)
-                .receivesFailure(
-                        Status.Schema.IndexDropFailed,
-                        "Unable to drop index called `my_index`. There is no such index.",
-                        GqlStatusInfoCodes.STATUS_50N42.getGqlStatus(),
-                        "error: general processing exception - unexpected error. Unexpected error has occurred. See debug log for details.")
-                .receivesIgnored();
-    }
-
-    @ProtocolTest
-    @IncludeWire({@Version(major = 5, minor = 6, range = 6), @Version(major = 4)})
-    void shouldFailNicelyWhenSubmittingInvalidStatementV40(BoltWire wire, @Authenticated BoltTestConnection connection)
-            throws IOException {
-        connection.send(wire.run("MATCH (:Movie{title:'"));
-
-        assertThat(connection).receivesFailureFuzzyV40(Status.Statement.SyntaxError, "Failed to parse string literal");
-    }
-
-    @ProtocolTest
-    @ExcludeWire({@Version(major = 5, minor = 6, range = 6), @Version(major = 4)})
-    void shouldFailNicelyWhenSubmittingInvalidStatement(BoltWire wire, @Authenticated BoltTestConnection connection)
-            throws IOException {
+    void shouldFailNicelyWhenSubmittingInvalidStatement(BoltWire wire, @Authenticated BoltTestConnection connection) {
         connection.send(wire.run("MATCH (:Movie{title:'"));
 
         assertThat(connection)
-                .receivesFailureFuzzy(
-                        Status.Statement.SyntaxError,
-                        "Failed to parse string literal",
-                        GqlStatusInfoCodes.STATUS_50N42.getGqlStatus(),
-                        "error: general processing exception - unexpected error. Unexpected error has occurred. See debug log for details.");
+                .receivesFailure(FailureMetadataAssertions.create()
+                        .hasLegacyStatus(Status.Statement.SyntaxError)
+                        .hasLegacyMessageFuzzy("Failed to parse string literal")
+                        .hasStatus(GqlStatusInfoCodes.STATUS_42001)
+                        .hasDescription("error: syntax error or access rule violation - invalid syntax")
+                        .hasDiagnosticRecord(DiagnosticRecordAssertions.create()
+                                .hasClassification(ErrorClassification.CLIENT_ERROR)
+                                .hasPosition(21, 1, 20))
+                        .hasCause(FailureCauseAssertions.create()
+                                .hasStatus(GqlStatusInfoCodes.STATUS_42I19)
+                                .hasDescription(
+                                        "error: syntax error or access rule violation - invalid string literal. Failed to parse string literal. The query must contain an even number of non-escaped quotes.")
+                                .hasDiagnosticRecord(DiagnosticRecordAssertions.create()
+                                        .hasClassification(ErrorClassification.CLIENT_ERROR)
+                                        .hasPosition(21, 1, 20))));
     }
 }

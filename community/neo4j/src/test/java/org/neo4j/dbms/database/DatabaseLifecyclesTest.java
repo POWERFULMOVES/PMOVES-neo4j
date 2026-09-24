@@ -42,20 +42,21 @@ import org.neo4j.kernel.database.DatabaseIdRepository;
 import org.neo4j.kernel.database.NamedDatabaseId;
 import org.neo4j.kernel.database.NormalizedDatabaseName;
 import org.neo4j.logging.NullLogProvider;
+import org.neo4j.monitoring.ExceptionHandlerService;
 
 class DatabaseLifecyclesTest {
     private final Database system = mock(Database.class);
     private final Database neo4j = mock(Database.class);
     private final DatabaseRepository<StandaloneDatabaseContext> databaseRepository =
             new DatabaseRepository<>(new SimpleDatabaseIdRepository());
+    private final ExceptionHandlerService exceptionHandlerService = mock(ExceptionHandlerService.class);
 
     private final DatabaseLifecycles databaseLifecycles = new DatabaseLifecycles(
             databaseRepository,
             DEFAULT_DATABASE_NAME,
-            (namedDatabaseId, databaseOptions) -> getContext(namedDatabaseId),
-            NullLogProvider.getInstance());
-
-    private StandaloneDatabaseContext context = null;
+            this::getContext,
+            NullLogProvider.getInstance(),
+            exceptionHandlerService);
 
     @Test
     void shouldCreateSystemOmInitThenStart() throws Exception {
@@ -100,7 +101,7 @@ class DatabaseLifecyclesTest {
         systemDatabaseStarter.start();
         databaseLifecycles.defaultDatabaseStarter().start();
         var context =
-                databaseRepository.getDatabaseContext(DEFAULT_DATABASE_NAME).get();
+                databaseRepository.getDatabaseContext(DEFAULT_DATABASE_NAME).orElseThrow();
         var message = "Oh noes...";
 
         // when
@@ -122,9 +123,8 @@ class DatabaseLifecyclesTest {
     }
 
     private StandaloneDatabaseContext getContext(NamedDatabaseId namedDatabaseId) {
-        context = mock(StandaloneDatabaseContext.class);
-        Database db = null;
-
+        var context = mock(StandaloneDatabaseContext.class);
+        Database db;
         if (namedDatabaseId.name().equals(GraphDatabaseSettings.SYSTEM_DATABASE_NAME)) {
             db = system;
         } else if (namedDatabaseId.name().equals(DEFAULT_DATABASE_NAME)) {
@@ -153,6 +153,14 @@ class DatabaseLifecyclesTest {
 
         @Override
         public Optional<NamedDatabaseId> getById(DatabaseId databaseId) {
+            return databaseIds.stream()
+                    .filter(id -> id.databaseId().equals(databaseId))
+                    .findFirst();
+        }
+
+        @Override
+        public Optional<NamedDatabaseId> getOwningDatabaseId(DatabaseId databaseId) {
+            // update if adding tests for sharded databases
             return databaseIds.stream()
                     .filter(id -> id.databaseId().equals(databaseId))
                     .findFirst();

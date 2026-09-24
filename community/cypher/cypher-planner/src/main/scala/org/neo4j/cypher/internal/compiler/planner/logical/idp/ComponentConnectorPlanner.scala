@@ -23,20 +23,20 @@ import org.neo4j.cypher.internal.compiler.planner.logical.LogicalPlanningContext
 import org.neo4j.cypher.internal.compiler.planner.logical.QueryPlannerKit
 import org.neo4j.cypher.internal.compiler.planner.logical.idp.GoalBitAllocation.startComponents
 import org.neo4j.cypher.internal.compiler.planner.logical.idp.IDPQueryGraphSolver.extraRequirementForInterestingOrder
-import org.neo4j.cypher.internal.compiler.planner.logical.idp.IDPTable.SORTED_BIT
 import org.neo4j.cypher.internal.compiler.planner.logical.idp.cartesianProductsOrValueJoins.COMPONENT_THRESHOLD_FOR_CARTESIAN_PRODUCT
 import org.neo4j.cypher.internal.compiler.planner.logical.idp.cartesianProductsOrValueJoins.planLotsOfCartesianProducts
 import org.neo4j.cypher.internal.compiler.planner.logical.ordering.InterestingOrderConfig
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.BestPlans
 import org.neo4j.cypher.internal.ir.QueryGraph
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
-import org.neo4j.cypher.internal.macros.AssertMacros
+import org.neo4j.cypher.internal.macros.AssertMacros3
 import org.neo4j.cypher.internal.util.collection.immutable.ListSet
 import org.neo4j.cypher.internal.util.collection.immutable.ListSet.IterableOnceToListSet
 import org.neo4j.time.Stopwatch
 
 import scala.collection.CypherPlannerBitSetOptimizations
 import scala.collection.immutable.BitSet
+import scala.util.chaining.scalaUtilChainingOps
 
 /**
  * This class is responsible for connecting all disconnected logical plans, which can be
@@ -53,8 +53,9 @@ case class ComponentConnectorPlanner(singleComponentPlanner: SingleComponentPlan
   private val cpConnector = CartesianProductComponentConnector
 
   private val joinConnectors = Seq(
-    NestedIndexJoinComponentConnector(singleComponentPlanner),
-    ValueHashJoinComponentConnector
+    ApplyComponentConnector(singleComponentPlanner),
+    ValueHashJoinComponentConnector,
+    ValueMergeJoinComponentConnector
   )
   private val omConnector = OptionalMatchConnector
 
@@ -74,6 +75,7 @@ case class ComponentConnectorPlanner(singleComponentPlanner: SingleComponentPlan
       notYetSolved.isEmpty &&
         queryGraph.optionalMatches.isEmpty &&
         queryGraph.shortestRelationshipPatterns.isEmpty &&
+        queryGraph.searchClause.isEmpty &&
         interestingOrderConfig.orderToSolve.isEmpty
 
     if (canUseHeuristic) {
@@ -94,24 +96,34 @@ case class ComponentConnectorPlanner(singleComponentPlanner: SingleComponentPlan
         ).plan
       }
     } else {
-      val predicatesAndLegacyShortestWithArgumentDependenciesOnly =
-        queryGraph.predicatesAndLegacyShortestPartitionedByDependencyOnNonArgumentIds.dependOnArgumentsOnly
-
-      val kitToUse = if (predicatesAndLegacyShortestWithArgumentDependenciesOnly.isEmpty) {
+      connectWithIDP(
+        components,
+        filterOutQueryGraphElementsWithArgumentOnlyDependencies(queryGraph),
+        interestingOrderConfig,
+        context,
         kit
-      } else {
-        kit.copy(select = { (plan, qg) =>
-          // These predicates/shortestPaths should already be solved by one of the components, avoid solving them multiple times.
-          val fixedQg = qg
-            .removePredicates(predicatesAndLegacyShortestWithArgumentDependenciesOnly.predicates)
-            .removeShortestRelationships(
-              predicatesAndLegacyShortestWithArgumentDependenciesOnly.shortestRelationshipPatterns
-            )
-          kit.select(plan, fixedQg)
-        })
-      }
+      )
+    }
+  }
 
-      connectWithIDP(components, queryGraph, interestingOrderConfig, context, kitToUse)
+  // These elements should already be solved in one of the components, by removing them here we avoid solving them multiple times.
+  private def filterOutQueryGraphElementsWithArgumentOnlyDependencies(queryGraph: QueryGraph): QueryGraph = {
+    val elementsWithArgumentDependenciesOnly =
+      queryGraph.dependentElementsPartitionedByDependencyOnNonArgumentIds.dependOnArgumentsOnly
+
+    if (elementsWithArgumentDependenciesOnly.isEmpty) {
+      queryGraph
+    } else {
+      queryGraph
+        .removePredicates(elementsWithArgumentDependenciesOnly.predicates)
+        .removeShortestRelationships(elementsWithArgumentDependenciesOnly.shortestRelationshipPatterns)
+        .pipe { qg =>
+          if (elementsWithArgumentDependenciesOnly.searchClause.nonEmpty) {
+            qg.withoutSearchClause
+          } else {
+            qg
+          }
+        }
     }
   }
 
@@ -122,9 +134,21 @@ case class ComponentConnectorPlanner(singleComponentPlanner: SingleComponentPlan
     context: LogicalPlanningContext,
     kit: QueryPlannerKit
   ): BestPlans = {
+    context.staticComponents.idpLogger.markScope("connectWithIDP") {
+      doConnectWithIDP(components, queryGraph, interestingOrderConfig, context, kit)
+    }
+  }
+
+  private def doConnectWithIDP(
+    components: Set[PlannedComponent],
+    queryGraph: QueryGraph,
+    interestingOrderConfig: InterestingOrderConfig,
+    context: LogicalPlanningContext,
+    kit: QueryPlannerKit
+  ): BestPlans = {
     val orderRequirement = extraRequirementForInterestingOrder(context, interestingOrderConfig)
     val (goalBitAllocation, initialTodo) =
-      GoalBitAllocation.create(components.map(_.queryGraph), queryGraph.optionalMatches.toListSet)
+      GoalBitAllocation.create(components.map(_.queryGraph), queryGraph.optionalMatches)
 
     val joinSolverSteps =
       joinConnectors.map(_.solverStep(goalBitAllocation, queryGraph, interestingOrderConfig, kit, context))
@@ -154,17 +178,31 @@ case class ComponentConnectorPlanner(singleComponentPlanner: SingleComponentPlan
       projectingSelector = kit.pickBest,
       maxTableSize = config.maxTableSize,
       iterationDurationLimit = config.iterationDurationLimit,
-      extraRequirement = orderRequirement,
+      extraOrderRequirement = orderRequirement,
+      extraPropertyRequirement =
+        context.settings.remoteBatchPropertiesStrategy.interestingPropertiesAsIDPExtraRequirement(queryGraph, context),
       monitor = monitor,
       stopWatchFactory = () => Stopwatch.start(),
-      cancellationChecker = context.staticComponents.cancellationChecker
+      cancellationChecker = context.staticComponents.cancellationChecker,
+      idpLogger = context.staticComponents.idpLogger
     )
 
     val seed: Seed[QueryGraph, LogicalPlan] = components.flatMap {
       case PlannedComponent(queryGraph, plan) => Set(
-          ((Set(queryGraph), false), plan.bestResult)
-        ) ++ plan.bestResultFulfillingReq.map { bestSortedResult =>
-          ((Set(queryGraph), true), bestSortedResult)
+          (
+            SolvableItemWithExtraRequirements(Set(queryGraph), isSorted = false, hasPrefetchedProperties = false),
+            plan.bestResult
+          )
+        ) ++ plan.bestSortedResult.map { bestSortedResult =>
+          (
+            SolvableItemWithExtraRequirements(Set(queryGraph), isSorted = true, hasPrefetchedProperties = false),
+            bestSortedResult
+          )
+        } ++ plan.bestExtraPropertiesResult.map { bestExtraPropertiesResult =>
+          (
+            SolvableItemWithExtraRequirements(Set(queryGraph), isSorted = false, hasPrefetchedProperties = true),
+            bestExtraPropertiesResult
+          )
         }
     }
     solver(seed, initialTodo, context)
@@ -183,9 +221,7 @@ trait ComponentConnector {
 }
 
 object GoalBitAllocation {
-  private val numSorted = 1
-  private val startSorted = SORTED_BIT
-  private val startComponents = startSorted + numSorted
+  private val startComponents = 1 // we start at 1, since 0 used to be a reserved bit.
 
   /**
    * Given the components and optional matches, return a [[GoalBitAllocation]] and the initialTodo for the [[IDPSolver]].
@@ -194,14 +230,14 @@ object GoalBitAllocation {
   def create(
     components: Set[QueryGraph],
     optionalMatches: ListSet[QueryGraph]
-  ): (GoalBitAllocation, Seq[QueryGraph]) = {
-    val initialTodo = components.toSeq ++ optionalMatches
+  ): (GoalBitAllocation, ListSet[QueryGraph]) = {
+    val initialTodo = components.toListSet ++ optionalMatches
 
     // For each optional match, find dependencies to components and other optional matches
     val optionalMatchDependencies: IndexedSeq[BitSet] = optionalMatches.toVector.map { om =>
       om.argumentIds.iterator.map { arg =>
-        val index = initialTodo.indexWhere(x => x.idsWithoutOptionalMatchesOrUpdates.contains(arg))
-        AssertMacros.checkOnlyWhenAssertionsAreEnabled(
+        val index = initialTodo.iterator.indexWhere(x => x.idsWithoutOptionalMatchesOrUpdates.contains(arg))
+        AssertMacros3.checkOnlyWhenAssertionsAreEnabled(
           index >= 0,
           "Did not find which QG introduces dependency of optional match."
         )

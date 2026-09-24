@@ -41,6 +41,9 @@ import org.neo4j.memory.MemoryTracker;
  */
 public class ReadAheadChannel<T extends StoreChannel> implements ReadableChannel {
     public static final int DEFAULT_READ_AHEAD_SIZE = toIntExact(kibiBytes(4));
+
+    private static final ByteBuffer ZERO_BUFFER = ByteBuffer.allocate(DEFAULT_READ_AHEAD_SIZE);
+
     private final ScopedBuffer scopedBuffer;
 
     protected T channel;
@@ -56,7 +59,7 @@ public class ReadAheadChannel<T extends StoreChannel> implements ReadableChannel
         this.aheadBuffer.position(aheadBuffer.capacity());
         this.channel = channel;
         this.readAheadSize = aheadBuffer.capacity();
-        this.checksumView = aheadBuffer.duplicate();
+        this.checksumView = aheadBuffer.duplicate().order(aheadBuffer.order());
         this.checksum = CHECKSUM_FACTORY.get();
         this.scopedBuffer = scopedBuffer;
     }
@@ -148,6 +151,21 @@ public class ReadAheadChannel<T extends StoreChannel> implements ReadableChannel
     }
 
     @Override
+    public long getAppendIndex() throws IOException {
+        return getLong();
+    }
+
+    @Override
+    public byte getContentType() {
+        return UNSPECIFIED_CONTENT_TYPE;
+    }
+
+    @Override
+    public long getTerm() throws IOException {
+        return BASE_TERM;
+    }
+
+    @Override
     public int read(ByteBuffer dst) throws IOException {
         int length = dst.remaining();
         if (aheadBuffer.remaining() >= length) {
@@ -208,11 +226,9 @@ public class ReadAheadChannel<T extends StoreChannel> implements ReadableChannel
 
     @Override
     public int getChecksum() {
-
         // Consume remaining bytes
         checksumView.limit(aheadBuffer.position());
         checksum.update(checksumView);
-
         return (int) checksum.getValue();
     }
 
@@ -292,6 +308,21 @@ public class ReadAheadChannel<T extends StoreChannel> implements ReadableChannel
      */
     protected T next(T channel) throws IOException {
         return channel;
+    }
+
+    protected void zeroOutBuffers() {
+        aheadBuffer.clear();
+
+        final var aheadSize = aheadBuffer.capacity();
+        var toZero = aheadSize;
+        while (toZero > 0) {
+            final var length = min(ZERO_BUFFER.capacity(), toZero);
+            aheadBuffer.put(aheadSize - toZero, ZERO_BUFFER, 0, length);
+            toZero -= length;
+        }
+        aheadBuffer.limit(0); // force a buffer fill on next read
+        checksum.reset();
+        checksumView.clear();
     }
 
     @Override

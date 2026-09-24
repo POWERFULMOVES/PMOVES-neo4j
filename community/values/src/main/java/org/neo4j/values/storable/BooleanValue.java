@@ -46,11 +46,6 @@ public abstract class BooleanValue extends ScalarValue {
     public abstract boolean booleanValue();
 
     @Override
-    public NumberType numberType() {
-        return NumberType.NO_NUMBER;
-    }
-
-    @Override
     public long updateHash(HashFunction hashFunction, long hash) {
         return hashFunction.update(hash, hashCode());
     }
@@ -68,7 +63,7 @@ public abstract class BooleanValue extends ScalarValue {
     public static final BooleanValue TRUE = new BooleanValue() {
         @Override
         public boolean equals(Value other) {
-            return this == other;
+            return this == other || getClass().equals(other.getClass());
         }
 
         @Override
@@ -116,7 +111,7 @@ public abstract class BooleanValue extends ScalarValue {
     public static final BooleanValue FALSE = new BooleanValue() {
         @Override
         public boolean equals(Value other) {
-            return this == other;
+            return this == other || getClass().equals(other.getClass());
         }
 
         @Override

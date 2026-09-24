@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.neo4j.internal.helpers.Strings.joinAsLines;
 import static org.neo4j.kernel.api.exceptions.Status.Statement.ArithmeticError;
 import static org.neo4j.kernel.api.exceptions.Status.Statement.SyntaxError;
-import static reactor.adapter.JdkFlowAdapter.flowPublisherToFlux;
+import static org.neo4j.test.extension.SkipOnSpd.Note.notSupported;
 
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -49,6 +49,8 @@ import org.neo4j.driver.Value;
 import org.neo4j.driver.Values;
 import org.neo4j.driver.exceptions.ClientException;
 import org.neo4j.driver.exceptions.TransientException;
+import org.neo4j.driver.reactivestreams.ReactiveResult;
+import org.neo4j.driver.reactivestreams.ReactiveSession;
 import org.neo4j.driver.types.Path;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.graphdb.GraphDatabaseService;
@@ -66,10 +68,12 @@ import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.BoltDbmsExtension;
 import org.neo4j.test.extension.ExtensionCallback;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
 import reactor.core.publisher.Mono;
 
 @BoltDbmsExtension(configurationCallback = "configure")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
+@SkipOnSpd(notes = notSupported, reason = "Snapshot execution engine is not supported")
 class SnapshotExecutionIT {
     @Inject
     private static GraphDatabaseAPI graphDatabase;
@@ -111,20 +115,19 @@ class SnapshotExecutionIT {
 
     @Test
     void testBasicSnapshotRead() {
+        try (Transaction tx = driver.session().beginTransaction()) {
+            tx.run("MATCH (f:First)\n SET f:Test").consume();
+            tx.commit();
+        }
         var query = joinAsLines(
-                "MATCH (f:First)",
-                "WITH f.number AS f",
-                "CALL se.doConcurrently('MATCH (f:First)\n SET f.number=1')",
-                "CALL se.doConcurrently('MATCH (s:Second)\n SET s.number=1')",
-                "MATCH (s:Second)",
-                "RETURN f, s.number AS s");
+                "MATCH (f:Test)",
+                "WITH f AS f",
+                "CALL se.doConcurrently('MATCH (f:First)\n REMOVE f:Test')",
+                "RETURN f");
 
-        var result = driver.session().run(query).stream()
-                .map(r -> List.of(r.get("f", -1), r.get("s", -1)))
-                .findFirst()
-                .get();
-        // The result would be (0, 1) without Snapshot EE
-        assertEquals(List.of(1, 1), result);
+        var result = driver.session().run(query).list();
+        // The result would be one node found without Snapshot EE
+        assertEquals(List.of(), result);
     }
 
     /**
@@ -228,8 +231,8 @@ class SnapshotExecutionIT {
         var query = joinAsLines("UNWIND range(0, 100) AS a", "RETURN a");
 
         int receivedRecords = Mono.fromDirect(
-                        flowPublisherToFlux(driver.reactiveSession().run(query)))
-                .flatMapMany(result -> flowPublisherToFlux(result.records()))
+                        driver.session(ReactiveSession.class).run(query))
+                .flatMapMany(ReactiveResult::records)
                 .limitRate(5)
                 .take(50)
                 .collectList()
@@ -265,12 +268,9 @@ class SnapshotExecutionIT {
 
         @Procedure(mode = Mode.WRITE, name = "se.doConcurrently")
         public void doConcurrently(@Name("query") String query) throws Exception {
-            var executor = Executors.newSingleThreadExecutor();
-            try {
+            try (var executor = Executors.newSingleThreadExecutor()) {
                 var future = executor.submit(() -> db.executeTransactionally(query));
                 future.get();
-            } finally {
-                executor.shutdown();
             }
         }
     }
@@ -287,7 +287,8 @@ class SnapshotExecutionIT {
                     .cursorContext()
                     .getVersionContext()
                     .markAsDirty();
-            throw new TransientTransactionFailureException(Status.Transaction.Outdated, "Surprise!");
+            throw TransientTransactionFailureException.internalError(
+                    this.getClass().getSimpleName(), "Surprise!", Status.Transaction.Outdated);
         }
     }
 }

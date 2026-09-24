@@ -21,9 +21,6 @@ package org.neo4j.dbms.routing;
 
 import static java.util.Collections.emptyList;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -51,25 +48,15 @@ class RoutingResultTest {
 
         var result = new RoutingResult(routers, writers, readers, 42);
 
-        assertEquals(result.readEndpoints(), readers);
-        assertEquals(result.writeEndpoints(), writers);
-        assertEquals(result.routeEndpoints(), routers);
+        assertThat(result.readEndpoints()).isEqualTo(readers);
+        assertThat(result.writeEndpoints()).isEqualTo(writers);
+        assertThat(result.routeEndpoints()).isEqualTo(routers);
     }
 
     @Test
     void shouldExposeTtl() {
         var result = new RoutingResult(emptyList(), emptyList(), emptyList(), 424242);
 
-        assertEquals(424242, result.ttlMillis());
-    }
-
-    @Test
-    void shouldCheckIfContainsEndpoints() {
-        var address = new SocketAddress("localhost", 1);
-        var emptyResult = new RoutingResult(emptyList(), emptyList(), emptyList(), 42);
-        var nonEmptyResult = new RoutingResult(List.of(address), List.of(address), List.of(address), 42);
-
-        assertTrue(emptyResult.containsNoEndpoints());
-        assertFalse(nonEmptyResult.containsNoEndpoints());
+        assertThat(result.ttlMillis()).isEqualTo(424242);
     }
 }

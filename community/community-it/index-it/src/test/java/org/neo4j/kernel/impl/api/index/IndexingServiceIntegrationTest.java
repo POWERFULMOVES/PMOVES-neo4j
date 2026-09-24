@@ -22,15 +22,17 @@ package org.neo4j.kernel.impl.api.index;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
+import static org.neo4j.internal.helpers.collection.Iterators.iterator;
 import static org.neo4j.internal.kernel.api.InternalIndexState.ONLINE;
 import static org.neo4j.internal.kernel.api.InternalIndexState.POPULATING;
 import static org.neo4j.internal.schema.IndexPrototype.uniqueForSchema;
 import static org.neo4j.internal.schema.SchemaDescriptors.forLabel;
-import static org.neo4j.storageengine.api.IndexEntryUpdate.add;
+import static org.neo4j.storageengine.api.EagerValueIndexEntryUpdate.add;
 import static org.neo4j.values.storable.Values.longValue;
 
 import java.io.IOException;
-import java.util.List;
+import java.nio.file.Path;
+import java.util.Iterator;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.AfterEach;
@@ -58,6 +60,7 @@ import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexPrototype;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseLayout;
+import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.cursor.PageCursorTracer;
 import org.neo4j.kernel.api.KernelTransaction;
@@ -66,8 +69,6 @@ import org.neo4j.kernel.api.index.IndexDirectoryStructure;
 import org.neo4j.kernel.impl.coreapi.InternalTransaction;
 import org.neo4j.kernel.impl.coreapi.schema.IndexDefinitionImpl;
 import org.neo4j.kernel.impl.factory.GraphDatabaseFacade;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
 import org.neo4j.test.Race;
@@ -75,6 +76,8 @@ import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
 
 @TestDirectoryExtension
 public class IndexingServiceIntegrationTest {
@@ -107,9 +110,9 @@ public class IndexingServiceIntegrationTest {
 
     @Test
     void tracePageCacheAccessOnIndexUpdatesApply() throws KernelException {
-        var marker = Label.label("marker");
-        var propertyName = "property";
-        var testConstraint = "testConstraint";
+        Label marker = Label.label("marker");
+        String propertyName = "property";
+        String testConstraint = "testConstraint";
         try (Transaction transaction = database.beginTx()) {
             transaction
                     .schema()
@@ -120,15 +123,15 @@ public class IndexingServiceIntegrationTest {
             transaction.commit();
         }
 
-        var dependencyResolver = ((GraphDatabaseAPI) database).getDependencyResolver();
-        var indexingService = dependencyResolver.resolveDependency(IndexingService.class);
-        var contextFactory = dependencyResolver.resolveDependency(CursorContextFactory.class);
+        DependencyResolver dependencyResolver = ((GraphDatabaseAPI) database).getDependencyResolver();
+        IndexingService indexingService = dependencyResolver.resolveDependency(IndexingService.class);
+        CursorContextFactory contextFactory = dependencyResolver.resolveDependency(CursorContextFactory.class);
 
         try (Transaction transaction = database.beginTx()) {
-            var kernelTransaction = ((InternalTransaction) transaction).kernelTransaction();
-            var indexDescriptor = kernelTransaction.schemaRead().indexGetForName(testConstraint);
-            try (var cursorContext = contextFactory.create("tracePageCacheAccessOnIndexUpdatesApply")) {
-                Iterable<IndexEntryUpdate<IndexDescriptor>> updates = List.of(add(1, indexDescriptor, longValue(4)));
+            KernelTransaction kernelTransaction = ((InternalTransaction) transaction).kernelTransaction();
+            IndexDescriptor indexDescriptor = kernelTransaction.schemaRead().indexGetForName(testConstraint);
+            try (CursorContext cursorContext = contextFactory.create("tracePageCacheAccessOnIndexUpdatesApply")) {
+                Iterator<IndexEntryUpdate> updates = iterator(add(1, indexDescriptor, longValue(4)));
                 indexingService.applyUpdates(updates, cursorContext, false);
 
                 PageCursorTracer cursorTracer = cursorContext.getCursorTracer();
@@ -349,11 +352,11 @@ public class IndexingServiceIntegrationTest {
     private IndexDescriptor createOrphanUniquenessConstraintIndex() throws KernelException {
         IndexDescriptor index;
         try (Transaction tx = database.beginTx()) {
-            final var ktx = ((InternalTransaction) tx).kernelTransaction();
-            final int labelId = ktx.tokenRead().nodeLabel(FOOD_LABEL);
-            final int propertyKeyId = ktx.tokenRead().propertyKey(PROPERTY_NAME);
+            KernelTransaction ktx = ((InternalTransaction) tx).kernelTransaction();
+            int labelId = ktx.tokenRead().nodeLabel(FOOD_LABEL);
+            int propertyKeyId = ktx.tokenRead().propertyKey(PROPERTY_NAME);
 
-            final IndexPrototype uniqueIndex = uniqueForSchema(forLabel(labelId, propertyKeyId))
+            IndexPrototype uniqueIndex = uniqueForSchema(forLabel(labelId, propertyKeyId))
                     .withIndexProvider(AllIndexProviderDescriptors.RANGE_DESCRIPTOR)
                     .withName("constraint");
             index = ktx.indexUniqueCreate(uniqueIndex);
@@ -363,9 +366,10 @@ public class IndexingServiceIntegrationTest {
     }
 
     private void deleteIndexFiles(IndexDescriptor index) throws IOException {
-        final var directoryStructure = IndexDirectoryStructure.directoriesByProvider(layout.databaseDirectory())
+        IndexDirectoryStructure directoryStructure = IndexDirectoryStructure.directoriesByProvider(
+                        layout.databaseDirectory())
                 .forProvider(index.getIndexProvider());
-        final var path = directoryStructure.directoryForIndex(index.getId());
+        Path path = directoryStructure.directoryForIndex(index.getId());
         fs.deleteRecursively(path);
     }
 
@@ -379,12 +383,12 @@ public class IndexingServiceIntegrationTest {
         layout = ((GraphDatabaseFacade) database).databaseLayout();
     }
 
-    private InternalIndexState getIndexState(IndexingService service, IndexDescriptor index)
+    private static InternalIndexState getIndexState(IndexingService service, IndexDescriptor index)
             throws IndexNotFoundKernelException {
         return service.getIndexProxy(index).getState();
     }
 
-    private void awaitStoreScan(IndexingService service, IndexDescriptor index)
+    private static void awaitStoreScan(IndexingService service, IndexDescriptor index)
             throws IndexNotFoundKernelException, IndexPopulationFailedKernelException, InterruptedException {
         service.getIndexProxy(index).awaitStoreScanCompleted(10, TimeUnit.MINUTES);
     }

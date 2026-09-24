@@ -20,7 +20,6 @@
 package org.neo4j.queryapi;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.neo4j.queryapi.QueryApiTestUtil.setupLogging;
 import static org.neo4j.server.queryapi.response.format.Fieldnames.ERRORS_KEY;
 import static org.neo4j.server.queryapi.response.format.Fieldnames.ERROR_CODE;
 import static org.neo4j.server.queryapi.response.format.Fieldnames.ERROR_MESSAGE;
@@ -33,48 +32,27 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
+import org.assertj.core.util.Lists;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-import org.neo4j.configuration.connectors.BoltConnector;
-import org.neo4j.configuration.connectors.BoltConnectorInternalSettings;
-import org.neo4j.configuration.connectors.ConnectorPortRegister;
-import org.neo4j.configuration.connectors.ConnectorType;
-import org.neo4j.configuration.connectors.HttpConnector;
-import org.neo4j.configuration.helpers.SocketAddress;
-import org.neo4j.dbms.api.DatabaseManagementService;
 import org.neo4j.kernel.api.exceptions.Status;
+import org.neo4j.queryapi.test.QueryApiTestUtil;
+import org.neo4j.queryapi.test.annotation.QueryAPITestExtension;
+import org.neo4j.queryapi.test.testclient.QueryAPITestClient;
 import org.neo4j.server.queryapi.QueryMimeTypes;
-import org.neo4j.test.TestDatabaseManagementServiceBuilder;
+import org.neo4j.test.extension.SkipOnSpd;
 
+@QueryAPITestExtension
 class QueryResourceErrorIT {
 
-    private static DatabaseManagementService dbms;
-    private static HttpClient client;
+    private final HttpClient client;
     private final ObjectMapper MAPPER = new ObjectMapper();
-    private static String queryEndpoint;
+    private final String queryEndpoint;
 
-    @BeforeAll
-    static void beforeAll() {
-        setupLogging();
-        var builder = new TestDatabaseManagementServiceBuilder();
-        dbms = builder.setConfig(HttpConnector.enabled, true)
-                .setConfig(HttpConnector.listen_address, new SocketAddress("localhost", 0))
-                .setConfig(
-                        BoltConnectorInternalSettings.local_channel_address, QueryResourceErrorIT.class.getSimpleName())
-                .setConfig(BoltConnector.enabled, true)
-                .impermanent()
-                .build();
-        var portRegister = QueryApiTestUtil.resolveDependency(dbms, ConnectorPortRegister.class);
-        queryEndpoint = "http://" + portRegister.getLocalAddress(ConnectorType.HTTP) + "/db/{databaseName}/query/v2";
-        client = HttpClient.newBuilder().build();
-    }
-
-    @AfterAll
-    static void teardown() {
-        dbms.shutdown();
+    QueryResourceErrorIT(QueryAPITestClient testClient) {
+        this.queryEndpoint = testClient.getEndpoint();
+        this.client = HttpClient.newHttpClient();
     }
 
     @Test
@@ -82,7 +60,7 @@ class QueryResourceErrorIT {
         var httpRequest = QueryApiTestUtil.baseRequestBuilder(queryEndpoint, "neo4j")
                 .POST(HttpRequest.BodyPublishers.noBody())
                 .build();
-        var response = client.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+        var response = QueryAPITestClient.send(client, httpRequest, HttpResponse.BodyHandlers.ofString());
 
         assertThat(response.statusCode()).isEqualTo(400);
         assertThat(response.headers().allValues(HttpHeaders.CONTENT_TYPE)).contains(MediaType.APPLICATION_JSON);
@@ -96,7 +74,7 @@ class QueryResourceErrorIT {
         var httpRequest = QueryApiTestUtil.baseRequestBuilder(queryEndpoint, "neo4j")
                 .GET()
                 .build();
-        var response = client.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+        var response = QueryAPITestClient.send(client, httpRequest, HttpResponse.BodyHandlers.ofString());
 
         assertThat(response.statusCode()).isEqualTo(405);
         assertThat(response.headers().allValues(HttpHeaders.CONTENT_TYPE)).contains(MediaType.APPLICATION_JSON);
@@ -114,7 +92,7 @@ class QueryResourceErrorIT {
                 .POST(HttpRequest.BodyPublishers.ofString("This is not acceptable"))
                 .build();
 
-        var response = client.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+        var response = QueryAPITestClient.send(client, httpRequest, HttpResponse.BodyHandlers.ofString());
 
         assertThat(response.statusCode()).isEqualTo(415);
         assertThat(response.headers().allValues(HttpHeaders.CONTENT_TYPE)).contains(MediaType.APPLICATION_JSON);
@@ -132,7 +110,7 @@ class QueryResourceErrorIT {
                 .POST(HttpRequest.BodyPublishers.ofString("This is not acceptable"))
                 .build();
 
-        var response = client.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+        var response = QueryAPITestClient.send(client, httpRequest, HttpResponse.BodyHandlers.ofString());
 
         assertThat(response.statusCode()).isEqualTo(415);
         assertThat(response.headers().allValues(HttpHeaders.CONTENT_TYPE)).contains(MediaType.APPLICATION_JSON);
@@ -149,7 +127,7 @@ class QueryResourceErrorIT {
                 .POST(HttpRequest.BodyPublishers.ofString("{\"statement\": \"RETURN 1\"}"))
                 .build();
 
-        var response = client.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+        var response = QueryAPITestClient.send(client, httpRequest, HttpResponse.BodyHandlers.ofString());
 
         assertThat(response.statusCode()).isEqualTo(415);
         assertThat(response.headers().allValues(HttpHeaders.CONTENT_TYPE)).contains(MediaType.APPLICATION_JSON);
@@ -163,7 +141,7 @@ class QueryResourceErrorIT {
         var httpRequest = QueryApiTestUtil.baseRequestBuilder(queryEndpoint, "neo4j")
                 .POST(HttpRequest.BodyPublishers.ofString("This is a random string!"))
                 .build();
-        var response = client.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+        var response = QueryAPITestClient.send(client, httpRequest, HttpResponse.BodyHandlers.ofString());
 
         assertThat(response.statusCode()).isEqualTo(400);
         assertThat(response.headers().allValues(HttpHeaders.CONTENT_TYPE)).contains(MediaType.APPLICATION_JSON);
@@ -181,7 +159,7 @@ class QueryResourceErrorIT {
                 .POST(HttpRequest.BodyPublishers.noBody())
                 .build();
 
-        var response = client.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+        var response = QueryAPITestClient.send(client, httpRequest, HttpResponse.BodyHandlers.ofString());
 
         assertThat(response.statusCode()).isEqualTo(406);
         assertThat(response.headers().allValues(HttpHeaders.CONTENT_TYPE)).contains(MediaType.APPLICATION_JSON);
@@ -195,13 +173,15 @@ class QueryResourceErrorIT {
         var httpRequest = QueryApiTestUtil.baseRequestBuilder(queryEndpoint, "thisDbisALie")
                 .POST(HttpRequest.BodyPublishers.ofString("{\"statement\": \"RETURN 1\"}"))
                 .build();
-        var response = client.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+        var response = QueryAPITestClient.send(client, httpRequest, HttpResponse.BodyHandlers.ofString());
 
         assertThat(response.statusCode()).isEqualTo(404);
         assertThat(response.headers().allValues(HttpHeaders.CONTENT_TYPE)).contains(MediaType.APPLICATION_JSON);
-        assertThat(response.body())
-                .isEqualTo("{\"errors\":[{\"code\":\"Neo.ClientError.Database.DatabaseNotFound\","
-                        + "\"message\":\"Graph not found: thisdbisalie\"}]}");
+        var possibleBodies = Lists.newArrayList(
+                "{\"errors\":[{\"code\":\"Neo.ClientError.Database.DatabaseNotFound\",\"message\":\"Graph not found: thisdbisalie\"}]}",
+                // we get this result in SPD running non-community
+                "{\"errors\":[{\"code\":\"Neo.ClientError.Database.DatabaseNotFound\",\"message\":\"Database does not exist. Database name: 'thisDbisALie'.\"}]}");
+        assertThat(response.body()).isIn(possibleBodies);
     }
 
     @Test
@@ -216,7 +196,13 @@ class QueryResourceErrorIT {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {QueryMimeTypes.TYPED_JSON, QueryMimeTypes.TYPED_JSON_V1x0})
+    @ValueSource(
+            strings = {
+                QueryMimeTypes.TYPED_JSON,
+                QueryMimeTypes.TYPED_JSON_V1x0,
+                QueryMimeTypes.TYPED_JSON_V1x1,
+                QueryMimeTypes.TYPED_JSON_V1x2
+            })
     void invalidTypedCypher(String mimeType) throws IOException, InterruptedException {
         var request = HttpRequest.newBuilder()
                 .uri(URI.create(queryEndpoint.replace("{databaseName}", "neo4j")))
@@ -225,7 +211,7 @@ class QueryResourceErrorIT {
                 .POST(HttpRequest.BodyPublishers.ofString("{\"statement\": \"MATCH (n)\"}"))
                 .build();
 
-        var response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        var response = QueryAPITestClient.send(client, request, HttpResponse.BodyHandlers.ofString());
 
         assertThat(response.statusCode()).isEqualTo(400);
         assertThat(response.headers().allValues(HttpHeaders.CONTENT_TYPE)).contains(mimeType);
@@ -258,16 +244,15 @@ class QueryResourceErrorIT {
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
 
-        var response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        var response = QueryAPITestClient.send(client, request, HttpResponse.BodyHandlers.ofString());
 
         assertThat(response.statusCode()).isEqualTo(400);
-        assertThat(response.body())
-                .contains(
-                        """
+        assertThat(response.body()).contains("""
                         {"errors":[{"code":"Neo.ClientError.Statement.ArgumentError","message":"Impersonation is not supported with auth disabled."}]}""");
     }
 
     @Test
+    @SkipOnSpd(reason = "SPD is enterprise and accepts system commands")
     void systemCommandsDontWork() throws IOException, InterruptedException {
         var response =
                 QueryApiTestUtil.simpleRequest(client, queryEndpoint, "{\"statement\": \"CREATE DATABASE foo\"}");
@@ -299,7 +284,7 @@ class QueryResourceErrorIT {
         var httpRequest = QueryApiTestUtil.baseRequestBuilder(queryEndpoint, "neo4j")
                 .POST(HttpRequest.BodyPublishers.noBody())
                 .build();
-        var response = client.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+        var response = QueryAPITestClient.send(client, httpRequest, HttpResponse.BodyHandlers.ofString());
 
         assertThat(response.statusCode()).isEqualTo(400);
         var parsedJson = MAPPER.readTree(response.body());

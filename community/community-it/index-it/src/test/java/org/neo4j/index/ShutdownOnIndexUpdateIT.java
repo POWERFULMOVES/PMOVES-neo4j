@@ -29,12 +29,10 @@ import org.neo4j.graphdb.Label;
 import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.Transaction;
 import org.neo4j.graphdb.schema.Schema;
+import org.neo4j.kernel.availability.AvailabilityListener;
+import org.neo4j.kernel.availability.DatabaseAvailabilityGuard;
 import org.neo4j.kernel.database.Database;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
-import org.neo4j.kernel.lifecycle.LifeSupport;
-import org.neo4j.kernel.lifecycle.LifecycleListener;
-import org.neo4j.kernel.lifecycle.LifecycleStatus;
-import org.neo4j.storageengine.api.StorageEngine;
 import org.neo4j.test.extension.ImpermanentDbmsExtension;
 import org.neo4j.test.extension.Inject;
 
@@ -59,9 +57,9 @@ class ShutdownOnIndexUpdateIT {
             Node node = transaction.createNode(CONSTRAINT_INDEX_LABEL);
             node.setProperty(UNIQUE_PROPERTY_NAME, indexProvider.getAndIncrement());
 
-            LifeSupport dataSourceLife = database.getLife();
+            DatabaseAvailabilityGuard availabilityGuard = database.getDatabaseAvailabilityGuard();
             TransactionCloseListener closeListener = new TransactionCloseListener(transaction);
-            dataSourceLife.addLifecycleListener(closeListener);
+            availabilityGuard.addListener(closeListener);
             database.stop();
 
             assertTrue(
@@ -86,7 +84,7 @@ class ShutdownOnIndexUpdateIT {
         }
     }
 
-    private static class TransactionCloseListener implements LifecycleListener {
+    private static class TransactionCloseListener implements AvailabilityListener {
         private final Transaction transaction;
         private boolean transactionClosed;
 
@@ -95,11 +93,9 @@ class ShutdownOnIndexUpdateIT {
         }
 
         @Override
-        public void notifyStatusChanged(Object instance, LifecycleStatus from, LifecycleStatus to) {
-            if ((LifecycleStatus.STOPPED == to) && instance instanceof StorageEngine) {
-                transaction.commit();
-                transactionClosed = true;
-            }
+        public void unavailable() {
+            transaction.commit();
+            transactionClosed = true;
         }
 
         boolean isTransactionClosed() {

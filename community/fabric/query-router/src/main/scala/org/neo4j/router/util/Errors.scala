@@ -24,24 +24,23 @@ import org.neo4j.cypher.messages.MessageUtilProvider
 import org.neo4j.exceptions.InvalidSemanticsException
 import org.neo4j.exceptions.SyntaxException
 import org.neo4j.fabric.planning.Use
+import org.neo4j.gqlstatus.ErrorGqlStatusObject
+import org.neo4j.gqlstatus.GqlHelper
 import org.neo4j.kernel.database.DatabaseReference
 
 object Errors {
 
-  def syntax(msg: String): Nothing = throw new SyntaxException(msg)
-
-  def semantic(message: String) = throw new InvalidSemanticsException(message)
+  def syntax(gql: ErrorGqlStatusObject, msg: String): Nothing = throw new SyntaxException(gql, msg)
 
   private def dynamicGraphNotAllowedMessage(use: String) =
     MessageUtilProvider.createDynamicGraphReferenceUnsupportedError(use).stripMargin
 
   def dynamicGraphNotAllowed(use: GraphSelection): Nothing =
-    syntax(dynamicGraphNotAllowedMessage(Use.show(use)))
+    syntax(
+      GqlHelper.getGql42001_42N72(use.position.offset, use.position.line, use.position.column),
+      dynamicGraphNotAllowedMessage(Use.show(use))
+    )
 
   def cantAccessOutsideCompositeMessage(target: DatabaseReference, sessionDatabase: DatabaseReference): Nothing =
-    throw new InvalidSemanticsException(
-      s"When connected to a composite database, access is allowed only to its constituents. " +
-        s"Attempted to access '${target.toPrettyString}' while connected to '${sessionDatabase.toPrettyString}'"
-    );
-
+    throw InvalidSemanticsException.unsupportedAccessOfStandardDb(target.toPrettyString, sessionDatabase.toPrettyString)
 }

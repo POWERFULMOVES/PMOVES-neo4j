@@ -33,8 +33,6 @@ import static org.neo4j.test.Race.throwing;
 import java.io.IOException;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
-import java.util.Collection;
-import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -60,6 +58,7 @@ import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.lifecycle.LifeSupport;
 import org.neo4j.memory.GlobalMemoryGroupTracker;
@@ -103,7 +102,7 @@ class BufferingIdGeneratorFactoryTest {
         Config config = Config.defaults(GraphDatabaseInternalSettings.buffered_ids_offload, offHeap);
         bufferingIdGeneratorFactory.initialize(
                 fs,
-                directory.file("tmp-ids"),
+                new StoreFile(directory.file("tmp-ids")),
                 config,
                 boundaries,
                 boundaries,
@@ -111,7 +110,7 @@ class BufferingIdGeneratorFactoryTest {
                 dbMemoryPool.getPoolMemoryTracker());
         idGenerator = bufferingIdGeneratorFactory.open(
                 pageCache,
-                Path.of("doesnt-matter"),
+                new StoreFile(Path.of("doesnt-matter")),
                 TestIdType.TEST,
                 () -> 0L,
                 Integer.MAX_VALUE,
@@ -238,7 +237,7 @@ class BufferingIdGeneratorFactoryTest {
     private static class ControllableSnapshotSupplier
             implements Supplier<IdController.TransactionSnapshot>,
                     IdController.IdFreeCondition,
-                    IdController.TransactionIdVisibilityBoundary {
+                    IdController.VisibilityHorizonVisibilityBoundary {
         boolean automaticallyEnableConditions;
         volatile IdController.TransactionSnapshot mostRecentlyReturned;
         private final Set<IdController.TransactionSnapshot> enabledSnapshots = new HashSet<>();
@@ -266,7 +265,12 @@ class BufferingIdGeneratorFactoryTest {
         }
 
         @Override
-        public long oldestObservableHorizon() {
+        public long oldestCleanupHorizon() {
+            return 9;
+        }
+
+        @Override
+        public long oldestVisibilityHorizon() {
             return 9;
         }
     }
@@ -278,7 +282,7 @@ class BufferingIdGeneratorFactoryTest {
         @Override
         public IdGenerator open(
                 PageCache pageCache,
-                Path filename,
+                StoreFile storeFile,
                 IdType idType,
                 LongSupplier highIdScanner,
                 long maxId,
@@ -300,7 +304,7 @@ class BufferingIdGeneratorFactoryTest {
         @Override
         public IdGenerator create(
                 PageCache pageCache,
-                Path filename,
+                StoreFile storeFile,
                 IdType idType,
                 long highId,
                 boolean throwIfFileExists,
@@ -312,7 +316,7 @@ class BufferingIdGeneratorFactoryTest {
                 IdSlotDistribution slotDistribution) {
             return open(
                     pageCache,
-                    filename,
+                    storeFile,
                     idType,
                     () -> highId,
                     maxId,
@@ -337,11 +341,6 @@ class BufferingIdGeneratorFactoryTest {
         public void clearCache(boolean allocationEnabled, CursorContext cursorContext) {
             // no-op
         }
-
-        @Override
-        public Collection<Path> listIdFiles() {
-            return Collections.emptyList();
-        }
     }
 
     private static class MockedMarker implements IdGenerator.TransactionalMarker, IdGenerator.ContextualMarker {
@@ -356,8 +355,13 @@ class BufferingIdGeneratorFactoryTest {
         }
 
         @Override
-        public void markDeleted(long id, int numberOfIds) {
+        public void markDeleted(long id, int numberOfIds, boolean bridgeOnDelete) {
             deleted.add(Pair.of(id, numberOfIds));
+        }
+
+        @Override
+        public void markDeleted(long id, int numberOfIds) {
+            markDeleted(id, numberOfIds, false);
         }
 
         @Override
@@ -367,7 +371,12 @@ class BufferingIdGeneratorFactoryTest {
 
         @Override
         public void markDeletedAndFree(long id, int numberOfIds) {
-            markDeleted(id, numberOfIds);
+            markDeleted(id, numberOfIds, false);
+        }
+
+        @Override
+        public void markDeletedAndFree(long id, int numberOfIds, boolean bridgeOnDelete) {
+            markDeleted(id, numberOfIds, bridgeOnDelete);
             markFree(id, numberOfIds);
         }
 

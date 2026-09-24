@@ -24,12 +24,12 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import org.neo4j.bolt.negotiation.ProtocolVersion;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 import org.neo4j.bolt.protocol.common.connector.connection.Feature;
-import org.neo4j.bolt.protocol.common.message.request.connection.RoutingContext;
 import org.neo4j.bolt.protocol.io.StructType;
-import org.neo4j.bolt.protocol.io.writer.LegacyStructWriter;
+import org.neo4j.bolt.protocol.io.writer.VersionedValueWriterV40;
 import org.neo4j.bolt.protocol.v40.BoltProtocolV40;
+import org.neo4j.boltmessages.request.connection.RoutingContext;
 import org.neo4j.packstream.io.PackstreamBuf;
 import org.neo4j.packstream.struct.StructHeader;
 
@@ -49,8 +49,13 @@ public class BoltV40Wire extends AbstractBoltWire {
     }
 
     @Override
+    public boolean hasGQLStatus() {
+        return false;
+    }
+
+    @Override
     protected void configurePipeline() {
-        this.pipeline.addLast(LegacyStructWriter.getInstance());
+        this.pipeline.addLast(VersionedValueWriterV40.getInstance());
 
         super.configurePipeline();
     }
@@ -86,7 +91,7 @@ public class BoltV40Wire extends AbstractBoltWire {
             buf.writeString(db);
         }
 
-        return buf.getTarget();
+        return buf.raw();
     }
 
     @Override

@@ -21,14 +21,15 @@ package org.neo4j.storageengine;
 
 import org.neo4j.io.pagecache.context.TransactionIdSnapshot;
 import org.neo4j.kernel.KernelVersion;
-import org.neo4j.kernel.impl.transaction.log.AppendBatchInfo;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.storageengine.api.ClosedBatchMetadata;
 import org.neo4j.storageengine.api.ClosedTransactionMetadata;
 import org.neo4j.storageengine.api.OpenTransactionMetadata;
 import org.neo4j.storageengine.api.TransactionId;
 import org.neo4j.storageengine.api.TransactionIdStore;
+import org.neo4j.util.concurrent.OutOfOrderSequence;
+import org.neo4j.wal.AppendBatchInfo;
+import org.neo4j.wal.LogPosition;
+import org.neo4j.wal.LogTailLogVersionsMetadata;
 
 public class ReadOnlyTransactionIdStore implements TransactionIdStore {
     private final LogPosition logPosition;
@@ -68,28 +69,34 @@ public class ReadOnlyTransactionIdStore implements TransactionIdStore {
     }
 
     @Override
-    public long getLastClosedTransactionId() {
+    public long getHighestGapFreeClosedTransactionId() {
         return lastCommittedTransaction.id();
     }
 
     @Override
     public TransactionIdSnapshot getClosedTransactionSnapshot() {
-        return new TransactionIdSnapshot(getLastClosedTransactionId());
+        return new TransactionIdSnapshot(getHighestGapFreeClosedTransactionId());
     }
 
     @Override
-    public ClosedTransactionMetadata getLastClosedTransaction() {
+    public ClosedTransactionMetadata getHighestGapFreeClosedTransaction() {
         return new ClosedTransactionMetadata(lastCommittedTransaction, logPosition);
     }
 
     @Override
     public ClosedBatchMetadata getLastClosedBatch() {
-        return new ClosedBatchMetadata(lastBatch.appendIndex(), lastCommittedTransaction.kernelVersion(), logPosition);
+        return new ClosedBatchMetadata(
+                lastBatch.appendIndex(),
+                lastCommittedTransaction.kernelVersion(),
+                logPosition,
+                lastBatch.consensusIndex());
     }
 
     @Override
     public void setLastCommittedAndClosedTransactionId(
-            long transactionId,
+            long lastCommitedTxId,
+            long lastClosedTxId,
+            long[] notClosedTransactions,
             long transactionAppendIndex,
             KernelVersion kernelVersion,
             int checksum,
@@ -97,7 +104,10 @@ public class ReadOnlyTransactionIdStore implements TransactionIdStore {
             long consensusIndex,
             long logByteOffset,
             long logVersion,
-            long appendIndex) {
+            long appendIndex,
+            long lastClosedBatchConsensusIndex,
+            OpenTransactionMetadata earliestOpenTransactionMetadata,
+            OutOfOrderSequence.NumberWithMeta lastClosedTxIdInfo) {
         throw new UnsupportedOperationException("Read-only transaction ID store");
     }
 
@@ -121,7 +131,23 @@ public class ReadOnlyTransactionIdStore implements TransactionIdStore {
             boolean firstBatch,
             boolean lastBatch,
             KernelVersion kernelVersion,
-            LogPosition logPositionAfter) {
+            LogPosition logPositionAfter,
+            long consensusIndex) {
+        throw new UnsupportedOperationException("Read-only transaction ID store");
+    }
+
+    @Override
+    public void setLastCommittedAndClosedTransactionId(
+            long transactionId,
+            long transactionAppendIndex,
+            KernelVersion kernelVersion,
+            int checksum,
+            long commitTimestamp,
+            long consensusIndex,
+            long byteOffset,
+            long logVersion,
+            long logsAppendIndex,
+            long lastClosedBatchConsensusIndex) {
         throw new UnsupportedOperationException("Read-only transaction ID store");
     }
 
@@ -145,7 +171,8 @@ public class ReadOnlyTransactionIdStore implements TransactionIdStore {
             boolean firstBatch,
             boolean lastBatch,
             LogPosition logPositionBefore,
-            LogPosition logPositionAfter) {}
+            LogPosition logPositionAfter,
+            long consensusIndex) {}
 
     @Override
     public AppendBatchInfo getLastCommittedBatch() {
@@ -160,5 +187,15 @@ public class ReadOnlyTransactionIdStore implements TransactionIdStore {
     @Override
     public TransactionId getHighestEverClosedTransaction() {
         return lastCommittedTransaction;
+    }
+
+    @Override
+    public long getLowestAvailableCommittedTransactionId() {
+        throw new UnsupportedOperationException("Read-only transaction ID store");
+    }
+
+    @Override
+    public void setLowestAvailableCommittedTransactionId(long transactionId) {
+        throw new UnsupportedOperationException("Read-only transaction ID store");
     }
 }

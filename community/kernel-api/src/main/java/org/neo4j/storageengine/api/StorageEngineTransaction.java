@@ -22,9 +22,9 @@ package org.neo4j.storageengine.api;
 import java.util.function.LongConsumer;
 import org.neo4j.common.Subject;
 import org.neo4j.io.pagecache.context.CursorContext;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
 import org.neo4j.storageengine.AppendIndexProvider;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
+import org.neo4j.wal.LogPosition;
 
 /**
  * Group of commands to apply onto {@link StorageEngine}, as well as reference to {@link #next()} group of commands.
@@ -35,6 +35,12 @@ public interface StorageEngineTransaction extends AutoCloseable {
      * @return transaction id representing this group of commands.
      */
     long transactionId();
+
+    /**
+     * @param externalId suggested id to use
+     * @return transaction id representing this group of commands.
+     */
+    long transactionId(long externalId);
 
     /**
      * @return chunk id representing this group of commands
@@ -80,12 +86,32 @@ public interface StorageEngineTransaction extends AutoCloseable {
      */
     void onClose(LongConsumer closedCallback);
 
+    /**
+     * The chunks in multi-chunked transactions all share a transaction id. On merged logs, this can result in gaps in
+     * our metadata store, as that txid is based on the append index of the first chunk. This method returns true if we
+     * are on merged logs and therefore need to fill those gaps.
+     */
+    default boolean fillGapsOnCloseIfRelevant() {
+        return false;
+    }
+
+    /**
+     * The chunks in multi-chunked transactions all share a transaction id. On merged logs, this can result in gaps in
+     * our metadata store, as that txid is based on the append index of the first chunk. This method should be called
+     * with {@code true} when registering txs on merged logs.
+     */
+    default void fillGapsOnCloseIfRelevant(boolean fillGapsOnClose) {
+        // No-op by default
+    }
+
     void commit();
 
     /**
      * Commands that should be applied as part of this particular batch
      */
     CommandBatch commandBatch();
+
+    LogPositionMetadata logPositionMetadata();
 
     /**
      * Invoked by commit process after this batch of commands was applied to transaction log
@@ -101,8 +127,9 @@ public interface StorageEngineTransaction extends AutoCloseable {
      * Method to update back transaction with data from clustering replication process
      * @param transactionId - transaction id that was generated for this transaction
      * @param appendIndex - append index generated for the latest chunk of this transaction
+     * @param chunkId - chunk id generated for the latest chunk of this transaction
      */
-    void updateClusteredInfo(long transactionId, long appendIndex);
+    void updateClusteredInfo(long transactionId, long appendIndex, long chunkId);
 
     @Override
     void close();

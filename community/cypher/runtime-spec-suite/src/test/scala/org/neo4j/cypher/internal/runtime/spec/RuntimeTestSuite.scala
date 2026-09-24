@@ -26,33 +26,32 @@ import org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME
 import org.neo4j.configuration.GraphDatabaseSettings.SYSTEM_DATABASE_NAME
 import org.neo4j.configuration.GraphDatabaseSettings.cypher_worker_limit
 import org.neo4j.cypher.internal.CypherRuntime
-import org.neo4j.cypher.internal.InterpretedRuntimeName
 import org.neo4j.cypher.internal.LogicalQuery
-import org.neo4j.cypher.internal.ParallelRuntimeName
-import org.neo4j.cypher.internal.PipelinedRuntimeName
 import org.neo4j.cypher.internal.RuntimeContext
-import org.neo4j.cypher.internal.SlottedRuntimeName
 import org.neo4j.cypher.internal.ast.AstConstructionTestSupport
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
 import org.neo4j.cypher.internal.frontend.phases.ResolvedFunctionInvocation
 import org.neo4j.cypher.internal.logical.plans.Prober
+import org.neo4j.cypher.internal.macros.ControlFlowMacros3.doWhile
+import org.neo4j.cypher.internal.notification.InternalNotification
 import org.neo4j.cypher.internal.options.CypherDebugOptions
+import org.neo4j.cypher.internal.runtime.InputDataStreamTestSupport
 import org.neo4j.cypher.internal.runtime.InputValues
 import org.neo4j.cypher.internal.runtime.TestSubscriber
-import org.neo4j.cypher.internal.runtime.debug.DebugSupport
+import org.neo4j.cypher.internal.runtime.spec.Edition.SpdConfig
+import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSupport.WorkloadMode
 import org.neo4j.cypher.internal.runtime.spec.execution.RuntimeTestSupportExecution
 import org.neo4j.cypher.internal.runtime.spec.matcher.RuntimeResultMatchers
 import org.neo4j.cypher.internal.runtime.spec.resolver.RuntimeTestResolver
 import org.neo4j.cypher.internal.runtime.spec.rewriters.TestPlanCombinationRewriter.TestPlanCombinationRewriterHint
-import org.neo4j.cypher.internal.util.InternalNotification
 import org.neo4j.cypher.internal.util.attribution.Id
-import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 import org.neo4j.cypher.result.RuntimeResult
 import org.neo4j.dbms.api.DatabaseManagementService
 import org.neo4j.graphdb.GraphDatabaseService
 import org.neo4j.graphdb.QueryStatistics
 import org.neo4j.graphdb.Result
+import org.neo4j.graphdb.ResultTransformer
 import org.neo4j.graphdb.config.Setting
 import org.neo4j.io.fs.EphemeralFileSystemAbstraction
 import org.neo4j.kernel.api.Kernel
@@ -60,6 +59,7 @@ import org.neo4j.kernel.api.KernelTransaction
 import org.neo4j.kernel.api.procedure.CallableProcedure
 import org.neo4j.kernel.api.procedure.CallableUserAggregationFunction
 import org.neo4j.kernel.api.procedure.CallableUserFunction
+import org.neo4j.kernel.api.query.RuntimeName
 import org.neo4j.kernel.impl.coreapi.InternalTransaction
 import org.neo4j.kernel.impl.factory.GraphDatabaseFacade
 import org.neo4j.kernel.impl.query.NonRecordingQuerySubscriber
@@ -67,12 +67,12 @@ import org.neo4j.kernel.impl.query.RecordingQuerySubscriber
 import org.neo4j.kernel.internal.GraphDatabaseAPI
 import org.neo4j.logging.AssertableLogProvider
 import org.neo4j.logging.InternalLogProvider
+import org.neo4j.util.Table
 import org.neo4j.values.AnyValue
 import org.neo4j.values.AnyValues
 import org.neo4j.values.storable.DurationValue
 import org.neo4j.values.storable.PointValue
 import org.neo4j.values.storable.Value
-import org.scalactic.source.Position
 import org.scalatest.Args
 import org.scalatest.Assertion
 import org.scalatest.BeforeAndAfterAll
@@ -81,6 +81,7 @@ import org.scalatest.Status
 import org.scalatest.SucceededStatus
 import org.scalatest.Tag
 
+import java.time.Duration
 import java.time.LocalTime
 import java.time.OffsetTime
 import java.time.chrono.ChronoLocalDate
@@ -92,15 +93,21 @@ import java.util.Locale
 import java.util.concurrent.Callable
 import java.util.concurrent.TimeUnit.MILLISECONDS
 import java.util.concurrent.TimeUnit.SECONDS
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.function.Predicate
 
 import scala.jdk.CollectionConverters.CollectionHasAsScala
 import scala.util.Random
 import scala.util.Using
 
+object BaseRuntimeTestSuite {
+  private val dummyPos = new org.scalactic.source.Position("", "", -1)
+}
+
 object RuntimeTestSuite {
   val ANY_VALUE_ORDERING: Ordering[AnyValue] = Ordering.comparatorToOrdering(AnyValues.COMPARATOR)
   def isParallel(runtime: CypherRuntime[_]): Boolean = runtime.name.toLowerCase(Locale.ROOT) == "parallel"
+  def isPipelined(runtime: CypherRuntime[_]): Boolean = runtime.name.toLowerCase(Locale.ROOT) == "pipelined"
 }
 
 /**
@@ -114,15 +121,18 @@ object RuntimeTestSuite {
 abstract class BaseRuntimeTestSuite[CONTEXT <: RuntimeContext](
   baseEdition: Edition[CONTEXT],
   val runtime: CypherRuntime[CONTEXT],
-  workloadMode: Boolean = false,
+  workloadMode: WorkloadMode = WorkloadMode.Off,
   testPlanCombinationRewriterHints: Set[TestPlanCombinationRewriterHint]
-) extends CypherFunSuite
+) extends RuntimeSpecSuiteTestSuite
     with AstConstructionTestSupport
     with RuntimeTestSupportExecution[CONTEXT]
     with GraphCreation[CONTEXT]
     with BeforeAndAfterEach
     with RuntimeResultMatchers[CONTEXT]
-    with RuntimeTestResolver[CONTEXT] {
+    with RuntimeTestResolver[CONTEXT]
+    with InputDataStreamTestSupport {
+
+  def spdEnabled: Boolean = edition.spd.isDefined
 
   protected var managementService: DatabaseManagementService = _
   protected var dbmsFileSystem: EphemeralFileSystemAbstraction = _
@@ -134,20 +144,26 @@ abstract class BaseRuntimeTestSuite[CONTEXT <: RuntimeContext](
   var logProvider: AssertableLogProvider = _
   def debugOptions: CypherDebugOptions = CypherDebugOptions.default
   val isParallel: Boolean = RuntimeTestSuite.isParallel(runtime)
+  val isPipelined: Boolean = RuntimeTestSuite.isPipelined(runtime)
 
   def updateDynamicSetting[T](setting: Setting[T], value: T): Unit = {
     val resolver = graphDb.asInstanceOf[GraphDatabaseFacade].getDependencyResolver
     resolver.resolveDependency(classOf[Config]).setDynamicByUser(setting, value, "dbms.setConfigValue")
   }
 
+  def supportFastExpandInto(): Boolean = {
+    tx.kernelTransaction().storageEngineCharacteristics().supportsFastExpandInto()
+  }
+
   def canFuse: Boolean = {
-    val runtimeUsed = runtime.name.toLowerCase(Locale.ROOT)
-    val fuseablePipeline = runtimeUsed == "pipelined" || runtimeUsed == "parallel"
+    val fuseablePipeline = isPipelined || isParallel
 
     fuseablePipeline && !edition
       .getSetting(GraphDatabaseInternalSettings.cypher_operator_engine)
       .contains(GraphDatabaseInternalSettings.CypherOperatorEngine.INTERPRETED)
   }
+
+  def canMerge: Boolean = !isParallel && (canFuse || !isPipelined)
 
   def canFuseOverPipelines: Boolean = canFuse && !isParallel
 
@@ -189,11 +205,13 @@ abstract class BaseRuntimeTestSuite[CONTEXT <: RuntimeContext](
   }
 
   protected def restartDB(): Unit = {
+    require(managementService == null)
+    require(runtimeTestSupport == null)
     logProvider = new AssertableLogProvider()
     val dbms = edition.newGraphManagementService(logProvider)
 
-    if (edition.isSpd) {
-      setupSpd(dbms)
+    if (edition.spd.isDefined) {
+      setupSpd(dbms, edition.spd.get)
     }
 
     managementService = dbms.dbms
@@ -203,10 +221,19 @@ abstract class BaseRuntimeTestSuite[CONTEXT <: RuntimeContext](
     kernel = graphDb.asInstanceOf[GraphDatabaseFacade].getDependencyResolver.resolveDependency(classOf[Kernel])
   }
 
-  private def setupSpd(dbms: Edition.Dbms): Unit = {
+  private def setupSpd(dbms: Edition.Dbms, spdConfig: SpdConfig): Unit = {
+    val system = dbms.dbms.database(SYSTEM_DATABASE_NAME)
+
+    system.executeTransactionally(
+      s"CYPHER 25 CREATE DATABASE $DEFAULT_DATABASE_NAME GRAPH SHARD { TOPOLOGY ${spdConfig.primaries} PRIMARY 0 SECONDARIES } PROPERTY SHARDS { COUNT ${spdConfig.shards} TOPOLOGY 1 REPLICA}",
+      util.Map.of(),
+      ResultTransformer.EMPTY_TRANSFORMER,
+      Duration.ofSeconds(60)
+    )
+
     // First let's wait until the SPD is actually available
     val callable: Callable[String] = () => {
-      dbms.dbms.database(SYSTEM_DATABASE_NAME).executeTransactionally(
+      system.executeTransactionally(
         "CALL internal.dbms.spd.available",
         java.util.Map.of[String, Object],
         (result: Result) => result.next.get("detail").asInstanceOf[String]
@@ -215,37 +242,36 @@ abstract class BaseRuntimeTestSuite[CONTEXT <: RuntimeContext](
 
     val predicate: Predicate[String] = (status: String) => status == "All started"
     await().atMost(60, SECONDS).pollDelay(500, MILLISECONDS).pollInSameThread.until(callable, predicate)
-
-    // Let's create the default indexes that could not be created when the database was created
-    val dbs =
-      dbms.dbms.listDatabases().stream().filter(dbName => !dbName.equals(SYSTEM_DATABASE_NAME)).filter(dbName =>
-        !dbName.contains("shard")
-      ).map(dbName =>
-        dbms.dbms.database(dbName)
-      ).toList
-    dbs.forEach(db => {
-      db.executeTransactionally("CREATE LOOKUP INDEX node_label_lookup_index FOR (n) ON EACH labels(n)")
-      db.executeTransactionally("CREATE LOOKUP INDEX rel_type_lookup_index FOR ()-[r]-() ON EACH type(r)")
-    })
-
-    dbs.forEach(db => {
-      val tx = db.beginTx()
-      try {
-        tx.schema().awaitIndexesOnline(60, SECONDS)
-      } finally {
-        tx.close()
-      }
-    })
   }
 
   protected def createRuntimeTestSupport(): Unit = {
+    require(runtimeTestSupport == null)
     logProvider.clear()
     runtimeTestSupport = createRuntimeTestSupport(graphDb, edition, runtime, workloadMode, logProvider)
+    require(
+      runtimeTestSupport.defaultTransactionType == defaultTransactionType,
+      s"""
+         |createRuntimeTestSupport override dropped the defaultTransactionType hook.
+         |Suite wants $defaultTransactionType but the RuntimeTestSupport was built with ${runtimeTestSupport.defaultTransactionType}.
+         |Thread defaultTransactionType through the override (or override the def instead).
+         |""".stripMargin
+    )
     if (runtimeTestParameters != null) {
       runtimeTestSupport.setRuntimeTestParameters(augmentedRuntimeTestParameters, isParallel)
     }
     runtimeTestSupport.start()
     runtimeTestSupport.startTx()
+  }
+
+  protected def closeRuntimeTestSupport(): Unit = {
+    if (runtimeTestSupport != null) {
+      try {
+        runtimeTestSupport.stopTx()
+        runtimeTestSupport.stop()
+      } finally {
+        runtimeTestSupport = null
+      }
+    }
   }
 
   private def augmentedRuntimeTestParameters: RuntimeTestParameters = {
@@ -264,45 +290,58 @@ abstract class BaseRuntimeTestSuite[CONTEXT <: RuntimeContext](
     augmented
   }
 
+  protected def defaultTransactionType: KernelTransaction.Type = KernelTransaction.Type.EXPLICIT
+
   protected def createRuntimeTestSupport(
     graphDb: GraphDatabaseService,
     edition: Edition[CONTEXT],
     runtime: CypherRuntime[CONTEXT],
-    workloadMode: Boolean,
+    workloadMode: WorkloadMode,
     logProvider: InternalLogProvider
   ): RuntimeTestSupport[CONTEXT] = {
-    new RuntimeTestSupport[CONTEXT](graphDb, edition, runtime, workloadMode, logProvider, debugOptions)
+    new RuntimeTestSupport[CONTEXT](
+      graphDb,
+      edition,
+      runtime,
+      workloadMode,
+      logProvider,
+      debugOptions,
+      defaultTransactionType
+    )
   }
 
   protected def shutdownDatabase(): Unit = {
     try {
-      if (managementService != null) {
-        runtimeTestSupport.stop()
-        managementService.shutdown()
-      }
+      closeRuntimeTestSupport()
     } finally {
-      managementService = null
-      dbmsFileSystem = null
-      runtimeTestSupport = null
-      kernel = null
-      graphDb = null
-      systemDb = null
-      // NOTE: AssertFusingSucceeded relies on logProvider not being null, so delay setting it to null
-      //       in case a test case explicitly calls shutdownDatabase() (looking at you, SchedulerTracerTestBase...)
-      if (logProvider != null) {
-        logProvider.clear()
+      try {
+        if (managementService != null) {
+          managementService.shutdown()
+        }
+      } finally {
+        managementService = null
+        dbmsFileSystem = null
+        runtimeTestSupport = null // Should already be null, but just in case
+        kernel = null
+        graphDb = null
+        systemDb = null
+        // NOTE: AssertFusingSucceeded relies on logProvider not being null, so delay setting it to null
+        //       in case a test case explicitly calls shutdownDatabase() (looking at you, SchedulerTracerTestBase...)
+        if (logProvider != null) {
+          logProvider.clear()
+        }
       }
     }
   }
 
-  override def test(testName: String, testTags: Tag*)(testFun: => Any)(implicit pos: Position): Unit = {
-    super.test(testName, Tag(runtime.name) +: testTags: _*)({
+  // shadows the `test` method
+  inline def test(testName: String, testTags: Tag*)(testFun: => Any)(implicit d: DummyImplicit): Unit = {
+    registerTest(testName, Tag(runtime.name) +: testTags: _*)({
       testFun
       // Close the transaction here so that any errors resulting from that will be visible as test failures
-      if (runtimeTestSupport != null) {
-        runtimeTestSupport.stopTx()
-      }
-    })
+      closeRuntimeTestSupport()
+    })(using
+      BaseRuntimeTestSuite.dummyPos) // not actually used by registerTest, provided to avoid generating a position via macro expansion
   }
 
   override protected def runTest(testName: String, args: Args): Status = {
@@ -341,11 +380,11 @@ abstract class BaseRuntimeTestSuite[CONTEXT <: RuntimeContext](
   case object Parallel extends Runtime
 
   protected def runtimeUsed: Runtime = {
-    runtime.name.toUpperCase match {
-      case InterpretedRuntimeName.name => Interpreted
-      case SlottedRuntimeName.name     => Slotted
-      case PipelinedRuntimeName.name   => Pipelined
-      case ParallelRuntimeName.name    => Parallel
+    RuntimeName.fromName(runtime.name) match {
+      case RuntimeName.INTERPRETED => Interpreted
+      case RuntimeName.SLOTTED     => Slotted
+      case RuntimeName.PIPELINED   => Pipelined
+      case RuntimeName.PARALLEL    => Parallel
     }
   }
 
@@ -409,7 +448,8 @@ abstract class BaseRuntimeTestSuite[CONTEXT <: RuntimeContext](
 
   def toExpression(value: Any): Expression = {
     def resolve(function: FunctionInvocation): Expression = {
-      if (function.needsToBeResolved) ResolvedFunctionInvocation(functionSignature)(function).coerceArguments
+      if (function.needsToBeResolved)
+        ResolvedFunctionInvocation.fromUnresolved(functionSignature)(function).coerceArguments
       else function
     }
     val valueToConvert = value match {
@@ -434,7 +474,8 @@ abstract class BaseRuntimeTestSuite[CONTEXT <: RuntimeContext](
         val crsExpr = "crs" -> literal(point.getCRS.getType)
         resolve(function("point", mapOf((coordExpr :+ crsExpr): _*)))
       case array: Array[_] => listOf(array.map(toExpression): _*)
-      case other           => literal(other)
+      // TODO: Vector cypher expressions
+      case other => literal(other)
     }
   }
 
@@ -449,6 +490,14 @@ abstract class BaseRuntimeTestSuite[CONTEXT <: RuntimeContext](
       ThreadSafeRecordingProbe(variablesToRecord: _*)
     else
       RecordingProbe(variablesToRecord: _*)
+  }
+
+  protected def countingProbe(counter: AtomicInteger): Prober.Probe = {
+    new Prober.Probe {
+      override def onRow(row: AnyRef, state: AnyRef): Unit = {
+        counter.getAndAdd(1)
+      }
+    }
   }
 
   /** Hack to make TC report test results correctly for certain nested suites */
@@ -467,12 +516,11 @@ abstract class BaseRuntimeTestSuite[CONTEXT <: RuntimeContext](
 abstract class RuntimeTestSuite[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
-  workloadMode: Boolean = false,
+  workloadMode: WorkloadMode = WorkloadMode.Off,
   testPlanCombinationRewriterHints: Set[TestPlanCombinationRewriterHint] = Set.empty[TestPlanCombinationRewriterHint]
 ) extends BaseRuntimeTestSuite[CONTEXT](edition, runtime, workloadMode, testPlanCombinationRewriterHints) {
 
   override protected def beforeEach(): Unit = {
-    DebugSupport.TIMELINE.beginTime()
     restartDB()
     createRuntimeTestSupport()
     super.beforeEach()
@@ -480,10 +528,7 @@ abstract class RuntimeTestSuite[CONTEXT <: RuntimeContext](
 
   override protected def afterEach(): Unit = {
     try {
-      if (runtimeTestSupport != null) {
-        runtimeTestSupport.stopTx()
-      }
-      DebugSupport.TIMELINE.log("")
+      closeRuntimeTestSupport()
     } finally {
       try {
         shutdownDatabase()
@@ -505,7 +550,7 @@ abstract class RuntimeTestSuite[CONTEXT <: RuntimeContext](
 abstract class StaticGraphRuntimeTestSuite[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
-  workloadMode: Boolean = false,
+  workloadMode: WorkloadMode = WorkloadMode.Off,
   testPlanCombinationRewriterHints: Set[TestPlanCombinationRewriterHint] = Set.empty[TestPlanCombinationRewriterHint]
 ) extends BaseRuntimeTestSuite[CONTEXT](edition, runtime, workloadMode, testPlanCombinationRewriterHints)
     with BeforeAndAfterAll {
@@ -514,7 +559,6 @@ abstract class StaticGraphRuntimeTestSuite[CONTEXT <: RuntimeContext](
 
   override protected def beforeEach(): Unit = {
     if (shouldSetup) {
-      DebugSupport.TIMELINE.beginTime()
       createRuntimeTestSupport()
     }
     super.beforeEach()
@@ -522,8 +566,7 @@ abstract class StaticGraphRuntimeTestSuite[CONTEXT <: RuntimeContext](
 
   override protected def afterEach(): Unit = {
     if (shouldSetup) {
-      runtimeTestSupport.stopTx()
-      DebugSupport.TIMELINE.log("")
+      closeRuntimeTestSupport()
     }
     super.afterEach()
   }
@@ -532,7 +575,11 @@ abstract class StaticGraphRuntimeTestSuite[CONTEXT <: RuntimeContext](
     if (shouldSetup) {
       restartDB()
       createRuntimeTestSupport()
-      createGraph()
+      try {
+        createGraph()
+      } finally {
+        closeRuntimeTestSupport()
+      }
     }
     super.beforeAll()
   }
@@ -559,7 +606,7 @@ trait RuntimeTestResult {
 }
 
 trait RuntimeTestResultConsumptionController {
-  def consume(runtimeResult: RuntimeResult)
+  def consume(runtimeResult: RuntimeResult): Unit
 }
 
 case object ConsumeAllThenCloseResultConsumer extends RuntimeTestResultConsumptionController {
@@ -573,9 +620,9 @@ case class ConsumeNByNThenCloseResultConsumer(nRowsPerRequest: Int) extends Runt
 
   override def consume(runtimeResult: RuntimeResult): Unit = {
     Using.resource(runtimeResult) { r =>
-      do {
+      doWhile {
         r.request(nRowsPerRequest)
-      } while (r.await())
+      }(r.await())
     }
   }
 }
@@ -585,10 +632,10 @@ case class ConsumeSlowlyNByNThenCloseResultConsumer(nRowsPerRequest: Int, sleepN
 
   override def consume(runtimeResult: RuntimeResult): Unit = {
     Using.resource(runtimeResult) { r =>
-      do {
+      doWhile {
         Thread.sleep(0L, sleepNanos)
         r.request(nRowsPerRequest)
-      } while (r.await())
+      }(r.await())
     }
   }
 }
@@ -599,9 +646,19 @@ case class RecordingRuntimeResult(
   resultConsumptionController: RuntimeTestResultConsumptionController = ConsumeAllThenCloseResultConsumer
 ) extends RuntimeTestResult {
 
-  def awaitAll(): IndexedSeq[Array[AnyValue]] = {
+  def consume(): Unit = {
     resultConsumptionController.consume(runtimeResult)
+  }
+
+  def awaitAll(): IndexedSeq[Array[AnyValue]] = {
+    consume()
     recordingQuerySubscriber.getOrThrow().asScala.toIndexedSeq
+  }
+
+  def table(): Table = {
+    val header = runtimeResult.fieldNames()
+    val res = awaitAll()
+    Table(header, res.map(_.toSeq))
   }
 }
 

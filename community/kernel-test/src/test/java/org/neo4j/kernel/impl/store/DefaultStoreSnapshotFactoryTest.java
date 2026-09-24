@@ -29,6 +29,11 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.neo4j.collection.Dependencies.dependenciesOf;
+import static org.neo4j.storageengine.AppendIndexProvider.UNKNOWN_APPEND_INDEX;
+import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_TRANSACTION_ID;
+import static org.neo4j.test.LatestVersions.LATEST_KERNEL_VERSION;
+import static org.neo4j.test.LatestVersions.LATEST_LOG_FORMAT;
+import static org.neo4j.wal.entry.LogHeader.UNSPECIFIED_CREATION_TIME;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -39,15 +44,18 @@ import org.neo4j.internal.helpers.collection.Iterators;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.kernel.availability.DatabaseAvailabilityGuard;
 import org.neo4j.kernel.database.Database;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.LatestCheckpointInfo;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.StoreCopyCheckPointMutex;
 import org.neo4j.logging.internal.DatabaseLogProvider;
-import org.neo4j.storageengine.api.StoreFileMetadata;
+import org.neo4j.storageengine.api.StoreIdentifier;
 import org.neo4j.storageengine.api.StoreResource;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
+import org.neo4j.wal.LogFile;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.LogPosition;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.LatestCheckpointInfo;
+import org.neo4j.wal.checkpoint.StoreCopyCheckPointMutex;
 
 @TestDirectoryExtension
 class DefaultStoreSnapshotFactoryTest {
@@ -60,7 +68,7 @@ class DefaultStoreSnapshotFactoryTest {
     private StoreCopyCheckPointMutex storeCopyCheckPointMutex;
 
     @BeforeEach
-    void setUp() {
+    void setUp() throws IOException {
         var database = mock(Database.class);
         fileListingBuilder = mock(StoreFileListing.Builder.class, CALLS_REAL_METHODS);
         databaseLayout = DatabaseLayout.ofFlat(testDirectory.directory("neo4j", "data", "databases"));
@@ -72,8 +80,19 @@ class DefaultStoreSnapshotFactoryTest {
         when(database.getStoreFileListing()).thenReturn(storeFileListing);
         when(database.getInternalLogProvider()).thenReturn(DatabaseLogProvider.nullDatabaseLogProvider());
         var checkPointer = mock(CheckPointer.class);
-        when(checkPointer.latestCheckPointInfo()).thenReturn(LatestCheckpointInfo.UNKNOWN_CHECKPOINT_INFO);
-        when(database.getDependencyResolver()).thenReturn(dependenciesOf(checkPointer));
+        when(checkPointer.latestCheckPointInfo())
+                .thenReturn(new LatestCheckpointInfo(
+                        UNKNOWN_TRANSACTION_ID.kernelVersion(),
+                        UNKNOWN_TRANSACTION_ID,
+                        UNKNOWN_APPEND_INDEX,
+                        new LogPosition(1, 1)));
+        LogFiles logFiles = mock(LogFiles.class);
+        LogFile logFile = mock(LogFile.class);
+        when(logFile.extractHeader(1))
+                .thenReturn(LATEST_LOG_FORMAT.newHeader(
+                        1, 1, 1, StoreIdentifier.UNKNOWN, 1, 1, LATEST_KERNEL_VERSION, UNSPECIFIED_CREATION_TIME));
+        when(logFiles.getLogFile()).thenReturn(logFile);
+        when(database.getDependencyResolver()).thenReturn(dependenciesOf(checkPointer, logFiles));
         when(database.getDatabaseAvailabilityGuard()).thenReturn(availabilityGuard);
         storeCopyCheckPointMutex = new StoreCopyCheckPointMutex();
         when(database.getStoreCopyCheckPointMutex()).thenReturn(storeCopyCheckPointMutex);
@@ -82,7 +101,7 @@ class DefaultStoreSnapshotFactoryTest {
 
     @Test
     void shouldHandleEmptyListOfFilesForEachType() throws Exception {
-        setExpectedFiles(new StoreFileMetadata[0]);
+        setExpectedFiles(new Path[0]);
         var prepareStoreCopyFiles =
                 defaultStoreSnapshotFactory.createStoreSnapshot().get();
         var files = prepareStoreCopyFiles.recoverableFiles();
@@ -92,7 +111,7 @@ class DefaultStoreSnapshotFactoryTest {
         assertEquals(0, atomicFilesSnapshotLength);
     }
 
-    private void setExpectedFiles(StoreFileMetadata[] expectedFiles) throws IOException {
+    private void setExpectedFiles(Path[] expectedFiles) throws IOException {
         doAnswer(invocation -> Iterators.asResourceIterator(Iterators.iterator(expectedFiles)))
                 .when(fileListingBuilder)
                 .build();
@@ -101,8 +120,8 @@ class DefaultStoreSnapshotFactoryTest {
     @Test
     void shouldReturnExpectedListOfFileNamesForEachType() throws Exception {
         // given
-        var expectedFiles = new StoreFileMetadata[] {
-            new StoreFileMetadata(databaseLayout.file("a")), new StoreFileMetadata(databaseLayout.file("b"))
+        var expectedFiles = new Path[] {
+            databaseLayout.file("a").baseSegment(), databaseLayout.file("b").baseSegment()
         };
         setExpectedFiles(expectedFiles);
 
@@ -113,10 +132,9 @@ class DefaultStoreSnapshotFactoryTest {
         var atomicFilesSnapshot = prepareStoreCopyFiles.unrecoverableFiles().toArray(StoreResource[]::new);
 
         // then
-        var expectedFilesConverted =
-                Arrays.stream(expectedFiles).map(StoreFileMetadata::path).toArray(Path[]::new);
+        var expectedFilesConverted = Arrays.stream(expectedFiles).toArray(Path[]::new);
         var expectedAtomicFilesConverted = Arrays.stream(expectedFiles)
-                .map(f -> new StoreResource(f.path(), getRelativePath(f), testDirectory.getFileSystem()))
+                .map(f -> new StoreResource(f, getRelativePath(f), testDirectory.getFileSystem()))
                 .toArray(StoreResource[]::new);
         assertArrayEquals(expectedFilesConverted, files);
         assertEquals(expectedAtomicFilesConverted.length, atomicFilesSnapshot.length);
@@ -144,7 +162,7 @@ class DefaultStoreSnapshotFactoryTest {
         checkpointMutex.close();
     }
 
-    private String getRelativePath(StoreFileMetadata f) {
-        return databaseLayout.databaseDirectory().relativize(f.path()).toString();
+    private String getRelativePath(Path f) {
+        return databaseLayout.databaseDirectory().relativize(f).toString();
     }
 }

@@ -19,13 +19,14 @@
  */
 package org.neo4j.shell.commands;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.Mockito.mock;
 import static org.neo4j.shell.test.Util.testConnectionConfig;
 import static org.neo4j.shell.util.Versions.majorVersion;
 import static org.neo4j.shell.util.Versions.minorVersion;
 
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.neo4j.shell.CypherShell;
 import org.neo4j.shell.StringLinePrinter;
@@ -44,7 +45,7 @@ class CypherShellProtocolIntegrationTest {
         CypherShell shell = shell();
         try {
             shell.connect(testConnectionConfig("bolt://localhost:7687").withUsernameAndPassword("neo4j", "neo"));
-            assertTrue(shell.isConnected());
+            assertThat(shell.isConnected()).isTrue();
         } finally {
             shell.disconnect();
         }
@@ -56,7 +57,7 @@ class CypherShellProtocolIntegrationTest {
         try {
             // This should work even on older databases without the neo4j protocol, by falling back to bolt
             shell.connect(testConnectionConfig("neo4j://localhost:7687").withUsernameAndPassword("neo4j", "neo"));
-            assertTrue(shell.isConnected());
+            assertThat(shell.isConnected()).isTrue();
         } finally {
             shell.disconnect();
         }
@@ -69,7 +70,7 @@ class CypherShellProtocolIntegrationTest {
             // Given 3.X series where X > 1, where SSC are the default. Hard to test in 4.0 sadly.
             onlyIn3_2to3_6(shell);
             shell.connect(testConnectionConfig("bolt+ssc://localhost:7687").withUsernameAndPassword("neo4j", "neo"));
-            assertTrue(shell.isConnected());
+            assertThat(shell.isConnected()).isTrue();
         } finally {
             shell.disconnect();
         }
@@ -83,14 +84,14 @@ class CypherShellProtocolIntegrationTest {
             onlyIn3_2to3_6(shell);
             // This should work by falling back to bolt+ssc
             shell.connect(testConnectionConfig("neo4j+ssc://localhost:7687").withUsernameAndPassword("neo4j", "neo"));
-            assertTrue(shell.isConnected());
+            assertThat(shell.isConnected()).isTrue();
         } finally {
             shell.disconnect();
         }
     }
 
     private CypherShell shell() {
-        var boltHandler = new BoltStateHandler(true, AccessMode.WRITE);
+        var boltHandler = new BoltStateHandler(true, AccessMode.WRITE, Optional.empty());
         var printer = new PrettyPrinter(new PrettyConfig(Format.PLAIN, true, 1000, false));
         var parameters = mock(ParameterService.class);
         var dbInfo = mock(DbInfo.class);

@@ -22,25 +22,24 @@ package org.neo4j.storageengine.migration;
 import static org.neo4j.storageengine.api.format.MultiVersionedIndexesCompatibility.MULTI_VERSION_INDEXES;
 
 import java.io.IOException;
-import java.nio.file.Path;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import org.neo4j.batchimport.api.IndexImporterFactory;
 import org.neo4j.common.EntityType;
 import org.neo4j.configuration.Config;
 import org.neo4j.internal.helpers.progress.ProgressListener;
-import org.neo4j.internal.schema.AnyTokenSchemaDescriptor;
 import org.neo4j.internal.schema.SchemaRule;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.storageengine.api.StorageEngineFactory;
 import org.neo4j.storageengine.api.StoreVersion;
 import org.neo4j.storageengine.api.format.CapabilityType;
+import org.neo4j.wal.LogTailMetadata;
 
 /**
  * Migrates token indexes between different neo4j versions. Participates in store upgrade as one of the migration participants.
@@ -55,7 +54,7 @@ public class TokenIndexMigrator extends AbstractStoreMigrationParticipant {
     private final PageCacheTracer pageCacheTracer;
     private final StorageEngineFactory storageEngineFactory;
     private final DatabaseLayout layout;
-    private final Function<SchemaRule, Path> storeFileProvider;
+    private final Function<SchemaRule, StoreFile> storeFileProvider;
     private boolean deleteRelationshipTokenIndex;
     private boolean moveFiles;
     private final CursorContextFactory contextFactory;
@@ -68,9 +67,9 @@ public class TokenIndexMigrator extends AbstractStoreMigrationParticipant {
             PageCacheTracer pageCacheTracer,
             StorageEngineFactory storageEngineFactory,
             DatabaseLayout layout,
-            Function<SchemaRule, Path> storeFileProvider,
+            Function<SchemaRule, StoreFile> storeFileProvider,
             CursorContextFactory contextFactory) {
-        super(name);
+        super(name + INDEX_MIGRATOR_SUFFIX);
         this.fileSystem = fileSystem;
         this.pageCache = pageCache;
         this.pageCacheTracer = pageCacheTracer;
@@ -102,7 +101,7 @@ public class TokenIndexMigrator extends AbstractStoreMigrationParticipant {
     }
 
     private boolean scanStoreExists(DatabaseLayout directoryLayout, String fileName) {
-        return fileSystem.fileExists(directoryLayout.file(fileName));
+        return directoryLayout.file(fileName).exists(fileSystem);
     }
 
     @Override
@@ -141,7 +140,7 @@ public class TokenIndexMigrator extends AbstractStoreMigrationParticipant {
                 r -> r,
                 contextFactory,
                 memoryTracker)) {
-            if (!schemaRule.schema().isSchemaDescriptorType(AnyTokenSchemaDescriptor.class)) {
+            if (!schemaRule.schema().isAnyTokenSchemaDescriptor()) {
                 continue;
             }
 
@@ -153,12 +152,13 @@ public class TokenIndexMigrator extends AbstractStoreMigrationParticipant {
         }
     }
 
-    private void moveFile(SchemaRule schemaRule, String legacyFileName) throws IOException {
-        if (scanStoreExists(layout, legacyFileName)) {
-            Path destination = storeFileProvider.apply(schemaRule);
+    private void moveFile(SchemaRule schemaRule, String fileName) throws IOException {
+        if (scanStoreExists(layout, fileName)) {
+            StoreFile destination = storeFileProvider.apply(schemaRule);
             try {
-                fileSystem.mkdirs(destination.getParent());
-                fileSystem.renameFile(layout.file(legacyFileName), destination);
+                fileSystem.mkdirs(destination.baseSegment().getParent());
+                StoreFile source = layout.file(fileName);
+                source.rename(destination, fileSystem);
             } catch (IOException e) {
                 throw new IOException("Failed to move LOOKUP index files to index directory during migration", e);
             }
@@ -178,11 +178,10 @@ public class TokenIndexMigrator extends AbstractStoreMigrationParticipant {
                 r -> r,
                 contextFactory,
                 memoryTracker)) {
-            if (schemaRule.schema().isSchemaDescriptorType(AnyTokenSchemaDescriptor.class)
-                    && tokenIndexFilter.test(schemaRule)) {
-                Path indexFile = storeFileProvider.apply(schemaRule);
+            if (schemaRule.schema().isAnyTokenSchemaDescriptor() && tokenIndexFilter.test(schemaRule)) {
+                StoreFile indexFile = storeFileProvider.apply(schemaRule);
                 try {
-                    fileSystem.deleteFile(indexFile);
+                    indexFile.delete(fileSystem);
                 } catch (IOException e) {
                     throw new IOException("Failed to remove a relationship LOOKUP index file during migration", e);
                 }

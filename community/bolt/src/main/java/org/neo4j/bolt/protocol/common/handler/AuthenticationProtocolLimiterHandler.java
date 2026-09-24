@@ -47,26 +47,30 @@ public class AuthenticationProtocolLimiterHandler extends SimpleChannelInboundHa
 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, PackstreamBuf buffer) throws Exception {
-        if (!buffer.getTarget().isReadable()) {
+        if (!buffer.raw().isReadable()) {
             ctx.fireChannelRead(buffer.retain());
             return;
         }
 
-        buffer.getTarget().markReaderIndex();
+        buffer.raw().markReaderIndex();
 
         var rootEncountered = false;
-        while (buffer.getTarget().isReadable()) {
+        while (buffer.raw().isReadable()) {
             var type = buffer.peekType();
 
             if (this.levels.isEmpty()) {
                 if (rootEncountered) {
-                    throw new PackstreamReaderException("Encountered illegal secondary root element within message");
+                    throw PackstreamReaderException.illegalElement(
+                            "secondary root",
+                            "Excepted single root element",
+                            "Encountered illegal secondary root element within message");
                 }
 
                 rootEncountered = true;
 
                 if (type != Type.STRUCT) {
-                    throw new PackstreamReaderException("Encountered illegal root element: Expected struct");
+                    throw PackstreamReaderException.illegalElement(
+                            "root", "Expected struct", "Encountered illegal root element: Expected struct");
                 }
             }
 
@@ -86,7 +90,7 @@ public class AuthenticationProtocolLimiterHandler extends SimpleChannelInboundHa
             }
         }
 
-        buffer.getTarget().resetReaderIndex();
+        buffer.raw().resetReaderIndex();
         ctx.fireChannelRead(buffer.retain());
     }
 
@@ -103,7 +107,8 @@ public class AuthenticationProtocolLimiterHandler extends SimpleChannelInboundHa
 
             if (!currentLevel.expectingKey) {
                 if (type != Type.STRING) {
-                    throw new PackstreamReaderException("Encountered illegal map element: Expected string key");
+                    throw PackstreamReaderException.illegalElement(
+                            "map", "Expected string key", "Encountered illegal map element: Expected string key");
                 }
 
                 return true;

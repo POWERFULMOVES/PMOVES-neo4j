@@ -19,10 +19,8 @@
  */
 package org.neo4j.io.memory;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNotSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.inOrder;
@@ -90,9 +88,8 @@ class ByteBufferFactoryTest {
         ByteBufferFactory.Allocator localAllocator3 = factory.newLocalAllocator();
 
         // then
-        assertNotSame(localAllocator1, localAllocator2);
-        assertNotSame(localAllocator2, localAllocator3);
-        assertNotSame(localAllocator1, localAllocator3);
+        assertThat(localAllocator2).isNotSameAs(localAllocator1);
+        assertThat(localAllocator3).isNotSameAs(localAllocator2).isNotSameAs(localAllocator1);
     }
 
     @Test
@@ -102,7 +99,8 @@ class ByteBufferFactoryTest {
         factory.acquireThreadLocalBuffer(INSTANCE);
 
         // when/then
-        assertThrows(IllegalStateException.class, () -> factory.acquireThreadLocalBuffer(INSTANCE));
+        assertThatExceptionOfType(IllegalStateException.class)
+                .isThrownBy(() -> factory.acquireThreadLocalBuffer(INSTANCE));
         factory.close();
     }
 
@@ -114,44 +112,44 @@ class ByteBufferFactoryTest {
         factory.releaseThreadLocalBuffer();
 
         // when/then
-        assertThrows(IllegalStateException.class, factory::releaseThreadLocalBuffer);
+        assertThatExceptionOfType(IllegalStateException.class).isThrownBy(factory::releaseThreadLocalBuffer);
         factory.close();
     }
 
     @Test
     void shouldShareThreadLocalBuffersLoggingIndexedIdGeneratorMonitorStressfully() throws Throwable {
         // given
-        ByteBufferFactory factory = heapBufferFactory(1024);
         int threads = 10;
-        CountDownLatch startLatch = new CountDownLatch(1);
-        ExecutorService executor = Executors.newFixedThreadPool(threads);
-        List<Future<?>> futures = new ArrayList<>();
-        List<Set<ByteBuffer>> seenBuffers = new ArrayList<>();
-        for (int i = 0; i < threads; i++) {
-            Set<ByteBuffer> seen = new HashSet<>();
-            seenBuffers.add(seen);
-            futures.add(executor.submit(() -> {
-                startLatch.await();
-                for (int j = 0; j < 1000; j++) {
-                    ByteBuffer buffer = factory.acquireThreadLocalBuffer(INSTANCE);
-                    assertNotNull(buffer);
-                    seen.add(buffer);
-                    factory.releaseThreadLocalBuffer();
-                }
-                return null;
-            }));
-        }
+        try (ByteBufferFactory factory = heapBufferFactory(1024);
+                ExecutorService executor = Executors.newFixedThreadPool(threads)) {
+            CountDownLatch startLatch = new CountDownLatch(1);
+            List<Future<?>> futures = new ArrayList<>();
+            List<Set<ByteBuffer>> seenBuffers = new ArrayList<>();
+            for (int i = 0; i < threads; i++) {
+                Set<ByteBuffer> seen = new HashSet<>();
+                seenBuffers.add(seen);
+                futures.add(executor.submit(() -> {
+                    startLatch.await();
+                    for (int j = 0; j < 1000; j++) {
+                        ByteBuffer buffer = factory.acquireThreadLocalBuffer(INSTANCE);
+                        assertThat(buffer).isNotNull();
+                        seen.add(buffer);
+                        factory.releaseThreadLocalBuffer();
+                    }
+                    return null;
+                }));
+            }
 
-        // when
-        startLatch.countDown();
-        Futures.getAll(futures);
-        executor.shutdown();
-        executor.awaitTermination(10, TimeUnit.SECONDS);
+            // when
+            startLatch.countDown();
+            Futures.getAll(futures);
+            executor.shutdown();
+            executor.awaitTermination(10, TimeUnit.SECONDS);
 
-        // then
-        for (int i = 0; i < threads; i++) {
-            assertEquals(1, seenBuffers.get(i).size());
+            // then
+            for (int i = 0; i < threads; i++) {
+                assertThat(seenBuffers.get(i)).hasSize(1);
+            }
         }
-        factory.close();
     }
 }

@@ -21,6 +21,7 @@ package org.neo4j.cypher.internal.planning
 
 import org.neo4j.collection.ResourceRawIterator
 import org.neo4j.exceptions.CypherExecutionException
+import org.neo4j.gqlstatus.GqlHelper
 import org.neo4j.internal.kernel.api.exceptions.ProcedureException
 import org.neo4j.kernel.api.exceptions.ResourceCloseFailureException
 
@@ -33,7 +34,7 @@ final class ExceptionWrappingProcedureIterator[T, E <: Exception](
       inner.hasNext
     } catch {
       // Procedures always wraps exceptions in a ProcedureException
-      case e: ProcedureException => throw new CypherExecutionException(e.getMessage, e)
+      case e: ProcedureException => throw CypherExecutionException.wrapError(e)
     }
 
   override def next(): T =
@@ -41,7 +42,7 @@ final class ExceptionWrappingProcedureIterator[T, E <: Exception](
       inner.next()
     } catch {
       // Procedures always wraps exceptions in a ProcedureExceptions
-      case e: ProcedureException => throw new CypherExecutionException(e.getMessage, e)
+      case e: ProcedureException => throw CypherExecutionException.wrapError(e)
     }
 
   override def close(): Unit =
@@ -49,6 +50,7 @@ final class ExceptionWrappingProcedureIterator[T, E <: Exception](
       inner.close()
     } catch {
       // Procedures always wraps close exceptions in a ResourceCloseFailureException
-      case e: ResourceCloseFailureException => throw new CypherExecutionException(e.getMessage, e)
+      case e: ResourceCloseFailureException =>
+        throw new CypherExecutionException(GqlHelper.getDefaultObject, e.getMessage, e)
     }
 }

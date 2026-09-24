@@ -44,8 +44,6 @@ import org.neo4j.internal.recordstorage.SchemaStorage;
 import org.neo4j.internal.schema.ConstraintDescriptor;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexType;
-import org.neo4j.internal.schema.LabelSchemaDescriptor;
-import org.neo4j.internal.schema.RelationTypeSchemaDescriptor;
 import org.neo4j.internal.schema.SchemaDescriptor;
 import org.neo4j.internal.schema.SchemaRule;
 import org.neo4j.internal.schema.constraints.PropertyTypeSet;
@@ -167,6 +165,13 @@ class SchemaChecker {
                 }
 
                 SchemaRule schemaRule = schemaStorage.loadSingleSchemaRule(id, storeCursors, context.memoryTracker);
+
+                if (schemaRule.schema().isRelationshipEndpointLabelDescriptor()
+                        || schemaRule.schema().isNodeLabelExistenceSchemaDescriptor()) {
+                    // graph type constraints are not checked for record format, so skip those!
+                    continue;
+                }
+
                 SchemaRecord previousContentRecord =
                         verifiedRulesWithRecords.put(SchemaRuleKey.from(schemaRule), new SchemaRecord(record));
                 if (previousContentRecord != null) {
@@ -418,8 +423,9 @@ class SchemaChecker {
                                 context.memoryTracker);
                     }
                 }
-                default -> throw new IllegalArgumentException(
-                        "Schema with given entity type is not supported: " + schema.entityType());
+                default ->
+                    throw new IllegalArgumentException(
+                            "Schema with given entity type is not supported: " + schema.entityType());
             }
         }
 
@@ -455,9 +461,9 @@ class SchemaChecker {
 
         public void collect(SchemaDescriptor schema) {
             MutableIntObjectMap<MutableIntSet> targetMap;
-            if (schema.isSchemaDescriptorType(LabelSchemaDescriptor.class)) {
+            if (schema.isLabelSchemaDescriptor()) {
                 targetMap = mandatoryNodeProperties;
-            } else if (schema.isSchemaDescriptorType(RelationTypeSchemaDescriptor.class)) {
+            } else if (schema.isRelationshipTypeSchemaDescriptor()) {
                 targetMap = mandatoryRelationshipProperties;
             } else {
                 // We want to process only LabelSchemaDescriptor and RelationshipTypeSchemaDescriptors.
@@ -490,9 +496,9 @@ class SchemaChecker {
             var schema = constraintDescriptor.schema();
 
             MutableIntObjectMap<MutableIntObjectMap<PropertyTypeSet>> targetMap;
-            if (schema.isSchemaDescriptorType(LabelSchemaDescriptor.class)) {
+            if (schema.isLabelSchemaDescriptor()) {
                 targetMap = allowedNodePropertyTypes;
-            } else if (schema.isSchemaDescriptorType(RelationTypeSchemaDescriptor.class)) {
+            } else if (schema.isRelationshipTypeSchemaDescriptor()) {
                 targetMap = allowedRelationshipPropertyTypes;
             } else {
                 // We want to process only LabelSchemaDescriptor and RelationshipTypeSchemaDescriptors.

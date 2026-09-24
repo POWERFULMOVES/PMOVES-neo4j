@@ -22,8 +22,9 @@ package org.neo4j.cypher.internal.logical.plans
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.IntegerLiteral
 import org.neo4j.cypher.internal.expressions.LogicalVariable
+import org.neo4j.cypher.internal.expressions.SemanticDirection
 import org.neo4j.cypher.internal.expressions.Variable
-import org.neo4j.cypher.internal.macros.AssertMacros
+import org.neo4j.cypher.internal.macros.AssertMacros3
 import org.neo4j.cypher.internal.util.InputPosition
 
 object Distinctness {
@@ -76,6 +77,31 @@ object Distinctness {
       case _                                                 => source.distinctness
     }
   }
+
+  /**
+   * Computes the distinctness of the relationship variable introduced by an [[Expand]] plan.
+   *
+   * For a directed Expand (OUTGOING or INCOMING) from a source that is distinct on the `from` variable,
+   * the resulting relationship variable `relName` is also distinct:
+   * Each relationship has a unique identity and its start (OUTGOING) or end (INCOMING) node is `from`.
+   * So, if `from` appears at most once, the relationship is traversed at most once.
+   *
+   * For undirected Expands (BOTH), a self-loop `(n)-[r]-(n)` is traversed once as outgoing and once as
+   * incoming, so the same relationship can appear twice even when the source node is distinct.
+   */
+  def distinctColumnsOfExpand(
+    source: LogicalPlan,
+    from: LogicalVariable,
+    dir: SemanticDirection,
+    maybeRelName: Option[LogicalVariable]
+  ): Distinctness =
+    (dir, maybeRelName) match {
+      case (SemanticDirection.BOTH, _) => NotDistinct
+      case (_, None)                   => NotDistinct
+      case (_, Some(relName)) if source.distinctness.covers(Seq(from)) =>
+        DistinctColumns(relName)
+      case _ => NotDistinct
+    }
 }
 
 sealed trait Distinctness {
@@ -97,7 +123,7 @@ sealed trait Distinctness {
  * @param columns the tuple of `columns` is distinct.
  */
 case class DistinctColumns private (columns: Set[LogicalVariable]) extends Distinctness {
-  AssertMacros.checkOnlyWhenAssertionsAreEnabled(columns.nonEmpty, "DistinctColumns must be non-empty")
+  AssertMacros3.checkOnlyWhenAssertionsAreEnabled(columns.nonEmpty, "DistinctColumns must be non-empty")
 
   /**
    * If these distinct columns are a subset of the given distinct `expressions`

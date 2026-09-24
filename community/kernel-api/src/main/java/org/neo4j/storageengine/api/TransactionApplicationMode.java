@@ -22,8 +22,10 @@ package org.neo4j.storageengine.api;
 import static org.neo4j.storageengine.api.CommandVersion.AFTER;
 import static org.neo4j.storageengine.api.CommandVersion.BEFORE;
 
+import org.neo4j.memory.MemoryTracker;
+
 /**
- * Mode of {@link StorageEngine#apply(StorageEngineTransaction, TransactionApplicationMode) applying transactions}.
+ * Mode of {@link StorageEngine#apply(StorageEngineTransaction, TransactionApplicationMode, MemoryTracker) applying transactions}.
  * Depending on how transaction state have been built, additional work may need to be performed during
  * application of it.
  */
@@ -76,7 +78,12 @@ public enum TransactionApplicationMode {
     MVCC_ROLLBACK(
             false, // id tracking not needed because this is for the initial reverse recovery
             true, // include indexes and counts
-            true, BEFORE);
+            true, BEFORE),
+
+    /**
+     * Rollback of MVCC incomplete transactions discovered during reverse recovery phase
+     */
+    MVCC_INCOMPLETE_REVERSE_RECOVERY(false, true, true, BEFORE);
 
     private final boolean needsHighIdTracking;
     private final boolean indexesAndCounts;

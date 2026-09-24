@@ -19,8 +19,8 @@
  */
 package org.neo4j.internal.batchimport.input;
 
-import static org.apache.commons.lang3.ArrayUtils.EMPTY_OBJECT_ARRAY;
 import static org.apache.commons.lang3.ArrayUtils.EMPTY_STRING_ARRAY;
+import static org.neo4j.token.api.TokenConstants.NO_TOKEN;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -30,13 +30,17 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.ToIntFunction;
+import org.eclipse.collections.api.factory.primitive.IntLists;
+import org.eclipse.collections.api.factory.primitive.IntSets;
+import org.eclipse.collections.api.list.primitive.IntList;
+import org.eclipse.collections.api.list.primitive.MutableIntList;
+import org.eclipse.collections.api.set.primitive.IntSet;
+import org.eclipse.collections.api.set.primitive.MutableIntSet;
+import org.eclipse.collections.impl.list.mutable.FastList;
+import org.neo4j.batchimport.api.input.ApplicationMode;
 import org.neo4j.batchimport.api.input.Group;
 import org.neo4j.batchimport.api.input.InputEntityVisitor;
-import org.neo4j.internal.batchimport.cache.idmapping.IdMapper;
-import org.neo4j.internal.helpers.collection.PrefetchingIterator;
 import org.neo4j.internal.id.IdSequence;
-import org.neo4j.storageengine.api.PropertyKeyValue;
-import org.neo4j.storageengine.api.StorageProperty;
 import org.neo4j.util.Preconditions;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.Values;
@@ -46,34 +50,32 @@ import org.neo4j.values.storable.Values;
  * for that data. Easier to work with than purely visitor-based implementation in tests.
  */
 public class InputEntity implements InputEntityVisitor {
-    public static final Object[] NO_PROPERTIES = EMPTY_OBJECT_ARRAY;
     public static final String[] NO_LABELS = EMPTY_STRING_ARRAY;
     public static final int NULL_ID = -1;
 
-    private final InputEntityVisitor delegate;
-
-    public InputEntity(InputEntityVisitor delegate) {
-        this.delegate = delegate;
-        reset();
-    }
-
     public InputEntity() {
-        this(NULL);
+        reset();
     }
 
     public boolean hasPropertyId;
     public long propertyId;
     public boolean hasIntPropertyKeyIds;
-    public final List<Object> properties = new ArrayList<>();
+    public final List<Property> properties = FastList.newList();
+    public final List<String> removedProperties = new ArrayList<>();
+    public final MutableIntList intRemovedProperties = IntLists.mutable.empty();
     public ByteBuffer encodedProperties;
     public boolean propertiesOffloaded;
 
     public boolean hasLongId;
     public long longId;
+    public IdSequence idSequence;
     public Object objectId;
     public Group idGroup;
 
     public final List<String> labels = new ArrayList<>();
+    public final List<String> removedLabels = new ArrayList<>();
+    public final MutableIntList intLabels = IntLists.mutable.empty();
+    public final MutableIntList intRemovedLabels = IntLists.mutable.empty();
     public boolean hasLabelField;
     public long labelField;
 
@@ -87,9 +89,14 @@ public class InputEntity implements InputEntityVisitor {
     public Object objectEndId;
     public Group endIdGroup;
 
+    public String sourceDescription;
+    public long lineNumber;
+
     public boolean hasIntType;
     public int intType;
     public String stringType;
+
+    public ApplicationMode applicationMode;
 
     private boolean end;
 
@@ -98,7 +105,7 @@ public class InputEntity implements InputEntityVisitor {
         checkClear();
         hasPropertyId = true;
         propertyId = nextProp;
-        return delegate.propertyId(nextProp);
+        return true;
     }
 
     @Override
@@ -106,24 +113,38 @@ public class InputEntity implements InputEntityVisitor {
         checkClear();
         encodedProperties = properties;
         propertiesOffloaded = offloaded;
-        return delegate.properties(properties, offloaded);
+        return true;
     }
 
     @Override
-    public boolean property(String key, Object value) {
+    public boolean property(String key, Object value, boolean identifier) {
+        assert value != Values.NO_VALUE;
         checkClear();
-        properties.add(key);
-        properties.add(value);
-        return delegate.property(key, value);
+        properties.add(new Property(key, NO_TOKEN, value, identifier));
+        return true;
     }
 
     @Override
-    public boolean property(int propertyKeyId, Object value) {
+    public boolean property(int propertyKeyId, Object value, boolean identifier) {
+        assert value != Values.NO_VALUE;
         checkClear();
         hasIntPropertyKeyIds = true;
-        properties.add(propertyKeyId);
-        properties.add(value);
-        return delegate.property(propertyKeyId, value);
+        properties.add(new Property(null, propertyKeyId, value, identifier));
+        return true;
+    }
+
+    @Override
+    public boolean removedProperties(String[] keys) {
+        checkClear();
+        Collections.addAll(removedProperties, keys);
+        return true;
+    }
+
+    @Override
+    public boolean removedProperties(int[] keys) {
+        checkClear();
+        intRemovedProperties.addAll(keys);
+        return true;
     }
 
     @Override
@@ -131,7 +152,7 @@ public class InputEntity implements InputEntityVisitor {
         checkClear();
         hasLongId = true;
         longId = id;
-        return delegate.id(id);
+        return true;
     }
 
     @Override
@@ -139,22 +160,44 @@ public class InputEntity implements InputEntityVisitor {
         checkClear();
         objectId = id;
         idGroup = group;
-        return delegate.id(id, group);
+        return true;
     }
 
     @Override
     public boolean id(Object id, Group group, IdSequence idSequence) {
+        this.idSequence = idSequence;
         checkClear();
         objectId = id;
         idGroup = group;
-        return delegate.id(id, group, idSequence);
+        return true;
     }
 
     @Override
     public boolean labels(String[] labels) {
         checkClear();
         Collections.addAll(this.labels, labels);
-        return delegate.labels(labels);
+        return true;
+    }
+
+    @Override
+    public boolean labels(int[] labels) {
+        checkClear();
+        intLabels.addAll(labels);
+        return true;
+    }
+
+    @Override
+    public boolean removedLabels(String[] labels) {
+        checkClear();
+        Collections.addAll(this.removedLabels, labels);
+        return true;
+    }
+
+    @Override
+    public boolean removedLabels(int[] labels) {
+        checkClear();
+        intRemovedLabels.addAll(labels);
+        return true;
     }
 
     @Override
@@ -162,7 +205,7 @@ public class InputEntity implements InputEntityVisitor {
         checkClear();
         hasLabelField = true;
         this.labelField = labelField;
-        return delegate.labelField(labelField);
+        return true;
     }
 
     @Override
@@ -170,7 +213,7 @@ public class InputEntity implements InputEntityVisitor {
         checkClear();
         hasLongStartId = true;
         longStartId = id;
-        return delegate.startId(id);
+        return true;
     }
 
     @Override
@@ -178,7 +221,7 @@ public class InputEntity implements InputEntityVisitor {
         checkClear();
         objectStartId = id;
         startIdGroup = group;
-        return delegate.startId(id, group);
+        return true;
     }
 
     @Override
@@ -186,7 +229,7 @@ public class InputEntity implements InputEntityVisitor {
         checkClear();
         hasLongEndId = true;
         longEndId = id;
-        return delegate.endId(id);
+        return true;
     }
 
     @Override
@@ -194,7 +237,19 @@ public class InputEntity implements InputEntityVisitor {
         checkClear();
         objectEndId = id;
         endIdGroup = group;
-        return delegate.endId(id, group);
+        return true;
+    }
+
+    @Override
+    public boolean sourceDescription(String source) {
+        sourceDescription = source;
+        return true;
+    }
+
+    @Override
+    public boolean lineNumber(long line) {
+        lineNumber = line;
+        return true;
     }
 
     @Override
@@ -202,21 +257,31 @@ public class InputEntity implements InputEntityVisitor {
         checkClear();
         hasIntType = true;
         intType = type;
-        return delegate.type(type);
+        return true;
     }
 
     @Override
     public boolean type(String type) {
         checkClear();
         stringType = type;
-        return delegate.type(type);
+        return true;
+    }
+
+    @Override
+    public boolean applicationMode(ApplicationMode mode) {
+        checkClear();
+        applicationMode = mode;
+        return true;
+    }
+
+    public ApplicationMode applicationMode() {
+        return applicationMode != null ? applicationMode : ApplicationMode.CREATE;
     }
 
     @Override
     public void endOfEntity() throws IOException {
         // Mark that the next call to any data method should clear the state
         end = true;
-        delegate.endOfEntity();
     }
 
     public boolean isComplete() {
@@ -227,16 +292,39 @@ public class InputEntity implements InputEntityVisitor {
         return labels.toArray(new String[0]);
     }
 
-    public Object[] properties() {
-        return properties.toArray();
+    private IntSet tokenIds(IntList ids, List<String> names, ToIntFunction<String> nameToIdLookup) {
+        if (ids.isEmpty() && names.isEmpty()) {
+            return IntSets.immutable.empty();
+        }
+
+        MutableIntSet result = IntSets.mutable.empty();
+        result.addAll(ids);
+        for (String name : names) {
+            int id = nameToIdLookup.applyAsInt(name);
+            if (id != NO_TOKEN) {
+                result.add(id);
+            }
+        }
+        return result;
+    }
+
+    public IntSet labelIds(ToIntFunction<String> nameToIdLookup) {
+        return tokenIds(intLabels, labels, nameToIdLookup);
+    }
+
+    public IntSet removedLabelIds(ToIntFunction<String> nameToIdLookup) {
+        return tokenIds(intRemovedLabels, removedLabels, nameToIdLookup);
+    }
+
+    public IntSet removedPropertyIds(ToIntFunction<String> nameToIdLookup) {
+        return tokenIds(intRemovedProperties, removedProperties, nameToIdLookup);
     }
 
     public Map<String, Object> propertiesAsMap() {
         Preconditions.checkState(!hasIntPropertyKeyIds, "This instance doesn't have String keys");
         Map<String, Object> map = new HashMap<>();
-        var propertyCount = propertyCount();
-        for (int i = 0; i < propertyCount; i++) {
-            map.put((String) propertyKey(i), propertyValue(i));
+        for (var p : properties) {
+            map.put(p.keyName(), p.value);
         }
         return map;
     }
@@ -244,31 +332,19 @@ public class InputEntity implements InputEntityVisitor {
     public Map<String, Value> propertiesAsValueMap() {
         Preconditions.checkState(!hasIntPropertyKeyIds, "This instance doesn't have String keys");
         Map<String, Value> map = new HashMap<>();
-        var propertyCount = propertyCount();
-        for (int i = 0; i < propertyCount; i++) {
-            var value = propertyValue(i);
-            map.put((String) propertyKey(i), value instanceof Value v ? v : Values.of(value));
+        for (var p : properties) {
+            map.put(p.keyName(), p.asValue());
         }
         return map;
     }
 
-    public Iterable<StorageProperty> asStorageProperties(ToIntFunction<String> propertyKeyIdLookup) {
-        return () -> new PrefetchingIterator<>() {
-            private final int count = propertyCount();
-            private int cursor;
-
-            @Override
-            protected StorageProperty fetchNextOrNull() {
-                if (cursor < count) {
-                    int propertyKeyId = propertyKeyIdLookup.applyAsInt((String) propertyKey(cursor));
-                    Object valueObject = propertyValue(cursor);
-                    cursor++;
-                    return new PropertyKeyValue(
-                            propertyKeyId, valueObject instanceof Value value ? value : Values.of(valueObject));
-                }
-                return null;
+    public Property getProperty(String key) {
+        for (var p : properties) {
+            if (key.equals(p.keyName())) {
+                return p;
             }
-        };
+        }
+        return null;
     }
 
     public Object id() {
@@ -283,37 +359,16 @@ public class InputEntity implements InputEntityVisitor {
         return hasLongStartId ? longStartId : objectStartId;
     }
 
+    public String sourceDescription() {
+        return sourceDescription;
+    }
+
+    public long lineNumber() {
+        return lineNumber;
+    }
+
     public Object type() {
         return stringType != null ? stringType : intType;
-    }
-
-    public long longStartId(IdMapper.Getter idLookup) {
-        return extractNodeId(hasLongStartId, longStartId, objectStartId, startIdGroup, idLookup);
-    }
-
-    public long longEndId(IdMapper.Getter idLookup) {
-        return extractNodeId(hasLongEndId, longEndId, objectEndId, endIdGroup, idLookup);
-    }
-
-    public int intType(ToIntFunction<String> idLookup) {
-        if (hasIntType) {
-            return intType;
-        }
-        if (stringType != null) {
-            return idLookup.applyAsInt(stringType);
-        }
-        return NULL_ID;
-    }
-
-    private long extractNodeId(
-            boolean hasLongId, long longId, Object objectId, Group idGroup, IdMapper.Getter idLookup) {
-        if (hasLongId) {
-            return longId;
-        }
-        if (objectId != null) {
-            return idLookup.get(objectId, idGroup);
-        }
-        return NULL_ID;
     }
 
     private void checkClear() {
@@ -329,13 +384,17 @@ public class InputEntity implements InputEntityVisitor {
         propertyId = NULL_ID;
         hasIntPropertyKeyIds = false;
         properties.clear();
+        removedProperties.clear();
+        intRemovedProperties.clear();
         encodedProperties = null;
         propertiesOffloaded = false;
         hasLongId = false;
         longId = NULL_ID;
+        idSequence = null;
         objectId = null;
         idGroup = null;
         labels.clear();
+        removedLabels.clear();
         hasLabelField = false;
         labelField = NULL_ID;
         hasLongStartId = false;
@@ -349,38 +408,35 @@ public class InputEntity implements InputEntityVisitor {
         hasIntType = false;
         intType = NULL_ID;
         stringType = null;
-    }
-
-    @Override
-    public void close() throws IOException {
-        delegate.close();
-    }
-
-    public int propertyCount() {
-        return properties.size() / 2;
-    }
-
-    public Object propertyKey(int i) {
-        return properties.get(i * 2);
-    }
-
-    public Object propertyValue(int i) {
-        return properties.get(i * 2 + 1);
+        applicationMode = null;
+        intLabels.clear();
+        intRemovedLabels.clear();
+        sourceDescription = null;
+        lineNumber = 0;
     }
 
     public void replayOnto(InputEntityVisitor visitor) throws IOException {
+        if (applicationMode != null) {
+            visitor.applicationMode(applicationMode);
+        }
+
         // properties
         if (hasPropertyId) {
             visitor.propertyId(propertyId);
         } else if (!properties.isEmpty()) {
-            int propertyCount = propertyCount();
-            for (int i = 0; i < propertyCount; i++) {
-                if (hasIntPropertyKeyIds) {
-                    visitor.property((Integer) propertyKey(i), propertyValue(i));
+            for (var p : properties) {
+                if (p.hasKeyId()) {
+                    visitor.property(p.keyId(), p.value, p.identifier);
                 } else {
-                    visitor.property((String) propertyKey(i), propertyValue(i));
+                    visitor.property(p.keyName(), p.value, p.identifier);
                 }
             }
+        }
+        if (!removedProperties.isEmpty()) {
+            visitor.removedProperties(removedProperties.toArray(new String[0]));
+        }
+        if (!intRemovedProperties.isEmpty()) {
+            visitor.removedProperties(intRemovedProperties.toArray());
         }
 
         // id
@@ -393,8 +449,19 @@ public class InputEntity implements InputEntityVisitor {
         // labels
         if (hasLabelField) {
             visitor.labelField(labelField);
-        } else if (!labels.isEmpty()) {
-            visitor.labels(labels.toArray(new String[0]));
+        } else {
+            if (!labels.isEmpty()) {
+                visitor.labels(labels.toArray(new String[0]));
+            }
+            if (!removedLabels.isEmpty()) {
+                visitor.removedLabels(removedLabels.toArray(new String[0]));
+            }
+            if (!intLabels.isEmpty()) {
+                visitor.labels(intLabels.toArray());
+            }
+            if (!intRemovedLabels.isEmpty()) {
+                visitor.removedLabels(intRemovedLabels.toArray());
+            }
         }
 
         // start id
@@ -420,5 +487,49 @@ public class InputEntity implements InputEntityVisitor {
 
         // all done
         visitor.endOfEntity();
+    }
+
+    public void updateWithDataFrom(InputEntity increment) {
+        // properties
+        for (var property : increment.properties) {
+            properties.stream()
+                    .filter(p -> p.keyName().equals(property.keyName()))
+                    .findFirst()
+                    .ifPresent(properties::remove);
+            properties.add(property);
+        }
+
+        // removed properties
+        for (var key : increment.removedProperties) {
+            properties.stream().filter(p -> key.equals(p.keyName())).findFirst().ifPresent(properties::remove);
+        }
+
+        // labels
+        increment.labels.stream().filter(l -> !labels.contains(l)).forEach(labels::add);
+
+        // removed labels
+        increment.removedLabels.forEach(labels::remove);
+    }
+
+    public record Property(String keyName, int keyId, Object value, boolean identifier) {
+        public Value asValue() {
+            return value instanceof Value v ? v : Values.of(value);
+        }
+
+        @Override
+        public String keyName() {
+            assert keyName != null : "The key name isn't present";
+            return keyName;
+        }
+
+        @Override
+        public int keyId() {
+            assert keyId != NO_TOKEN : "The key id isn't present";
+            return keyId;
+        }
+
+        public boolean hasKeyId() {
+            return keyId != NO_TOKEN;
+        }
     }
 }

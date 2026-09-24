@@ -27,6 +27,7 @@ import org.neo4j.cypher.internal.logical.plans.FindShortestPaths.AllowSameNode
 import org.neo4j.cypher.internal.logical.plans.FindShortestPaths.DisallowSameNode
 import org.neo4j.cypher.internal.logical.plans.FindShortestPaths.SkipSameNode
 import org.neo4j.cypher.internal.logical.plans.IndexOrderNone
+import org.neo4j.cypher.internal.logical.plans.TraversalPathMode.Walk
 import org.neo4j.cypher.internal.runtime.ast.TraversalEndpoint
 import org.neo4j.cypher.internal.runtime.ast.TraversalEndpoint.Endpoint
 import org.neo4j.cypher.internal.runtime.spec.Edition
@@ -36,16 +37,38 @@ import org.neo4j.cypher.internal.runtime.spec.Rows
 import org.neo4j.cypher.internal.runtime.spec.RowsMatcher
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.cypher.internal.runtime.spec.TestPath
+import org.neo4j.cypher.internal.runtime.spec.tests.ShortestPathTestBase.DbInstantiatedGraph
+import org.neo4j.cypher.internal.util.test_helpers.graphtemplate.NamedEntites
 import org.neo4j.exceptions.ShortestPathCommonEndNodesForbiddenException
 import org.neo4j.graphdb.Direction.INCOMING
 import org.neo4j.graphdb.Direction.OUTGOING
-import org.neo4j.graphdb.Label
+import org.neo4j.graphdb.Label.label
+import org.neo4j.graphdb.Node
+import org.neo4j.graphdb.Relationship
 import org.neo4j.graphdb.RelationshipType
 import org.neo4j.internal.helpers.collection.Iterables.single
 import org.neo4j.values.AnyValue
+import org.neo4j.values.virtual.PathReference
 import org.neo4j.values.virtual.VirtualPathValue
+import org.neo4j.values.virtual.VirtualValues
 
 import java.util
+
+object ShortestPathTestBase {
+
+  implicit class DbInstantiatedGraph(graph: NamedEntites[Node, Relationship]) {
+
+    def pathReference(names: String*): PathReference = {
+      val nodes = names.zipWithIndex.collect { case (n, i) if i % 2 == 0 => graph.node(n).getId }
+      val rels = names.zipWithIndex.collect { case (r, i) if i % 2 == 1 => graph.rel(r).getId }
+
+      VirtualValues.pathReference(
+        nodes.toArray,
+        rels.toArray
+      )
+    }
+  }
+}
 
 //noinspection ZeroIndexToHead
 abstract class ShortestPathTestBase[CONTEXT <: RuntimeContext](
@@ -132,29 +155,6 @@ abstract class ShortestPathTestBase[CONTEXT <: RuntimeContext](
       TestPath(start, Seq(rels(1)))
     )
     runtimeResult should beColumns("path").withRows(singleColumn(expected))
-  }
-
-  test("all shortest paths (length >= 1), AllowSameNode, undirected is not supported") {
-    // given
-    val (start, r1, r2) = givenGraph {
-      val n = tx.createNode()
-      val m = tx.createNode()
-      val r1 = n.createRelationshipTo(m, RelationshipType.withName("R"))
-      val r2 = m.createRelationshipTo(n, RelationshipType.withName("R"))
-      (n, r1, r2)
-    }
-
-    // when
-    val logicalQuery = new LogicalQueryBuilder(this)
-      .produceResults("path")
-      .shortestPath("(x)-[r*1..]-(y)", pathName = Some("path"), all = true, sameNodeMode = AllowSameNode)
-      .cartesianProduct()
-      .|.nodeByElementIdSeek("y", Set.empty, start.getElementId)
-      .nodeByElementIdSeek("x", Set.empty, start.getElementId)
-      .build()
-
-    // AllowSameNode + length >= 1 + Undirected is not supported
-    an[IllegalArgumentException] shouldBe thrownBy(execute(logicalQuery, runtime))
   }
 
   test("all shortest paths (length >= 1), AllowSameNode, longer shortest paths, directed") {
@@ -628,8 +628,8 @@ abstract class ShortestPathTestBase[CONTEXT <: RuntimeContext](
   test("all shortest paths in a lollipop graph") {
     // given
     val (start, end, r1, r2, r3) = givenGraph {
-      val (Seq(n1, _, n3), Seq(r1, r2, r3)) = lollipopGraph()
-      n3.addLabel(Label.label("END"))
+      val (Seq(n1, _, n3), Seq(r1, r2, r3)) = lollipopGraph(): @unchecked
+      n3.addLabel(label("END"))
       (n1, n3, r1, r2, r3)
     }
 
@@ -677,7 +677,7 @@ abstract class ShortestPathTestBase[CONTEXT <: RuntimeContext](
 
     // then
     runtimeResult should beColumns("x", "r", "y", "path").withRows(Array(
-      Array(start, util.Arrays.asList(rels.toSeq: _*), end, TestPath(start, rels))
+      Array[Object](start, util.Arrays.asList(rels: _*), end, TestPath(start, rels))
     ))
   }
 
@@ -707,7 +707,7 @@ abstract class ShortestPathTestBase[CONTEXT <: RuntimeContext](
 
     // then
     runtimeResult should beColumns("x", "r", "y", "path").withRows(Array(
-      Array(start, util.Arrays.asList(rels.toSeq: _*), end, TestPath(start, rels))
+      Array[Object](start, util.Arrays.asList(rels: _*), end, TestPath(start, rels))
     ))
   }
 
@@ -741,7 +741,7 @@ abstract class ShortestPathTestBase[CONTEXT <: RuntimeContext](
 
     // then
     runtimeResult should beColumns("x", "r", "y", "path").withRows(Array(
-      Array(start, util.Arrays.asList(rels.toSeq: _*), end, TestPath(start, rels))
+      Array[Object](start, util.Arrays.asList(rels: _*), end, TestPath(start, rels))
     ))
   }
 
@@ -826,7 +826,7 @@ abstract class ShortestPathTestBase[CONTEXT <: RuntimeContext](
 
     // then
     runtimeResult should beColumns("x", "r", "y", "path").withRows(Array(
-      Array(start, util.Arrays.asList(rels.toSeq: _*), end, TestPath(start, rels))
+      Array[Object](start, util.Arrays.asList(rels: _*), end, TestPath(start, rels))
     ))
   }
 
@@ -860,7 +860,7 @@ abstract class ShortestPathTestBase[CONTEXT <: RuntimeContext](
 
     // then
     runtimeResult should beColumns("x", "r", "y", "path").withRows(Array(
-      Array(start, util.Arrays.asList(rels.toSeq: _*), end, TestPath(start, rels))
+      Array[Object](start, util.Arrays.asList(rels: _*), end, TestPath(start, rels))
     ))
   }
 
@@ -894,7 +894,7 @@ abstract class ShortestPathTestBase[CONTEXT <: RuntimeContext](
 
     // then
     runtimeResult should beColumns("x", "r", "y", "path").withRows(Array(
-      Array(start, util.Arrays.asList(rels.toSeq: _*), end, TestPath(start, rels))
+      Array[Object](start, util.Arrays.asList(rels: _*), end, TestPath(start, rels))
     ))
   }
 
@@ -1237,6 +1237,207 @@ abstract class ShortestPathTestBase[CONTEXT <: RuntimeContext](
     runtimeResult should beColumns("path").withRows(assertPaths(rowCount(100))(p => p.size() == 10))
   }
 
+  test("all shortest path (length 0 allowed), AllowSameNode") {
+    // given
+    val start = givenGraph {
+      //           (a)
+      //         /  |  \
+      // (start) - (c) (d)
+      //         \ || /
+      //          (b)
+      val start = tx.createNode()
+      val a = tx.createNode()
+      val b = tx.createNode()
+      val c = tx.createNode()
+      val d = tx.createNode()
+      start.createRelationshipTo(a, RelationshipType.withName("R"))
+      start.createRelationshipTo(b, RelationshipType.withName("R"))
+      start.createRelationshipTo(c, RelationshipType.withName("R"))
+
+      a.createRelationshipTo(c, RelationshipType.withName("R"))
+      a.createRelationshipTo(d, RelationshipType.withName("R"))
+
+      c.createRelationshipTo(b, RelationshipType.withName("R"))
+      c.createRelationshipTo(b, RelationshipType.withName("R"))
+
+      d.createRelationshipTo(b, RelationshipType.withName("R"))
+      start
+    }
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("path")
+      .shortestPath("(x)-[r*0..]-(x)", pathName = Some("path"), all = true, sameNodeMode = AllowSameNode)
+      .nodeByElementIdSeek("x", Set.empty, start.getElementId)
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("path").withRows(assertPaths(rowCount(1))(p => p.size() == 0))
+  }
+
+  test("all shortest path (length >= 1), AllowSameNode, undirected complicated case") {
+    // given
+    val start = givenGraph {
+      //           (a)
+      //         /  |  \
+      // (start) - (c) (d)
+      //         \ || /
+      //          (b)
+      val start = tx.createNode()
+      val a = tx.createNode()
+      val b = tx.createNode()
+      val c = tx.createNode()
+      val d = tx.createNode()
+      start.createRelationshipTo(a, RelationshipType.withName("R"))
+      start.createRelationshipTo(b, RelationshipType.withName("R"))
+      start.createRelationshipTo(c, RelationshipType.withName("R"))
+
+      a.createRelationshipTo(c, RelationshipType.withName("R"))
+      a.createRelationshipTo(d, RelationshipType.withName("R"))
+
+      c.createRelationshipTo(b, RelationshipType.withName("R"))
+      c.createRelationshipTo(b, RelationshipType.withName("R"))
+
+      d.createRelationshipTo(b, RelationshipType.withName("R"))
+      start
+    }
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("path")
+      .shortestPath("(x)-[r*1..]-(x)", pathName = Some("path"), all = true, sameNodeMode = AllowSameNode)
+      .nodeByElementIdSeek("x", Set.empty, start.getElementId)
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("path").withRows(assertPaths(rowCount(6))(p => p.size() == 3))
+  }
+
+  test("single shortest path (length >= 1), AllowSameNode, undirected complicated case") {
+    // given
+    val start = givenGraph {
+      //           (a)
+      //         /  |  \
+      // (start) - (c) (d)
+      //         \ || /
+      //          (b)
+      val start = tx.createNode()
+      val a = tx.createNode()
+      val b = tx.createNode()
+      val c = tx.createNode()
+      val d = tx.createNode()
+      start.createRelationshipTo(a, RelationshipType.withName("R"))
+      start.createRelationshipTo(b, RelationshipType.withName("R"))
+      start.createRelationshipTo(c, RelationshipType.withName("R"))
+
+      a.createRelationshipTo(c, RelationshipType.withName("R"))
+      a.createRelationshipTo(d, RelationshipType.withName("R"))
+
+      c.createRelationshipTo(b, RelationshipType.withName("R"))
+      c.createRelationshipTo(b, RelationshipType.withName("R"))
+
+      d.createRelationshipTo(b, RelationshipType.withName("R"))
+      start
+    }
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("path")
+      .shortestPath("(x)-[r*1..]-(x)", pathName = Some("path"), sameNodeMode = AllowSameNode)
+      .nodeByElementIdSeek("x", Set.empty, start.getElementId)
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("path").withRows(assertPaths(rowCount(1))(p => p.size() == 3))
+  }
+
+  test("all shortest path (length >= 1), AllowSameNode, undirected walk") {
+    // given
+    val start = givenGraph {
+      //           (a)
+      //         /  |  \
+      // (start) - (c) (d)
+      //         \ || /
+      //          (b)
+      val start = tx.createNode()
+      val a = tx.createNode()
+      val b = tx.createNode()
+      val c = tx.createNode()
+      val d = tx.createNode()
+      start.createRelationshipTo(a, RelationshipType.withName("R"))
+      start.createRelationshipTo(b, RelationshipType.withName("R"))
+      start.createRelationshipTo(c, RelationshipType.withName("R"))
+
+      a.createRelationshipTo(c, RelationshipType.withName("R"))
+      a.createRelationshipTo(d, RelationshipType.withName("R"))
+
+      c.createRelationshipTo(b, RelationshipType.withName("R"))
+      c.createRelationshipTo(b, RelationshipType.withName("R"))
+
+      d.createRelationshipTo(b, RelationshipType.withName("R"))
+      start
+    }
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("path")
+      .shortestPath(
+        "(x)-[r*1..]-(x)",
+        pathName = Some("path"),
+        all = true,
+        sameNodeMode = AllowSameNode,
+        traversalPathMode = Walk
+      )
+      .nodeByElementIdSeek("x", Set.empty, start.getElementId)
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("path").withRows(assertPaths(rowCount(3))(p => p.size() == 2))
+  }
+
+  test("single shortest path (length >= 1), AllowSameNode, undirected walk") {
+    // given
+    val start = givenGraph {
+      //           (a)
+      //         /  |  \
+      // (start) - (c) (d)
+      //         \ || /
+      //          (b)
+      val start = tx.createNode()
+      val a = tx.createNode()
+      val b = tx.createNode()
+      val c = tx.createNode()
+      val d = tx.createNode()
+      start.createRelationshipTo(a, RelationshipType.withName("R"))
+      start.createRelationshipTo(b, RelationshipType.withName("R"))
+      start.createRelationshipTo(c, RelationshipType.withName("R"))
+
+      a.createRelationshipTo(c, RelationshipType.withName("R"))
+      a.createRelationshipTo(d, RelationshipType.withName("R"))
+
+      c.createRelationshipTo(b, RelationshipType.withName("R"))
+      c.createRelationshipTo(b, RelationshipType.withName("R"))
+
+      d.createRelationshipTo(b, RelationshipType.withName("R"))
+      start
+    }
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("path")
+      .shortestPath("(x)-[r*1..]-(x)", pathName = Some("path"), sameNodeMode = AllowSameNode, traversalPathMode = Walk)
+      .nodeByElementIdSeek("x", Set.empty, start.getElementId)
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("path").withRows(assertPaths(rowCount(1))(p => p.size() == 2))
+  }
+
   test(
     "TraversalEndpoint(To) should resolve as the next node of a relationship traversal during predicate evaluation"
   ) {
@@ -1301,6 +1502,72 @@ abstract class ShortestPathTestBase[CONTEXT <: RuntimeContext](
     ))
 
     runtimeResult should beColumns("path").withRows(expected)
+  }
+
+  test("shortest paths with node property predicate") {
+    // given
+    val (start, a, b, r1, r2) = givenGraph {
+
+      /**
+       *                 (t21)
+       *               ↗
+       *         (t11)
+       *        ↗      ↘
+       *                 (̶t̶2̶2̶)̶
+       * (start)
+       *                 (t23)
+       *        ↘      ↗
+       *          (̶t̶1̶2̶)̶)
+       *               ↘
+       *                 (̶t̶2̶4̶)̶
+       *
+       */
+      val startNode = tx.createNode(label("Start"))
+      startNode.setProperty("followMe", true)
+      val t11 = tx.createNode(label("Neighbour"))
+      t11.setProperty("followMe", true)
+      val t12 = tx.createNode(label("Neighbour"))
+      t12.setProperty("followMe", false)
+      val r1 = startNode.createRelationshipTo(t11, RelationshipType.withName("R"))
+      startNode.createRelationshipTo(t12, RelationshipType.withName("R"))
+
+      val t21 = tx.createNode(label("Neighbour"))
+      t21.setProperty("followMe", true)
+      val t22 = tx.createNode(label("Neighbour"))
+      t22.setProperty("followMe", false)
+      val r2 = t11.createRelationshipTo(t21, RelationshipType.withName("R"))
+      t11.createRelationshipTo(t22, RelationshipType.withName("R"))
+
+      val t23 = tx.createNode(label("Neighbour"))
+      t23.setProperty("followMe", true)
+      val t24 = tx.createNode(label("Neighbour"))
+      t24.setProperty("followMe", false)
+      t12.createRelationshipTo(t23, RelationshipType.withName("R"))
+      t12.createRelationshipTo(t24, RelationshipType.withName("R"))
+      (startNode, t11, t21, r1, r2)
+    }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("nodes", "rels")
+      .projection("relationships(p) AS rels", "nodes(p) AS nodes")
+      .shortestPath(
+        "(source)-[r*1..]-(target)",
+        pathName = Some("p"),
+        nodePredicates = Seq(Predicate("n", "n.followMe"))
+      )
+      .cartesianProduct()
+      .|.nodeByLabelScan("target", "Neighbour")
+      .nodeByLabelScan("source", "Start")
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("nodes", "rels").withRows(Seq(
+      Array(util.List.of(start, a), util.List.of(r1)),
+      Array(util.List.of(start, a, b), util.List.of(r1, r2))
+    ))
   }
 
   case class assertPaths(rowsMatcher: RowsMatcher)(check: VirtualPathValue => Boolean) extends RowsMatcher {

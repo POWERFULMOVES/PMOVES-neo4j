@@ -20,23 +20,22 @@
 package org.neo4j.internal.kernel.api.exceptions.schema;
 
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
+import org.neo4j.gqlstatus.GqlHelper;
 import org.neo4j.kernel.api.exceptions.Status;
+import org.neo4j.token.api.TokenType;
 
 public class IllegalTokenNameException extends SchemaKernelException {
-    public IllegalTokenNameException(String tokenName) {
-        super(
-                Status.Schema.TokenNameError,
-                String.format(
-                        "%s is not a valid token name. " + "Token names cannot be empty or contain any null-bytes.",
-                        tokenName != null ? "'" + tokenName + "'" : "Null"));
-    }
-
-    public IllegalTokenNameException(ErrorGqlStatusObject gqlStatusObject, String tokenName) {
+    private IllegalTokenNameException(ErrorGqlStatusObject gqlStatusObject, String tokenName) {
         super(
                 gqlStatusObject,
                 Status.Schema.TokenNameError,
                 String.format(
                         "%s is not a valid token name. " + "Token names cannot be empty or contain any null-bytes.",
                         tokenName != null ? "'" + tokenName + "'" : "Null"));
+    }
+
+    public static IllegalTokenNameException invalidTokenName(String tokenName, TokenType type) {
+        var gql = GqlHelper.getGql42001_42I11(type.getName(), tokenName, 0, 0, 0);
+        return new IllegalTokenNameException(gql, tokenName);
     }
 }

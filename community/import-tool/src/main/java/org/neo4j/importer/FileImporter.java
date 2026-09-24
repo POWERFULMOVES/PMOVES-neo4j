@@ -19,13 +19,13 @@
  */
 package org.neo4j.importer;
 
+import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
+import static org.apache.commons.lang3.exception.ExceptionUtils.getThrowableList;
 import static org.apache.commons.lang3.exception.ExceptionUtils.indexOfThrowable;
+import static org.apache.commons.lang3.exception.ExceptionUtils.indexOfType;
 import static org.neo4j.configuration.GraphDatabaseInternalSettings.duplication_user_messages;
 import static org.neo4j.configuration.GraphDatabaseSettings.db_temporal_timezone;
-import static org.neo4j.configuration.GraphDatabaseSettings.server_logging_config_path;
-import static org.neo4j.internal.batchimport.input.Collectors.badCollector;
-import static org.neo4j.internal.batchimport.input.Collectors.collect;
 import static org.neo4j.internal.batchimport.input.InputEntityDecorators.NO_DECORATOR;
 import static org.neo4j.internal.batchimport.input.InputEntityDecorators.additiveLabels;
 import static org.neo4j.internal.batchimport.input.InputEntityDecorators.defaultRelationshipType;
@@ -33,12 +33,11 @@ import static org.neo4j.internal.batchimport.input.csv.DataFactories.data;
 import static org.neo4j.internal.batchimport.input.csv.DataFactories.defaultFormatNodeFileHeader;
 import static org.neo4j.internal.batchimport.input.csv.DataFactories.defaultFormatRelationshipFileHeader;
 import static org.neo4j.io.ByteUnit.bytesToString;
+import static org.neo4j.io.fs.DefaultFileSystemAbstraction.TRUNCATE_OPTIONS;
 import static org.neo4j.kernel.impl.scheduler.JobSchedulerFactory.createInitialisedScheduler;
-import static org.neo4j.logging.log4j.LogConfig.createLoggerFromXmlConfig;
 import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_ID;
 
 import java.io.IOException;
-import java.io.OutputStream;
 import java.io.PrintStream;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
@@ -46,60 +45,83 @@ import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.Path;
 import java.time.ZoneId;
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
+import java.util.Map.Entry;
+import java.util.SequencedSet;
 import java.util.Set;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
-import org.eclipse.collections.api.factory.Lists;
-import org.eclipse.collections.api.list.MutableList;
 import org.neo4j.batchimport.api.Configuration;
+import org.neo4j.batchimport.api.ImportValidationException;
+import org.neo4j.batchimport.api.Monitor;
+import org.neo4j.batchimport.api.ResumableStateAccessor;
 import org.neo4j.batchimport.api.UnsupportedFormatException;
 import org.neo4j.batchimport.api.input.Collector;
+import org.neo4j.batchimport.api.input.FileGroup;
 import org.neo4j.batchimport.api.input.IdType;
 import org.neo4j.batchimport.api.input.Input;
 import org.neo4j.cloud.storage.StorageUtils;
 import org.neo4j.configuration.Config;
 import org.neo4j.csv.reader.IllegalMultilineFieldException;
+import org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker;
+import org.neo4j.function.ThrowingSupplier;
+import org.neo4j.importer.ImportCommand.ShardingArguments;
+import org.neo4j.importer.SchemaCommandSource.ResolvedSchemaCommands;
 import org.neo4j.internal.batchimport.cache.idmapping.string.DuplicateInputIdException;
 import org.neo4j.internal.batchimport.input.BadCollector;
 import org.neo4j.internal.batchimport.input.Groups;
 import org.neo4j.internal.batchimport.input.InputException;
 import org.neo4j.internal.batchimport.input.MissingRelationshipDataException;
+import org.neo4j.internal.batchimport.input.ProblemReporters;
 import org.neo4j.internal.batchimport.input.csv.CsvInput;
+import org.neo4j.internal.batchimport.input.csv.CsvInput.PrintingMonitor;
 import org.neo4j.internal.batchimport.input.csv.DataFactory;
 import org.neo4j.internal.batchimport.input.parquet.ParquetInput;
 import org.neo4j.internal.batchimport.input.parquet.ParquetMonitor;
-import org.neo4j.internal.schema.SchemaCommand;
 import org.neo4j.io.fs.DefaultFileSystemAbstraction;
 import org.neo4j.io.fs.FileSystemAbstraction;
+import org.neo4j.io.fs.StoreChannel;
+import org.neo4j.io.layout.CommonDatabaseStores;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.locker.FileLockException;
 import org.neo4j.io.os.OsBeanUtil;
+import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.context.FixedVersionContextSupplier;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.api.index.IndexProvidersAccess;
+import org.neo4j.kernel.impl.api.index.IndexProviderMap;
+import org.neo4j.kernel.impl.index.schema.DefaultIndexProvidersAccess;
 import org.neo4j.kernel.internal.Version;
+import org.neo4j.kernel.lifecycle.Lifespan;
 import org.neo4j.logging.InternalLogProvider;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.logging.internal.PrefixedLogProvider;
 import org.neo4j.logging.internal.SimpleLogService;
-import org.neo4j.logging.log4j.Log4jLogProvider;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.scheduler.JobScheduler;
-import org.neo4j.util.Preconditions;
+import org.neo4j.storageengine.api.StorageEngineFactory;
+import org.neo4j.token.TokenHolders;
+import org.neo4j.util.VisibleForTesting;
 
-class FileImporter {
-    static final String DEFAULT_REPORT_FILE_NAME = "import.report";
+public class FileImporter {
+
+    private static final String MULTILINE_HINT = "Detected field which spanned multiple lines for an import where "
+            + "--multiline-fields=false. If you know that your input data "
+            + "include fields containing new-line characters then import with this option set to "
+            + "true.";
 
     private final DatabaseLayout databaseLayout;
     private final Config databaseConfig;
+    private final StorageEngineFactory storageEngineFactory;
     private final org.neo4j.csv.reader.Configuration csvConfig;
-    private final org.neo4j.batchimport.api.Configuration importConfig;
-    private final Path reportFile;
-    private final IdType idType;
+    private final Configuration importConfig;
+    private final ThrowingSupplier<StoreChannel, IOException> reportChannel;
+    private final IdType defaultIdType;
     private final Charset inputEncoding;
     private final boolean ignoreExtraColumns;
     private final boolean skipBadRelationships;
@@ -109,8 +131,11 @@ class FileImporter {
     private final boolean normalizeTypes;
     private final boolean verbose;
     private final boolean autoSkipHeaders;
-    private final Map<Set<String>, List<Path[]>> nodeFiles;
-    private final Map<String, List<Path[]>> relationshipFiles;
+
+    // The same import command must always read the input files in the same order, therefore LinkedHashMaps
+    private final Map<Set<String>, List<FileGroup>> nodeFiles;
+    private final Map<String, List<FileGroup>> relationshipFiles;
+
     private final FileSystemAbstraction fileSystem;
     private final PrintStream stdOut;
     private final PrintStream stdErr;
@@ -118,19 +143,22 @@ class FileImporter {
     private final CursorContextFactory contextFactory;
     private final MemoryTracker memoryTracker;
     private final boolean force;
-    private final ImportCommand.IncrementalStage incrementalStage;
-    private final boolean incremental;
     private final InternalLogProvider logProvider;
-    private final List<SchemaCommand> schemaCommands;
-    private final FileInputType fileImportType;
+    private final SchemaCommandSource schemaCommands;
+    private final FileInputType fileInputType;
+    private final ShardingArguments shardingArguments;
+    private final Monitor monitor;
+    private final ResumableStateAccessor resumableStateAccessor;
 
-    private FileImporter(Builder b) {
+    private FileImporter(
+            Builder b, Map<Set<String>, List<FileGroup>> nodeFiles, Map<String, List<FileGroup>> relationshipFiles) {
         this.databaseLayout = requireNonNull(b.databaseLayout);
         this.databaseConfig = requireNonNull(b.databaseConfig);
+        this.storageEngineFactory = requireNonNull(b.storageEngineFactory);
         this.csvConfig = requireNonNull(b.csvConfig);
         this.importConfig = requireNonNull(b.importConfig);
-        this.reportFile = requireNonNull(b.reportFile);
-        this.idType = requireNonNull(b.idType);
+        this.reportChannel = requireNonNull(b.reportChannel);
+        this.defaultIdType = requireNonNull(b.defaultIdType);
         this.inputEncoding = requireNonNull(b.inputEncoding);
         this.ignoreExtraColumns = b.ignoreExtraColumns;
         this.skipBadRelationships = b.skipBadRelationships;
@@ -140,8 +168,8 @@ class FileImporter {
         this.normalizeTypes = b.normalizeTypes;
         this.verbose = b.verbose;
         this.autoSkipHeaders = b.autoSkipHeaders;
-        this.nodeFiles = requireNonNull(b.nodeFiles);
-        this.relationshipFiles = requireNonNull(b.relationshipFiles);
+        this.nodeFiles = nodeFiles;
+        this.relationshipFiles = relationshipFiles;
         this.fileSystem = requireNonNull(b.fileSystem);
         this.pageCacheTracer = requireNonNull(b.pageCacheTracer);
         this.contextFactory = requireNonNull(b.contextFactory);
@@ -150,89 +178,268 @@ class FileImporter {
         this.stdErr = requireNonNull(b.stdErr);
         this.logProvider = requireNonNull(b.logProvider);
         this.force = b.force;
-        this.incremental = b.incremental;
-        this.incrementalStage = b.incrementalStage;
         this.schemaCommands = b.schemaCommands;
-        this.fileImportType = b.fileInputType;
+        this.fileInputType = b.fileInputType;
+        this.shardingArguments = b.shardingArguments;
+        this.monitor = b.monitor;
+        this.resumableStateAccessor = b.resumableStateAccessor;
     }
 
-    void doImport(ImportCommand.Base type) throws IOException {
+    public FileInputType fileInputType() {
+        return fileInputType;
+    }
+
+    /**
+     * @return the node input file groups, keyed by the additional labels applied to them, in the order the groups were
+     * given on the command line. This returns an unmodifiable Map, with unmodifiable Set keys and
+     * unmodifiable List values.
+     */
+    public Map<Set<String>, List<FileGroup>> nodeFiles() {
+        return nodeFiles;
+    }
+
+    /**
+     * @return the relationship input file groups, keyed by their default relationship type, in the order the groups
+     * were given on the command line. This returns an unmodifiable Map, with unmodifiable Set keys and
+     * unmodifiable List values.
+     */
+    public Map<String, List<FileGroup>> relationshipFiles() {
+        return relationshipFiles;
+    }
+
+    public void dryRun(ImportCommand.Base type) throws IOException {
+        printOverview(true);
+
+        try (var input = importInput();
+                var jobScheduler = createInitialisedScheduler()) {
+            type.doDryRun(
+                    input,
+                    fileSystem,
+                    databaseLayout,
+                    databaseConfig,
+                    storageEngineFactory,
+                    jobScheduler,
+                    contextFactory,
+                    importConfig,
+                    () -> new IndexProvidersAccess() {
+                        @Override
+                        public IndexProviderMap access(
+                                PageCache pageCache,
+                                DatabaseLayout layout,
+                                DatabaseReadOnlyChecker readOnlyChecker,
+                                MemoryTracker memoryTracker) {
+                            return unsupported();
+                        }
+
+                        @Override
+                        public IndexProviderMap access(
+                                PageCache pageCache,
+                                DatabaseLayout layout,
+                                DatabaseReadOnlyChecker readOnlyChecker,
+                                TokenHolders tokenHolders) {
+                            return unsupported();
+                        }
+
+                        @Override
+                        public void close() {}
+
+                        private IndexProviderMap unsupported() {
+                            throw new UnsupportedOperationException(
+                                    "Indexes do not need to be accessed during a dry run");
+                        }
+                    },
+                    stdOut,
+                    verbose,
+                    shardingArguments,
+                    monitor);
+        } catch (Exception ex) {
+            throw csvImportExceptionWrapped(databaseLayout.getDatabaseName(), ex, type.importType());
+        }
+    }
+
+    /**
+     * When {@link ImportCommand.Full#forceOverwriteDestinationForResume} is removed, the changes that came
+     * along with this comment need to be reverted.
+     */
+    public void doImport(ImportCommand.Base type, boolean skidbladnir, boolean resume) throws IOException {
         if (force) {
+            Predicate<Path> preserved = resume ? preservedByResume() : path -> false;
             fileSystem.deleteRecursively(
-                    databaseLayout.databaseDirectory(), path -> !path.equals(databaseLayout.databaseLockFile()));
+                    databaseLayout.databaseDirectory(),
+                    path -> !path.equals(databaseLayout.databaseLockFile()) && !preserved.test(path));
             fileSystem.deleteRecursively(databaseLayout.getTransactionLogsDirectory());
         }
 
-        try (OutputStream badOutput = fileSystem.openAsOutputStream(reportFile, false);
-                Collector badCollector = getBadCollector(badOutput)) {
-            // Extract the default time zone from the database configuration
-            ZoneId dbTimeZone = databaseConfig.get(db_temporal_timezone);
-            Supplier<ZoneId> defaultTimeZone = () -> dbTimeZone;
+        try (var badCollector = getBadCollector();
+                var input = importInput()) {
+            doImport(input, badCollector, type, skidbladnir, resume);
+        }
+    }
 
-            final var nodeData = nodeData();
-            final var relationshipsData = relationshipData();
-            try (var input = importInput(nodeData, defaultTimeZone, relationshipsData)) {
-                doImport(input, badCollector, type);
-            }
+    /**
+     * Matches what a resumed import has to keep even though it overwrites the destination: the files that the steps
+     * before store writing left in the temporary area, and the token stores that the relationship IR refers to.
+     */
+    private Predicate<Path> preservedByResume() {
+        Path temporaryArea = importConfig.tempDirectory(databaseLayout.databaseDirectory());
+        DatabaseLayout formatSpecificLayout = storageEngineFactory.formatSpecificDatabaseLayout(databaseLayout);
+        Path relationshipTypeTokens = formatSpecificLayout
+                .pathForStore(CommonDatabaseStores.RELATIONSHIP_TYPE_TOKENS)
+                .baseSegment();
+        Path propertyKeyTokens = formatSpecificLayout
+                .pathForStore(CommonDatabaseStores.PROPERTY_KEY_TOKENS)
+                .baseSegment();
+        return path -> isKeptTemporaryAreaFile(temporaryArea, path)
+                || belongsToStore(path, relationshipTypeTokens)
+                || belongsToStore(path, propertyKeyTokens);
+    }
+
+    /**
+     * The temporary area files that a resume reuses: the relationship IR and the node markers. Both are written
+     * before the store writing step and are not rewritten by a resumed import, which still reads them.
+     * Named literally here because they belong to the block format importer, which this module cannot see
+     * and this method will be removed again soon (tm).
+     */
+    private static boolean isKeptTemporaryAreaFile(Path temporaryArea, Path path) {
+        if (!temporaryArea.equals(path.getParent())) {
+            return false;
+        }
+        String fileName = path.getFileName().toString();
+        return fileName.startsWith("rels-for-later") || fileName.startsWith("node-markers");
+    }
+
+    /**
+     * @return whether {@code path} is one of the store's segments or its id file, all of which are named after the
+     * store's base segment.
+     */
+    private static boolean belongsToStore(Path path, Path storeBaseSegment) {
+        return storeBaseSegment.getParent().equals(path.getParent())
+                && path.getFileName()
+                        .toString()
+                        .startsWith(storeBaseSegment.getFileName().toString());
+    }
+
+    private Input importInput() {
+        // extract the default time zone from the database configuration
+        var dbTimeZone = databaseConfig.get(db_temporal_timezone);
+        var nodeData = nodeData();
+        var relationshipsData = relationshipData();
+        return importInput(nodeData, relationshipsData, () -> dbTimeZone);
+    }
+
+    private void abortIfVectorsUnsupported(Input input) {
+        if (!storageEngineFactory.supportsVectorData() && input.containsVectorData()) {
+            throw new UnsupportedOperationException("Provided input is known to contain vector value data, "
+                    + "which is not supported by the target storage engine.");
         }
     }
 
     private Input importInput(
-            Iterable<DataFactory> nodeData, Supplier<ZoneId> defaultTimeZone, Iterable<DataFactory> relationshipsData) {
-        return switch (fileImportType) {
-            case CSV -> new CsvInput(
-                    nodeData,
-                    defaultFormatNodeFileHeader(defaultTimeZone, normalizeTypes),
-                    relationshipsData,
-                    defaultFormatRelationshipFileHeader(defaultTimeZone, normalizeTypes),
-                    schemaCommands,
-                    idType,
-                    csvConfig,
-                    autoSkipHeaders,
-                    new CsvInput.PrintingMonitor(stdOut),
-                    new Groups(),
-                    memoryTracker);
-            case PARQUET -> new ParquetInput(
-                    nodeFiles,
-                    relationshipFiles,
-                    schemaCommands,
-                    idType,
-                    csvConfig.arrayDelimiter(),
-                    new Groups(),
-                    new ParquetMonitor(stdOut));
+            Iterable<DataFactory> nodeData, Iterable<DataFactory> relationshipsData, Supplier<ZoneId> defaultTimeZone) {
+        return switch (fileInputType) {
+            case CSV ->
+                new CsvInput(
+                        nodeData,
+                        defaultFormatNodeFileHeader(defaultTimeZone, normalizeTypes),
+                        relationshipsData,
+                        defaultFormatRelationshipFileHeader(defaultTimeZone, normalizeTypes),
+                        schemaCommands,
+                        defaultIdType,
+                        csvConfig,
+                        autoSkipHeaders,
+                        new PrintingMonitor(stdOut),
+                        new Groups(),
+                        memoryTracker);
+            case PARQUET -> {
+                var input = new ParquetInput(
+                        nodeFiles,
+                        relationshipFiles,
+                        schemaCommands,
+                        defaultIdType,
+                        csvConfig,
+                        new Groups(),
+                        new ParquetMonitor(stdOut));
+                // For Parquet: Abort if vectors are unsupported.
+                abortIfVectorsUnsupported(input);
+                yield input;
+            }
+            case NO_INPUT -> null;
         };
     }
 
-    private void doImport(Input input, Collector badCollector, ImportCommand.Base type) {
+    private void doImport(
+            Input input, Collector badCollector, ImportCommand.Base type, boolean skidbladnir, boolean resume) {
         boolean success = false;
 
-        printOverview();
+        printOverview(false);
 
-        try (JobScheduler jobScheduler = createInitialisedScheduler()) {
+        try (JobScheduler jobScheduler = createInitialisedScheduler();
+                Lifespan life = new Lifespan()) {
             // Let the storage engine factory be configurable in the tool later on...
             var logService = new SimpleLogService(
                     NullLogProvider.getInstance(),
                     new PrefixedLogProvider(logProvider, databaseLayout.getDatabaseName()),
                     databaseConfig.get(duplication_user_messages));
-            type.doImport(
+            Supplier<IndexProvidersAccess> indexProviders = () -> new DefaultIndexProvidersAccess(
+                    storageEngineFactory,
                     fileSystem,
-                    databaseLayout,
                     databaseConfig,
                     jobScheduler,
-                    logProvider,
+                    new SimpleLogService(logProvider),
                     pageCacheTracer,
-                    contextFactory,
-                    importConfig,
-                    logService,
-                    stdOut,
-                    stdErr,
-                    verbose,
-                    badCollector,
-                    memoryTracker,
-                    input);
+                    contextFactory);
+            if (skidbladnir) {
+                type.doSkidbladnirImport(
+                        fileSystem,
+                        databaseLayout,
+                        force,
+                        databaseConfig,
+                        storageEngineFactory,
+                        jobScheduler,
+                        logProvider,
+                        pageCacheTracer,
+                        contextFactory,
+                        importConfig,
+                        logService,
+                        stdOut,
+                        stdErr,
+                        verbose,
+                        badCollector,
+                        memoryTracker,
+                        input,
+                        inputEncoding,
+                        nodeFiles,
+                        indexProviders,
+                        shardingArguments,
+                        monitor,
+                        resumableStateAccessor,
+                        resume);
+            } else {
+                type.doImport(
+                        fileSystem,
+                        databaseLayout,
+                        force,
+                        databaseConfig,
+                        storageEngineFactory,
+                        jobScheduler,
+                        logProvider,
+                        pageCacheTracer,
+                        contextFactory,
+                        importConfig,
+                        logService,
+                        stdOut,
+                        stdErr,
+                        verbose,
+                        badCollector,
+                        memoryTracker,
+                        input,
+                        indexProviders,
+                        shardingArguments,
+                        monitor);
+            }
             success = true;
         } catch (Exception ex) {
-            throw andPrintError(databaseLayout.getDatabaseName(), ex, incremental, stdErr);
+            throw csvImportExceptionWrapped(databaseLayout.getDatabaseName(), ex, type.importType());
         } finally {
             long numberOfBadEntries = badCollector.badEntries();
             if (badTolerance != BadCollector.UNLIMITED_TOLERANCE && numberOfBadEntries > badTolerance) {
@@ -241,10 +448,7 @@ class FileImporter {
                         + badTolerance + "). Import is optimized to import fault-free data.");
                 stdOut.println();
                 if (skipBadEntriesLogging) {
-                    stdOut.println(
-                            "Bad entry logging is disabled, enable it using --skip-bad-entries-logging=false" + ".");
-                } else {
-                    stdOut.println("Bad entries were logged to " + reportFile.toAbsolutePath() + ".");
+                    stdOut.println("Bad entry logging is disabled, enable it using --skip-bad-entries-logging=false.");
                 }
                 stdOut.println();
                 stdOut.println("We recommend that data should be cleaned before importing. The fault-tolerance can be "
@@ -255,54 +459,54 @@ class FileImporter {
             if (!success) {
                 stdErr.println("WARNING Import failed. The store files in "
                         + databaseLayout.databaseDirectory().toAbsolutePath()
-                        + " are left as they are, although they are likely in an unusable state. "
-                        + "Starting a database on these store files will likely fail or observe inconsistent records so "
-                        + "start at your own risk or delete the store manually.");
+                        + " are left as they are, although they are likely in an unusable state. Starting a database"
+                        + " on these store files will likely fail or observe inconsistent records so start at your own"
+                        + " risk or delete the store manually.");
                 stdOut.println();
             }
         }
     }
 
     /**
-     * Method name looks strange, but look at how it's used and you'll see why it's named like that.
+     * Wraps the provided exception in a {@link CsvImportException} which provides additional error information and
+     * traceability.
+     * <p>
+     * <b>Note:</b> Instances of {@link UnsupportedFormatException} are not wrapped, and are returned as is.
      *
      * @param databaseName the name of the database to receive the import data
      * @param e            the error that occurred
-     * @param incremental  whether the import is incremental
-     * @param err          the error output stream
+     * @param importType   the import type (ex. full/incremental/sharded)
      */
-    private static RuntimeException andPrintError(
-            String databaseName, Exception e, boolean incremental, PrintStream err) {
+    private static RuntimeException csvImportExceptionWrapped(String databaseName, Exception e, String importType) {
+        int relevantThrowableIndex;
         // List of common errors that can be explained to the user
         if (DuplicateInputIdException.class.equals(e.getClass())) {
-            err.println("Duplicate input ids that would otherwise clash can be put into separate id space.");
+            return new CsvImportException(
+                    "Duplicate input ids that would otherwise clash can be put into separate id space.", e);
         } else if (MissingRelationshipDataException.class.equals(e.getClass())) {
-            err.println("Relationship missing mandatory field");
+            return new CsvImportException("Relationship missing mandatory field", e);
         } else if (DirectoryNotEmptyException.class.equals(e.getClass())) {
-            err.println(
-                    "Database already exist. Re-run with `--overwrite-destination` to remove the database prior to import");
+            return new CsvImportException(
+                    "Database already exist. Re-run with `--overwrite-destination` to remove the database prior to import",
+                    e);
         } else if (FileLockException.class.equals(e.getClass())) {
             String string =
                     "%s can only be run against a database which is offline. The current state of database '%s' is online."
-                            .formatted(incremental ? "Incremental import" : "Import", databaseName);
-            err.println(string);
+                            .formatted(importType, databaseName);
+            return new CsvImportException(string, e);
+        } else if ((relevantThrowableIndex = indexOfType(e, InputException.class)) != -1) {
+            InputException ie = (InputException) getThrowableList(e).get(relevantThrowableIndex);
+            // Provide extra hint if causal chain contains IllegalMultilineFieldException (which is wrapped because it
+            // comes from the csv component, which has no access to InputException).
+            String message = indexOfThrowable(e, IllegalMultilineFieldException.class) != -1
+                    ? format("%s%n%n%s", MULTILINE_HINT, ie.getMessage())
+                    : ie.getMessage();
+            return new CsvImportException(message, ie);
+        } else if (e instanceof UnsupportedFormatException ufe) {
+            return ufe;
+        } else if (e instanceof ImportValidationException ive) {
+            return new CsvImportException("The import failed some validation.", ive);
         }
-        // This type of exception is wrapped since our input code throws InputException consistently,
-        // and so IllegalMultilineFieldException comes from the csv component, which has no access to InputException
-        // therefore it's wrapped.
-        else if (indexOfThrowable(e, IllegalMultilineFieldException.class) != -1) {
-            err.println("Detected field which spanned multiple lines for an import where "
-                    + "--multiline-fields=false. If you know that your input data "
-                    + "include fields containing new-line characters then import with this option set to "
-                    + "true.");
-        } else if (indexOfThrowable(e, InputException.class) != -1) {
-            err.println("Error in input data");
-        } else if (e instanceof UnsupportedFormatException exception) {
-            err.println("Incremental import is not supported for a database with the format high_limit.");
-            return exception;
-        }
-        err.println();
-
         return new CsvImportException(e); // throw in order to have process exit with !0
     }
 
@@ -310,20 +514,25 @@ class FileImporter {
         CsvImportException(Throwable cause) {
             super(cause);
         }
+
+        CsvImportException(String message, Throwable cause) {
+            super(message, cause);
+        }
     }
 
-    private void printOverview() {
+    private void printOverview(boolean isDryRun) {
         stdOut.println("Neo4j version: " + Version.getNeo4jVersion());
-        stdOut.println("Importing the contents of these files into " + databaseLayout.databaseDirectory() + ":");
-        if (incrementalStage != null) {
-            stdOut.println("Import mode: " + incrementalStage);
+        if (isDryRun) {
+            stdOut.println("Checking the contents of the following files:");
+        } else {
+            stdOut.println("Importing the contents of these files into " + databaseLayout.databaseDirectory() + ":");
         }
         printInputFiles("Nodes", nodeFiles, stdOut);
         printInputFiles("Relationships", relationshipFiles, stdOut);
         stdOut.println();
         stdOut.println("Available resources:");
-        printIndented("Total machine memory: " + bytesToString(OsBeanUtil.getTotalPhysicalMemory()), stdOut);
-        printIndented("Free machine memory: " + bytesToString(OsBeanUtil.getFreePhysicalMemory()), stdOut);
+        printIndented("Total machine memory: " + bytesToString(OsBeanUtil.getTotalMemory()), stdOut);
+        printIndented("Free machine memory: " + bytesToString(OsBeanUtil.getFreeMemory()), stdOut);
         printIndented("Max heap memory : " + bytesToString(Runtime.getRuntime().maxMemory()), stdOut);
         printIndented("Max worker threads: " + importConfig.maxNumberOfWorkerThreads(), stdOut);
         printIndented("Configured max memory: " + bytesToString(importConfig.maxOffHeapMemory()), stdOut);
@@ -331,21 +540,22 @@ class FileImporter {
         stdOut.println();
     }
 
-    private static void printInputFiles(String name, Map<?, List<Path[]>> inputFiles, PrintStream out) {
-        if (inputFiles.isEmpty()) {
+    private static void printInputFiles(
+            String name, Map<?, List<FileGroup>> inputFileGroupsByAdditionalLabels, PrintStream out) {
+        if (inputFileGroupsByAdditionalLabels.isEmpty()) {
             return;
         }
 
         out.println(name + ":");
 
-        inputFiles.forEach((k, files) -> {
-            if (!isEmptyKey(k)) {
-                printIndented(k + ":", out);
+        inputFileGroupsByAdditionalLabels.forEach((additionalLabels, fileGroups) -> {
+            if (!isEmptyKey(additionalLabels)) {
+                printIndented(additionalLabels + ":", out);
             }
 
-            for (Path[] arr : files) {
-                for (final Path file : arr) {
-                    printIndented(StorageUtils.toString(file), out);
+            for (FileGroup fileGroup : fileGroups) {
+                for (FileGroup.NumberedFile file : fileGroup.files()) {
+                    printIndented(StorageUtils.toString(file.path()), out);
                 }
             }
             out.println();
@@ -353,12 +563,12 @@ class FileImporter {
     }
 
     private static boolean isEmptyKey(Object k) {
-        if (k instanceof String) {
-            return ((String) k).isEmpty();
-        } else if (k instanceof Set) {
-            return ((Set<?>) k).isEmpty();
-        }
-        return false;
+        return switch (k) {
+            case null -> true;
+            case String s -> s.isEmpty();
+            case Set<?> set -> set.isEmpty();
+            default -> false;
+        };
     }
 
     private static void printIndented(Object value, PrintStream out) {
@@ -367,10 +577,11 @@ class FileImporter {
 
     private Iterable<DataFactory> relationshipData() {
         final var result = new ArrayList<DataFactory>();
-        relationshipFiles.forEach((defaultTypeName, fileSets) -> {
+        relationshipFiles.forEach((defaultTypeName, fileGroups) -> {
             final var decorator = defaultRelationshipType(defaultTypeName);
-            for (Path[] files : fileSets) {
-                final var data = data(decorator, inputEncoding, files);
+            for (FileGroup fileGroup : fileGroups) {
+                final var data =
+                        data(decorator, inputEncoding, fileGroup.streamPaths().toArray(Path[]::new));
                 result.add(data);
             }
         });
@@ -379,48 +590,48 @@ class FileImporter {
 
     private Iterable<DataFactory> nodeData() {
         final var result = new ArrayList<DataFactory>();
-        nodeFiles.forEach((labels, fileSets) -> {
+        nodeFiles.forEach((labels, fileGroups) -> {
             final var decorator = labels.isEmpty() ? NO_DECORATOR : additiveLabels(labels.toArray(new String[0]));
-            for (Path[] files : fileSets) {
-                final var data = data(decorator, inputEncoding, files);
+            for (FileGroup fileGroup : fileGroups) {
+                final var data =
+                        data(decorator, inputEncoding, fileGroup.streamPaths().toArray(Path[]::new));
                 result.add(data);
             }
         });
         return result;
     }
 
-    private Collector getBadCollector(OutputStream badOutput) {
-        return badCollector(
-                badOutput,
+    private Collector getBadCollector() throws IOException {
+        return BadCollector.create(
+                ProblemReporters.jsonOutputProblemHandler(reportChannel.get()),
                 badTolerance,
-                collect(skipBadRelationships, skipDuplicateNodes, ignoreExtraColumns, !schemaCommands.isEmpty()),
+                BadCollector.collectFlag(
+                        skipBadRelationships,
+                        skipDuplicateNodes,
+                        ignoreExtraColumns,
+                        SchemaCommandSource.mayHaveCommands(schemaCommands)),
                 skipBadEntriesLogging);
     }
 
-    static InternalLogProvider createLogProvider(FileSystemAbstraction fileSystem, Config databaseConfig) {
-        return new Log4jLogProvider(createLoggerFromXmlConfig(
-                fileSystem,
-                databaseConfig.get(server_logging_config_path),
-                !databaseConfig.isExplicitlySet(server_logging_config_path),
-                databaseConfig::configStringLookup));
-    }
-
-    static Builder builder() {
+    public static Builder builder() {
         return new Builder();
     }
 
-    enum FileInputType {
+    public enum FileInputType {
         CSV,
-        PARQUET
+        PARQUET,
+        NO_INPUT
     }
 
-    static class Builder {
+    @SuppressWarnings("UnusedReturnValue")
+    public static class Builder {
         private DatabaseLayout databaseLayout;
         private Config databaseConfig;
+        private StorageEngineFactory storageEngineFactory;
         private org.neo4j.csv.reader.Configuration csvConfig = org.neo4j.csv.reader.Configuration.COMMAS;
         private Configuration importConfig = Configuration.DEFAULT;
-        private Path reportFile;
-        private IdType idType = IdType.STRING;
+        private ThrowingSupplier<StoreChannel, IOException> reportChannel;
+        private IdType defaultIdType = IdType.STRING;
         private Charset inputEncoding = StandardCharsets.UTF_8;
         private boolean ignoreExtraColumns;
         private boolean skipBadRelationships;
@@ -430,8 +641,15 @@ class FileImporter {
         private boolean normalizeTypes;
         private boolean verbose;
         private boolean autoSkipHeaders;
-        private final Map<Set<String>, List<Path[]>> nodeFiles = new HashMap<>();
-        private final Map<String, List<Path[]>> relationshipFiles = new HashMap<>();
+        /* The same import command must always read the input files in the same order, therefore LinkedHashMaps.
+         * The temp entity files are mutable, the field that we end up constructing the importer with is unmodifiable.
+         *
+         * Warning: do not use these Maps as a source of truth, they are mutating as we are building the importer
+         * setup, the finalized source of truth files should be accessed from FileImporter.nodeFiles()
+         */
+        private final LinkedHashMap<Set<String>, List<FileGroup>> tempNodeFiles = new LinkedHashMap<>();
+        private final LinkedHashMap<String, List<FileGroup>> tempRelationshipFiles = new LinkedHashMap<>();
+
         private FileSystemAbstraction fileSystem = new DefaultFileSystemAbstraction();
         private PageCacheTracer pageCacheTracer = PageCacheTracer.NULL;
         private CursorContextFactory contextFactory =
@@ -440,165 +658,231 @@ class FileImporter {
         private PrintStream stdOut = System.out;
         private PrintStream stdErr = System.err;
         private boolean force;
-        private boolean incremental = false;
-        private ImportCommand.IncrementalStage incrementalStage = null;
         private InternalLogProvider logProvider = NullLogProvider.getInstance();
-        private final MutableList<SchemaCommand> schemaCommands = Lists.mutable.empty();
+        private SchemaCommandSource schemaCommands = ResolvedSchemaCommands.of();
         private FileInputType fileInputType = FileInputType.CSV;
+        private ShardingArguments shardingArguments;
+        private Monitor monitor = Monitor.NO_MONITOR;
+        private ResumableStateAccessor resumableStateAccessor = ResumableStateAccessor.NOOP;
+        private int globalFileIdCounter = 0;
 
-        Builder withDatabaseLayout(DatabaseLayout databaseLayout) {
+        /**
+         * Wraps a path array in a file group and assign each file in the group a global id.
+         */
+        public FileGroup toFileGroup(Path[] paths) {
+            FileGroup.NumberedFile[] numberedFiles = new FileGroup.NumberedFile[paths.length];
+            for (int i = 0; i < paths.length; i++) {
+                numberedFiles[i] = new FileGroup.NumberedFile(globalFileIdCounter++, paths[i]);
+            }
+            return new FileGroup(numberedFiles);
+        }
+
+        public Builder withDatabaseLayout(DatabaseLayout databaseLayout) {
             this.databaseLayout = databaseLayout;
             return this;
         }
 
-        Builder withDatabaseConfig(Config databaseConfig) {
+        public DatabaseLayout getDatabaseLayout() {
+            return databaseLayout;
+        }
+
+        public Builder withDatabaseConfig(Config databaseConfig) {
             this.databaseConfig = databaseConfig;
             return this;
         }
 
-        Builder withCsvConfig(org.neo4j.csv.reader.Configuration csvConfig) {
+        public Config getDatabaseConfig() {
+            return databaseConfig;
+        }
+
+        public Builder withStorageEngineFactory(StorageEngineFactory storageEngineFactory) {
+            this.storageEngineFactory = storageEngineFactory;
+            return this;
+        }
+
+        public Builder withCsvConfig(org.neo4j.csv.reader.Configuration csvConfig) {
             this.csvConfig = csvConfig;
             return this;
         }
 
-        Builder withImportConfig(Configuration importConfig) {
+        public Builder withImportConfig(Configuration importConfig) {
             this.importConfig = importConfig;
             return this;
         }
 
-        Builder withReportFile(Path reportFile) {
-            this.reportFile = reportFile;
+        public Builder withReportChannel(ThrowingSupplier<StoreChannel, IOException> reportChannel) {
+            this.reportChannel = reportChannel;
             return this;
         }
 
-        Builder withIdType(IdType idType) {
-            this.idType = idType;
+        @VisibleForTesting
+        public Builder withReportFile(Path reportFile) {
+            this.reportChannel = () -> fileSystem.open(reportFile, TRUNCATE_OPTIONS);
             return this;
         }
 
-        Builder withInputEncoding(Charset inputEncoding) {
+        public Builder withDefaultIdType(IdType idType) {
+            this.defaultIdType = idType;
+            return this;
+        }
+
+        public Builder withInputEncoding(Charset inputEncoding) {
             this.inputEncoding = inputEncoding;
             return this;
         }
 
-        Builder withIgnoreExtraColumns(boolean ignoreExtraColumns) {
+        public Builder withIgnoreExtraColumns(boolean ignoreExtraColumns) {
             this.ignoreExtraColumns = ignoreExtraColumns;
             return this;
         }
 
-        Builder withSkipBadRelationships(boolean skipBadRelationships) {
+        public Builder withSkipBadRelationships(boolean skipBadRelationships) {
             this.skipBadRelationships = skipBadRelationships;
             return this;
         }
 
-        Builder withSkipDuplicateNodes(boolean skipDuplicateNodes) {
+        public Builder withSkipDuplicateNodes(boolean skipDuplicateNodes) {
             this.skipDuplicateNodes = skipDuplicateNodes;
             return this;
         }
 
-        Builder withSkipBadEntriesLogging(boolean skipBadEntriesLogging) {
+        public Builder withSkipBadEntriesLogging(boolean skipBadEntriesLogging) {
             this.skipBadEntriesLogging = skipBadEntriesLogging;
             return this;
         }
 
-        Builder withBadTolerance(long badTolerance) {
+        public Builder withBadTolerance(long badTolerance) {
             this.badTolerance = badTolerance;
             return this;
         }
 
-        Builder withNormalizeTypes(boolean normalizeTypes) {
+        public Builder withNormalizeTypes(boolean normalizeTypes) {
             this.normalizeTypes = normalizeTypes;
             return this;
         }
 
-        Builder withVerbose(boolean verbose) {
+        public Builder withVerbose(boolean verbose) {
             this.verbose = verbose;
             return this;
         }
 
-        Builder withAutoSkipHeaders(boolean autoSkipHeaders) {
+        public Builder withAutoSkipHeaders(boolean autoSkipHeaders) {
             this.autoSkipHeaders = autoSkipHeaders;
             return this;
         }
 
-        Builder addNodeFiles(Set<String> labels, Path[] files) {
-            final var list = nodeFiles.computeIfAbsent(labels, unused -> new ArrayList<>());
-            list.add(files);
+        /**
+         * @param labels additional labels to apply to these files. A {@link SequencedSet} guarantees the same
+         * order of applying labels, which is required for resumability
+         */
+        public Builder addNodeFiles(SequencedSet<String> labels, FileGroup fileGroup) {
+            tempNodeFiles.computeIfAbsent(labels, unused -> new ArrayList<>()).add(fileGroup);
             return this;
         }
 
-        Builder addRelationshipFiles(String defaultRelType, Path[] files) {
-            final var list = relationshipFiles.computeIfAbsent(defaultRelType, unused -> new ArrayList<>());
-            list.add(files);
+        public Builder addRelationshipFiles(String defaultRelType, FileGroup fileGroup) {
+            tempRelationshipFiles
+                    .computeIfAbsent(defaultRelType, unused -> new ArrayList<>())
+                    .add(fileGroup);
             return this;
         }
 
-        Builder withFileSystem(FileSystemAbstraction fileSystem) {
+        public Builder withFileSystem(FileSystemAbstraction fileSystem) {
             this.fileSystem = fileSystem;
             return this;
         }
 
-        Builder withPageCacheTracer(PageCacheTracer pageCacheTracer) {
+        public FileSystemAbstraction getFileSystem() {
+            return fileSystem;
+        }
+
+        public Builder withPageCacheTracer(PageCacheTracer pageCacheTracer) {
             this.pageCacheTracer = pageCacheTracer;
             return this;
         }
 
-        Builder withCursorContextFactory(CursorContextFactory contextFactory) {
+        public Builder withCursorContextFactory(CursorContextFactory contextFactory) {
             this.contextFactory = contextFactory;
             return this;
         }
 
-        Builder withMemoryTracker(MemoryTracker memoryTracker) {
+        @SuppressWarnings("unused")
+        public Builder withMemoryTracker(MemoryTracker memoryTracker) {
             this.memoryTracker = memoryTracker;
             return this;
         }
 
-        Builder withStdOut(PrintStream stdOut) {
+        public Builder withStdOut(PrintStream stdOut) {
             this.stdOut = stdOut;
             return this;
         }
 
-        Builder withStdErr(PrintStream stdErr) {
+        public Builder withStdErr(PrintStream stdErr) {
             this.stdErr = stdErr;
             return this;
         }
 
-        Builder withForce(boolean force) {
+        public Builder withForce(boolean force) {
             this.force = force;
             return this;
         }
 
-        Builder withIncremental(boolean incremental) {
-            this.incremental = incremental;
-            return this;
+        public boolean isForce() {
+            return force;
         }
 
-        Builder withIncrementalStage(ImportCommand.IncrementalStage mode) {
-            this.incrementalStage = mode;
-            return this;
-        }
-
-        Builder withLogProvider(InternalLogProvider logProvider) {
+        public Builder withLogProvider(InternalLogProvider logProvider) {
             this.logProvider = logProvider;
             return this;
         }
 
-        Builder withSchemaCommands(List<SchemaCommand> schemaCommands) {
-            this.schemaCommands.addAll(Objects.requireNonNull(schemaCommands));
+        public Builder withSchemaCommands(SchemaCommandSource schemaCommands) {
+            this.schemaCommands = requireNonNull(schemaCommands);
             return this;
         }
 
-        Builder withFileInputType(FileInputType fileInputType) {
+        public Builder withFileInputType(FileInputType fileInputType) {
             this.fileInputType = fileInputType;
             return this;
         }
 
-        FileImporter build() {
-            Preconditions.checkState(
-                    !(force && incremental),
-                    "--overwrite-destination doesn't work with incremental import",
-                    incrementalStage);
-            return new FileImporter(this);
+        public Builder withShardingArguments(ShardingArguments shardingArguments) {
+            this.shardingArguments = shardingArguments;
+            return this;
+        }
+
+        public Builder withMonitor(Monitor monitor) {
+            this.monitor = monitor;
+            return this;
+        }
+
+        public Builder withResumableStateAccessor(ResumableStateAccessor resumableStateAccessor) {
+            this.resumableStateAccessor = resumableStateAccessor;
+            return this;
+        }
+
+        public FileImporter build() {
+            var nodeFiles = unmodifiableNodeFiles(tempNodeFiles);
+            var relationshipFiles = unmodifiableRelationshipFiles(tempRelationshipFiles);
+            return new FileImporter(this, nodeFiles, relationshipFiles);
+        }
+
+        private static Map<Set<String>, List<FileGroup>> unmodifiableNodeFiles(
+                LinkedHashMap<Set<String>, List<FileGroup>> files) {
+            var copy = new LinkedHashMap<Set<String>, List<FileGroup>>();
+            for (Entry<Set<String>, List<FileGroup>> entry : files.entrySet()) {
+                copy.put(Collections.unmodifiableSet(entry.getKey()), Collections.unmodifiableList(entry.getValue()));
+            }
+            return Collections.unmodifiableMap(copy);
+        }
+
+        private static Map<String, List<FileGroup>> unmodifiableRelationshipFiles(
+                LinkedHashMap<String, List<FileGroup>> files) {
+            var copy = new LinkedHashMap<String, List<FileGroup>>();
+            for (Entry<String, List<FileGroup>> entry : files.entrySet()) {
+                copy.put(entry.getKey(), Collections.unmodifiableList(entry.getValue()));
+            }
+            return Collections.unmodifiableMap(copy);
         }
     }
 }

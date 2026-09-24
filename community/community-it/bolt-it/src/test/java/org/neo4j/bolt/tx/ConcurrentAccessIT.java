@@ -28,7 +28,6 @@ import java.util.ArrayList;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.assertj.core.api.Assertions;
 import org.neo4j.bolt.test.annotation.BoltTestExtension;
@@ -86,8 +85,7 @@ public class ConcurrentAccessIT {
             });
         }
 
-        var pool = Executors.newFixedThreadPool(nWorkers);
-        try {
+        try (var pool = Executors.newFixedThreadPool(nWorkers)) {
             var futures = pool.invokeAll(tasks);
 
             // when
@@ -95,9 +93,6 @@ public class ConcurrentAccessIT {
 
             // then no exception is thrown, and
             Assertions.assertThat(highestNumConcurrentWorkers.get()).isEqualTo(nWorkers);
-        } finally {
-            pool.shutdownNow();
-            pool.awaitTermination(30, TimeUnit.SECONDS);
         }
     }
 
@@ -115,9 +110,11 @@ public class ConcurrentAccessIT {
                     .receivesSuccess()
                     .receivesSuccess(meta -> Assertions.assertThat(meta)
                             .containsKeys("t_first", "qid")
-                            .hasEntrySatisfying("fields", fields -> Assertions.assertThat(fields)
-                                    .asInstanceOf(list(String.class))
-                                    .isEmpty()))
+                            .hasEntrySatisfying(
+                                    "fields",
+                                    fields -> Assertions.assertThat(fields)
+                                            .asInstanceOf(list(String.class))
+                                            .isEmpty()))
                     .receivesSuccess(meta -> Assertions.assertThat(meta).containsKeys("t_last", "db"))
                     .receivesSuccess();
 
@@ -126,10 +123,11 @@ public class ConcurrentAccessIT {
             assertThat(connection)
                     .receivesSuccess(meta -> Assertions.assertThat(meta)
                             .containsKeys("t_first")
-                            .hasEntrySatisfying("fields", fields -> Assertions.assertThat(fields)
-                                    .asInstanceOf(list(String.class))
-                                    .hasSize(1)
-                                    .containsExactly("n")))
+                            .hasEntrySatisfying(
+                                    "fields",
+                                    fields -> Assertions.assertThat(fields)
+                                            .asInstanceOf(list(String.class))
+                                            .containsExactly("n")))
                     .receivesSuccess(meta -> Assertions.assertThat(meta).containsKeys("t_last", "db"));
         });
     }

@@ -20,7 +20,6 @@
 package org.neo4j.gis.spatial.index.curves;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import org.neo4j.gis.spatial.index.Envelope;
 
@@ -111,36 +110,36 @@ public abstract class SpaceFillingCurve {
         return range;
     }
 
-    protected abstract CurveRule rootCurve();
+    abstract CurveRule rootCurve();
 
     /**
      * Given a coordinate in multiple dimensions, calculate its derived key for maxLevel
      * Needs to be public due to dependency from Neo4j Spatial
      */
-    public Long derivedValueFor(double[] coord) {
-        return derivedValueFor(coord, maxLevel);
+    public long derivedValueFor(double... coord) {
+        return derivedValueFor(maxLevel, coord);
     }
 
     /**
      * Given a coordinate in multiple dimensions, calculate its derived key for given level
      */
-    private Long derivedValueFor(double[] coord, int level) {
+    private long derivedValueFor(int level, double... coord) {
         assertValidLevel(level);
         long[] normalizedValues = getNormalizedCoord(coord);
-        return derivedValueFor(normalizedValues, level);
+        return derivedValueFor(level, normalizedValues);
     }
 
     /**
      * Given a normalized coordinate in multiple dimensions, calculate its derived key for maxLevel
      */
-    public Long derivedValueFor(long[] normalizedValues) {
-        return derivedValueFor(normalizedValues, maxLevel);
+    public long derivedValueFor(long... normalizedValues) {
+        return derivedValueFor(maxLevel, normalizedValues);
     }
 
     /**
      * Given a normalized coordinate in multiple dimensions, calculate its derived key for given level
      */
-    private Long derivedValueFor(long[] normalizedValues, int level) {
+    private long derivedValueFor(int level, long... normalizedValues) {
         assertValidLevel(level);
         long derivedValue = 0;
         long mask = 1L << (maxLevel - 1);
@@ -172,21 +171,21 @@ public abstract class SpaceFillingCurve {
      * Given a derived key, find the center coordinate of the corresponding tile at maxLevel
      */
     public double[] centerPointFor(long derivedValue) {
-        return centerPointFor(derivedValue, maxLevel);
+        return centerPointFor(maxLevel, derivedValue);
     }
 
     /**
      * Given a derived key, find the center coordinate of the corresponding tile at given level
      */
-    private double[] centerPointFor(long derivedValue, int level) {
-        long[] normalizedCoord = normalizedCoordinateFor(derivedValue, level);
-        return getDoubleCoord(normalizedCoord, level);
+    private double[] centerPointFor(int level, long derivedValue) {
+        long[] normalizedCoord = normalizedCoordinateFor(level, derivedValue);
+        return getDoubleCoord(level, normalizedCoord);
     }
 
     /**
      * Given a derived key, find the normalized coordinate it corresponds to on a specific level
      */
-    long[] normalizedCoordinateFor(long derivedValue, int level) {
+    long[] normalizedCoordinateFor(int level, long derivedValue) {
         assertValidLevel(level);
         long mask = initialNormMask;
         long[] coordinate = new long[nbrDim];
@@ -223,14 +222,11 @@ public abstract class SpaceFillingCurve {
      */
     List<LongRange> getTilesIntersectingEnvelope(Envelope referenceEnvelope) {
         return getTilesIntersectingEnvelope(
-                referenceEnvelope.getMin(), referenceEnvelope.getMax(), new StandardConfiguration());
+                referenceEnvelope.min(), referenceEnvelope.max(), new StandardConfiguration());
     }
 
     public List<LongRange> getTilesIntersectingEnvelope(
             double[] from, double[] to, SpaceFillingCurveConfiguration config) {
-        from = Arrays.copyOf(from, from.length);
-        to = Arrays.copyOf(to, to.length);
-
         for (int i = 0; i < from.length; i++) {
             if (from[i] > to[i]) {
                 throw new IllegalArgumentException("Invalid range, min greater than max: " + from[i] + " > " + to[i]);
@@ -284,7 +280,7 @@ public abstract class SpaceFillingCurve {
             for (int i = 0; i < quadFactor; i++) {
                 SearchEnvelope quadrant = currentExtent.quadrant(curve.npointForIndex(i));
                 if (width == 1L) {
-                    long[] coord = normalizedCoordinateFor(left + i, maxLevel);
+                    long[] coord = normalizedCoordinateFor(maxLevel, left + i);
                     if (search.contains(coord)) {
                         computeTilesIntersectionEnvelopeAt(monitor, depth, quadrant, left + i, left + i, results);
                     }
@@ -313,7 +309,7 @@ public abstract class SpaceFillingCurve {
             long newMax,
             List<LongRange> results) {
         // Note that LongRange upper bound is inclusive, hence the '-1' in several places
-        LongRange current = results.isEmpty() ? null : results.get(results.size() - 1);
+        LongRange current = results.isEmpty() ? null : results.getLast();
         if (current != null && current.max == left - 1) {
             current.expandToMax(newMax);
         } else {
@@ -329,11 +325,13 @@ public abstract class SpaceFillingCurve {
     /**
      * Given a coordinate, find the corresponding normalized coordinate
      */
-    long[] getNormalizedCoord(double[] coord) {
+    long[] getNormalizedCoord(double... coord) {
         long[] normalizedCoord = new long[nbrDim];
 
         for (int dim = 0; dim < nbrDim; dim++) {
-            double value = clamp(coord[dim], range.getMin(dim), range.getMax(dim));
+            double min = range.getMin(dim);
+            double max = range.getMax(dim);
+            double value = Math.clamp(coord[dim], min, max);
             // Avoiding awkward rounding errors
             if (value - range.getMin(dim) == range.getMax(dim) - range.getMin(dim)) {
                 normalizedCoord[dim] = width - 1;
@@ -356,10 +354,10 @@ public abstract class SpaceFillingCurve {
                         + getTileWidth(dim, maxLevel) / 2.0;
                 // The 1E-16 is to create the behavior of the [min,max) bounds without an expensive if...else if...else
                 // check
-                long normalizedOffset = (long) ((value - tileCenter) * scalingFactor[dim] - 0.5 + 1E-16);
+                long normalizedOffset = (long) ((value - tileCenter) * scalingFactor[dim] - 0.5 + 1.0E-16);
                 // normalizedOffset is almost always 0, but can be +1 or -1 if there were rounding errors we need to
-                // correct for
-                normalizedCoord[dim] += normalizedOffset;
+                // correct for, we should never overcompensate though so that we end up outside [0, width)
+                normalizedCoord[dim] = Math.clamp(normalizedCoord[dim] + normalizedOffset, 0, width - 1);
             }
         }
         return normalizedCoord;
@@ -368,26 +366,17 @@ public abstract class SpaceFillingCurve {
     /**
      * Given a normalized coordinate, find the center coordinate of that tile  on the given level
      */
-    private double[] getDoubleCoord(long[] normalizedCoord, int level) {
+    private double[] getDoubleCoord(int level, long... normalizedCoord) {
         double[] coord = new double[nbrDim];
 
         for (int dim = 0; dim < nbrDim; dim++) {
             double coordinate = ((double) normalizedCoord[dim]) / scalingFactor[dim]
                     + range.getMin(dim)
                     + getTileWidth(dim, level) / 2.0;
-            coord[dim] = clamp(coordinate, range.getMin(dim), range.getMax(dim));
+            double min = range.getMin(dim);
+            coord[dim] = Math.clamp(coordinate, min, range.getMax(dim));
         }
         return coord;
-    }
-
-    private static double clamp(double val, double min, double max) {
-        if (val <= min) {
-            return min;
-        }
-        if (val >= max) {
-            return max;
-        }
-        return val;
     }
 
     /**
@@ -421,7 +410,7 @@ public abstract class SpaceFillingCurve {
 
         @Override
         public boolean equals(Object other) {
-            return other instanceof LongRange && this.equals((LongRange) other);
+            return other instanceof LongRange lr && this.equals(lr);
         }
 
         public boolean equals(LongRange other) {

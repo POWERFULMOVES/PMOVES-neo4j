@@ -55,7 +55,7 @@ class UserSerializationTest {
 
         // Then
         List<User> actual = serialization.deserializeRecords(serialized);
-        assertThat(actual.size()).isEqualTo(users.size());
+        assertThat(actual).hasSize(users.size());
         for (int i = 0; i < actual.size(); i++) {
             // they should be in the same order so this is okay
             User actualUser = actual.get(i);
@@ -116,9 +116,11 @@ class UserSerializationTest {
         byte[] hash2 = {(byte) 0x0e, (byte) 0x1f, (byte) 0xff, (byte) 0xc2, (byte) 0x3e};
 
         // When
-        List<User> deserialized = serialization.deserializeRecords(UTF8.encode(
-                "Mike:SHA-256,FE0056C37E,A543:\n" + "Steve:SHA-256,FE0056C37E,A543:nice_guy,password_change_required\n"
-                        + "Bob:SHA-256,0E1FFFC23E,34A4:password_change_required\n"));
+        List<User> deserialized = serialization.deserializeRecords(UTF8.encode("""
+                        Mike:SHA-256,FE0056C37E,A543:
+                        Steve:SHA-256,FE0056C37E,A543:nice_guy,password_change_required
+                        Bob:SHA-256,0E1FFFC23E,34A4:password_change_required
+                        """));
 
         // Then
         assertThat(deserialized)

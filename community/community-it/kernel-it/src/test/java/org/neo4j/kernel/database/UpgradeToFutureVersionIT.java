@@ -59,10 +59,14 @@ import org.neo4j.test.Race;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.UpgradeTestUtil;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
 import org.neo4j.util.concurrent.BinaryLatch;
 
+@SkipOnSpd(
+        reason =
+                "Assertions revolve around a single 'upgrade' command. In SPD commands are wrapped and there's one per shard too")
 @TestDirectoryExtension
 class UpgradeToFutureVersionIT {
     @Inject
@@ -122,7 +126,7 @@ class UpgradeToFutureVersionIT {
         createWriteTransaction(); // Just to have at least one tx from our measurement point in the old version
         assertThat(kernelVersion()).isEqualTo(LatestVersions.LATEST_KERNEL_VERSION);
 
-        systemDb.executeTransactionally("CALL dbms.upgrade()");
+        UpgradeTestUtil.manuallyUpgrade(systemDb);
         assertThat(dbmsRuntimeVersion()).isEqualTo(DbmsRuntimeVersion.GLORIOUS_FUTURE);
 
         createReadTransaction();
@@ -163,7 +167,7 @@ class UpgradeToFutureVersionIT {
                 .cause()
                 .isInstanceOf(RuntimeException.class)
                 .hasMessageContaining(
-                        "Log file contains entries with prefix 127, and the highest supported Kernel Version is");
+                        "Log file contains entries with prefix 254, and the highest supported Kernel Version is");
     }
 
     @Test
@@ -181,7 +185,7 @@ class UpgradeToFutureVersionIT {
         Race race = new Race()
                 .withRandomStartDelays()
                 .withEndCondition(() -> KernelVersion.GLORIOUS_FUTURE.equals(kernelVersion()));
-        race.addContestant(() -> systemDb.executeTransactionally("CALL dbms.upgrade()"), 1);
+        race.addContestant(() -> UpgradeTestUtil.upgradeDbms(dbms), 1);
         race.addContestants(max(Runtime.getRuntime().availableProcessors() - 1, 2), Race.throwing(() -> {
             try {
                 createWriteTransaction();
@@ -255,8 +259,7 @@ class UpgradeToFutureVersionIT {
             Future<String> f1 = executor.executeDontWait(this::createWriteTransaction);
             l2.await(); // wait for it to be committing
             // then upgrade dbms runtime to trigger db upgrade on next write
-            systemDb.executeTransactionally("CALL dbms.upgrade()");
-
+            UpgradeTestUtil.manuallyUpgrade(systemDb);
             try (Transaction tx = db.beginTx()) {
                 tx.acquireWriteLock(tx.getNodeByElementId(lockNode1)); // take the lock
                 tx.createNode(); // and make sure it is a write to trigger upgrade
@@ -269,12 +272,11 @@ class UpgradeToFutureVersionIT {
 
         // Then
         LogAssertions.assertThat(logProvider)
-                .containsMessageWithArguments(
-                        "Upgrade transaction from %s to %s not possible right now due to conflicting transaction, will retry on next write",
-                        LatestVersions.LATEST_KERNEL_VERSION, KernelVersion.GLORIOUS_FUTURE)
-                .doesNotContainMessageWithArguments(
-                        "Upgrade transaction from %s to %s started",
-                        LatestVersions.LATEST_KERNEL_VERSION, KernelVersion.GLORIOUS_FUTURE);
+                .containsMessages(
+                        "Upgrade transaction from %s to %s not possible right now due to conflicting transaction, will retry on next write"
+                                .formatted(LatestVersions.LATEST_KERNEL_VERSION, KernelVersion.GLORIOUS_FUTURE))
+                .doesNotContainMessage("Upgrade transaction from %s to %s started"
+                        .formatted(LatestVersions.LATEST_KERNEL_VERSION, KernelVersion.GLORIOUS_FUTURE));
 
         assertThat(getNodeCount()).as("Both transactions succeeded").isEqualTo(numNodesBefore + 2);
         assertThat(kernelVersion()).isEqualTo(LatestVersions.LATEST_KERNEL_VERSION);
@@ -285,12 +287,11 @@ class UpgradeToFutureVersionIT {
         // Then
         assertThat(kernelVersion()).isEqualTo(KernelVersion.GLORIOUS_FUTURE);
         LogAssertions.assertThat(logProvider)
-                .containsMessageWithArguments(
-                        "Upgrade transaction from %s to %s started",
-                        LatestVersions.LATEST_KERNEL_VERSION, KernelVersion.GLORIOUS_FUTURE)
-                .containsMessageWithArguments(
-                        "Upgrade transaction from %s to %s completed",
-                        LatestVersions.LATEST_KERNEL_VERSION, KernelVersion.GLORIOUS_FUTURE);
+                .containsMessages(
+                        "Upgrade transaction from %s to %s started"
+                                .formatted(LatestVersions.LATEST_KERNEL_VERSION, KernelVersion.GLORIOUS_FUTURE),
+                        "Upgrade transaction from %s to %s completed"
+                                .formatted(LatestVersions.LATEST_KERNEL_VERSION, KernelVersion.GLORIOUS_FUTURE));
     }
 
     private long getNodeCount() {

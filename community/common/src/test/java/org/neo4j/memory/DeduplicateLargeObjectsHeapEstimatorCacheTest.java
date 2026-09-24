@@ -32,7 +32,7 @@ class DeduplicateLargeObjectsHeapEstimatorCacheTest {
 
     @BeforeEach
     void setUp() {
-        cache = new DeduplicateLargeObjectsHeapEstimatorCache(HeapEstimatorCacheConfig.SMALL);
+        cache = new DeduplicateLargeObjectsHeapEstimatorCache();
     }
 
     @Test

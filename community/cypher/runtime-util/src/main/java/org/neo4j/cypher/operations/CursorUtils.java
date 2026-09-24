@@ -35,21 +35,17 @@ import org.eclipse.collections.impl.list.mutable.primitive.IntArrayList;
 import org.neo4j.cypher.internal.runtime.DbAccess;
 import org.neo4j.exceptions.CypherTypeException;
 import org.neo4j.exceptions.EntityNotFoundException;
-import org.neo4j.graphdb.Direction;
-import org.neo4j.internal.kernel.api.CursorFactory;
 import org.neo4j.internal.kernel.api.EntityCursor;
 import org.neo4j.internal.kernel.api.NodeCursor;
+import org.neo4j.internal.kernel.api.NodeIndexCursor;
 import org.neo4j.internal.kernel.api.PropertyCursor;
 import org.neo4j.internal.kernel.api.Read;
-import org.neo4j.internal.kernel.api.RelationshipDataAccessor;
+import org.neo4j.internal.kernel.api.RelationshipCursor;
+import org.neo4j.internal.kernel.api.RelationshipIndexCursor;
 import org.neo4j.internal.kernel.api.RelationshipScanCursor;
-import org.neo4j.internal.kernel.api.RelationshipTraversalCursor;
 import org.neo4j.internal.kernel.api.TokenRead;
 import org.neo4j.internal.kernel.api.exceptions.PropertyKeyIdNotFoundKernelException;
-import org.neo4j.internal.kernel.api.helpers.RelationshipSelections;
-import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.kernel.api.StatementConstants;
-import org.neo4j.kernel.impl.newapi.Cursors;
 import org.neo4j.storageengine.api.PropertySelection;
 import org.neo4j.util.CalledFromGeneratedCode;
 import org.neo4j.values.AnyValue;
@@ -60,6 +56,8 @@ import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.Values;
 import org.neo4j.values.virtual.MapValue;
 import org.neo4j.values.virtual.MapValueBuilder;
+import org.neo4j.values.virtual.NodeValue;
+import org.neo4j.values.virtual.RelationshipValue;
 import org.neo4j.values.virtual.RelationshipVisitor;
 import org.neo4j.values.virtual.VirtualNodeValue;
 import org.neo4j.values.virtual.VirtualRelationshipValue;
@@ -96,6 +94,32 @@ public final class CursorUtils {
     }
 
     /**
+     * Fetches a given property from a node, where the node has already been loaded.
+     *
+     * @param nodeCursor The node cursor which currently points to the node to get the property from.
+     * @param propertyCursor The property cursor to use to read the property.
+     * @param prop The property key id
+     * @return The value of the property, otherwise {@link Values#NO_VALUE} if not found.
+     * @throws EntityNotFoundException If the node was deleted in transaction.
+     */
+    public static Value nodeGetProperty(Read read, NodeIndexCursor nodeCursor, PropertyCursor propertyCursor, int prop)
+            throws EntityNotFoundException {
+        if (prop == NO_SUCH_PROPERTY_KEY) {
+            return NO_VALUE;
+        }
+        if (!nodeCursor.readFromStore()) {
+            long node = nodeCursor.nodeReference();
+            if (read.nodeDeletedInTransaction(node)) {
+                throw EntityNotFoundException.nodeDeletedInThisTransaction(nodeCursor.nodeReference());
+            } else {
+                return NO_VALUE;
+            }
+        }
+        nodeCursor.properties(propertyCursor, PropertySelection.selection(prop));
+        return propertyCursor.next() ? propertyCursor.propertyValue() : NO_VALUE;
+    }
+
+    /**
      * Fetches a given property from a node
      *
      * @param read The current Read instance
@@ -126,8 +150,7 @@ public final class CursorUtils {
         read.singleNode(node, nodeCursor);
         if (!nodeCursor.next()) {
             if (throwOnDeleted && read.nodeDeletedInTransaction(node)) {
-                throw new EntityNotFoundException(
-                        String.format("Node with id %d has been deleted in this transaction", node));
+                throw EntityNotFoundException.nodeDeletedInThisTransaction(node);
             } else {
                 return NO_VALUE;
             }
@@ -160,6 +183,11 @@ public final class CursorUtils {
         assert entityCursor.reference() != StatementConstants.NO_SUCH_ENTITY;
 
         final Value[] values = emptyPropertyArray(tokens.length);
+        if (entityCursor instanceof NodeIndexCursor nodeIndexCursor && !nodeIndexCursor.readFromStore()
+                || entityCursor instanceof RelationshipIndexCursor relationshipIndexCursor
+                        && !relationshipIndexCursor.readFromStore()) {
+            return values;
+        }
         entityCursor.properties(propertyCursor, PropertySelection.selection(tokens));
         while (propertyCursor.next()) {
             final int index = indexOf(tokens, propertyCursor.propertyKey());
@@ -185,8 +213,7 @@ public final class CursorUtils {
      * @return <code>true</code> if node has property otherwise <code>false</code>
      */
     public static boolean nodeHasProperty(
-            Read read, NodeCursor nodeCursor, long node, PropertyCursor propertyCursor, int prop)
-            throws EntityNotFoundException {
+            Read read, NodeCursor nodeCursor, long node, PropertyCursor propertyCursor, int prop) {
         if (prop == NO_SUCH_PROPERTY_KEY) {
             return false;
         }
@@ -195,6 +222,25 @@ public final class CursorUtils {
             return false;
         }
         return nodeHasProperty(nodeCursor, propertyCursor, prop);
+    }
+
+    /**
+     * Checks if a given node has the given property
+     *
+     * @param nodeCursor The node cursor to use
+     * @param propertyCursor The property cursor to use
+     * @param prop The id of the property to find
+     * @return <code>true</code> if node has property otherwise <code>false</code>
+     */
+    public static boolean nodeHasProperty(NodeIndexCursor nodeCursor, PropertyCursor propertyCursor, int prop) {
+        if (prop == NO_SUCH_PROPERTY_KEY) {
+            return false;
+        }
+        if (!nodeCursor.readFromStore()) {
+            return false;
+        }
+        nodeCursor.properties(propertyCursor, PropertySelection.onlyKeysSelection(prop));
+        return propertyCursor.next();
     }
 
     /**
@@ -235,6 +281,24 @@ public final class CursorUtils {
     }
 
     /**
+     * Checks if given node has a given label.
+     *
+     * @param nodeCursor A node cursor positioned on a particular node
+     * @param label The id of the label
+     * @return {@code true} if the node has the label, otherwise {@code false}
+     */
+    public static boolean nodeHasLabel(NodeIndexCursor nodeCursor, int label) {
+        if (label == NO_SUCH_LABEL) {
+            return false;
+        }
+        if (nodeCursor.readFromStore()) {
+            return nodeCursor.hasLabel(label);
+        } else {
+            return false;
+        }
+    }
+
+    /**
      * Checks if a given node has all the given labels
      * @param read The current Read instance
      * @param nodeCursor The node cursor to use
@@ -249,6 +313,29 @@ public final class CursorUtils {
         }
 
         return nodeHasLabels(nodeCursor, labels);
+    }
+
+    /**
+     * Checks if a given node has all the given labels
+     * @param nodeCursor A node cursor positioned on a particular node
+     * @param labels The labels to check for
+     * @return {@code true} if the node has all the labels, otherwise {@code false}
+     */
+    public static boolean nodeHasLabels(NodeIndexCursor nodeCursor, int[] labels) {
+        for (int i = 0; i < labels.length; i++) {
+            int label = labels[i];
+            if (label == NO_SUCH_LABEL) {
+                return false;
+            }
+            // enough to call readFromStore once
+            if (i == 0 && !nodeCursor.readFromStore()) {
+                return false;
+            }
+            if (!nodeCursor.hasLabel(label)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -290,11 +377,15 @@ public final class CursorUtils {
     /**
      * Checks if given node has any label at all.
      *
-     * @param nodeCursor The node cursor to use
+     * @param nodeCursor The index cursor to use
      * @return {@code true} if the node has the label, otherwise {@code false}
      */
-    public static boolean nodeHasALabel(NodeCursor nodeCursor) {
-        return nodeCursor.hasLabel();
+    public static boolean nodeHasALabel(NodeIndexCursor nodeCursor) {
+        if (!nodeCursor.readFromStore()) {
+            return nodeCursor.hasLabel();
+        } else {
+            return false;
+        }
     }
 
     /**
@@ -307,6 +398,18 @@ public final class CursorUtils {
         }
 
         return nodeHasAnyLabel(nodeCursor, labels);
+    }
+
+    /**
+     * Returns true if any of the specified labels are set on the node that `cursor` is pointing at.
+     */
+    @CalledFromGeneratedCode
+    public static boolean nodeHasAnyLabel(NodeIndexCursor cursor, int[] labels) {
+        if (!cursor.readFromStore()) {
+            return false;
+        }
+
+        return nodeHasAnyLabel((NodeCursor) cursor, labels);
     }
 
     /**
@@ -393,7 +496,48 @@ public final class CursorUtils {
     }
 
     @CalledFromGeneratedCode
-    public static boolean relationshipHasTypes(RelationshipScanCursor relationshipCursor, int[] types) {
+    public static int relationshipGetType(RelationshipIndexCursor relationshipCursor) {
+        if (relationshipCursor.readFromStore()) {
+            return relationshipCursor.type();
+        } else {
+            return StatementConstants.NO_SUCH_RELATIONSHIP_TYPE;
+        }
+    }
+
+    @CalledFromGeneratedCode
+    public static boolean relationshipHasType(RelationshipIndexCursor relationshipCursor, int type) {
+        if (type == NO_SUCH_RELATIONSHIP_TYPE) {
+            return false;
+        } else if (relationshipCursor.readFromStore()) {
+            return relationshipCursor.type() == type;
+        } else {
+            return false;
+        }
+    }
+
+    @CalledFromGeneratedCode
+    public static boolean relationshipHasType(RelationshipCursor relationshipCursor, int type) {
+        return relationshipCursor.type() == type;
+    }
+
+    @CalledFromGeneratedCode
+    public static boolean relationshipHasTypes(RelationshipIndexCursor relationshipCursor, int[] types) {
+        assert types.length > 0;
+        int typeToLookFor = types[0];
+        for (int i = 1; i < types.length; i++) {
+            if (types[i] != typeToLookFor) {
+                return false;
+            }
+        }
+        if (typeToLookFor == NO_SUCH_RELATIONSHIP_TYPE) {
+            return false;
+        }
+
+        return relationshipCursor.readFromStore() && relationshipCursor.type() == typeToLookFor;
+    }
+
+    @CalledFromGeneratedCode
+    public static boolean relationshipHasTypes(RelationshipCursor relationshipCursor, int[] types) {
         assert types.length > 0;
         int typeToLookFor = types[0];
         for (int i = 1; i < types.length; i++) {
@@ -406,25 +550,6 @@ public final class CursorUtils {
         }
 
         return relationshipCursor.type() == typeToLookFor;
-    }
-
-    public static RelationshipTraversalCursor nodeGetRelationships(
-            Read read,
-            CursorFactory cursors,
-            NodeCursor node,
-            long nodeId,
-            Direction direction,
-            int[] types,
-            CursorContext cursorContext) {
-        read.singleNode(nodeId, node);
-        if (!node.next()) {
-            return Cursors.emptyTraversalCursor(read);
-        }
-        return switch (direction) {
-            case OUTGOING -> RelationshipSelections.outgoingCursor(cursors, node, types, cursorContext);
-            case INCOMING -> RelationshipSelections.incomingCursor(cursors, node, types, cursorContext);
-            case BOTH -> RelationshipSelections.allCursor(cursors, node, types, cursorContext);
-        };
     }
 
     /**
@@ -479,8 +604,7 @@ public final class CursorUtils {
         read.singleRelationship(relationship, relationshipCursor);
         if (!relationshipCursor.next()) {
             if (throwOnDeleted && read.relationshipDeletedInTransaction(relationship)) {
-                throw new EntityNotFoundException(
-                        String.format("Relationship with id %d has been deleted in this transaction", relationship));
+                throw EntityNotFoundException.relationshipDeletedInThisTransaction(relationship);
             } else {
                 return NO_VALUE;
             }
@@ -530,7 +654,28 @@ public final class CursorUtils {
      * @return the value of the property, otherwise {@link Values#NO_VALUE} if not found.
      */
     public static Value relationshipGetProperty(
-            RelationshipDataAccessor relationshipCursor, PropertyCursor propertyCursor, int prop) {
+            RelationshipIndexCursor relationshipCursor, PropertyCursor propertyCursor, int prop) {
+        if (prop == NO_SUCH_PROPERTY_KEY) {
+            return NO_VALUE;
+        }
+        if (relationshipCursor.readFromStore()) {
+            relationshipCursor.properties(propertyCursor, PropertySelection.selection(prop));
+            return propertyCursor.next() ? propertyCursor.propertyValue() : NO_VALUE;
+        } else {
+            return NO_VALUE;
+        }
+    }
+
+    /**
+     * Fetches a given property from a relationship, where the relationship has already been loaded.
+     *
+     * @param relationshipCursor relationship cursor which currently points to the relationship to get the property from.
+     * @param propertyCursor the property cursor to use to read the property.
+     * @param prop property key id
+     * @return the value of the property, otherwise {@link Values#NO_VALUE} if not found.
+     */
+    public static Value relationshipGetProperty(
+            RelationshipCursor relationshipCursor, PropertyCursor propertyCursor, int prop) {
         if (prop == NO_SUCH_PROPERTY_KEY) {
             return NO_VALUE;
         }
@@ -590,12 +735,34 @@ public final class CursorUtils {
      */
     @CalledFromGeneratedCode
     public static boolean relationshipHasProperty(
-            RelationshipDataAccessor relationshipCursor, PropertyCursor propertyCursor, int prop) {
+            RelationshipCursor relationshipCursor, PropertyCursor propertyCursor, int prop) {
         if (prop == NO_SUCH_PROPERTY_KEY) {
             return false;
         }
         relationshipCursor.properties(propertyCursor, PropertySelection.onlyKeysSelection(prop));
         return propertyCursor.next();
+    }
+
+    /**
+     * Checks if a given relationship has the given property, where the relationship has already been loaded.
+     *
+     * @param relationshipCursor The relationship cursor which currently points to the relationship to check property existence for.
+     * @param propertyCursor The property cursor to use
+     * @param prop The id of the property to find
+     * @return {@code true} if relationship has property otherwise {@code false}.
+     */
+    @CalledFromGeneratedCode
+    public static boolean relationshipHasProperty(
+            RelationshipIndexCursor relationshipCursor, PropertyCursor propertyCursor, int prop) {
+        if (prop == NO_SUCH_PROPERTY_KEY) {
+            return false;
+        }
+        if (relationshipCursor.readFromStore()) {
+            relationshipCursor.properties(propertyCursor, PropertySelection.onlyKeysSelection(prop));
+            return propertyCursor.next();
+        } else {
+            return false;
+        }
     }
 
     @CalledFromGeneratedCode
@@ -632,8 +799,12 @@ public final class CursorUtils {
             PropertyCursor propertyCursor) {
         if (container == NO_VALUE) {
             return NO_VALUE;
+        } else if (container instanceof NodeValue node && node.id() < 0) {
+            return node.properties().get(key);
         } else if (container instanceof VirtualNodeValue node) {
             return nodeGetProperty(read, nodeCursor, node.id(), propertyCursor, dbAccess.propertyKey(key));
+        } else if (container instanceof RelationshipValue rel && rel.id() < 0) {
+            return rel.properties().get(key);
         } else if (container instanceof VirtualRelationshipValue rel) {
             return relationshipGetProperty(
                     read, relationshipScanCursor, rel, propertyCursor, dbAccess.propertyKey(key), true);
@@ -662,8 +833,30 @@ public final class CursorUtils {
             PropertyCursor propertyCursor) {
         if (container == NO_VALUE) {
             return emptyPropertyArray(keys.length);
+        } else if (container instanceof NodeValue node && node.id() < 0) {
+            AnyValue[] values = new AnyValue[keys.length];
+            for (int i = 0; i < keys.length; i++) {
+                MapValue nodeProps = node.properties();
+                if (nodeProps.containsKey(keys[i])) {
+                    values[i] = nodeProps.get(keys[i]);
+                } else {
+                    values[i] = NO_VALUE;
+                }
+            }
+            return values;
         } else if (container instanceof VirtualNodeValue node) {
             return propertiesGet(propertyKeys(keys, dbAccess), node.id(), read, nodeCursor, propertyCursor);
+        } else if (container instanceof RelationshipValue rel && rel.id() < 0) {
+            AnyValue[] values = new AnyValue[keys.length];
+            for (int i = 0; i < keys.length; i++) {
+                MapValue nodeProps = rel.properties();
+                if (nodeProps.containsKey(keys[i])) {
+                    values[i] = nodeProps.get(keys[i]);
+                } else {
+                    values[i] = NO_VALUE;
+                }
+            }
+            return values;
         } else if (container instanceof VirtualRelationshipValue rel) {
             return propertiesGet(propertyKeys(keys, dbAccess), rel, read, relationshipScanCursor, propertyCursor);
         } else {
@@ -692,8 +885,7 @@ public final class CursorUtils {
         if (nodeCursor.next()) {
             return entityGetProperties(nodeCursor, propertyCursor, keys);
         } else if (read.nodeDeletedInTransaction(node)) {
-            throw new EntityNotFoundException(
-                    String.format("Node with id %d has been deleted in this transaction", node));
+            throw EntityNotFoundException.nodeDeletedInThisTransaction(node);
         } else {
             return emptyPropertyArray(keys.length);
         }
@@ -705,8 +897,7 @@ public final class CursorUtils {
         if (relCursor.next()) {
             return entityGetProperties(relCursor, propertyCursor, keys);
         } else if (read.relationshipDeletedInTransaction(rel)) {
-            throw new EntityNotFoundException(
-                    String.format("Relationship with id %d has been deleted in this transaction", rel));
+            throw EntityNotFoundException.relationshipDeletedInThisTransaction(rel);
         } else {
             return emptyPropertyArray(keys.length);
         }
@@ -761,7 +952,7 @@ public final class CursorUtils {
         return result;
     }
 
-    public static VirtualRelationshipValue relationshipById(RelationshipDataAccessor cursor) {
+    public static VirtualRelationshipValue relationshipById(RelationshipCursor cursor) {
         return VirtualValues.relationship(
                 cursor.relationshipReference(),
                 cursor.sourceNodeReference(),
@@ -825,8 +1016,7 @@ public final class CursorUtils {
                 read.singleRelationship(relationship.id(), start, type, end, cursor);
                 if (!cursor.next()) {
                     if (throwOnDeleted && read.relationshipDeletedInTransaction(relationship.id())) {
-                        throw new EntityNotFoundException(String.format(
-                                "Relationship with id %d has been deleted in this transaction", relationship.id()));
+                        throw EntityNotFoundException.relationshipDeletedInThisTransaction(relationship.id());
                     } else {
                         return false;
                     }
@@ -886,7 +1076,7 @@ public final class CursorUtils {
                 TokenRead tokenRead, PropertyCursor propertyCursor, MapValueBuilder builder, IntSet seenTokens)
                 throws PropertyKeyIdNotFoundKernelException {
             if (next()) {
-                cursor.properties(propertyCursor, PropertySelection.ALL_PROPERTIES.excluding(seenTokens::contains));
+                cursor.properties(propertyCursor, PropertySelection.ALL_PROPERTIES.excluding(seenTokens.toArray()));
                 while (propertyCursor.next()) {
                     builder.add(
                             tokenRead.propertyKeyName(propertyCursor.propertyKey()), propertyCursor.propertyValue());

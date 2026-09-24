@@ -19,10 +19,13 @@
  */
 package org.neo4j.internal.batchimport.cache.idmapping.string;
 
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.neo4j.internal.batchimport.cache.NumberArrayFactories;
 
 class GroupCacheTest {
@@ -30,31 +33,45 @@ class GroupCacheTest {
     void shouldHandleSingleByteCount() {
         // given
         int max = 256;
-        GroupCache cache = GroupCache.select(NumberArrayFactories.HEAP, 100, max, INSTANCE);
+        try (GroupCache cache = GroupCache.select(NumberArrayFactories.OFF_HEAP, 100, max, INSTANCE)) {
 
-        // when
-        assertSetAndGet(cache, 10, 45);
-        assertSetAndGet(cache, 100, 145);
-        assertSetAndGet(cache, 1000, 245);
+            // when
+            assertSetAndGet(cache, 10, 45);
+            assertSetAndGet(cache, 100, 145);
+            assertSetAndGet(cache, 1000, 245);
 
-        // then
-        assertThrows(ArithmeticException.class, () -> cache.set(10000, 345));
+            // then
+            assertThatExceptionOfType(ArithmeticException.class).isThrownBy(() -> cache.set(10000, 345));
+        }
     }
 
     @Test
     void shouldSwitchToTwoByteVersionBeyondSingleByteGroupIds() {
         // given
         int max = 257;
-        GroupCache cache = GroupCache.select(NumberArrayFactories.HEAP, 100, max, INSTANCE);
+        try (GroupCache cache = GroupCache.select(NumberArrayFactories.OFF_HEAP, 100, max, INSTANCE)) {
 
+            // when
+            assertSetAndGet(cache, 10, 123);
+            assertSetAndGet(cache, 100, 1234);
+            assertSetAndGet(cache, 1000, 12345);
+            assertSetAndGet(cache, 10000, 0xFFFF);
+
+            // then
+            assertThatExceptionOfType(ArithmeticException.class).isThrownBy(() -> cache.set(100000, 123456));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1})
+    void shouldSelectZeroMemoryVersion(int numGroups) {
         // when
-        assertSetAndGet(cache, 10, 123);
-        assertSetAndGet(cache, 100, 1234);
-        assertSetAndGet(cache, 1000, 12345);
-        assertSetAndGet(cache, 10000, 0xFFFF);
+        try (GroupCache cache = GroupCache.select(NumberArrayFactories.OFF_HEAP, 100, numGroups, INSTANCE)) {
 
-        // then
-        assertThrows(ArithmeticException.class, () -> cache.set(100000, 123456));
+            // then
+            assertThat(cache).isSameAs(GroupCache.SINGLE);
+            assertSetAndGet(cache, 123, 0);
+        }
     }
 
     private static void assertSetAndGet(GroupCache cache, long nodeId, int groupId) {

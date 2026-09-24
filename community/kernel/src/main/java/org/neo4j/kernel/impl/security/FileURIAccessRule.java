@@ -24,7 +24,6 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.Locale;
-import java.util.function.Supplier;
 import org.neo4j.cloud.storage.SchemeFileSystemAbstraction;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
@@ -42,15 +41,15 @@ import org.neo4j.io.fs.DefaultFileSystemAbstraction;
  */
 public class FileURIAccessRule implements AccessRule<URI> {
 
-    private final Supplier<SchemeFileSystemAbstraction> schemeSystemSupplier;
+    private final SchemeFileSystemAbstraction.Factory sfsFactory;
     private final Config config;
 
     public FileURIAccessRule(Config config) {
         this(() -> new SchemeFileSystemAbstraction(new DefaultFileSystemAbstraction(), config), config);
     }
 
-    public FileURIAccessRule(Supplier<SchemeFileSystemAbstraction> schemeSystemSupplier, Config config) {
-        this.schemeSystemSupplier = schemeSystemSupplier;
+    public FileURIAccessRule(SchemeFileSystemAbstraction.Factory sfsFactory, Config config) {
+        this.sfsFactory = sfsFactory;
         this.config = config;
     }
 
@@ -81,7 +80,7 @@ public class FileURIAccessRule implements AccessRule<URI> {
     public CharReadable getReader(
             URI uri, SecurityAuthorizationHandler securityAuthorizationHandler, SecurityContext securityContext)
             throws URLAccessValidationError, IOException {
-        var fs = schemeSystemSupplier.get();
+        var fs = sfsFactory.create();
         CharReadable readable;
         try {
             var scheme = uri.getScheme().toLowerCase(Locale.ROOT);
@@ -119,6 +118,16 @@ public class FileURIAccessRule implements AccessRule<URI> {
             @Override
             public long position() {
                 return readable.position();
+            }
+
+            @Override
+            public long lineNumber() {
+                return readable.lineNumber();
+            }
+
+            @Override
+            public Path file() {
+                return readable.file();
             }
 
             @Override

@@ -20,14 +20,15 @@
 package org.neo4j.cypher.internal.runtime
 
 import org.neo4j.cypher.internal.config.CypherConfiguration
-import org.neo4j.cypher.internal.options.CypherHeapEstimatorCacheOption
+import org.neo4j.cypher.internal.options.CypherDerivedQueryOptions
 import org.neo4j.cypher.internal.options.CypherPipelinedBatchReuseOption
 import org.neo4j.cypher.internal.options.CypherQueryOptions
 import org.neo4j.memory.HeapEstimatorCacheConfig
 
 case class QueryRuntimeConfig(
   heapEstimatorCacheConfig: HeapEstimatorCacheConfig,
-  morselReuseConfig: MorselReuseConfig = MorselReuseConfig.DEFAULT
+  morselReuseConfig: MorselReuseConfig,
+  memoryTrackingConfig: MemoryTrackingConfig
 ) {
 
   def withHeapEstimatorCacheConfig(heapEstimatorCacheConfig: HeapEstimatorCacheConfig): QueryRuntimeConfig = {
@@ -41,9 +42,13 @@ case class QueryRuntimeConfig(
 
 object QueryRuntimeConfig {
 
-  def createFrom(queryOptions: CypherQueryOptions, config: CypherConfiguration): QueryRuntimeConfig = {
+  def createFrom(
+    queryOptions: CypherQueryOptions,
+    derivedOptions: CypherDerivedQueryOptions,
+    config: CypherConfiguration
+  ): QueryRuntimeConfig = {
     QueryRuntimeConfig(
-      CypherHeapEstimatorCacheOption.heapEstimatorCacheConfigFrom(queryOptions.heapEstimatorCacheOption, config),
+      derivedOptions.heapEstimatorCacheConfig,
       morselReuseConfig = queryOptions.pipelinedBatchReuseOption match {
         case CypherPipelinedBatchReuseOption.default =>
           MorselReuseConfig.DEFAULT
@@ -53,12 +58,17 @@ object QueryRuntimeConfig {
           MorselReuseConfig.ReuseRemainingRowsOnly
         case CypherPipelinedBatchReuseOption.disabled =>
           MorselReuseConfig.NeverReuse
-      }
+      },
+      memoryTrackingConfig = MemoryTrackingConfig(
+        topOperatorTrackingStrategyThreshold = config.pipelinedTopOperatorMemoryTrackingStrategyThreshold
+      )
     )
   }
 
   final val DEFAULT: QueryRuntimeConfig = QueryRuntimeConfig(
-    HeapEstimatorCacheConfig.DEFAULT
+    HeapEstimatorCacheConfig.DEFAULT,
+    MorselReuseConfig.DEFAULT,
+    MemoryTrackingConfig.DEFAULT
   )
 }
 
@@ -69,4 +79,12 @@ object MorselReuseConfig {
   case object FullReuse extends MorselReuseConfig
   case object ReuseRemainingRowsOnly extends MorselReuseConfig
   case object NeverReuse extends MorselReuseConfig
+}
+
+case class MemoryTrackingConfig(
+  topOperatorTrackingStrategyThreshold: Long
+)
+
+object MemoryTrackingConfig {
+  val DEFAULT: MemoryTrackingConfig = MemoryTrackingConfig(10000L)
 }

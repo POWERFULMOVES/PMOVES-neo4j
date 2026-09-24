@@ -20,9 +20,9 @@
 package org.neo4j.commandline.dbms;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
@@ -95,9 +95,7 @@ class StoreInfoCommandTest {
         try (var out = new PrintStream(baos)) {
             CommandLine.usage(command, new PrintStream(out), CommandLine.Help.Ansi.OFF);
         }
-        assertThat(baos.toString().trim())
-                .isEqualToIgnoringNewLines(
-                        """
+        assertThat(baos.toString().trim()).isEqualToIgnoringNewLines("""
                 Print information about a Neo4j database store.
 
                 USAGE
@@ -134,22 +132,24 @@ class StoreInfoCommandTest {
     void nonExistingDirShouldThrow() {
         var notADirArgs = args(Paths.get("yaba", "daba", "doo"), true, "foo");
         CommandLine.populateCommand(command, notADirArgs);
-        var notADirException = assertThrows(CommandFailedException.class, () -> command.execute());
-        assertThat(notADirException.getMessage()).contains("must point to a directory");
+        assertThatThrownBy(() -> command.execute())
+                .isInstanceOf(CommandFailedException.class)
+                .hasMessageContaining("must point to a directory");
     }
 
     @Test
     void databaseDirShouldThrow() throws IOException {
-        prepareStore(fooDbLayout, "A", "v1", null, null, 5);
+        prepareStore(fooDbLayout, "A", "v1", null, null);
         var dbDirArgs = args(fooDbDirectory, false, "");
         CommandLine.populateCommand(command, dbDirArgs);
-        var dbDirException = assertThrows(CommandFailedException.class, () -> command.execute());
-        assertThat(dbDirException.getMessage()).contains("should point to the databases directory");
+        assertThatThrownBy(() -> command.execute())
+                .isInstanceOf(CommandFailedException.class)
+                .hasMessageContaining("should point to the databases directory");
     }
 
     @Test
     void readsLatestStoreVersionCorrectly() throws IOException {
-        prepareStore(fooDbLayout, "A", "v1", null, null, 5);
+        prepareStore(fooDbLayout, "A", "v1", null, null);
         CommandLine.populateCommand(command, args(databasesRoot, true, "foo"));
         command.execute();
 
@@ -161,7 +161,7 @@ class StoreInfoCommandTest {
 
     @Test
     void readsOlderStoreVersionCorrectly() throws IOException {
-        prepareStore(fooDbLayout, "A", "v1", "B", "v2", 5);
+        prepareStore(fooDbLayout, "A", "v1", "B", "v2");
         CommandLine.populateCommand(command, args(databasesRoot, true, "foo"));
         command.execute();
 
@@ -173,23 +173,24 @@ class StoreInfoCommandTest {
 
     @Test
     void throwsOnUnknownVersion() throws IOException {
-        prepareStore(fooDbLayout, "unknown", "v1", null, null, 3);
+        prepareStore(fooDbLayout, "unknown", "v1", null, null);
         when(storageEngineFactory.versionInformation(any(StoreId.class))).thenThrow(IllegalArgumentException.class);
         CommandLine.populateCommand(command, args(databasesRoot, true, "foo"));
-        var exception = assertThrows(Exception.class, () -> command.execute());
-        assertThat(exception).hasRootCauseInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> command.execute())
+                .isInstanceOf(Exception.class)
+                .hasRootCauseInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void respectLockFiles() throws IOException {
-        prepareStore(fooDbLayout, "A", "v1", null, null, 4);
+        prepareStore(fooDbLayout, "A", "v1", null, null);
         try (Locker locker = new DatabaseLocker(fileSystem, fooDbLayout)) {
             locker.checkLock();
             CommandLine.populateCommand(command, args(databasesRoot, true, "foo"));
-            var exception = assertThrows(Exception.class, () -> command.execute());
-            assertEquals(
-                    "Failed to execute command as the database 'foo' is in use. Please stop it and try again.",
-                    exception.getMessage());
+            assertThatThrownBy(() -> command.execute())
+                    .isInstanceOf(Exception.class)
+                    .hasMessageContaining(
+                            "Failed to execute command as the database 'foo' is in use. Please stop it and try again.");
         }
     }
 
@@ -200,8 +201,8 @@ class StoreInfoCommandTest {
         var barDbLayout = DatabaseLayout.ofFlat(barDbDirectory);
         fileSystem.mkdirs(barDbDirectory);
 
-        prepareStore(fooDbLayout, "A", "v1", null, null, 1);
-        prepareStore(barDbLayout, "A", "v1", null, null, 1);
+        prepareStore(fooDbLayout, "A", "v1", null, null);
+        prepareStore(barDbLayout, "A", "v1", null, null);
 
         var expectedBar = expectedStructuredResult("bar", false, "A", "v1", null, 1);
 
@@ -227,10 +228,10 @@ class StoreInfoCommandTest {
         var barDbLayout = DatabaseLayout.ofFlat(barDbDirectory);
         fileSystem.mkdirs(barDbDirectory);
 
-        prepareStore(fooDbLayout, "A", "v1", null, null, 1);
+        prepareStore(fooDbLayout, "A", "v1", null, null);
         var expectedFoo = expectedPrettyResult("foo", false, "A", "v1", null, 1);
 
-        prepareStore(barDbLayout, "A", "v1", null, null, 1);
+        prepareStore(barDbLayout, "A", "v1", null, null);
         var expectedBar = expectedPrettyResult("bar", false, "A", "v1", null, 1);
 
         var expected = expectedBar + System.lineSeparator() + System.lineSeparator() + expectedFoo;
@@ -250,10 +251,10 @@ class StoreInfoCommandTest {
         var barDbLayout = DatabaseLayout.ofFlat(barDbDirectory);
         fileSystem.mkdirs(barDbDirectory);
 
-        prepareStore(fooDbLayout, "A", "v1", null, null, 1);
+        prepareStore(fooDbLayout, "A", "v1", null, null);
         var expectedFoo = expectedPrettyResult("foo", false, "A", "v1", null, 1);
 
-        prepareStore(barDbLayout, "A", "v1", null, null, 1);
+        prepareStore(barDbLayout, "A", "v1", null, null);
         var expectedBar = expectedPrettyResult("bar", false, "A", "v1", null, 1);
 
         var expected = expectedBar + System.lineSeparator() + System.lineSeparator() + expectedFoo;
@@ -273,10 +274,10 @@ class StoreInfoCommandTest {
         var barDbLayout = DatabaseLayout.ofFlat(barDbDirectory);
         fileSystem.mkdirs(barDbDirectory);
 
-        prepareStore(fooDbLayout, "A", "v1", null, null, 1);
+        prepareStore(fooDbLayout, "A", "v1", null, null);
         var expectedFoo = expectedPrettyResult("foo", false, "A", "v1", null, 1);
 
-        prepareStore(barDbLayout, "A", "v1", null, null, 1);
+        prepareStore(barDbLayout, "A", "v1", null, null);
 
         // when
         CommandLine.populateCommand(command, args(databasesRoot, true, "f*"));
@@ -289,7 +290,7 @@ class StoreInfoCommandTest {
     @Test
     void returnsInfoStructuredAsJson() throws IOException {
         // given
-        prepareStore(fooDbLayout, "A", "v1", null, null, 1);
+        prepareStore(fooDbLayout, "A", "v1", null, null);
         var expectedFoo = expectedStructuredResult("foo", false, "A", "v1", null, 1);
 
         // when
@@ -303,7 +304,7 @@ class StoreInfoCommandTest {
     @Test
     void returnsInfoInTextFormat() throws IOException {
         // given
-        prepareStore(fooDbLayout, "A", "v1", null, null, 1);
+        prepareStore(fooDbLayout, "A", "v1", null, null);
         var expectedFoo = expectedPrettyResult("foo", false, "A", "v1", null, 1);
 
         // when
@@ -321,9 +322,9 @@ class StoreInfoCommandTest {
         var barDbLayout = DatabaseLayout.ofFlat(barDbDirectory);
         fileSystem.mkdirs(barDbDirectory);
 
-        prepareStore(fooDbLayout, "B", "v2", null, null, 1);
+        prepareStore(fooDbLayout, "B", "v2", null, null);
         var expectedFoo = expectedPrettyResult("foo", false, "B", "v2", null, 1);
-        prepareStore(barDbLayout, "B", "v2", null, null, 1);
+        prepareStore(barDbLayout, "B", "v2", null, null);
         var expectedBar = expectedPrettyResult("bar", false, "B", "v2", null, 1);
 
         var expectedMulti = expectedBar + System.lineSeparator() + System.lineSeparator() + expectedFoo;
@@ -338,7 +339,7 @@ class StoreInfoCommandTest {
     @Test
     void prettySingleStoreInfoResultHasTrailingLineSeparator() throws IOException {
         // given
-        prepareStore(fooDbLayout, "B", "v2", null, null, 1);
+        prepareStore(fooDbLayout, "B", "v2", null, null);
         var expectedFoo = expectedPrettyResult("foo", false, "B", "v2", null, 1);
 
         // when
@@ -393,21 +394,26 @@ class StoreInfoCommandTest {
             String storeVersion,
             String introducedInVersion,
             String successorStoreVersion,
-            String successorNeo4jVersion,
-            long lastCommittedTxId)
+            String successorNeo4jVersion)
             throws IOException {
         doReturn(Optional.of(storageEngineFactory))
                 .when(storageEngineSelector)
-                .selectStorageEngine(any(), argThat(dbLayout -> dbLayout.databaseDirectory()
-                        .equals(databaseLayout.databaseDirectory())));
-        doReturn(true).when(storageEngineFactory).storageExists(any(), argThat(dbLayout -> dbLayout.databaseDirectory()
-                .equals(databaseLayout.databaseDirectory())));
+                .selectStorageEngine(
+                        any(),
+                        argThat(dbLayout -> dbLayout.databaseDirectory().equals(databaseLayout.databaseDirectory())));
+        doReturn(true)
+                .when(storageEngineFactory)
+                .storageExists(
+                        any(),
+                        argThat(dbLayout -> dbLayout.databaseDirectory().equals(databaseLayout.databaseDirectory())));
         doReturn(StorageFilesState.recoveredState())
                 .when(storageEngineFactory)
                 .checkStoreFileState(
                         any(),
                         argThat(dbLayout -> dbLayout.databaseDirectory().equals(databaseLayout.databaseDirectory())),
-                        any());
+                        any(),
+                        any(),
+                        anyBoolean());
 
         StoreVersion storeVersion2 = null;
         if (successorStoreVersion != null) {

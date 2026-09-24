@@ -20,7 +20,10 @@
 package org.neo4j.graphdb.security;
 
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
+import org.neo4j.gqlstatus.GqlHelper;
 import org.neo4j.gqlstatus.GqlRuntimeException;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.kernel.api.exceptions.Status;
 
 /**
@@ -29,12 +32,29 @@ import org.neo4j.kernel.api.exceptions.Status;
 public class AuthProviderTimeoutException extends GqlRuntimeException implements Status.HasStatus {
     private static final Status statusCode = Status.Security.AuthProviderTimeout;
 
-    public AuthProviderTimeoutException(String message, Throwable cause) {
-        super(message, cause);
+    private AuthProviderTimeoutException(ErrorGqlStatusObject gqlStatusObject, String message, Throwable cause) {
+        super(gqlStatusObject, message, cause);
     }
 
-    public AuthProviderTimeoutException(ErrorGqlStatusObject gqlStatusObject, String message, Throwable cause) {
-        super(gqlStatusObject, message, cause);
+    public static AuthProviderTimeoutException internalError(String msgTitle, String message, Throwable cause) {
+        var gql = GqlHelper.get50N00(msgTitle, message);
+        return new AuthProviderTimeoutException(gql, message, cause);
+    }
+
+    public static final String LDAP_READ_TIMEOUT_CLIENT_MESSAGE = "LDAP response timed out.";
+
+    public static AuthProviderTimeoutException ldapReadTimeout(Throwable cause) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42NFC)
+                .build();
+        return new AuthProviderTimeoutException(gql, LDAP_READ_TIMEOUT_CLIENT_MESSAGE, cause);
+    }
+
+    public static final String LDAP_CONNECTION_TIMEOUT_CLIENT_MESSAGE = "LDAP connection timed out.";
+
+    public static AuthProviderTimeoutException ldapConnectionTimeout(Throwable cause) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42NFC)
+                .build();
+        return new AuthProviderTimeoutException(gql, LDAP_CONNECTION_TIMEOUT_CLIENT_MESSAGE, cause);
     }
 
     /** The Neo4j status code associated with this exception type. */

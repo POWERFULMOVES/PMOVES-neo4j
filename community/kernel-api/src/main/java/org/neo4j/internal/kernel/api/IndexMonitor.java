@@ -33,17 +33,27 @@ public interface IndexMonitor {
 
     void indexPopulationScanComplete(IndexDescriptor[] indexDescriptors);
 
+    void indexPopulationScanSkipped(IndexDescriptor[] indexDescriptors);
+
     void awaitingPopulationOfRecoveredIndex(IndexDescriptor descriptor);
 
     void indexSamplingTriggered(IndexSamplingMode mode);
 
     void populationCancelled(IndexDescriptor[] indexDescriptors, boolean storeScanHadStated);
 
-    void populationJobCompleted(long peakDirectMemoryUsage);
+    void populationJobCompleted(long peakDirectMemoryUsage, IndexDescriptor[] indexDescriptors);
 
     void queried(IndexDescriptor descriptor);
 
     void indexPopulationJobStarting(IndexDescriptor[] indexDescriptors);
+
+    default void concurrentUpdatesQueueDrained(long updateByteSizeDrained) {}
+
+    default void indexPopulationScanStartingAfterVisibilityUpdate(IndexDescriptor[] indexDescriptors) {}
+
+    default void postPopulationCompactionStarted(IndexDescriptor descriptor) {}
+
+    default void postPopulationCompactionAborted(IndexDescriptor descriptor) {}
 
     class MonitorAdapter implements IndexMonitor {
         @Override
@@ -67,6 +77,9 @@ public interface IndexMonitor {
         }
 
         @Override
+        public void indexPopulationScanSkipped(IndexDescriptor[] indexDescriptors) {}
+
+        @Override
         public void awaitingPopulationOfRecoveredIndex(IndexDescriptor descriptor) { // Do nothing
         }
 
@@ -79,7 +92,8 @@ public interface IndexMonitor {
         }
 
         @Override
-        public void populationJobCompleted(long peakDirectMemoryUsage) { // Do nothing
+        public void populationJobCompleted(
+                long peakDirectMemoryUsage, IndexDescriptor[] indexDescriptors) { // Do nothing
         }
 
         @Override

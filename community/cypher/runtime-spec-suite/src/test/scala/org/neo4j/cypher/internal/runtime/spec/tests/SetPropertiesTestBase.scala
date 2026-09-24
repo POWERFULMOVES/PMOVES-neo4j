@@ -27,6 +27,8 @@ import org.neo4j.cypher.internal.runtime.spec.RecordingRuntimeResult
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.internal.helpers.collection.Iterables
 
+object SetPropertiesTestBase
+
 abstract class SetPropertiesTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
@@ -300,7 +302,7 @@ abstract class SetPropertiesTestBase[CONTEXT <: RuntimeContext](
 
     // then
     val runtimeResult: RecordingRuntimeResult = execute(logicalQuery, runtime, input)
-    runtimeResult should beColumns("p1", "p2").withRows(Seq(Array(3, 3), Array(null, null))).withStatistics(
+    runtimeResult should beColumns("p1", "p2").withRows(Seq(Array(3, 3), Array[Any](null, null))).withStatistics(
       propertiesSet = 2
     )
   }

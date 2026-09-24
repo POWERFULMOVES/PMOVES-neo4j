@@ -37,7 +37,7 @@ public final class RelationshipEndpointLabelMissingLabelExceptionTest {
 
     @Test
     public void shouldGetCorrectUserMessage() {
-        var kernelToken = mock(TokenNameLookup.class);
+        TokenNameLookup kernelToken = mock(TokenNameLookup.class);
 
         when(kernelToken.relationshipTypeGetName(REL_TYPE_ID)).thenReturn("RelationshipType");
         when(kernelToken.labelGetName(LABEL_ID)).thenReturn("EndpointLabel");
@@ -46,7 +46,7 @@ public final class RelationshipEndpointLabelMissingLabelExceptionTest {
         RelationshipEndpointLabelConstraintDescriptor relationshipEndpointLabelConstraintDescriptor =
                 ConstraintDescriptorFactory.relationshipEndpointLabelForRelType(
                         REL_TYPE_ID, LABEL_ID, EndpointType.START);
-        var userMessage = new RelationshipEndpointLabelMissingLabelException(
+        String userMessage = RelationshipEndpointLabelMissingLabelException.endpointLabelPresenceVerificationFailed(
                         relationshipEndpointLabelConstraintDescriptor,
                         ConstraintValidationException.Phase.VERIFICATION,
                         relationshipReference,
@@ -56,6 +56,6 @@ public final class RelationshipEndpointLabelMissingLabelExceptionTest {
 
         assertThat(userMessage)
                 .isEqualTo(
-                        "Relationship(1) with type RelationshipType requires it's start Node(2) to have label EndpointLabel");
+                        "Relationship(1) with type RelationshipType requires its start Node(2) to have label EndpointLabel");
     }
 }

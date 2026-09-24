@@ -19,25 +19,29 @@
  */
 package org.neo4j.kernel.impl.newapi;
 
+import static org.neo4j.util.Preconditions.requireNonEmpty;
 import static org.neo4j.values.storable.Values.NO_VALUE;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
 import org.eclipse.collections.api.LongIterable;
 import org.eclipse.collections.api.block.procedure.primitive.LongProcedure;
 import org.eclipse.collections.api.list.MutableList;
 import org.eclipse.collections.api.list.primitive.MutableLongList;
-import org.eclipse.collections.api.set.primitive.LongSet;
 import org.eclipse.collections.api.set.primitive.MutableLongSet;
 import org.eclipse.collections.impl.UnmodifiableMap;
 import org.eclipse.collections.impl.factory.Lists;
 import org.eclipse.collections.impl.factory.primitive.LongLists;
 import org.eclipse.collections.impl.factory.primitive.LongSets;
-import org.neo4j.collection.diffset.LongDiffSets;
 import org.neo4j.internal.kernel.api.PropertyIndexQuery;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexOrder;
+import org.neo4j.internal.schema.IndexQuery.IndexQueryType;
+import org.neo4j.internal.schema.IndexRemovalSnapshot;
 import org.neo4j.storageengine.api.txstate.ReadableTransactionState;
 import org.neo4j.values.storable.TextValue;
 import org.neo4j.values.storable.Value;
@@ -48,12 +52,243 @@ import org.neo4j.values.storable.Values;
 /**
  * This class provides static utility methods that calculate relevant index updates from a transaction state for several index operations.
  */
-class TxStateIndexChanges {
+public class TxStateIndexChanges {
 
     private static final AddedWithValuesAndRemoved EMPTY_ADDED_AND_REMOVED_WITH_VALUES =
-            new AddedWithValuesAndRemoved(Collections.emptyList(), LongSets.immutable.empty());
+            new AddedWithValuesAndRemoved(Collections.emptyList(), IndexRemovalSnapshot.EMPTY);
     private static final AddedAndRemoved EMPTY_ADDED_AND_REMOVED =
-            new AddedAndRemoved(LongLists.immutable.empty(), LongSets.immutable.empty());
+            new AddedAndRemoved(LongLists.immutable.empty(), IndexRemovalSnapshot.EMPTY);
+
+    private interface QueryDispatch<T> {
+        T empty();
+
+        T forSeek(ReadableTransactionState txState, IndexDescriptor descriptor, ValueTuple values);
+
+        T forScan(ReadableTransactionState txState, IndexDescriptor descriptor, IndexOrder indexOrder);
+
+        T forRangeSeek(
+                ReadableTransactionState txState,
+                IndexDescriptor descriptor,
+                Value[] equalityPrefix,
+                PropertyIndexQuery.RangePredicate<?> predicate,
+                IndexOrder indexOrder);
+
+        T forBoundingBoxSeek(
+                ReadableTransactionState txState,
+                IndexDescriptor descriptor,
+                Value[] equalityPrefix,
+                PropertyIndexQuery.BoundingBoxPredicate predicate);
+
+        T forPrefixSeek(
+                ReadableTransactionState txState,
+                IndexDescriptor descriptor,
+                Value[] equalityPrefix,
+                TextValue prefix,
+                IndexOrder indexOrder);
+
+        T forSuffixOrContains(
+                ReadableTransactionState txState,
+                IndexDescriptor descriptor,
+                PropertyIndexQuery query,
+                IndexOrder indexOrder);
+    }
+
+    private static final QueryDispatch<AddedWithValuesAndRemoved> WITH_VALUES = new QueryDispatch<>() {
+        @Override
+        public AddedWithValuesAndRemoved empty() {
+            return EMPTY_ADDED_AND_REMOVED_WITH_VALUES;
+        }
+
+        @Override
+        public AddedWithValuesAndRemoved forSeek(
+                ReadableTransactionState txState, IndexDescriptor descriptor, ValueTuple values) {
+            return indexUpdatesWithValuesForSeek(txState, descriptor, values);
+        }
+
+        @Override
+        public AddedWithValuesAndRemoved forScan(
+                ReadableTransactionState txState, IndexDescriptor descriptor, IndexOrder indexOrder) {
+            return indexUpdatesWithValuesForScan(txState, descriptor, indexOrder);
+        }
+
+        @Override
+        public AddedWithValuesAndRemoved forRangeSeek(
+                ReadableTransactionState txState,
+                IndexDescriptor descriptor,
+                Value[] equalityPrefix,
+                PropertyIndexQuery.RangePredicate<?> predicate,
+                IndexOrder indexOrder) {
+            return indexUpdatesWithValuesForRangeSeek(txState, descriptor, equalityPrefix, predicate, indexOrder);
+        }
+
+        @Override
+        public AddedWithValuesAndRemoved forBoundingBoxSeek(
+                ReadableTransactionState txState,
+                IndexDescriptor descriptor,
+                Value[] equalityPrefix,
+                PropertyIndexQuery.BoundingBoxPredicate predicate) {
+            return indexUpdatesWithValuesForBoundingBoxSeek(txState, descriptor, equalityPrefix, predicate);
+        }
+
+        @Override
+        public AddedWithValuesAndRemoved forPrefixSeek(
+                ReadableTransactionState txState,
+                IndexDescriptor descriptor,
+                Value[] equalityPrefix,
+                TextValue prefix,
+                IndexOrder indexOrder) {
+            return indexUpdatesWithValuesForRangeSeekByPrefix(txState, descriptor, equalityPrefix, prefix, indexOrder);
+        }
+
+        @Override
+        public AddedWithValuesAndRemoved forSuffixOrContains(
+                ReadableTransactionState txState,
+                IndexDescriptor descriptor,
+                PropertyIndexQuery query,
+                IndexOrder indexOrder) {
+            return indexUpdatesWithValuesForSuffixOrContains(txState, descriptor, query, indexOrder);
+        }
+    };
+
+    private static final QueryDispatch<AddedAndRemoved> WITHOUT_VALUES = new QueryDispatch<>() {
+        @Override
+        public AddedAndRemoved empty() {
+            return EMPTY_ADDED_AND_REMOVED;
+        }
+
+        @Override
+        public AddedAndRemoved forSeek(
+                ReadableTransactionState txState, IndexDescriptor descriptor, ValueTuple values) {
+            return indexUpdatesForSeek(txState, descriptor, values);
+        }
+
+        @Override
+        public AddedAndRemoved forScan(
+                ReadableTransactionState txState, IndexDescriptor descriptor, IndexOrder indexOrder) {
+            return indexUpdatesForScan(txState, descriptor, indexOrder);
+        }
+
+        @Override
+        public AddedAndRemoved forRangeSeek(
+                ReadableTransactionState txState,
+                IndexDescriptor descriptor,
+                Value[] equalityPrefix,
+                PropertyIndexQuery.RangePredicate<?> predicate,
+                IndexOrder indexOrder) {
+            return indexUpdatesForRangeSeek(txState, descriptor, equalityPrefix, predicate, indexOrder);
+        }
+
+        @Override
+        public AddedAndRemoved forBoundingBoxSeek(
+                ReadableTransactionState txState,
+                IndexDescriptor descriptor,
+                Value[] equalityPrefix,
+                PropertyIndexQuery.BoundingBoxPredicate predicate) {
+            return indexUpdatesForBoundingBoxSeek(txState, descriptor, equalityPrefix, predicate);
+        }
+
+        @Override
+        public AddedAndRemoved forPrefixSeek(
+                ReadableTransactionState txState,
+                IndexDescriptor descriptor,
+                Value[] equalityPrefix,
+                TextValue prefix,
+                IndexOrder indexOrder) {
+            return indexUpdatesForRangeSeekByPrefix(txState, descriptor, equalityPrefix, prefix, indexOrder);
+        }
+
+        @Override
+        public AddedAndRemoved forSuffixOrContains(
+                ReadableTransactionState txState,
+                IndexDescriptor descriptor,
+                PropertyIndexQuery query,
+                IndexOrder indexOrder) {
+            return indexUpdatesForSuffixOrContains(txState, descriptor, query, indexOrder);
+        }
+    };
+
+    private static <T> T computeForQuery(
+            QueryDispatch<T> dispatch,
+            ReadableTransactionState txState,
+            IndexDescriptor descriptor,
+            IndexOrder indexOrder,
+            PropertyIndexQuery... queries) {
+        requireNonEmpty(queries);
+        if (!txState.hasIndexUpdates(descriptor)) {
+            return dispatch.empty();
+        }
+
+        // Extract equality prefix — EXACT queries are always contiguous at the start by Neo4j index contract
+        List<Value> exactQueryValues = new ArrayList<>(queries.length);
+        int i = 0;
+        while (i < queries.length && queries[i].type() == IndexQueryType.EXACT) {
+            exactQueryValues.add(((PropertyIndexQuery.ExactPredicate) queries[i]).value());
+            i++;
+        }
+        Value[] exactValues = exactQueryValues.toArray(new Value[0]);
+
+        if (i == queries.length) {
+            // Seek ignores indexOrder — all values in the tuple are identical
+            return dispatch.forSeek(txState, descriptor, ValueTuple.of(exactValues));
+        }
+
+        PropertyIndexQuery nextQuery = queries[i];
+        return switch (nextQuery.type()) {
+            case ALL_ENTRIES, EXISTS -> {
+                // If no exact prefix, this is a full scan.
+                // Otherwise, use range seek with null predicate — this is intentional,
+                // it queries the range subtree under the equality prefix.
+                if (exactQueryValues.isEmpty()) {
+                    yield dispatch.forScan(txState, descriptor, indexOrder);
+                } else {
+                    yield dispatch.forRangeSeek(txState, descriptor, exactValues, null, indexOrder);
+                }
+            }
+            case RANGE ->
+                dispatch.forRangeSeek(
+                        txState, descriptor, exactValues, (PropertyIndexQuery.RangePredicate<?>) nextQuery, indexOrder);
+            case BOUNDING_BOX ->
+                dispatch.forBoundingBoxSeek(
+                        txState, descriptor, exactValues, (PropertyIndexQuery.BoundingBoxPredicate) nextQuery);
+            case STRING_PREFIX ->
+                dispatch.forPrefixSeek(
+                        txState,
+                        descriptor,
+                        exactValues,
+                        ((PropertyIndexQuery.StringPrefixPredicate) nextQuery).prefix(),
+                        indexOrder);
+            case STRING_SUFFIX, STRING_CONTAINS ->
+                dispatch.forSuffixOrContains(txState, descriptor, nextQuery, indexOrder);
+            case NEAREST_NEIGHBORS -> dispatch.empty();
+            default ->
+                throw new UnsupportedOperationException(
+                        "Query type not supported: " + nextQuery.type() + " in " + Arrays.toString(queries));
+        };
+    }
+
+    /**
+     * Computes added entities (with values) and removed entity IDs from tx state
+     * for the given query predicates.
+     */
+    public static AddedWithValuesAndRemoved computeForQueryWithValues(
+            ReadableTransactionState txState,
+            IndexDescriptor descriptor,
+            IndexOrder indexOrder,
+            PropertyIndexQuery... queries) {
+        return computeForQuery(WITH_VALUES, txState, descriptor, indexOrder, queries);
+    }
+
+    /**
+     * Computes added entity IDs (without values) and removed entity IDs from tx state
+     * for the given query predicates.
+     */
+    public static AddedAndRemoved computeForQueryWithoutValues(
+            ReadableTransactionState txState,
+            IndexDescriptor descriptor,
+            IndexOrder indexOrder,
+            PropertyIndexQuery... queries) {
+        return computeForQuery(WITHOUT_VALUES, txState, descriptor, indexOrder, queries);
+    }
 
     // SCAN
 
@@ -97,33 +332,36 @@ class TxStateIndexChanges {
 
     static AddedAndRemoved indexUpdatesForSeek(
             ReadableTransactionState txState, IndexDescriptor descriptor, ValueTuple values) {
-        UnmodifiableMap<ValueTuple, ? extends LongDiffSets> updates = txState.getIndexUpdates(descriptor);
-        if (updates != null) {
-            LongDiffSets indexUpdatesForSeek = updates.get(values);
-            return indexUpdatesForSeek == null
-                    ? EMPTY_ADDED_AND_REMOVED
-                    : new AddedAndRemoved(
-                            LongLists.mutable.ofAll(indexUpdatesForSeek.getAdded()), indexUpdatesForSeek.getRemoved());
+        if (!txState.hasIndexUpdates(descriptor)) {
+            return EMPTY_ADDED_AND_REMOVED;
         }
-        return EMPTY_ADDED_AND_REMOVED;
+        UnmodifiableMap<ValueTuple, MutableLongSet> additions = txState.getAddedIndexUpdates(descriptor);
+        IndexRemovalSnapshot removed = txState.getRemovedFromIndex(descriptor);
+
+        MutableLongSet added = additions.get(values);
+        if (added == null) {
+            added = LongSets.mutable.empty();
+        }
+        return new AddedAndRemoved(LongLists.mutable.ofAll(added), removed);
     }
 
     static AddedWithValuesAndRemoved indexUpdatesWithValuesForSeek(
             ReadableTransactionState txState, IndexDescriptor descriptor, ValueTuple values) {
-        UnmodifiableMap<ValueTuple, ? extends LongDiffSets> updates = txState.getIndexUpdates(descriptor);
-        if (updates != null) {
-            LongDiffSets indexUpdatesForSeek = updates.get(values);
-            if (indexUpdatesForSeek == null) {
-                return EMPTY_ADDED_AND_REMOVED_WITH_VALUES;
-            }
-            Value[] valueArray = values.getValues();
-            MutableList<EntityWithPropertyValues> added = Lists.mutable.empty();
-            indexUpdatesForSeek.getAdded().forEach((LongProcedure)
-                    l -> added.add(new EntityWithPropertyValues(l, valueArray)));
-
-            return new AddedWithValuesAndRemoved(added, indexUpdatesForSeek.getRemoved());
+        if (!txState.hasIndexUpdates(descriptor)) {
+            return EMPTY_ADDED_AND_REMOVED_WITH_VALUES;
         }
-        return EMPTY_ADDED_AND_REMOVED_WITH_VALUES;
+        UnmodifiableMap<ValueTuple, MutableLongSet> additions = txState.getAddedIndexUpdates(descriptor);
+        IndexRemovalSnapshot removed = txState.getRemovedFromIndex(descriptor);
+
+        MutableLongSet added = additions.get(values);
+        if (added == null) {
+            added = LongSets.mutable.empty();
+        }
+        Value[] valueArray = values.getValues();
+        MutableList<EntityWithPropertyValues> addedList = Lists.mutable.empty();
+        added.forEach((LongProcedure) l -> addedList.add(new EntityWithPropertyValues(l, valueArray)));
+
+        return new AddedWithValuesAndRemoved(addedList, removed);
     }
 
     // RANGE SEEK
@@ -134,10 +372,11 @@ class TxStateIndexChanges {
             Value[] equalityPrefix,
             PropertyIndexQuery.RangePredicate<?> predicate,
             IndexOrder indexOrder) {
-        NavigableMap<ValueTuple, ? extends LongDiffSets> sortedUpdates = txState.getSortedIndexUpdates(descriptor);
-        if (sortedUpdates == null) {
+        if (!txState.hasIndexUpdates(descriptor)) {
             return EMPTY_ADDED_AND_REMOVED;
         }
+        NavigableMap<ValueTuple, MutableLongSet> sortedAdditions = txState.getSortedAddedIndexUpdates(descriptor);
+        IndexRemovalSnapshot removed = txState.getRemovedFromIndex(descriptor);
 
         int size = descriptor.schema().getPropertyIds().length;
         RangeFilterValues rangeFilter = predicate == null
@@ -145,22 +384,18 @@ class TxStateIndexChanges {
                 : RangeFilterValues.fromRange(size, equalityPrefix, predicate);
 
         MutableLongList added = LongLists.mutable.empty();
-        MutableLongSet removed = LongSets.mutable.empty();
 
-        Map<ValueTuple, ? extends LongDiffSets> inRange =
-                sortedUpdates.subMap(rangeFilter.lower, true, rangeFilter.upper, true);
-        for (Map.Entry<ValueTuple, ? extends LongDiffSets> entry : inRange.entrySet()) {
-            ValueTuple values = entry.getKey();
-            Value rangeKey = values.valueAt(equalityPrefix.length);
-            LongDiffSets diffForSpecificValue = entry.getValue();
+        Map<ValueTuple, MutableLongSet> inRange =
+                sortedAdditions.subMap(rangeFilter.lower, true, rangeFilter.upper, true);
+        for (Map.Entry<ValueTuple, ? extends MutableLongSet> entry : inRange.entrySet()) {
+            Value rangeKey = entry.getKey().valueAt(equalityPrefix.length);
 
             // Needs to manually filter for if lower or upper should be included
             // since we only wants to compare the first value of the key and not all of them for composite indexes
             boolean allowed = rangeFilter.allowedEntry(rangeKey, equalityPrefix.length);
 
             if (allowed && (predicate == null || predicate.acceptsValue(rangeKey))) {
-                added.addAll(diffForSpecificValue.getAdded());
-                removed.addAll(diffForSpecificValue.getRemoved());
+                added.addAll(entry.getValue());
             }
         }
         return new AddedAndRemoved(indexOrder == IndexOrder.DESCENDING ? added.asReversed() : added, removed);
@@ -172,10 +407,11 @@ class TxStateIndexChanges {
             Value[] equalityPrefix,
             PropertyIndexQuery.RangePredicate<?> predicate,
             IndexOrder indexOrder) {
-        NavigableMap<ValueTuple, ? extends LongDiffSets> sortedUpdates = txState.getSortedIndexUpdates(descriptor);
-        if (sortedUpdates == null) {
+        if (!txState.hasIndexUpdates(descriptor)) {
             return EMPTY_ADDED_AND_REMOVED_WITH_VALUES;
         }
+        NavigableMap<ValueTuple, MutableLongSet> sortedAdditions = txState.getSortedAddedIndexUpdates(descriptor);
+        IndexRemovalSnapshot removed = txState.getRemovedFromIndex(descriptor);
 
         int size = descriptor.schema().getPropertyIds().length;
         RangeFilterValues rangeFilter = predicate == null
@@ -183,24 +419,20 @@ class TxStateIndexChanges {
                 : RangeFilterValues.fromRange(size, equalityPrefix, predicate);
 
         MutableList<EntityWithPropertyValues> added = Lists.mutable.empty();
-        MutableLongSet removed = LongSets.mutable.empty();
 
-        Map<ValueTuple, ? extends LongDiffSets> inRange =
-                sortedUpdates.subMap(rangeFilter.lower, true, rangeFilter.upper, true);
-        for (Map.Entry<ValueTuple, ? extends LongDiffSets> entry : inRange.entrySet()) {
-            ValueTuple values = entry.getKey();
-            Value rangeKey = values.valueAt(equalityPrefix.length);
-            LongDiffSets diffForSpecificValue = entry.getValue();
+        Map<ValueTuple, MutableLongSet> inRange =
+                sortedAdditions.subMap(rangeFilter.lower, true, rangeFilter.upper, true);
+        for (Map.Entry<ValueTuple, ? extends MutableLongSet> entry : inRange.entrySet()) {
+            Value rangeKey = entry.getKey().valueAt(equalityPrefix.length);
 
             // Needs to manually filter for if lower or upper should be included
             // since we only wants to compare the first value of the key and not all of them for composite indexes
             boolean allowed = rangeFilter.allowedEntry(rangeKey, equalityPrefix.length);
 
             if (allowed && (predicate == null || predicate.acceptsValue(rangeKey))) {
-                diffForSpecificValue
-                        .getAdded()
-                        .each(nodeId -> added.add(new EntityWithPropertyValues(nodeId, values.getValues())));
-                removed.addAll(diffForSpecificValue.getRemoved());
+                entry.getValue()
+                        .each(id -> added.add(
+                                new EntityWithPropertyValues(id, entry.getKey().getValues())));
             }
         }
         return new AddedWithValuesAndRemoved(indexOrder == IndexOrder.DESCENDING ? added.asReversed() : added, removed);
@@ -213,29 +445,26 @@ class TxStateIndexChanges {
             IndexDescriptor descriptor,
             Value[] equalityPrefix,
             PropertyIndexQuery.BoundingBoxPredicate predicate) {
-        NavigableMap<ValueTuple, ? extends LongDiffSets> sortedUpdates = txState.getSortedIndexUpdates(descriptor);
-        if (sortedUpdates == null) {
+        if (!txState.hasIndexUpdates(descriptor)) {
             return EMPTY_ADDED_AND_REMOVED;
         }
+        NavigableMap<ValueTuple, MutableLongSet> sortedAdditions = txState.getSortedAddedIndexUpdates(descriptor);
+        IndexRemovalSnapshot removed = txState.getRemovedFromIndex(descriptor);
 
         int size = descriptor.schema().getPropertyIds().length;
         RangeFilterValues rangeFilter = RangeFilterValues.fromBoundingBox(size, equalityPrefix, predicate);
 
         MutableLongList added = LongLists.mutable.empty();
-        MutableLongSet removed = LongSets.mutable.empty();
 
-        Map<ValueTuple, ? extends LongDiffSets> inRange =
-                sortedUpdates.subMap(rangeFilter.lower, true, rangeFilter.upper, true);
-        for (Map.Entry<ValueTuple, ? extends LongDiffSets> entry : inRange.entrySet()) {
-            ValueTuple values = entry.getKey();
-            Value rangeKey = values.valueAt(equalityPrefix.length);
-            LongDiffSets diffForSpecificValue = entry.getValue();
+        Map<ValueTuple, MutableLongSet> inRange =
+                sortedAdditions.subMap(rangeFilter.lower, true, rangeFilter.upper, true);
+        for (Map.Entry<ValueTuple, ? extends MutableLongSet> entry : inRange.entrySet()) {
+            Value rangeKey = entry.getKey().valueAt(equalityPrefix.length);
 
             // The TreeMap cannot perfectly order multi-dimensional types (spatial) and need additional filtering out
             // false positives
             if (predicate.acceptsValue(rangeKey)) {
-                added.addAll(diffForSpecificValue.getAdded());
-                removed.addAll(diffForSpecificValue.getRemoved());
+                added.addAll(entry.getValue());
             }
         }
         return new AddedAndRemoved(added, removed);
@@ -246,31 +475,28 @@ class TxStateIndexChanges {
             IndexDescriptor descriptor,
             Value[] equalityPrefix,
             PropertyIndexQuery.BoundingBoxPredicate predicate) {
-        NavigableMap<ValueTuple, ? extends LongDiffSets> sortedUpdates = txState.getSortedIndexUpdates(descriptor);
-        if (sortedUpdates == null) {
+        if (!txState.hasIndexUpdates(descriptor)) {
             return EMPTY_ADDED_AND_REMOVED_WITH_VALUES;
         }
+        NavigableMap<ValueTuple, MutableLongSet> sortedAdditions = txState.getSortedAddedIndexUpdates(descriptor);
+        IndexRemovalSnapshot removed = txState.getRemovedFromIndex(descriptor);
 
         int size = descriptor.schema().getPropertyIds().length;
         RangeFilterValues rangeFilter = RangeFilterValues.fromBoundingBox(size, equalityPrefix, predicate);
 
         MutableList<EntityWithPropertyValues> added = Lists.mutable.empty();
-        MutableLongSet removed = LongSets.mutable.empty();
 
-        Map<ValueTuple, ? extends LongDiffSets> inRange =
-                sortedUpdates.subMap(rangeFilter.lower, true, rangeFilter.upper, true);
-        for (Map.Entry<ValueTuple, ? extends LongDiffSets> entry : inRange.entrySet()) {
-            ValueTuple values = entry.getKey();
-            Value rangeKey = values.valueAt(equalityPrefix.length);
-            LongDiffSets diffForSpecificValue = entry.getValue();
+        Map<ValueTuple, MutableLongSet> inRange =
+                sortedAdditions.subMap(rangeFilter.lower, true, rangeFilter.upper, true);
+        for (Map.Entry<ValueTuple, ? extends MutableLongSet> entry : inRange.entrySet()) {
+            Value rangeKey = entry.getKey().valueAt(equalityPrefix.length);
 
             // The TreeMap cannot perfectly order multi-dimensional types (spatial) and need additional filtering out
             // false positives
             if (predicate.acceptsValue(rangeKey)) {
-                diffForSpecificValue
-                        .getAdded()
-                        .each(nodeId -> added.add(new EntityWithPropertyValues(nodeId, values.getValues())));
-                removed.addAll(diffForSpecificValue.getRemoved());
+                entry.getValue()
+                        .each(id -> added.add(
+                                new EntityWithPropertyValues(id, entry.getKey().getValues())));
             }
         }
         return new AddedWithValuesAndRemoved(added, removed);
@@ -284,25 +510,24 @@ class TxStateIndexChanges {
             Value[] equalityPrefix,
             TextValue prefix,
             IndexOrder indexOrder) {
-        NavigableMap<ValueTuple, ? extends LongDiffSets> sortedUpdates = txState.getSortedIndexUpdates(descriptor);
-        if (sortedUpdates == null) {
+        if (!txState.hasIndexUpdates(descriptor)) {
             return EMPTY_ADDED_AND_REMOVED;
         }
+        NavigableMap<ValueTuple, MutableLongSet> sortedAdditions = txState.getSortedAddedIndexUpdates(descriptor);
+        IndexRemovalSnapshot removed = txState.getRemovedFromIndex(descriptor);
+
         int size = descriptor.schema().getPropertyIds().length;
         ValueTuple floor = getCompositeValueTuple(size, equalityPrefix, prefix, true);
         ValueTuple maxString = getCompositeValueTuple(size, equalityPrefix, Values.MAX_STRING, false);
 
         MutableLongList added = LongLists.mutable.empty();
-        MutableLongSet removed = LongSets.mutable.empty();
 
-        for (Map.Entry<ValueTuple, ? extends LongDiffSets> entry :
-                sortedUpdates.subMap(floor, maxString).entrySet()) {
+        for (Map.Entry<ValueTuple, ? extends MutableLongSet> entry :
+                sortedAdditions.subMap(floor, maxString).entrySet()) {
             Value key = entry.getKey().valueAt(equalityPrefix.length);
             // Needs to check type since the subMap might include non-TextValue for composite index
             if (key.valueGroup() == ValueGroup.TEXT && ((TextValue) key).startsWith(prefix)) {
-                LongDiffSets diffSets = entry.getValue();
-                added.addAll(diffSets.getAdded());
-                removed.addAll(diffSets.getRemoved());
+                added.addAll(entry.getValue());
             } else {
                 break;
             }
@@ -316,27 +541,26 @@ class TxStateIndexChanges {
             Value[] equalityPrefix,
             TextValue prefix,
             IndexOrder indexOrder) {
-        NavigableMap<ValueTuple, ? extends LongDiffSets> sortedUpdates = txState.getSortedIndexUpdates(descriptor);
-        if (sortedUpdates == null) {
+        if (!txState.hasIndexUpdates(descriptor)) {
             return EMPTY_ADDED_AND_REMOVED_WITH_VALUES;
         }
+        NavigableMap<ValueTuple, MutableLongSet> sortedAdditions = txState.getSortedAddedIndexUpdates(descriptor);
+        IndexRemovalSnapshot removed = txState.getRemovedFromIndex(descriptor);
+
         int keySize = descriptor.schema().getPropertyIds().length;
         ValueTuple floor = getCompositeValueTuple(keySize, equalityPrefix, prefix, true);
         ValueTuple maxString = getCompositeValueTuple(keySize, equalityPrefix, Values.MAX_STRING, false);
 
         MutableList<EntityWithPropertyValues> added = Lists.mutable.empty();
-        MutableLongSet removed = LongSets.mutable.empty();
 
-        for (Map.Entry<ValueTuple, ? extends LongDiffSets> entry :
-                sortedUpdates.subMap(floor, maxString).entrySet()) {
-            ValueTuple key = entry.getKey();
-            Value prefixKey = key.valueAt(equalityPrefix.length);
+        for (Map.Entry<ValueTuple, ? extends MutableLongSet> entry :
+                sortedAdditions.subMap(floor, maxString).entrySet()) {
+            Value prefixKey = entry.getKey().valueAt(equalityPrefix.length);
             // Needs to check type since the subMap might include non-TextValue for composite index
             if (prefixKey.valueGroup() == ValueGroup.TEXT && ((TextValue) prefixKey).startsWith(prefix)) {
-                LongDiffSets diffSets = entry.getValue();
-                Value[] values = key.getValues();
-                diffSets.getAdded().each(nodeId -> added.add(new EntityWithPropertyValues(nodeId, values)));
-                removed.addAll(diffSets.getRemoved());
+                entry.getValue()
+                        .each(id -> added.add(
+                                new EntityWithPropertyValues(id, entry.getKey().getValues())));
             } else {
                 break;
             }
@@ -351,22 +575,20 @@ class TxStateIndexChanges {
             IndexDescriptor descriptor,
             PropertyIndexQuery filter,
             IndexOrder indexOrder) {
-        Map<ValueTuple, ? extends LongDiffSets> updates = getUpdates(txState, descriptor, indexOrder);
-
-        if (updates == null) {
+        if (!txState.hasIndexUpdates(descriptor)) {
             return EMPTY_ADDED_AND_REMOVED;
         }
 
-        MutableLongList added = LongLists.mutable.empty();
-        MutableLongSet removed = LongSets.mutable.empty();
+        Map<ValueTuple, ? extends MutableLongSet> additions = getAdded(txState, descriptor, indexOrder);
+        IndexRemovalSnapshot removed = txState.getRemovedFromIndex(descriptor);
 
-        for (Map.Entry<ValueTuple, ? extends LongDiffSets> entry : updates.entrySet()) {
+        MutableLongList added = LongLists.mutable.empty();
+
+        for (Map.Entry<ValueTuple, ? extends MutableLongSet> entry : additions.entrySet()) {
             Value[] values = entry.getKey().getValues();
             if (descriptor.getCapability().areValuesAccepted(values)
                     && (filter == null || filter.acceptsValue(values[0]))) {
-                LongDiffSets diffSet = entry.getValue();
-                added.addAll(diffSet.getAdded());
-                removed.addAll(diffSet.getRemoved());
+                added.addAll(entry.getValue());
             }
         }
         return new AddedAndRemoved(indexOrder == IndexOrder.DESCENDING ? added.asReversed() : added, removed);
@@ -377,32 +599,32 @@ class TxStateIndexChanges {
             IndexDescriptor descriptor,
             PropertyIndexQuery filter,
             IndexOrder indexOrder) {
-        Map<ValueTuple, ? extends LongDiffSets> updates = getUpdates(txState, descriptor, indexOrder);
-
-        if (updates == null) {
+        if (!txState.hasIndexUpdates(descriptor)) {
             return EMPTY_ADDED_AND_REMOVED_WITH_VALUES;
         }
 
-        MutableList<EntityWithPropertyValues> added = Lists.mutable.empty();
-        MutableLongSet removed = LongSets.mutable.empty();
+        Map<ValueTuple, ? extends MutableLongSet> additions = getAdded(txState, descriptor, indexOrder);
+        IndexRemovalSnapshot removed = txState.getRemovedFromIndex(descriptor);
 
-        for (Map.Entry<ValueTuple, ? extends LongDiffSets> entry : updates.entrySet()) {
+        MutableList<EntityWithPropertyValues> added = Lists.mutable.empty();
+
+        for (Map.Entry<ValueTuple, ? extends MutableLongSet> entry : additions.entrySet()) {
             Value[] values = entry.getKey().getValues();
             if (descriptor.getCapability().areValuesAccepted(values)
                     && (filter == null || filter.acceptsValue(values[0]))) {
-                LongDiffSets diffSet = entry.getValue();
-                diffSet.getAdded().each(nodeId -> added.add(new EntityWithPropertyValues(nodeId, values)));
-                removed.addAll(diffSet.getRemoved());
+                entry.getValue()
+                        .each(id -> added.add(
+                                new EntityWithPropertyValues(id, entry.getKey().getValues())));
             }
         }
         return new AddedWithValuesAndRemoved(indexOrder == IndexOrder.DESCENDING ? added.asReversed() : added, removed);
     }
 
-    private static Map<ValueTuple, ? extends LongDiffSets> getUpdates(
+    private static Map<ValueTuple, ? extends MutableLongSet> getAdded(
             ReadableTransactionState txState, IndexDescriptor descriptor, IndexOrder indexOrder) {
         return indexOrder == IndexOrder.NONE
-                ? txState.getIndexUpdates(descriptor)
-                : txState.getSortedIndexUpdates(descriptor);
+                ? txState.getAddedIndexUpdates(descriptor)
+                : txState.getSortedAddedIndexUpdates(descriptor);
     }
 
     private static ValueTuple getCompositeValueTuple(
@@ -418,13 +640,13 @@ class TxStateIndexChanges {
         return ValueTuple.of(values);
     }
 
-    record AddedAndRemoved(LongIterable added, LongSet removed) {
+    public record AddedAndRemoved(LongIterable added, IndexRemovalSnapshot removed) {
         public boolean isEmpty() {
             return added.isEmpty() && removed.isEmpty();
         }
     }
 
-    record AddedWithValuesAndRemoved(Iterable<EntityWithPropertyValues> added, LongSet removed) {
+    public record AddedWithValuesAndRemoved(Iterable<EntityWithPropertyValues> added, IndexRemovalSnapshot removed) {
         public boolean isEmpty() {
             return !added.iterator().hasNext() && removed.isEmpty();
         }

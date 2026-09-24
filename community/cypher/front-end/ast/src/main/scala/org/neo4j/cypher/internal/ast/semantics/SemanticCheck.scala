@@ -16,13 +16,13 @@
  */
 package org.neo4j.cypher.internal.ast.semantics
 
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheck.when
+import org.neo4j.cypher.internal.ast.semantics.scoping.ScopeState
 import org.neo4j.cypher.internal.expressions.Expression.SemanticContext
-import org.neo4j.cypher.internal.util.EmptyErrorMessageProvider
+import org.neo4j.cypher.internal.notification.InternalNotification
 import org.neo4j.cypher.internal.util.ErrorMessageProvider
 import org.neo4j.cypher.internal.util.InputPosition
-import org.neo4j.cypher.internal.util.InternalNotification
-import org.neo4j.cypher.internal.util.NotImplementedErrorMessageProvider
 import org.neo4j.gqlstatus.ErrorGqlStatusObject
 import org.neo4j.kernel.database.DatabaseReference
 
@@ -46,7 +46,7 @@ sealed trait SemanticCheck {
    * val check = first chain second chain third
    * }}}
    */
-  def chain(next: SemanticCheck): SemanticCheck = {
+  infix def chain(next: SemanticCheck): SemanticCheck = {
     for {
       a <- this
       b <- next
@@ -57,7 +57,7 @@ sealed trait SemanticCheck {
    * 
    * If `this` produces any errors, `next` is skipped.
    */
-  def ifOkChain(next: => SemanticCheck): SemanticCheck = {
+  infix def ifOkChain(next: => SemanticCheck): SemanticCheck = {
     for {
       a <- this
       b <- when(a.errors.isEmpty)(next)
@@ -120,6 +120,9 @@ object SemanticCheck {
   /** Creates a check which changes the current state to `s`. Does not produce any errors. */
   def setState(s: SemanticState): SemanticCheck = fromFunction(_ => SemanticCheckResult.success(s))
 
+  /** Creates a check which applies `f` to the current state. Does not produce any errors. */
+  def mapState(f: SemanticState => SemanticState): SemanticCheck = fromFunction(s => SemanticCheckResult.success(f(s)))
+
   /** Creates the next check from the current state. */
   def fromState(f: SemanticState => SemanticCheck): SemanticCheck = success.flatMap(res => f(res.state))
 
@@ -139,12 +142,10 @@ object SemanticCheck {
   def nestedCheck(check: => SemanticCheck): SemanticCheck = success.flatMap(_ => check)
 
   /** Creates a check which runs `check` if `condition` is `true`, otherwise does nothing. */
-  def when(condition: Boolean)(check: => SemanticCheck): SemanticCheck = {
-    if (condition)
-      check
-    else
-      SemanticCheck.success
-  }
+  def when(condition: Boolean, default: SemanticCheck = SemanticCheck.success)(
+    check: => SemanticCheck
+  ): SemanticCheck =
+    if (condition) check else default
 
   private[semantics] val DEBUG_ENABLED = false
 
@@ -167,9 +168,6 @@ object SemanticCheckResult {
 
   def error(state: SemanticState, error: SemanticErrorDef): SemanticCheckResult =
     SemanticCheckResult(state, Vector(error))
-
-  def error(state: SemanticState, msg: String, position: InputPosition): SemanticCheckResult =
-    error(state, SemanticError(msg, position))
 
   def error(
     gql: ErrorGqlStatusObject,
@@ -206,21 +204,32 @@ object SemanticCheckResult {
 }
 
 trait SemanticCheckContext {
+  def cypherVersion: CypherVersion
   def errorMessageProvider: ErrorMessageProvider
-  def sessionDatabaseReference: DatabaseReference
+  def sessionDatabaseReference: Option[DatabaseReference]
+  def scopeState: Option[ScopeState]
 }
 
 object SemanticCheckContext {
 
-  def default: SemanticCheckContext = new SemanticCheckContext {
-    override def errorMessageProvider: ErrorMessageProvider = NotImplementedErrorMessageProvider
-    override def sessionDatabaseReference: DatabaseReference = null
-  }
+  private case class Impl(
+    override val cypherVersion: CypherVersion,
+    override val errorMessageProvider: ErrorMessageProvider,
+    override val sessionDatabaseReference: Option[DatabaseReference],
+    override val scopeState: Option[ScopeState]
+  ) extends SemanticCheckContext
 
-  def empty: SemanticCheckContext = new SemanticCheckContext {
-    override def errorMessageProvider: ErrorMessageProvider = EmptyErrorMessageProvider
-    override def sessionDatabaseReference: DatabaseReference = null
-  }
+  def apply(
+    language: CypherVersion,
+    errorMessages: ErrorMessageProvider
+  ): SemanticCheckContext = Impl(language, errorMessages, None, None)
+
+  def apply(
+    language: CypherVersion,
+    errorMessages: ErrorMessageProvider,
+    sessionDb: Option[DatabaseReference],
+    scopeState: Option[ScopeState]
+  ): SemanticCheckContext = Impl(language, errorMessages, sessionDb, scopeState)
 }
 
 class OptionSemanticChecking[A](val option: Option[A]) extends AnyVal {

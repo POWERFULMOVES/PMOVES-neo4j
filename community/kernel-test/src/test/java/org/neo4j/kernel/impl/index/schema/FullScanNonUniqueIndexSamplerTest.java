@@ -24,12 +24,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.neo4j.index.internal.gbptree.DataTree.W_BATCHED_SINGLE_THREADED;
 import static org.neo4j.internal.schema.IndexPrototype.forSchema;
 import static org.neo4j.internal.schema.SchemaDescriptors.forLabel;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
 import static org.neo4j.kernel.impl.index.schema.NativeIndexKey.Inclusion.NEUTRAL;
 import static org.neo4j.kernel.impl.index.schema.ValueCreatorUtil.FRACTION_DUPLICATE_NON_UNIQUE;
 import static org.neo4j.kernel.impl.index.schema.ValueCreatorUtil.countUniqueValues;
-import static org.neo4j.values.storable.RandomValues.typesOfGroup;
+import static org.neo4j.values.storable.RandomValues.typesOfGroups;
 import static org.neo4j.values.storable.ValueGroup.NUMBER;
 
 import java.io.IOException;
@@ -90,8 +91,8 @@ public class FullScanNonUniqueIndexSamplerTest extends IndexTestUtil<RangeKey, N
 
         // WHEN
         IndexSample sample;
-        try (var gbpTree = getTree()) {
-            var sampler = new FullScanNonUniqueIndexSampler<>(gbpTree, layout);
+        try (GBPTree<RangeKey, NullValue> gbpTree = getTree()) {
+            FullScanNonUniqueIndexSampler<RangeKey> sampler = new FullScanNonUniqueIndexSampler<>(gbpTree, layout);
             sample = sampler.sample(NULL_CONTEXT, new AtomicBoolean(true));
         }
 
@@ -106,9 +107,9 @@ public class FullScanNonUniqueIndexSamplerTest extends IndexTestUtil<RangeKey, N
         Value[] values = generateNumberValues();
         buildTree(values);
 
-        var pageCacheTracer = new DefaultPageCacheTracer();
-        var contextFactory = new CursorContextFactory(pageCacheTracer, EMPTY_CONTEXT_SUPPLIER);
-        var cursorContext = contextFactory.create("testTracer");
+        DefaultPageCacheTracer pageCacheTracer = new DefaultPageCacheTracer();
+        CursorContextFactory contextFactory = new CursorContextFactory(pageCacheTracer, EMPTY_CONTEXT_SUPPLIER);
+        CursorContext cursorContext = contextFactory.create("testTracer");
 
         assertZeroCursor(cursorContext);
 
@@ -152,12 +153,12 @@ public class FullScanNonUniqueIndexSamplerTest extends IndexTestUtil<RangeKey, N
                     nodeId++;
                 }
             }
-            gbpTree.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            gbpTree.checkpoint(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
         }
     }
 
     private static ValueCreatorUtil<RangeKey> createValueCreatorUtil() {
-        return new ValueCreatorUtil<>(index, typesOfGroup(NUMBER), FRACTION_DUPLICATE_NON_UNIQUE);
+        return new ValueCreatorUtil<>(index, typesOfGroups(NUMBER), FRACTION_DUPLICATE_NON_UNIQUE);
     }
 
     @Override

@@ -35,34 +35,83 @@ abstract class StringFunction(arg: Expression) extends Expression {
 
 }
 
-case class ToStringFunction(argument: Expression) extends StringFunction(argument) {
-
-  override def apply(ctx: ReadableRow, state: QueryState): AnyValue =
-    CypherFunctions.toString(argument(ctx, state))
-
-  override def rewrite(f: Expression => Expression): Expression = f(ToStringFunction(argument.rewrite(f)))
-
+abstract class ToStringFunction(argument: Expression) extends StringFunction(argument) {
   override def children: Seq[AstNode[_]] = Seq(argument)
 }
 
-case class ToStringOrNullFunction(argument: Expression) extends StringFunction(argument) {
+case class ToStringFunctionCypher5(argument: Expression) extends ToStringFunction(argument) {
 
   override def apply(ctx: ReadableRow, state: QueryState): AnyValue =
-    CypherFunctions.toStringOrNull(argument(ctx, state))
+    CypherFunctions.toStringCypher5(argument(ctx, state))
 
-  override def rewrite(f: Expression => Expression): Expression = f(ToStringOrNullFunction(argument.rewrite(f)))
+  override def rewrite(f: Expression => Expression): Expression = f(ToStringFunctionCypher5(argument.rewrite(f)))
+}
 
+case class ToStringFunctionCypher25(argument: Expression) extends ToStringFunction(argument) {
+
+  override def apply(ctx: ReadableRow, state: QueryState): AnyValue =
+    CypherFunctions.toString(
+      argument(ctx, state),
+      state.query,
+      state.cursors.nodeCursor,
+      state.cursors.relationshipScanCursor
+    )
+
+  override def rewrite(f: Expression => Expression): Expression = f(ToStringFunctionCypher25(argument.rewrite(f)))
+}
+
+abstract class ToStringOrNullFunction(argument: Expression) extends StringFunction(argument) {
   override def children: Seq[AstNode[_]] = Seq(argument)
 }
 
-case class ToStringListFunction(argument: Expression) extends StringFunction(argument) {
+case class ToStringOrNullFunctionCypher5(argument: Expression) extends ToStringOrNullFunction(argument) {
 
   override def apply(ctx: ReadableRow, state: QueryState): AnyValue =
-    CypherFunctions.toStringList(argument(ctx, state))
+    CypherFunctions.toStringOrNullCypher5(argument(ctx, state))
 
-  override def rewrite(f: Expression => Expression): Expression = f(ToStringListFunction(argument.rewrite(f)))
+  override def rewrite(f: Expression => Expression): Expression =
+    f(ToStringOrNullFunctionCypher5(argument.rewrite(f)))
+}
 
+case class ToStringOrNullFunctionCypher25(argument: Expression) extends ToStringOrNullFunction(argument) {
+
+  override def apply(ctx: ReadableRow, state: QueryState): AnyValue =
+    CypherFunctions.toStringOrNull(
+      argument(ctx, state),
+      state.query,
+      state.cursors.nodeCursor,
+      state.cursors.relationshipScanCursor
+    )
+
+  override def rewrite(f: Expression => Expression): Expression =
+    f(ToStringOrNullFunctionCypher25(argument.rewrite(f)))
+}
+
+abstract class ToStringListFunction(argument: Expression) extends StringFunction(argument) {
   override def children: Seq[AstNode[_]] = Seq(argument)
+}
+
+case class ToStringListFunctionCypher5(argument: Expression) extends ToStringListFunction(argument) {
+
+  override def apply(ctx: ReadableRow, state: QueryState): AnyValue =
+    CypherFunctions.toStringListCypher5(argument(ctx, state))
+
+  override def rewrite(f: Expression => Expression): Expression =
+    f(ToStringListFunctionCypher5(argument.rewrite(f)))
+}
+
+case class ToStringListFunctionCypher25(argument: Expression) extends ToStringListFunction(argument) {
+
+  override def apply(ctx: ReadableRow, state: QueryState): AnyValue =
+    CypherFunctions.toStringList(
+      argument(ctx, state),
+      state.query,
+      state.cursors.nodeCursor,
+      state.cursors.relationshipScanCursor
+    )
+
+  override def rewrite(f: Expression => Expression): Expression =
+    f(ToStringListFunctionCypher25(argument.rewrite(f)))
 }
 
 case class ToLowerFunction(argument: Expression) extends StringFunction(argument) {
@@ -185,20 +234,30 @@ case class SubstringFunction(orig: Expression, start: Expression, length: Option
 
 }
 
-case class ReplaceFunction(orig: Expression, search: Expression, replaceWith: Expression)
-    extends Expression {
+case class ReplaceFunction(
+  orig: Expression,
+  search: Expression,
+  replaceWith: Expression,
+  limit: Option[Expression] = None
+) extends Expression {
 
-  override def apply(ctx: ReadableRow, state: QueryState): AnyValue = {
-    CypherFunctions.replace(orig(ctx, state), search(ctx, state), replaceWith(ctx, state))
+  override def apply(ctx: ReadableRow, state: QueryState): AnyValue = limit match {
+    case Some(e) =>
+      CypherFunctions.replace(orig(ctx, state), search(ctx, state), replaceWith(ctx, state), e(ctx, state))
+    case None => CypherFunctions.replace(orig(ctx, state), search(ctx, state), replaceWith(ctx, state))
   }
 
-  override def arguments: Seq[Expression] = Seq(orig, search, replaceWith)
+  override def arguments: Seq[Expression] = limit match {
+    case Some(e) => Seq(orig, search, replaceWith, e)
+    case None    => Seq(orig, search, replaceWith)
+  }
 
   override def children: Seq[AstNode[_]] = arguments
 
-  override def rewrite(f: Expression => Expression): Expression = f(
-    ReplaceFunction(orig.rewrite(f), search.rewrite(f), replaceWith.rewrite(f))
-  )
+  override def rewrite(f: Expression => Expression): Expression = limit match {
+    case Some(e) => f(ReplaceFunction(orig.rewrite(f), search.rewrite(f), replaceWith.rewrite(f), Some(e.rewrite(f))))
+    case None    => f(ReplaceFunction(orig.rewrite(f), search.rewrite(f), replaceWith.rewrite(f)))
+  }
 
 }
 

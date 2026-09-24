@@ -48,15 +48,12 @@ import org.neo4j.adversaries.fs.AdversarialFileSystemAbstraction;
 import org.neo4j.io.fs.EphemeralFileSystemAbstraction;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.fs.StoreChannel;
-import org.neo4j.io.pagecache.PageSwapperFactory;
 import org.neo4j.io.pagecache.PagedFile;
-import org.neo4j.io.pagecache.impl.SingleFilePageSwapperFactory;
 import org.neo4j.io.pagecache.impl.muninn.MuninnPageCache;
-import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.io.pagecache.tracing.linear.LinearHistoryPageCacheTracerTest;
 import org.neo4j.io.pagecache.tracing.linear.LinearTracers;
-import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.scheduler.JobScheduler;
 import org.neo4j.test.scheduler.DaemonThreadFactory;
 import org.neo4j.test.scheduler.ThreadPoolJobScheduler;
@@ -355,20 +352,20 @@ public class RandomPageCacheTestHarness implements Closeable {
             fs = new AdversarialFileSystemAbstraction(adversary, fs);
         }
 
-        PageSwapperFactory swapperFactory = new SingleFilePageSwapperFactory(fs, tracer, EmptyMemoryTracker.INSTANCE);
         JobScheduler jobScheduler = new ThreadPoolJobScheduler();
-        MuninnPageCache cache = new MuninnPageCache(
-                swapperFactory,
-                jobScheduler,
-                MuninnPageCache.config(cachePageCount).pageCacheTracer(tracer));
+        var configuration = MuninnPageCache.forPages(cachePageCount)
+                .pageCacheTracer(tracer)
+                // Don't use background eviction as that may race with the verification phase
+                .disableEvictionThread();
+        MuninnPageCache cache = new MuninnPageCache(fs, jobScheduler, configuration);
         if (filePageSize == 0) {
             filePageSize = cache.pageSize();
         }
         cache.setPrintExceptionsOnClose(false);
-        Map<Path, PagedFile> fileMap = new HashMap<>(files.length);
+        Map<Path, PagedFile> fileMap = HashMap.newHashMap(files.length);
         for (int i = 0; i < Math.min(files.length, initialMappedFiles); i++) {
             Path file = files[i];
-            fileMap.put(file, cache.map(file, filePageSize, DEFAULT_DATABASE_NAME, openOptions));
+            fileMap.put(file, cache.map(new StoreFile(file), filePageSize, DEFAULT_DATABASE_NAME, openOptions));
         }
 
         plan = plan(cache, files, fileMap);
@@ -435,7 +432,6 @@ public class RandomPageCacheTestHarness implements Closeable {
 
     private void runVerificationPhase(MuninnPageCache cache) throws Exception {
         if (verification != null) {
-            cache.flushAndForce(DatabaseFlushEvent.NULL); // Clears any stray evictor exceptions
             verification.run(cache, this.fs, plan.getFilesTouched());
         }
     }

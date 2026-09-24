@@ -100,7 +100,7 @@ class BrowserVersionTest {
         versions.sort(BrowserVersion::compareTo);
 
         assertThat(versions).isSorted();
-        assertThat(versions.get(versions.size() - 1)).isEqualTo(v3);
+        assertThat(versions.getLast()).isEqualTo(v3);
     }
 
     @Test
@@ -113,6 +113,6 @@ class BrowserVersionTest {
         versions.sort(BrowserVersion::compareTo);
 
         assertThat(versions).isSorted();
-        assertThat(versions.get(versions.size() - 1)).isEqualTo(v3);
+        assertThat(versions.getLast()).isEqualTo(v3);
     }
 }

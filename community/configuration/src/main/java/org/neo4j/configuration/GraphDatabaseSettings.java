@@ -26,11 +26,9 @@ import static java.util.Collections.emptyList;
 import static java.util.Collections.emptySet;
 import static java.util.Map.entry;
 import static org.neo4j.configuration.Config.DEFAULT_CONFIG_DIR_NAME;
-import static org.neo4j.configuration.GraphDatabaseSettings.TransactionStateMemoryAllocation.ON_HEAP;
 import static org.neo4j.configuration.SettingConstraints.ABSOLUTE_PATH;
 import static org.neo4j.configuration.SettingConstraints.HOSTNAME_ONLY;
 import static org.neo4j.configuration.SettingConstraints.NO_ALL_INTERFACES_ADDRESS;
-import static org.neo4j.configuration.SettingConstraints.POWER_OF_2;
 import static org.neo4j.configuration.SettingConstraints.any;
 import static org.neo4j.configuration.SettingConstraints.is;
 import static org.neo4j.configuration.SettingConstraints.min;
@@ -52,6 +50,7 @@ import static org.neo4j.configuration.SettingValueParsers.listOf;
 import static org.neo4j.configuration.SettingValueParsers.ofEnum;
 import static org.neo4j.configuration.SettingValueParsers.setOf;
 import static org.neo4j.configuration.connectors.ConnectorDefaults.SERVER_CONNECTOR_DEFAULTS;
+import static org.neo4j.io.ByteUnit.gibiBytes;
 import static org.neo4j.io.ByteUnit.kibiBytes;
 import static org.neo4j.io.ByteUnit.mebiBytes;
 
@@ -69,6 +68,7 @@ import org.neo4j.annotations.service.ServiceProvider;
 import org.neo4j.configuration.helpers.SocketAddress;
 import org.neo4j.graphdb.config.Setting;
 import org.neo4j.io.ByteUnit;
+import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.kernel.database.NamedDatabaseId;
 import org.neo4j.logging.Level;
 import org.neo4j.logging.LogTimeZone;
@@ -96,6 +96,7 @@ public class GraphDatabaseSettings implements SettingsDeclaration {
     public static final String DEFAULT_SCRIPT_FOLDER = "scripts";
     public static final String DEFAULT_DUMPS_DIR_NAME = "dumps";
     public static final String DEFAULT_LICENSES_DIR_NAME = "licenses";
+    public static final String DEFAULT_SEEDS_DIR_NAME = "seeds";
 
     public static final int DEFAULT_ROUTING_CONNECTOR_PORT = 7688;
 
@@ -108,7 +109,8 @@ public class GraphDatabaseSettings implements SettingsDeclaration {
             .immutable()
             .build();
 
-    @Description("Name of the default database (aliases are not supported).")
+    @Description(
+            "Specifies the default database name before the first DBMS startup. After the initial default database is created, changing this setting has no effect.")
     public static final Setting<String> initial_default_database = newBuilder(
                     "initial.dbms.default_database", DATABASENAME, DEFAULT_DATABASE_NAME)
             .build();
@@ -144,6 +146,13 @@ public class GraphDatabaseSettings implements SettingsDeclaration {
     public static final Setting<Path> database_dumps_root_path = newBuilder(
                     "server.directories.dumps.root", PATH, Path.of(DEFAULT_DUMPS_DIR_NAME))
             .setDependency(data_directory)
+            .immutable()
+            .build();
+
+    @Description("Root location of the configuration directory.")
+    public static final Setting<Path> configuration_directory = newBuilder(
+                    "server.directories.configuration", PATH, Path.of(DEFAULT_CONFIG_DIR_NAME))
+            .setDependency(neo4j_home)
             .immutable()
             .build();
 
@@ -231,6 +240,41 @@ public class GraphDatabaseSettings implements SettingsDeclaration {
     public enum CypherPlanner {
         DEFAULT,
         COST
+    }
+
+    @Description(
+            "The default maximum amount of time to attempt retries of a subquery transaction that fails with a transient error "
+                    + "in a query with a `CALL () { ... } IN TRANSACTIONS ... ON ERROR RETRY ...` clause. "
+                    + "This setting is only used when no retry timeout is explicitly specified in the query."
+                    + "E.g. `CALL () { ... } IN TRANSACTIONS ... ON ERROR RETRY FOR 10 SECONDS` would override this setting "
+                    + "with a 10 second retry timeout for that particular query.")
+    public static final Setting<Duration> cypher_default_subquery_transaction_retry_timeout = newBuilder(
+                    "dbms.cypher.transactions.default_subquery_retry_timeout", DURATION, Duration.ofSeconds(30))
+            .dynamic()
+            .build();
+
+    @Description("The default batching strategy for subquery transactions "
+            + "in a query with a `CALL () { ... } IN CONCURRENT TRANSACTIONS ...` clause. "
+            + "When set to `NONE`, batches are dispatched without dependency analysis. "
+            + "When set to `AUTO`, the query planner analyzes the query and, where possible, applies "
+            + "a batch formation and scheduling strategy that attempts to prevent deadlocks between concurrent batches. "
+            + "When set to `DEFAULT`, the current product default is used "
+            + "(currently `NONE`, but may be subject to change in future versions). "
+            + "This setting is only used when no `DISJOINT BY` option is explicitly specified in the query. "
+            + "E.g. `CALL () { ... } IN CONCURRENT TRANSACTIONS ... DISJOINT BY AUTO` overrides this setting, "
+            + "applying the automatic strategy to that query.")
+    public static final Setting<CypherTransactionsBatchStrategy> cypher_default_subquery_transaction_batch_strategy =
+            newBuilder(
+                            "dbms.cypher.transactions.default_subquery_batch_strategy",
+                            ofEnum(CypherTransactionsBatchStrategy.class),
+                            CypherTransactionsBatchStrategy.DEFAULT)
+                    .dynamic()
+                    .build();
+
+    public enum CypherTransactionsBatchStrategy {
+        DEFAULT,
+        NONE,
+        AUTO
     }
 
     @Description("Set this to specify the default planner for the default language version.")
@@ -346,6 +390,38 @@ public class GraphDatabaseSettings implements SettingsDeclaration {
                     "dbms.cypher.min_replan_interval", DURATION, ofSeconds(10))
             .build();
 
+    public enum CypherVersion {
+        Cypher5("CYPHER_5"),
+        Cypher25("CYPHER_25");
+        // Note, update org.neo4j.configuration.helpers.CypherVersionClassification if an experimental version is added.
+
+        private final String versionName;
+
+        CypherVersion(String versionName) {
+            this.versionName = versionName;
+        }
+
+        @Override
+        public String toString() {
+            return versionName;
+        }
+    }
+
+    @Description("The default language of a database determines which language is used to evaluate queries "
+            + "that do not explicitly select a language. This setting determines the default language used for "
+            + "new (and initial) databases where not specified as part of CREATE or ALTER database.")
+    public static final Setting<CypherVersion> default_language = newBuilder(
+                    "db.query.default_language",
+                    ofEnum(GraphDatabaseSettings.CypherVersion.class),
+                    CypherVersion.Cypher5)
+            // Warning! Previously we had the following constraint when introducing an experimental language version.
+            // .addConstraint(valueDependency(experimentalVersions(), enable_experimental_cypher_versions))
+            //
+            // Do not re-use this, it can cause classloading deadlocks.
+            // When the next experimental version is introduced you need to move the enable_experimental_cypher_versions
+            // to this class or eliminate the potential classloading deadlock in some other way.
+            .build();
+
     @Description("Determines if Cypher will allow using file URLs when loading data using `LOAD CSV`. Setting this "
             + "value to `false` will cause Neo4j to fail `LOAD CSV` clauses that load data from the file system.")
     public static final Setting<Boolean> allow_file_urls = newBuilder(
@@ -458,8 +534,7 @@ public class GraphDatabaseSettings implements SettingsDeclaration {
         VOLUMETRIC
     }
 
-    @Description(
-            """
+    @Description("""
             Configures the general policy for when checkpoints should occur.
             Possible values are:
 
@@ -532,6 +607,22 @@ public class GraphDatabaseSettings implements SettingsDeclaration {
     public static final Setting<Integer> check_point_iops_limit =
             newBuilder("db.checkpoint.iops.limit", INT, 600).dynamic().build();
 
+    @Description("Limit the write throughput per second of the background checkpoint process. "
+            + "This setting is advisory. It is ignored in Neo4j Community Edition and is followed to "
+            + "best effort in Enterprise Edition. "
+            + "Limiting the write IO in "
+            + "this way leaves more bandwidth in the IO subsystem to service random-read IOs, "
+            + "which is important for the response time of queries when the database cannot fit "
+            + "entirely in memory. The only drawback of this setting is that longer checkpoint times "
+            + "may lead to slightly longer recovery times in case of a database or system crash. "
+            + "A lower number means lower IO pressure and, consequently, longer checkpoint times. "
+            + "Set this to null to disable the throughput limit and fallback to IOPS limit. ")
+    public static final Setting<Long> check_point_throughput_limit = newBuilder(
+                    "db.checkpoint.throughput.limit", BYTES, null)
+            .addConstraint(min((long) PageCache.PAGE_SIZE))
+            .dynamic()
+            .build();
+
     // Index sampling
     @Description("Enable or disable background index sampling")
     public static final Setting<Boolean> index_background_sampling_enabled =
@@ -556,10 +647,10 @@ public class GraphDatabaseSettings implements SettingsDeclaration {
                     + "For example, \"10 days\" will prune logical logs that only contain transactions older than 10 days."
                     + "Alternatively, \"100k txs\" will keep the 100k latest transactions from each database and prune any older transactions.")
     public static final Setting<String> keep_logical_logs = newBuilder(
-                    "db.tx_log.rotation.retention_policy", STRING, "2 days")
+                    "db.tx_log.rotation.retention_policy", STRING, "2 days 2G")
             .dynamic()
             .addConstraint(SettingConstraints.matches(
-                    "^(true|keep_all|false|keep_none|(\\d+[KkMmGg]?( (files|size|txs|entries|hours( \\d+[KkMmGg]?)?|days( \\d+[KkMmGg]?)?))))$",
+                    "^(true|keep_all|false|keep_none|backup( \\d+[KkMmGg]?)?( \\d+[KkMmGg]?)?|(\\d+[KkMmGg]?( (files|size|txs|entries|hours( \\d+[KkMmGg]?)?|days( \\d+[KkMmGg]?)?))))$",
                     "Must be `true` or `keep_all`, `false` or `keep_none`, or of format `<number><optional unit> <type> <optional space restriction>`. "
                             + "Valid units are `K`, `M` and `G`. "
                             + "Valid types are `files`, `size`, `txs`, `entries`, `hours` and `days`. "
@@ -671,25 +762,44 @@ public class GraphDatabaseSettings implements SettingsDeclaration {
                     "db.memory.pagecache.warmup.preload.allowlist", STRING, ".*")
             .build();
 
+    @Description("Order in which page cache files will be warmed up in accordance with profiles.")
+    public static final Setting<WarmupOrder> pagecache_warmup_order = newBuilder(
+                    "db.memory.pagecache.warmup.order", ofEnum(WarmupOrder.class), WarmupOrder.NONE)
+            .build();
+
+    public enum WarmupOrder {
+        // no defined order
+        NONE,
+        // alphabetic order
+        ALPHABETIC,
+        // x1 store first (if present), id files, indexes and after that all the rest in alphabetic order
+        PRIORITY,
+    }
+
     @Description(
             "Use direct I/O for page cache. "
                     + "Setting is supported only on Linux and only for a subset of record formats that use platform aligned page size.")
     public static final Setting<Boolean> pagecache_direct_io =
             newBuilder("server.memory.pagecache.directio", BOOL, false).build();
 
+    @Description("Use async I/O for page cache. "
+            + "Setting is supported only on x86 Linux and only for a subset of operations.")
+    public static final Setting<Boolean> pagecache_async_io =
+            newBuilder("server.memory.pagecache.async", BOOL, false).build();
+
     @Description("Allows the enabling or disabling of the file watcher service. "
             + "This is an auxiliary service but should be left enabled in almost all cases.")
     public static final Setting<Boolean> filewatcher_enabled =
             newBuilder("db.filewatcher.enabled", BOOL, true).build();
 
-    @Description("Relationship count threshold for considering a node to be dense.")
+    @Description(
+            "Relationship count threshold for considering a node to be dense. Not applicable for the block format.")
     public static final Setting<Integer> dense_node_threshold = newBuilder(
                     "db.relationship_grouping_threshold", INT, 50)
             .addConstraint(min(1))
             .build();
 
-    @Description(
-            """
+    @Description("""
             Log executed queries. Valid values are `OFF`, `INFO`, or `VERBOSE`.
 
             `OFF`::  no logging.
@@ -710,8 +820,7 @@ public class GraphDatabaseSettings implements SettingsDeclaration {
         VERBOSE
     }
 
-    @Description(
-            """
+    @Description("""
             Log the start and end of a transaction. Valid values are `OFF`, `INFO`, or `VERBOSE`.
 
             `OFF`::  no logging.
@@ -725,24 +834,13 @@ public class GraphDatabaseSettings implements SettingsDeclaration {
             .dynamic()
             .build();
 
-    @Deprecated(since = "5.12.0", forRemoval = true)
-    @Description(
-            """
-            Log the annotation data as a JSON strings instead of a cypher map.
-            This only have effect when the query log is in JSON format.""")
-    public static final Setting<Boolean> log_queries_annotation_data_as_json = newBuilder(
-                    "db.logs.query.annotation_data_as_json_enabled", BOOL, false)
-            .dynamic()
-            .build();
-
     public enum AnnotationDataFormat {
         CYPHER,
         JSON,
         FLAT_JSON
     }
 
-    @Description(
-            """
+    @Description("""
             The format to use for the JSON annotation data.
 
             `CYPHER`:: Formatted as a Cypher map. E.g. `{foo: 'bar', baz: {k: 1}}`.
@@ -753,21 +851,21 @@ public class GraphDatabaseSettings implements SettingsDeclaration {
     public static final Setting<AnnotationDataFormat> log_queries_annotation_data_format = newBuilder(
                     "db.logs.query.annotation_data_format",
                     ofEnum(AnnotationDataFormat.class),
-                    AnnotationDataFormat.CYPHER)
+                    AnnotationDataFormat.JSON)
             .dynamic()
             .build();
 
     @Description("Path to the logging configuration for debug, query, http and security logs.")
     public static final Setting<Path> server_logging_config_path = newBuilder(
-                    "server.logs.config", PATH, Path.of(DEFAULT_CONFIG_DIR_NAME, "server-logs.xml"))
-            .setDependency(neo4j_home)
+                    "server.logs.config", PATH, Path.of("server-logs.xml"))
+            .setDependency(configuration_directory)
             .immutable()
             .build();
 
     @Description("Path to the logging configuration of user logs.")
     public static final Setting<Path> user_logging_config_path = newBuilder(
-                    "server.logs.user.config", PATH, Path.of(DEFAULT_CONFIG_DIR_NAME, "user-logs.xml"))
-            .setDependency(neo4j_home)
+                    "server.logs.user.config", PATH, Path.of("user-logs.xml"))
+            .setDependency(configuration_directory)
             .immutable()
             .build();
 
@@ -785,6 +883,13 @@ public class GraphDatabaseSettings implements SettingsDeclaration {
     public static final Setting<Path> licenses_directory = newBuilder(
                     "server.directories.licenses", PATH, Path.of(DEFAULT_LICENSES_DIR_NAME))
             .setDependency(neo4j_home)
+            .immutable()
+            .build();
+
+    @Description("Path of the seeds directory")
+    public static final Setting<Path> seeds_path = newBuilder(
+                    "server.directories.seeds", PATH, Path.of(DEFAULT_SEEDS_DIR_NAME))
+            .setDependency(GraphDatabaseSettings.neo4j_home)
             .immutable()
             .build();
 
@@ -966,47 +1071,6 @@ public class GraphDatabaseSettings implements SettingsDeclaration {
     public static final Setting<Boolean> memory_tracking =
             newBuilder("dbms.memory.tracking.enable", BOOL, true).build();
 
-    public enum TransactionStateMemoryAllocation {
-        ON_HEAP,
-        @Deprecated(since = "5.8.0", forRemoval = true)
-        OFF_HEAP
-    }
-
-    @Deprecated(since = "5.8.0", forRemoval = true)
-    @Description("Defines whether memory for transaction state should be allocated on- or off-heap. "
-            + "Note that for small transactions you can gain up to 25% write speed by setting it to `ON_HEAP`.")
-    public static final Setting<TransactionStateMemoryAllocation> tx_state_memory_allocation = newBuilder(
-                    "db.tx_state.memory_allocation", ofEnum(TransactionStateMemoryAllocation.class), ON_HEAP)
-            .build();
-
-    @Deprecated(since = "5.8.0", forRemoval = true)
-    @Description(
-            "The maximum amount of off-heap memory that can be used to store transaction state data; it's a total amount of memory "
-                    + "shared across all active transactions. Zero means 'unlimited'. Used when db.tx_state.memory_allocation is set to 'OFF_HEAP'.")
-    public static final Setting<Long> tx_state_max_off_heap_memory = newBuilder(
-                    "server.memory.off_heap.transaction_max_size", BYTES, BYTES.parse("2G"))
-            .addConstraint(min(0L))
-            .build();
-
-    @Deprecated(forRemoval = true)
-    @Description(
-            "Defines the maximum size of an off-heap memory block that can be cached to speed up allocations. The value must be a power of 2.")
-    public static final Setting<Long> tx_state_off_heap_max_cacheable_block_size = newBuilder(
-                    "server.memory.off_heap.max_cacheable_block_size", BYTES, ByteUnit.kibiBytes(512))
-            .addConstraint(min(kibiBytes(4)))
-            .addConstraint(POWER_OF_2)
-            .build();
-
-    @Deprecated(forRemoval = true)
-    @Description(
-            "Defines the size of the off-heap memory blocks cache. The cache will contain this number of blocks for each block size "
-                    + "that is power of two. Thus, maximum amount of memory used by blocks cache can be calculated as "
-                    + "2 * server.memory.off_heap.max_cacheable_block_size * server.memory.off_heap.block_cache_size")
-    public static final Setting<Integer> tx_state_off_heap_block_cache_size = newBuilder(
-                    "server.memory.off_heap.block_cache_size", INT, 128)
-            .addConstraint(min(16))
-            .build();
-
     @Description("Enable server-side routing in clusters using an additional bolt connector.\n"
             + "When configured, this allows requests to be forwarded from one cluster member to another, if the requests cannot be "
             + "satisfied by the first member (e.g. write requests received by a non-leader).")
@@ -1019,7 +1083,8 @@ public class GraphDatabaseSettings implements SettingsDeclaration {
             .setDependency(default_listen_address)
             .build();
 
-    @Description("Sets the level for the driver's internal logging.")
+    @Description("Sets the level for the driver's internal logging.\n"
+            + "This will only log if the log level of the server is set to debug as well.")
     public static final Setting<Level> routing_driver_logging_level = newBuilder(
                     "dbms.routing.driver.logging.level", ofEnum(Level.class), Level.INFO)
             .build();
@@ -1073,10 +1138,19 @@ public class GraphDatabaseSettings implements SettingsDeclaration {
     public static final Setting<Boolean> udc_enabled =
             newBuilder("dbms.usage_report.enabled", BOOL, true).build();
 
+    @Description(
+            "The size of individual files when creating a split archive with multiple files (dump or backup). "
+                    + "The size can be specified in bytes or with a unit suffix (e.g. 5G, 100g, 1TiB). The minimum split size is 1GiB. "
+                    + "The default value is 0 and then archives will not be split into multiple files regardless of the total size.")
+    public static final Setting<Long> split_archive_part_size = newBuilder("server.split_archive.part_size", BYTES, 0L)
+            .addConstraint(any(min(gibiBytes(1)), is(0L)))
+            .build();
+
     /**
      * Default settings for connectors. The default values are assumes to be default for embedded deployments through the code.
      * This map contains default connector settings that you can pass to the builders.
      */
+    @Deprecated(forRemoval = true)
     public static final Map<Setting<?>, Object> SERVER_DEFAULTS = buildDefaults();
 
     private static Map<Setting<?>, Object> buildDefaults() {

@@ -20,11 +20,12 @@
 package org.neo4j.cypher
 
 import org.neo4j.configuration.GraphDatabaseSettings.auth_enabled
+import org.neo4j.gqlstatus.GqlStatusInfoCodes
 import org.neo4j.graphdb.config.Setting
 
 class CommunityPrivilegeAdministrationCommandAcceptanceTest extends CommunityAdministrationCommandAcceptanceTestBase {
 
-  override def databaseConfig(): Map[Setting[_], Object] =
+  override def databaseConfig(): Map[Setting[?], Object] =
     super.databaseConfig() ++ Map(auth_enabled -> java.lang.Boolean.TRUE)
 
   test("should fail on showing all privileges from community") {
@@ -41,11 +42,33 @@ class CommunityPrivilegeAdministrationCommandAcceptanceTest extends CommunityAdm
   }
 
   test("should fail on showing user privileges from community") {
+    assertFailure("SHOW USER PRIVILEGES", "Unsupported administration command: SHOW USER PRIVILEGES")
     assertFailure("SHOW USER foo PRIVILEGES", "Unsupported administration command: SHOW USER foo PRIVILEGES")
     assertFailure("SHOW USER $foo PRIVILEGES", "Unsupported administration command: SHOW USER $foo PRIVILEGES")
     assertFailure(
       "SHOW USERS $foo, bar PRIVILEGES",
       "Unsupported administration command: SHOW USERS $foo, bar PRIVILEGES"
+    )
+  }
+
+  test("should fail on showing auth rule privileges from community") {
+    assertFailureWithGQLStatus(
+      "CYPHER 25 SHOW AUTH RULE foo PRIVILEGES",
+      "Unsupported administration command: SHOW AUTH RULE foo PRIVILEGES",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. 'SHOW PRIVILEGE' is not supported in community edition."
+    )
+    assertFailureWithGQLStatus(
+      "CYPHER 25 SHOW AUTH RULES $foo PRIVILEGES",
+      "Unsupported administration command: SHOW AUTH RULES $foo PRIVILEGES",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. 'SHOW PRIVILEGE' is not supported in community edition."
+    )
+    assertFailureWithGQLStatus(
+      "CYPHER 25 SHOW AUTH RULES $foo, bar PRIVILEGES",
+      "Unsupported administration command: SHOW AUTH RULES $foo, bar PRIVILEGES",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. 'SHOW PRIVILEGE' is not supported in community edition."
     )
   }
 
@@ -77,6 +100,10 @@ class CommunityPrivilegeAdministrationCommandAcceptanceTest extends CommunityAdm
 
   test("should fail on showing user privileges as (revoke) commands from community") {
     assertFailure(
+      "SHOW USER PRIVILEGES AS COMMAND",
+      "Unsupported administration command: SHOW USER PRIVILEGES AS COMMAND"
+    )
+    assertFailure(
       "SHOW USER foo PRIVILEGES AS COMMAND",
       "Unsupported administration command: SHOW USER foo PRIVILEGES AS COMMAND"
     )
@@ -87,6 +114,36 @@ class CommunityPrivilegeAdministrationCommandAcceptanceTest extends CommunityAdm
     assertFailure(
       "SHOW USERS $foo, bar PRIVILEGES AS REVOKE COMMANDS",
       "Unsupported administration command: SHOW USERS $foo, bar PRIVILEGES AS REVOKE COMMANDS"
+    )
+  }
+
+  test("should fail on showing auth rule privileges as (revoke) commands from community") {
+    assertFailureWithGQLStatus(
+      "CYPHER 25 SHOW AUTH RULE foo PRIVILEGES AS COMMAND",
+      "Unsupported administration command: SHOW AUTH RULE foo PRIVILEGES AS COMMAND",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. 'SHOW PRIVILEGE COMMANDS' is not supported in community edition."
+    )
+    assertFailureWithGQLStatus(
+      "CYPHER 25 SHOW AUTH RULE $foo PRIVILEGES AS REVOKE COMMANDS",
+      "Unsupported administration command: SHOW AUTH RULE $foo PRIVILEGES AS REVOKE COMMANDS",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. 'SHOW PRIVILEGE COMMANDS' is not supported in community edition."
+    )
+    assertFailureWithGQLStatus(
+      "CYPHER 25 SHOW AUTH RULES $foo, bar PRIVILEGES AS REVOKE COMMANDS",
+      "Unsupported administration command: SHOW AUTH RULES $foo, bar PRIVILEGES AS REVOKE COMMANDS",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. 'SHOW PRIVILEGE COMMANDS' is not supported in community edition."
+    )
+  }
+
+  test("should fail on showing supported privileges from community") {
+    assertFailureWithGQLStatus(
+      "SHOW SUPPORTED PRIVILEGES",
+      "Unsupported administration command: SHOW SUPPORTED PRIVILEGES",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. 'SHOW SUPPORTED PRIVILEGES' is not supported in community edition."
     )
   }
 
@@ -101,7 +158,7 @@ class CommunityPrivilegeAdministrationCommandAcceptanceTest extends CommunityAdm
   privilegeTypes.foreach {
     case (privilegeType, preposition) =>
       test(s"should fail on $privilegeType graph privilege from community") {
-        val command = s"$privilegeType TRAVERSE ON GRAPH * NODES * (*) $preposition custom"
+        val command = s"$privilegeType TRAVERSE ON GRAPH * NODES * $preposition custom"
         assertFailure(command, s"Unsupported administration command: $command")
       }
 

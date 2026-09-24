@@ -25,35 +25,37 @@ import java.lang.reflect.Method;
 
 /**
  * Utility class that exposes methods from proprietary implementations of {@link OperatingSystemMXBean}.
- * Able to work on Oracle JDK and IBM JDK.
  * Methods never fail but instead return {@link #VALUE_UNAVAILABLE} if such method is not exposed by the underlying
  * MX bean.
  */
 public final class OsBeanUtil {
     public static final long VALUE_UNAVAILABLE = -1;
 
-    private static final String SUN_OS_BEAN = "com.sun.management.OperatingSystemMXBean";
-    private static final String SUN_UNIX_OS_BEAN = "com.sun.management.UnixOperatingSystemMXBean";
-    private static final String IBM_OS_BEAN = "com.ibm.lang.management.OperatingSystemMXBean";
+    private static final String OPENJDK_OS_BEAN = "com.sun.management.OperatingSystemMXBean";
+    private static final String OPENJDK_UNIX_OS_BEAN = "com.sun.management.UnixOperatingSystemMXBean";
 
     private static final OperatingSystemMXBean osBean = ManagementFactory.getOperatingSystemMXBean();
 
-    private static final Method getTotalPhysicalMemoryMethod;
-    private static final Method getFreePhysicalMemoryMethod;
+    private static final Method getTotalMemoryMethod;
+    private static final Method getFreeMemoryMethod;
     private static final Method getCommittedVirtualMemoryMethod;
     private static final Method getTotalSwapSpaceMethod;
     private static final Method getFreeSwapSpaceMethod;
     private static final Method getMaxFileDescriptorsMethod;
     private static final Method getOpenFileDescriptorsMethod;
+    private static final Method getCpuLoad;
+    private static final Method getProcessCpuLoad;
 
     static {
-        getTotalPhysicalMemoryMethod = findOsBeanMethod("getTotalPhysicalMemorySize", "getTotalPhysicalMemory");
-        getFreePhysicalMemoryMethod = findOsBeanMethod("getFreePhysicalMemorySize", "getFreePhysicalMemorySize");
-        getCommittedVirtualMemoryMethod = findOsBeanMethod("getCommittedVirtualMemorySize", null);
-        getTotalSwapSpaceMethod = findOsBeanMethod("getTotalSwapSpaceSize", "getTotalSwapSpaceSize");
-        getFreeSwapSpaceMethod = findOsBeanMethod("getFreeSwapSpaceSize", "getFreeSwapSpaceSize");
+        getTotalMemoryMethod = findOsBeanMethod("getTotalMemorySize");
+        getFreeMemoryMethod = findOsBeanMethod("getFreeMemorySize");
+        getCommittedVirtualMemoryMethod = findOsBeanMethod("getCommittedVirtualMemorySize");
+        getTotalSwapSpaceMethod = findOsBeanMethod("getTotalSwapSpaceSize");
+        getFreeSwapSpaceMethod = findOsBeanMethod("getFreeSwapSpaceSize");
         getMaxFileDescriptorsMethod = findUnixOsBeanMethod("getMaxFileDescriptorCount");
         getOpenFileDescriptorsMethod = findUnixOsBeanMethod("getOpenFileDescriptorCount");
+        getCpuLoad = findOsBeanMethod("getCpuLoad");
+        getProcessCpuLoad = findOsBeanMethod("getProcessCpuLoad");
     }
 
     private OsBeanUtil() {
@@ -61,19 +63,19 @@ public final class OsBeanUtil {
     }
 
     /**
-     * @return total amount of physical memory in bytes, or {@link #VALUE_UNAVAILABLE} if underlying bean does not
+     * @return total amount of memory in bytes, or {@link #VALUE_UNAVAILABLE} if underlying bean does not
      * provide this functionality.
      */
-    public static long getTotalPhysicalMemory() {
-        return invoke(getTotalPhysicalMemoryMethod);
+    public static long getTotalMemory() {
+        return invokeToLong(getTotalMemoryMethod);
     }
 
     /**
-     * @return amount of free physical memory in bytes, or {@link #VALUE_UNAVAILABLE} if underlying bean does not
+     * @return amount of free memory in bytes, or {@link #VALUE_UNAVAILABLE} if underlying bean does not
      * provide this functionality.
      */
-    public static long getFreePhysicalMemory() {
-        return invoke(getFreePhysicalMemoryMethod);
+    public static long getFreeMemory() {
+        return invokeToLong(getFreeMemoryMethod);
     }
 
     /**
@@ -81,7 +83,7 @@ public final class OsBeanUtil {
      * {@link #VALUE_UNAVAILABLE} if underlying bean does not provide this functionality.
      */
     public static long getCommittedVirtualMemory() {
-        return invoke(getCommittedVirtualMemoryMethod);
+        return invokeToLong(getCommittedVirtualMemoryMethod);
     }
 
     /**
@@ -89,7 +91,7 @@ public final class OsBeanUtil {
      * provide this functionality.
      */
     public static long getTotalSwapSpace() {
-        return invoke(getTotalSwapSpaceMethod);
+        return invokeToLong(getTotalSwapSpaceMethod);
     }
 
     /**
@@ -97,7 +99,7 @@ public final class OsBeanUtil {
      * provide this functionality.
      */
     public static long getFreeSwapSpace() {
-        return invoke(getFreeSwapSpaceMethod);
+        return invokeToLong(getFreeSwapSpaceMethod);
     }
 
     /**
@@ -105,7 +107,7 @@ public final class OsBeanUtil {
      * provide this functionality.
      */
     public static long getMaxFileDescriptors() {
-        return invoke(getMaxFileDescriptorsMethod);
+        return invokeToLong(getMaxFileDescriptorsMethod);
     }
 
     /**
@@ -113,24 +115,31 @@ public final class OsBeanUtil {
      * provide this functionality.
      */
     public static long getOpenFileDescriptors() {
-        return invoke(getOpenFileDescriptorsMethod);
+        return invokeToLong(getOpenFileDescriptorsMethod);
     }
 
-    private static Method findOsBeanMethod(String sunMethodName, String ibmMethodName) {
-        Method sunOsBeanMethod = findSunOsBeanMethod(sunMethodName);
-        return sunOsBeanMethod == null ? findIbmOsBeanMethod(ibmMethodName) : sunOsBeanMethod;
+    /**
+     * @return cpu load, or {@link #VALUE_UNAVAILABLE} if underlying bean does not
+     * provide this functionality.
+     */
+    public static double getCpuLoad() {
+        return invokeToDouble(getCpuLoad);
+    }
+
+    /**
+     * @return process cpu load, or {@link #VALUE_UNAVAILABLE} if underlying bean does not
+     * provide this functionality.
+     */
+    public static double getProcessCpuLoad() {
+        return invokeToDouble(getProcessCpuLoad);
     }
 
     private static Method findUnixOsBeanMethod(String methodName) {
-        return findMethod(SUN_UNIX_OS_BEAN, methodName);
+        return findMethod(OPENJDK_UNIX_OS_BEAN, methodName);
     }
 
-    private static Method findSunOsBeanMethod(String methodName) {
-        return findMethod(SUN_OS_BEAN, methodName);
-    }
-
-    private static Method findIbmOsBeanMethod(String methodName) {
-        return findMethod(IBM_OS_BEAN, methodName);
+    private static Method findOsBeanMethod(String methodName) {
+        return findMethod(OPENJDK_OS_BEAN, methodName);
     }
 
     private static Method findMethod(String className, String methodName) {
@@ -141,10 +150,19 @@ public final class OsBeanUtil {
         }
     }
 
-    private static long invoke(Method method) {
+    private static long invokeToLong(Method method) {
         try {
             Object value = (method == null) ? null : method.invoke(osBean);
             return (value == null) ? VALUE_UNAVAILABLE : ((Number) value).longValue();
+        } catch (Throwable t) {
+            return VALUE_UNAVAILABLE;
+        }
+    }
+
+    private static double invokeToDouble(Method method) {
+        try {
+            Object value = (method == null) ? null : method.invoke(osBean);
+            return (value == null) ? VALUE_UNAVAILABLE : ((Number) value).doubleValue();
         } catch (Throwable t) {
             return VALUE_UNAVAILABLE;
         }

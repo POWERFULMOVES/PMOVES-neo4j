@@ -19,8 +19,7 @@
  */
 package org.neo4j.dbms.database;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
 import static org.neo4j.io.ByteUnit.kibiBytes;
 import static org.neo4j.kernel.database.NamedDatabaseId.NAMED_SYSTEM_DATABASE_ID;
@@ -37,6 +36,7 @@ import org.neo4j.kernel.database.NamedDatabaseId;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
 
@@ -75,16 +75,17 @@ class DefaultDatabaseContextProviderIT {
         var defaultDatabaseContext = databaseContextProvider.getDatabaseContext(defaultNamedDatabaseId);
         var systemDatabaseContext = databaseContextProvider.getDatabaseContext(NAMED_SYSTEM_DATABASE_ID);
 
-        assertTrue(defaultDatabaseContext.isPresent());
-        assertTrue(systemDatabaseContext.isPresent());
+        assertThat(defaultDatabaseContext).isPresent();
+        assertThat(systemDatabaseContext).isPresent();
     }
 
     @Test
+    @SkipOnSpd(reason = "Number of default databases in spd is more than two")
     void listDatabases() {
         var databases = databaseContextProvider.registeredDatabases();
-        assertEquals(2, databases.size());
         List<NamedDatabaseId> databaseNames = new ArrayList<>(databases.keySet());
-        assertEquals(NAMED_SYSTEM_DATABASE_ID, databaseNames.get(0));
-        assertEquals(defaultNamedDatabaseId, databaseNames.get(1));
+        assertThat(databaseNames).hasSize(2);
+        assertThat(databaseNames.get(0)).isEqualTo(NAMED_SYSTEM_DATABASE_ID);
+        assertThat(databaseNames.get(1)).isEqualTo(defaultNamedDatabaseId);
     }
 }

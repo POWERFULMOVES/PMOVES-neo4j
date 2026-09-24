@@ -38,6 +38,7 @@ import static org.neo4j.values.virtual.VirtualValues.relationship;
 import org.neo4j.cypher.internal.runtime.CypherRow;
 import org.neo4j.cypher.internal.runtime.ReadableRow;
 import org.neo4j.cypher.internal.runtime.WritableRow;
+import org.neo4j.cypher.operations.CypherTypeValueMapper;
 import org.neo4j.exceptions.InternalException;
 import org.neo4j.exceptions.ParameterWrongTypeException;
 import org.neo4j.values.AnyValue;
@@ -63,7 +64,9 @@ public class SlotAccessor {
                     RelNullableRefSlot,
                     OtherNonNullRefSlot,
                     OtherNullableRefSlot -> row.getRefAt(offset);
-            default -> throw new InternalException("Unknown slot type " + slot.slotType());
+            default ->
+                throw InternalException.internalError(
+                        SlotAccessor.class.getSimpleName(), "Unknown slot type " + slot.slotType());
         };
     }
 
@@ -71,22 +74,56 @@ public class SlotAccessor {
         final var offset = slot.offset();
         switch (slot.slotType()) {
             case NodeNonNullLongSlot -> {
-                if (value instanceof VirtualNodeValue n) row.setLongAt(offset, n.id());
-                else throw wrongType("node", slot.slot(), value);
+                if (value instanceof VirtualNodeValue n) {
+                    row.setLongAt(offset, n.id());
+                } else {
+                    throw ParameterWrongTypeException.expectedEntityAtLongSlotFoundInstead(
+                            offset,
+                            "node",
+                            String.valueOf(value),
+                            value.prettyPrint(),
+                            CypherTypeValueMapper.valueType(value));
+                }
             }
             case NodeNullableLongSlot -> {
-                if (value instanceof VirtualNodeValue n) row.setLongAt(offset, n.id());
-                else if (value == NO_VALUE) row.setLongAt(offset, PRIMITIVE_NULL);
-                else throw wrongType("node", slot.slot(), value);
+                if (value instanceof VirtualNodeValue n) {
+                    row.setLongAt(offset, n.id());
+                } else if (value == NO_VALUE) {
+                    row.setLongAt(offset, PRIMITIVE_NULL);
+                } else {
+                    throw ParameterWrongTypeException.expectedEntityAtLongSlotFoundInstead(
+                            offset,
+                            "node",
+                            String.valueOf(value),
+                            value.prettyPrint(),
+                            CypherTypeValueMapper.valueType(value));
+                }
             }
             case RelNonNullLongSlot -> {
-                if (value instanceof VirtualRelationshipValue n) row.setLongAt(offset, n.id());
-                else throw wrongType("relationship", slot.slot(), value);
+                if (value instanceof VirtualRelationshipValue n) {
+                    row.setLongAt(offset, n.id());
+                } else {
+                    throw ParameterWrongTypeException.expectedEntityAtLongSlotFoundInstead(
+                            offset,
+                            "relationship",
+                            String.valueOf(value),
+                            value.prettyPrint(),
+                            CypherTypeValueMapper.valueType(value));
+                }
             }
             case RelNullableLongSlot -> {
-                if (value instanceof VirtualRelationshipValue n) row.setLongAt(offset, n.id());
-                else if (value == NO_VALUE) row.setLongAt(offset, PRIMITIVE_NULL);
-                else throw wrongType("relationship", slot.slot(), value);
+                if (value instanceof VirtualRelationshipValue n) {
+                    row.setLongAt(offset, n.id());
+                } else if (value == NO_VALUE) {
+                    row.setLongAt(offset, PRIMITIVE_NULL);
+                } else {
+                    throw ParameterWrongTypeException.expectedEntityAtLongSlotFoundInstead(
+                            offset,
+                            "relationship",
+                            String.valueOf(value),
+                            value.prettyPrint(),
+                            CypherTypeValueMapper.valueType(value));
+                }
             }
             case OtherNonNullLongSlot, OtherNullableLongSlot -> throw failedToMakeSetter(slot.slot());
             case NodeNonNullRefSlot,
@@ -95,7 +132,9 @@ public class SlotAccessor {
                     RelNullableRefSlot,
                     OtherNonNullRefSlot,
                     OtherNullableRefSlot -> row.setRefAt(offset, value);
-            default -> throw new InternalException("Unknown slot type " + slot.slotType());
+            default ->
+                throw InternalException.internalError(
+                        SlotAccessor.class.getSimpleName(), "Unknown slot type " + slot.slotType());
         }
     }
 
@@ -142,8 +181,8 @@ public class SlotAccessor {
     private static boolean isNode(CypherRow row, SlotConfiguration.KeyedSlot slot, long node) {
         return switch (slot.slotType()) {
             case NodeNonNullLongSlot, NodeNullableLongSlot -> row.getLongAt(slot.offset()) == node;
-            case NodeNonNullRefSlot, NodeNullableRefSlot -> row.getRefAt(slot.offset()) instanceof VirtualNodeValue n
-                    && n.id() == node;
+            case NodeNonNullRefSlot, NodeNullableRefSlot ->
+                row.getRefAt(slot.offset()) instanceof VirtualNodeValue n && n.id() == node;
             default -> false; // Note! The slot can contain a node here too, but this mimics previous behaviour
         };
     }
@@ -151,9 +190,8 @@ public class SlotAccessor {
     private static boolean isRel(CypherRow row, SlotConfiguration.KeyedSlot slot, long rel) {
         return switch (slot.slotType()) {
             case RelNonNullLongSlot, RelNullableLongSlot -> row.getLongAt(slot.offset()) == rel;
-            case RelNonNullRefSlot, RelNullableRefSlot -> row.getRefAt(slot.offset())
-                            instanceof VirtualRelationshipValue n
-                    && n.id() == rel;
+            case RelNonNullRefSlot, RelNullableRefSlot ->
+                row.getRefAt(slot.offset()) instanceof VirtualRelationshipValue n && n.id() == rel;
             default -> false; // Note! The slot can contain a relationship here too, but this mimics previous behaviour
         };
     }
@@ -166,16 +204,13 @@ public class SlotAccessor {
         return id == PRIMITIVE_NULL ? NO_VALUE : relationship(id);
     }
 
-    private static ParameterWrongTypeException wrongType(String expected, Slot slot, Object actual) {
-        return new ParameterWrongTypeException("Expected to find a %s at %s slot %s but found %s instead"
-                .formatted(expected, slot.isLongSlot() ? "long" : "ref", slot.offset(), actual));
-    }
-
     private static InternalException failedToMakeGetter(Slot slot) {
-        return new InternalException("Do not know how to make getter for slot " + slot);
+        return InternalException.internalError(
+                SlotAccessor.class.getSimpleName(), "Do not know how to make getter for slot " + slot);
     }
 
     private static InternalException failedToMakeSetter(Slot slot) {
-        return new InternalException("Do not know how to make setter for slot " + slot);
+        return InternalException.internalError(
+                SlotAccessor.class.getSimpleName(), "Do not know how to make setter for slot " + slot);
     }
 }

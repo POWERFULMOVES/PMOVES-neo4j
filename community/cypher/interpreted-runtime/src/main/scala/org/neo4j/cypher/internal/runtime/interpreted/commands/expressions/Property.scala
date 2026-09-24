@@ -26,36 +26,37 @@ import org.neo4j.cypher.internal.runtime.interpreted.commands.values.KeyToken
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.QueryState
 import org.neo4j.cypher.operations.CypherTypeValueMapper
 import org.neo4j.exceptions.CypherTypeException
-import org.neo4j.exceptions.InvalidArgumentException
 import org.neo4j.values.AnyValue
 import org.neo4j.values.storable.DurationValue
 import org.neo4j.values.storable.PointValue
 import org.neo4j.values.storable.TemporalValue
 import org.neo4j.values.storable.Value
 import org.neo4j.values.storable.Values
+import org.neo4j.values.virtual.NodeValue
+import org.neo4j.values.virtual.RelationshipValue
 import org.neo4j.values.virtual.VirtualNodeValue
 import org.neo4j.values.virtual.VirtualRelationshipValue
-
-import scala.util.Failure
-import scala.util.Success
-import scala.util.Try
 
 case class Property(mapExpr: Expression, propertyKey: KeyToken)
     extends Expression with Product with Serializable {
 
   def apply(row: ReadableRow, state: QueryState): AnyValue = mapExpr(row, state) match {
     case IsNoValue() => Values.NO_VALUE
+    case n: NodeValue if n.id() < 0 =>
+      n.properties().get(propertyKey.name)
     case n: VirtualNodeValue =>
       propertyKey.getOptId(state.query) match {
         case None => Values.NO_VALUE
         case Some(propId) => state.query.nodeReadOps.getProperty(
-            n.id(),
+            n,
             propId,
             state.cursors.nodeCursor,
             state.cursors.propertyCursor,
             throwOnDeleted = true
           )
       }
+    case r: RelationshipValue if r.id() < 0 =>
+      r.properties().get(propertyKey.name)
     case r: VirtualRelationshipValue =>
       propertyKey.getOptId(state.query) match {
         case None => Values.NO_VALUE
@@ -71,10 +72,8 @@ case class Property(mapExpr: Expression, propertyKey: KeyToken)
     case IsMap(mapFunc)         => mapFunc(state).get(propertyKey.name)
     case t: TemporalValue[_, _] => t.get(propertyKey.name)
     case d: DurationValue       => d.get(propertyKey.name)
-    case p: PointValue => Try(p.get(propertyKey.name)) match {
-        case Success(v) => v
-        case Failure(e) => throw new InvalidArgumentException(e.getMessage, e)
-      }
+    case p: PointValue          => p.get(propertyKey.name)
+
     case value: Value =>
       throw CypherTypeException.expectedMap(
         String.valueOf(value),

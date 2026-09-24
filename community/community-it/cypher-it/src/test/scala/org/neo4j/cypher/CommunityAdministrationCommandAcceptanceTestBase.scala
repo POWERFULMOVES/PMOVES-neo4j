@@ -21,17 +21,21 @@ package org.neo4j.cypher
 
 import org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME
 import org.neo4j.configuration.GraphDatabaseSettings.SYSTEM_DATABASE_NAME
+import org.neo4j.cypher.internal.util.test_helpers.GqlExceptionMatchers.gqlStatus
+import org.neo4j.cypher.util.DontRunOnSpdBuild
+import org.neo4j.exceptions.Neo4jException
 import org.neo4j.exceptions.NotSystemDatabaseException
+import org.neo4j.gqlstatus.GqlStatusInfoCodes
 
 abstract class CommunityAdministrationCommandAcceptanceTestBase extends ExecutionEngineFunSuite
-    with GraphDatabaseTestSupport {
+    with GraphDatabaseTestSupport with LoggingTestSupport with DontRunOnSpdBuild {
 
   val param: String = s"$$param"
   val paramName: String = "param"
 
   override protected def beforeEach(): Unit = {
     super.beforeEach()
-    selectDatabase(SYSTEM_DATABASE_NAME)
+    selectDatabase(SYSTEM_DATABASE_NAME, awaitSystemDatabase = false)
   }
 
   def assertFailure(command: String, errorMsg: String): Unit = {
@@ -42,13 +46,34 @@ abstract class CommunityAdministrationCommandAcceptanceTestBase extends Executio
     } should have message errorMsg
   }
 
+  def assertFailureWithGQLStatus(
+    command: String,
+    errorMsg: String,
+    gqlStatusCode: GqlStatusInfoCodes,
+    statusDescription: String
+  ): Unit = {
+    val gqlMatcher = gqlStatus(gqlStatusCode, statusDescription)
+    val exception = the[Neo4jException] thrownBy {
+      // WHEN
+      execute(command)
+    }
+    // THEN
+    exception should have message errorMsg
+    exception shouldBe gqlMatcher
+  }
+
   def assertFailWhenNotOnSystem(command: String, errorMsgCommand: String): Unit = {
     selectDatabase(DEFAULT_DATABASE_NAME)
-    the[NotSystemDatabaseException] thrownBy {
+    val exception = the[NotSystemDatabaseException] thrownBy {
       // WHEN
       execute(command)
       // THEN
-    } should have message
+    }
+    exception should have message
       s"This is an administration command and it should be executed against the system database: $errorMsgCommand"
+    exception.gqlStatusObject().gqlStatus() should be(GqlStatusInfoCodes.STATUS_51N28.getStatusString)
+    exception.gqlStatusObject().statusDescription() should be(
+      "error: system configuration or operation exception - not supported by this database. This Cypher command must be executed against the database `system`."
+    )
   }
 }

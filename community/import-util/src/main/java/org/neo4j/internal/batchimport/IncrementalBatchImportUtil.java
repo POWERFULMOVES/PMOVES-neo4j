@@ -23,6 +23,7 @@ import static java.lang.String.format;
 import static org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker.readOnly;
 import static org.neo4j.internal.helpers.collection.Iterators.filter;
 import static org.neo4j.internal.helpers.collection.Iterators.firstOrNull;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -45,6 +46,7 @@ import org.neo4j.batchimport.api.input.Input;
 import org.neo4j.common.TokenNameLookup;
 import org.neo4j.configuration.Config;
 import org.neo4j.internal.batchimport.cache.idmapping.IndexIdMapper;
+import org.neo4j.internal.helpers.collection.Iterators;
 import org.neo4j.internal.helpers.progress.ProgressListener;
 import org.neo4j.internal.kernel.api.InternalIndexState;
 import org.neo4j.internal.schema.IndexDescriptor;
@@ -60,6 +62,7 @@ import org.neo4j.io.locker.Locker;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.api.exceptions.index.IndexEntryConflictException;
@@ -101,18 +104,26 @@ public class IncrementalBatchImportUtil {
             DatabaseLayout toLayout,
             DatabaseFile... databaseFiles)
             throws IOException {
-        var paths = new ArrayList<Path>();
+        var paths = new ArrayList<StoreFile>();
         for (var databaseFile : databaseFiles) {
             paths.add(fromLayout.file(databaseFile));
             fromLayout.idFile(databaseFile).ifPresent(paths::add);
         }
-        copyStoreFiles(fileSystem, toLayout, paths.toArray(new Path[0]));
+        copyStoreFiles(fileSystem, toLayout, paths.toArray(new StoreFile[0]));
     }
 
-    public static void copyStoreFiles(FileSystemAbstraction fileSystem, DatabaseLayout into, Path... paths)
+    /**
+     * Copy store files from one database layout to another.
+     *
+     * @param paths a list of (absolute) paths that can be relativized using {@code from.databaseDirectory().relativize}
+     *              to obtain a valid path relative to the database directory.
+     */
+    public static void copyStoreFiles(FileSystemAbstraction fileSystem, DatabaseLayout into, StoreFile... paths)
             throws IOException {
-        for (Path path : paths) {
-            fileSystem.copyFile(path, into.file(path.getFileName().toString()));
+        for (StoreFile path : paths) {
+            for (Path segment : path.allSegments(fileSystem)) {
+                fileSystem.copyFile(segment, into.path(segment.getFileName().toString()));
+            }
         }
     }
 
@@ -189,8 +200,12 @@ public class IncrementalBatchImportUtil {
 
     private static IndexDescriptor findLikelyIndex(
             SchemaCache schemaCache, SchemaDescriptor schemaDescriptor, TokenNameLookup tokenNameLookup) {
-        IndexDescriptor descriptor =
-                firstOrNull(filter(IndexDescriptor::isUnique, schemaCache.indexesForSchema(schemaDescriptor)));
+        List<IndexDescriptor> matches = Iterators.asList(schemaCache.indexesForSchema(schemaDescriptor));
+        var descriptor = firstOrNull(filter(IndexDescriptor::isUnique, matches.iterator()));
+        if (descriptor != null) {
+            return descriptor;
+        }
+        descriptor = firstOrNull(matches.iterator());
         Preconditions.checkState(
                 descriptor != null,
                 "Couldn't find a matching index for %s",
@@ -309,7 +324,7 @@ public class IncrementalBatchImportUtil {
         for (var entry : idMapperIndexes.entrySet()) {
             var indexDescriptor = schemaCache.getIndex(entry.getValue());
             // Remove this from the schema cache so that it won't be part of detecting other affected index changes
-            schemaCache.removeSchemaRule(entry.getValue());
+            schemaCache.removeSchemaRule(indexDescriptor);
             var accessor = indexProviders
                     .lookup(indexDescriptor.getIndexProvider())
                     .getOnlineAccessor(
@@ -412,7 +427,8 @@ public class IncrementalBatchImportUtil {
                                 progress);
                         toCloseBeforePageCacheClose.add(() -> {
                             try (targetIndex) {
-                                targetIndex.force(FileFlushEvent.NULL, CursorContext.NULL_CONTEXT);
+                                targetIndex.force(
+                                        FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, CursorContext.NULL_CONTEXT);
                             }
                         });
                     } catch (IndexEntryConflictException e) {

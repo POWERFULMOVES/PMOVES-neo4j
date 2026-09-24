@@ -21,10 +21,13 @@ package org.neo4j.cypher.internal.runtime.spec.tests
 
 import org.neo4j.cypher.internal.CypherRuntime
 import org.neo4j.cypher.internal.RuntimeContext
+import org.neo4j.cypher.internal.logical.plans.Prober.Probe
 import org.neo4j.cypher.internal.runtime.spec.Edition
 import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.values.storable.Values.stringValue
+
+object SortTestBase
 
 abstract class SortTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
@@ -108,6 +111,53 @@ abstract class SortTestBase[CONTEXT <: RuntimeContext](
     } yield Array[Any](x, y)
 
     runtimeResult should beColumns("a", "b").withRows(expected)
+  }
+
+  test("should sort and limit under apply") {
+    val nodesPerLabel = 100
+    val (aNodes, bNodes) = givenGraph { bipartiteGraph(nodesPerLabel, "A", "B", "R") }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("a", "b")
+      .apply()
+      .|.limit(1)
+      .|.sort("b ASC")
+      .|.expandAll("(a)-->(b)")
+      .|.argument("a")
+      .allNodeScan("a")
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    val expected = for {
+      x <- aNodes
+      y <- bNodes.sortBy(_.getId).take(1)
+    } yield Array[Any](x, y)
+
+    runtimeResult should beColumns("a", "b").withRows(expected)
+  }
+
+  test("should sort under apply with limit") {
+    val node = givenGraph { nodeGraph(1).head }
+    val unwindSize = sizeHint
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("a")
+      .limit(1)
+      .apply()
+      .|.sort("a ASC")
+      .|.argument("a")
+      .unwind(s"range(0,$unwindSize) AS unused")
+      .allNodeScan("a")
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("a").withSingleRow(node)
   }
 
   test("should sort twice in a row") {
@@ -338,4 +388,29 @@ abstract class SortTestBase[CONTEXT <: RuntimeContext](
     probe2.seenRows.map(_.toSeq).toSeq shouldBe
       sortedRange.map(i => Seq(stringValue(s"bla$i"), stringValue(s"blö$i")))
   }
+
+  test("should not leak the seek cursor when an eager consumer aborts mid-stream") {
+    val (_, relationships) = givenGraph { circleGraph(10) }
+    val ids = relationships.map(_.getId)
+
+    val throwAfterFirstRow = new Probe {
+      private var seen = 0
+      override def onRow(row: AnyRef, state: AnyRef): Unit = {
+        seen += 1
+        // Throw only after at least one row has flowed through, so the seek cursor is
+        if (seen >= 2) throw new SortInputException
+      }
+    }
+
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("r")
+      .sort("r ASC")
+      .prober(throwAfterFirstRow)
+      .relationshipByIdSeek("(x)-[r]-(y)", Set.empty, ids: _*)
+      .build()
+
+    a[SortInputException] shouldBe thrownBy(consume(execute(logicalQuery, runtime)))
+  }
+
+  private class SortInputException extends RuntimeException("simulated failure while sort materialises its input")
 }

@@ -18,6 +18,7 @@ package org.neo4j.cypher.internal.expressions
 
 import org.neo4j.cypher.internal.expressions.ASTCachedProperty.RuntimeKey
 import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.util.Stringifier
 
 sealed trait EntityType
 
@@ -56,7 +57,7 @@ trait ASTCachedProperty extends LogicalProperty {
   /**
    * @return a textual representation of the entity and the property in the form `n.prop`
    */
-  def propertyAccessString: String = s"$entityName.${propertyKey.name}"
+  def propertyAccessString: String = s"${Stringifier.backtick(entityName)}.${Stringifier.backtick(propertyKey.name)}"
 
   /**
    * @return the runtime key to be used when using this cached property in maps or sets at runtime,
@@ -65,6 +66,11 @@ trait ASTCachedProperty extends LogicalProperty {
    */
   def runtimeKey: RuntimeKey = RuntimeKey(originalEntityName, propertyKey, entityType)(entityName)
 }
+
+/**
+ * Marker trait for variations of cached properties containing an actual property value.
+ */
+trait ASTCachedPropertyWithValue extends ASTCachedProperty
 
 object ASTCachedProperty {
 
@@ -102,7 +108,7 @@ case class CachedProperty(
   override val entityType: EntityType,
   knownToAccessStore: Boolean = false,
   failOnMissingEntity: Boolean = true
-)(val position: InputPosition) extends ASTCachedProperty {
+)(val position: InputPosition) extends ASTCachedPropertyWithValue {
   override val entityName: String = entityVariable.name
   override def originalEntityName: String = originalEntity.name
   override def asCanonicalStringVal: String = s"cache[$propertyAccessString]"

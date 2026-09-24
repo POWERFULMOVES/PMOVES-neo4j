@@ -46,19 +46,19 @@ import org.neo4j.bolt.fsm.StateMachine;
 import org.neo4j.bolt.protocol.common.BoltProtocol;
 import org.neo4j.bolt.protocol.common.connection.Job;
 import org.neo4j.bolt.protocol.common.connector.Connector;
+import org.neo4j.bolt.protocol.common.connector.config.NettyConnectorConfiguration;
 import org.neo4j.bolt.protocol.common.connector.connection.Connection;
 import org.neo4j.bolt.protocol.common.connector.connection.ConnectionHandle;
 import org.neo4j.bolt.protocol.common.connector.connection.authentication.AuthenticationFlag;
 import org.neo4j.bolt.protocol.common.connector.connection.listener.ConnectionListener;
-import org.neo4j.bolt.protocol.common.connector.netty.AbstractNettyConnector.NettyConfiguration;
-import org.neo4j.bolt.protocol.common.message.notifications.NotificationsConfig;
-import org.neo4j.bolt.protocol.common.message.request.connection.RoutingContext;
 import org.neo4j.bolt.protocol.io.pipeline.PipelineContext;
 import org.neo4j.bolt.security.Authentication;
 import org.neo4j.bolt.security.error.AuthenticationException;
 import org.neo4j.bolt.tx.Transaction;
 import org.neo4j.bolt.tx.TransactionManager;
 import org.neo4j.bolt.tx.error.TransactionException;
+import org.neo4j.boltmessages.notifications.NotificationsConfig;
+import org.neo4j.boltmessages.request.connection.RoutingContext;
 import org.neo4j.internal.kernel.api.security.LoginContext;
 import org.neo4j.kernel.impl.query.clientconnection.BoltConnectionInfo;
 import org.neo4j.memory.MemoryTracker;
@@ -220,7 +220,7 @@ public class ConnectionMockFactory extends AbstractMockFactory<ConnectionHandle,
         return captor;
     }
 
-    public ConnectionMockFactory withValueReader(PackstreamValueReader<Connection> valueReader) {
+    public ConnectionMockFactory withValueReader(PackstreamValueReader valueReader) {
         return this.withStaticValue(mock -> mock.valueReader(ArgumentMatchers.any()), valueReader);
     }
 
@@ -458,11 +458,13 @@ public class ConnectionMockFactory extends AbstractMockFactory<ConnectionHandle,
         return this.withStaticValue(Connection::closeFuture, future);
     }
 
-    public ConnectionMockFactory withConfiguration(NettyConfiguration configuration) {
+    public ConnectionMockFactory withConfiguration(NettyConnectorConfiguration configuration) {
         return this.withConnector(factory -> factory.withConfiguration(configuration));
     }
 
-    public ConnectionMockFactory withConfiguration(Consumer<ConnectorConfigurationMockFactory> configurer) {
-        return this.withConnector(factory -> factory.withConfiguration(configurer));
+    public ConnectionMockFactory withConfiguration(Consumer<TestConnectorConfiguration.Factory> configurer) {
+        var factory = TestConnectorConfiguration.factory();
+        configurer.accept(factory);
+        return this.withConfiguration(factory.build());
     }
 }

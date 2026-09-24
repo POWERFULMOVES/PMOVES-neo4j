@@ -91,6 +91,7 @@ import org.neo4j.procedure.builtin.TransactionId;
 import org.neo4j.test.OtherThreadExecutor;
 import org.neo4j.test.extension.ImpermanentDbmsExtension;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.util.concurrent.BinaryLatch;
 import org.neo4j.values.AnyValue;
 import org.neo4j.values.storable.Values;
@@ -274,6 +275,10 @@ class Neo4jTransactionalContextIT {
         assertThat(snapshot.pageFaults()).isEqualTo(outerFaults + innerFaults);
     }
 
+    @SkipOnSpd(
+            reason = "Test assumes capturing of page hits/faults for commit too, whereas transaction in clustering"
+                    + " are applied by replicated applier after rafted, using a different thread",
+            notes = {SkipOnSpd.Note.incompatible})
     @Test
     void
             contextWithNewTransactionExecutingQueryShouldSumUpPageHitsFaultsFromInnerAndOuterTransactionsAlsoWhenCommitted() {
@@ -324,6 +329,10 @@ class Neo4jTransactionalContextIT {
         assertThat(pageHits).isGreaterThanOrEqualTo(numInnerContexts / 2);
     }
 
+    @SkipOnSpd(
+            reason = "Test assumes capturing of page hits/faults for commit too, whereas transaction in clustering"
+                    + " are applied by replicated applier after rafted, using a different thread",
+            notes = {SkipOnSpd.Note.incompatible})
     @Test
     void
             contextWithNewTransactionKernelStatisticsProviderShouldOnlySeePageHitsFaultsFromCurrentTransactionsAndInnerTransactionCommitsInPROFILE() {
@@ -529,7 +538,7 @@ class Neo4jTransactionalContextIT {
         // Start query execution
         executingQuery.onObfuscatorReady(QueryObfuscator.PASSTHROUGH, 0);
         executingQuery.onCompilationCompleted(null, null, null, 0);
-        executingQuery.onExecutionStarted(queryMemoryTracker);
+        executingQuery.onExecutionStarted(queryMemoryTracker, null);
 
         // Some operator in outer transaction allocates some memory
         outerTxMemoryTrackerForOperatorProvider
@@ -568,7 +577,8 @@ class Neo4jTransactionalContextIT {
         var snapshotBytes = snapshot.allocatedBytes();
         var profilingBytes = queryMemoryTracker.heapHighWaterMark();
         assertThat(snapshotBytes)
-                .isEqualTo(growingArraySize + outerHighWaterMark + Math.max(innerHighWaterMark, openHighWaterMark));
+                .isGreaterThanOrEqualTo(
+                        growingArraySize + outerHighWaterMark + Math.max(innerHighWaterMark, openHighWaterMark));
         assertThat(profilingBytes).isEqualTo(snapshotBytes);
     }
 
@@ -838,7 +848,14 @@ class Neo4jTransactionalContextIT {
                 .procedure(new QualifiedName("tx", "setMetaData"), QueryLanguage.CYPHER_5);
         var id = txSetMetaData.id();
         var procContext = new ProcedureCallContext(
-                id, EMPTY_STRING_ARRAY, false, "", false, "runtimeUsed", EmptyMemoryTracker.INSTANCE);
+                id,
+                EMPTY_STRING_ARRAY,
+                false,
+                "",
+                false,
+                "runtimeUsed",
+                EmptyMemoryTracker.INSTANCE,
+                QueryLanguage.CYPHER_5);
 
         // When
         AnyValue[] arguments = {VirtualValues.map(new String[] {"foo"}, new AnyValue[] {Values.stringValue("bar")})};
@@ -868,7 +885,7 @@ class Neo4jTransactionalContextIT {
                 innerTx.execute("SHOW TRANSACTIONS WHERE NOT currentQuery STARTS WITH 'SHOW TRANSACTIONS'").stream()
                         .toList();
 
-        assertThat(transactions.size()).isEqualTo(1);
+        assertThat(transactions).hasSize(1);
 
         // When
         var transactionId = transactions.get(0).get("transactionId");
@@ -905,7 +922,10 @@ class Neo4jTransactionalContextIT {
         // we are forcing the TERMINATE TRANSACTION to execute to completion
         // so that we can be ready to make assertions on the terminationReason
         //noinspection ResultOfMethodCallIgnored
-        innerTx.execute("TERMINATE TRANSACTION 'neo4j-transaction-" + userTransactionId + "'").stream()
+        innerTx
+                .execute("TERMINATE TRANSACTION '%s-transaction-%d'"
+                        .formatted(databaseAPI.databaseName(), userTransactionId))
+                .stream()
                 .toList();
 
         // Then

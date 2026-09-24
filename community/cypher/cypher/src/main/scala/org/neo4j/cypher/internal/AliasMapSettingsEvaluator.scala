@@ -24,10 +24,7 @@ import org.neo4j.cypher.internal.evaluator.EvaluationException
 import org.neo4j.cypher.internal.evaluator.StaticEvaluation
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.Parameter
-import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation
-import org.neo4j.gqlstatus.GqlHelper
-import org.neo4j.gqlstatus.GqlParams
-import org.neo4j.gqlstatus.GqlStatusInfoCodes
+import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.internal.kernel.api.Procedures
 import org.neo4j.kernel.api.exceptions.InvalidArgumentsException
 import org.neo4j.logging.Level
@@ -38,7 +35,6 @@ import org.neo4j.values.storable.IntegralValue
 import org.neo4j.values.storable.StringValue
 import org.neo4j.values.storable.Value
 import org.neo4j.values.storable.Values
-import org.neo4j.values.utils.PrettyPrinter
 import org.neo4j.values.virtual.MapValue
 import org.neo4j.values.virtual.MapValueBuilder
 import org.neo4j.values.virtual.VirtualValues
@@ -48,20 +44,17 @@ import java.util.Locale
 import scala.jdk.CollectionConverters.IterableHasAsScala
 import scala.jdk.CollectionConverters.SeqHasAsJava
 
-class AliasMapSettingsEvaluator(procedures: Procedures) {
-  private val evaluator = StaticEvaluation.from(procedures)
+class AliasMapSettingsEvaluator(procedures: Procedures, cypherVersion: CypherVersion) {
+  private val evaluator = StaticEvaluation.from(procedures, cypherVersion)
 
-  type ExpressionMapOrParamValue = Either[Map[String, Expression], AnyValue]
+  private type ExpressionMapOrParamValue = Either[Map[String, Expression], AnyValue]
 
   def evaluate(expression: Expression, params: MapValue): AnyValue = {
     try {
-      evaluator.evaluate(expression, params)
+      evaluator.evaluate(expression, params, CypherRow.empty)
     } catch {
-      case e: EvaluationException =>
-        val gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N89)
-          .withParam(GqlParams.StringParam.cause, e.getMessage)
-          .build()
-        throw new InvalidArgumentsException(gql, s"Failed evaluating the given driver settings.", e)
+      case e: EvaluationException => throw InvalidArgumentsException.failedEvaluatingDriverSettings(e)
+      case e: Exception           => throw e
     }
   }
 
@@ -73,15 +66,19 @@ class AliasMapSettingsEvaluator(procedures: Procedures) {
     driverSettings.map(settings =>
       evaluateMap(params).applyOrElse(
         settings.map(param => params.get(param.name)),
-        (param: ExpressionMapOrParamValue) => {
-          val pp = new PrettyPrinter
-          param.toOption.get.writeTo(pp)
-          val gql =
-            GqlHelper.getGql22G03_22N27(pp.value, GqlParams.StringParam.cmd.process("DRIVER"), java.util.List.of("MAP"))
-          throw new InvalidArgumentsException(
-            gql,
-            s"Failed to $operation: Invalid driver settings '${param.toOption.get}'. Expected a map value."
-          )
+        (paramValue: ExpressionMapOrParamValue) => {
+          settings match {
+            case Left(_) => throw InvalidArgumentsException.invalidDriverSettingsExpectedMap(
+                operation,
+                paramValue.toOption.get
+              )
+            case Right(parameter) =>
+              throw InvalidArgumentsException.invalidDriverSettingsExpectedMap42N51(
+                operation,
+                paramValue.toOption.get,
+                parameter.name
+              )
+          }
         }
       )
     ).map(AliasMapSettingsEvaluator.convert(_, operation))
@@ -96,9 +93,14 @@ class AliasMapSettingsEvaluator(procedures: Procedures) {
       evaluateMap(params).applyOrElse(
         settings.map(param => params.get(param.name)),
         (param: ExpressionMapOrParamValue) =>
-          throw new InvalidArgumentsException(
-            s"Failed to $operation: Invalid properties '${param.toOption.get}'. Expected a map value."
-          )
+          settings match {
+            case Left(_) => throw InvalidArgumentsException.invalidPropertiesExpectedMap(operation, param.toOption.get)
+            case Right(parameter) => throw InvalidArgumentsException.invalidPropertiesExpectedMap42N51(
+                operation,
+                param.toOption.get,
+                parameter.name
+              )
+          }
       )
     )
   }
@@ -153,13 +155,12 @@ object AliasMapSettingsEvaluator {
       expectedCypherType: String,
       invalidValue: AnyValue
     ) = {
-      val pp = new PrettyPrinter
-      invalidValue.writeTo(pp)
-
-      val gql = GqlHelper.getGql22G03_22N27(pp.value, key, java.util.List.of(expectedCypherType))
-      throw new InvalidArgumentsException(
-        gql,
-        s"Failed to $operation: Invalid driver settings value for '$key'. Expected $expectedType value."
+      throw InvalidArgumentsException.invalidDriverSettingsValue(
+        operation,
+        key,
+        expectedType,
+        expectedCypherType,
+        invalidValue
       )
     }
 
@@ -167,9 +168,7 @@ object AliasMapSettingsEvaluator {
       settings.getOption(key).map {
         case duration: DurationValue =>
           if (!allowNegative && duration.compareTo(DurationValue.ZERO) < 0) {
-            throw new InvalidArgumentsException(
-              s"Failed to $operation: Invalid driver settings value for '$key'. Negative duration is not allowed."
-            )
+            throw InvalidArgumentsException.driverSettingDurationNotPositive(operation, key, duration)
           } else {
             key -> duration
           }

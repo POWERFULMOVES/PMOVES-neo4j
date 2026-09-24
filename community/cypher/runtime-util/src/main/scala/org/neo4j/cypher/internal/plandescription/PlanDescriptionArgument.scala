@@ -34,6 +34,8 @@ case class PrettyString private[plandescription] (prettifiedString: String) {
 
   def repeat(count: Int): PrettyString = PrettyString(prettifiedString.repeat(count))
   def stripMargin: PrettyString = PrettyString(prettifiedString.stripMargin)
+
+  infix def append(other: PrettyString): PrettyString = PrettyString(prettifiedString + other.prettifiedString)
 }
 
 object PrettyString {
@@ -43,7 +45,7 @@ object PrettyString {
 object Arguments {
   private val VERSION_PATTERN = "(\\d+)\\.{1}(\\d+)(?:\\.(\\d+))?.*".r
 
-  val CURRENT_VERSION: String =
+  val CURRENT_DB_VERSION: String =
     parseMajorMinorPatch(selectVersion)
 
   object Details {
@@ -104,7 +106,17 @@ object Arguments {
 
   case class EstimatedRows(effectiveCardinality: Double, cardinality: Option[Double] = None) extends Argument
 
-  case class PipelineInfo(pipelineId: Int, fused: Boolean) extends Argument
+  case class PipelineInfo(pipelineId: Int, fused: Boolean, markAsSerial: Boolean) extends Argument
+
+  case class UsedIndexes(indexes: Map[String, Int]) extends Argument {
+
+    def toSeqOfStrings: Seq[String] = indexes
+      .toSeq
+      .sorted
+      .map { case (name, count) => s"$name: $count" }
+
+    def stringify: String = toSeqOfStrings.mkString(",\n")
+  }
 
   // This is the version of cypher
   case class Version(value: String) extends Argument {
@@ -118,7 +130,7 @@ object Arguments {
   }
 
   object RuntimeVersion {
-    def currentVersion: RuntimeVersion = RuntimeVersion(CURRENT_VERSION)
+    def currentVersion: RuntimeVersion = RuntimeVersion(CURRENT_DB_VERSION)
   }
 
   case class Planner(value: String) extends Argument {
@@ -131,13 +143,25 @@ object Arguments {
     override def name = "planner-impl"
   }
 
-  case class PlannerVersion(value: String) extends Argument {
-
+  sealed trait PlannerVersionArgument extends Argument {
+    def value: String
     override def name = "planner-version"
   }
 
-  object PlannerVersion {
-    def currentVersion: PlannerVersion = PlannerVersion(CURRENT_VERSION)
+  case class PlannerVersion(value: String) extends PlannerVersionArgument
+  // TODO: when enabling the display_planner_version flag, we should get rid of this class
+  // Until then, this helps the serializer distinguish between the old and new planner version formats
+  // so that only the newer version may be printed.
+  case class CypherPlannerVersion(value: String) extends PlannerVersionArgument
+
+  object PlannerVersionArgument {
+    def currentVersion: PlannerVersionArgument = PlannerVersion(CURRENT_DB_VERSION)
+
+    def forDisplay(cypherPlannerVersion: Option[String]): PlannerVersionArgument =
+      cypherPlannerVersion match {
+        case Some(version) => CypherPlannerVersion(version) // the display_planner_version flag is enabled
+        case None          => currentVersion
+      }
   }
 
   case class Runtime(value: String) extends Argument {
@@ -182,5 +206,72 @@ object Arguments {
       case _ =>
         version
     }
+  }
+
+  /*
+   * working scope details
+   */
+  case class IncomingConstants(value: String) extends Argument {
+    override def name = "incoming constants"
+  }
+
+  case class IncomingVariables(value: String) extends Argument {
+    override def name = "incoming variables"
+  }
+
+  case class IncomingCallables(value: String) extends Argument {
+    override def name = "incoming local callable"
+  }
+
+  case class IncomingProjectionItems(value: String) extends Argument {
+    override def name = "incoming projection items"
+  }
+
+  case class IncomingTopology(value: String) extends Argument {
+    override def name = "incoming topology variables"
+  }
+
+  case class IncomingPredicate(value: String) extends Argument {
+    override def name = "incoming predicate variables"
+  }
+
+  case class IncomingPath(value: String) extends Argument {
+    override def name = "incoming path variables"
+  }
+
+  case class Referenced(value: String) extends Argument {
+    override def name = "referenced"
+  }
+
+  case class DeclaredConstants(value: String) extends Argument {
+    override def name = "declared constants"
+  }
+
+  case class DeclaredVariables(value: String) extends Argument {
+    override def name = "declared variables"
+  }
+
+  case class DeclaredCallables(value: String) extends Argument {
+    override def name = "declared local callable"
+  }
+
+  case class ResultColumns(value: String) extends Argument {
+    override def name = "result columns"
+  }
+
+  case class OutgoingConstants(value: String) extends Argument {
+    override def name = "outgoing constants"
+  }
+
+  case class OutgoingVariables(value: String) extends Argument {
+    override def name = "outgoing variables"
+  }
+
+  case class OutgoingCallables(value: String) extends Argument {
+    override def name = "outgoing local callable"
+  }
+
+  case class Comment(value: String) extends Argument {
+    override def name = "comment"
   }
 }

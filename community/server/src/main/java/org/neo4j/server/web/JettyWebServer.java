@@ -41,6 +41,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.zip.ZipInputStream;
 import javax.servlet.DispatcherType;
 import javax.servlet.Filter;
+import org.apache.commons.io.FileUtils;
 import org.eclipse.jetty.ee8.servlet.FilterHolder;
 import org.eclipse.jetty.ee8.servlet.ServletContextHandler;
 import org.eclipse.jetty.ee8.webapp.WebAppContext;
@@ -99,6 +100,9 @@ public class JettyWebServer implements WebServer, WebContainerThreadInfo {
     private final SslSocketConnectorFactory sslSocketFactory;
     private final HttpConnectorFactory connectorFactory;
     private final InternalLog log;
+    private final Config config;
+    private final InternalLogProvider logProvider;
+    private final SecureXForwardFilter secureXForwardFilter;
 
     public JettyWebServer(
             InternalLogProvider logProvider,
@@ -106,10 +110,13 @@ public class JettyWebServer implements WebServer, WebContainerThreadInfo {
             NetworkConnectionTracker connectionTracker,
             ByteBufferPool byteBufferPool) {
         this.log = logProvider.getLog(getClass());
+        this.config = config;
+        this.logProvider = logProvider;
         this.ocspStaplingEnabled = config.get(CommonConnectorConfig.ocsp_stapling_enabled);
         this.contentSecurityPolicyHeader = config.get(ServerSettings.http_static_content_security_policy);
         sslSocketFactory = new SslSocketConnectorFactory(connectionTracker, config, byteBufferPool);
         connectorFactory = new HttpConnectorFactory(connectionTracker, config, byteBufferPool);
+        this.secureXForwardFilter = new SecureXForwardFilter(config, logProvider);
     }
 
     @Override
@@ -153,6 +160,19 @@ public class JettyWebServer implements WebServer, WebContainerThreadInfo {
         startJetty();
     }
 
+    public void replaceConnector() throws Exception {
+        var jettyThreadCalculator = new JettyThreadCalculator(jettyMaxThreads);
+        var port = httpsConnector.getLocalPort();
+        var newAddress = new SocketAddress(httpsAddress.getHostname(), port);
+        var newHttpsConnector = sslSocketFactory.createConnector(jetty, sslPolicy, newAddress, jettyThreadCalculator);
+
+        httpsConnector.stop();
+        jetty.removeConnector(httpsConnector);
+        jetty.addConnector(newHttpsConnector);
+        newHttpsConnector.start();
+        httpsConnector = newHttpsConnector;
+    }
+
     private static QueuedThreadPool createQueuedThreadPool(JettyThreadCalculator jtc) {
         BlockingQueue<Runnable> queue =
                 new BlockingArrayQueue<>(jtc.getMinThreads(), jtc.getMinThreads(), jtc.getMaxCapacity());
@@ -192,6 +212,13 @@ public class JettyWebServer implements WebServer, WebContainerThreadInfo {
     @Override
     public void setSslPolicy(SslPolicy policy) {
         sslPolicy = policy;
+        if (jetty != null && jetty.isRunning()) {
+            try {
+                replaceConnector();
+            } catch (Exception e) {
+                log.warn("Unhandled exception replacing SSL policy", e);
+            }
+        }
     }
 
     @Override
@@ -205,8 +232,8 @@ public class JettyWebServer implements WebServer, WebContainerThreadInfo {
         mountPoint = ensureRelativeUri(mountPoint);
         mountPoint = trimTrailingSlashToKeepJettyHappy(mountPoint);
 
-        JaxRsServletHolderFactory factory =
-                jaxRsServletHolderFactories.computeIfAbsent(mountPoint, k -> new JaxRsServletHolderFactory());
+        JaxRsServletHolderFactory factory = jaxRsServletHolderFactories.computeIfAbsent(
+                mountPoint, k -> new JaxRsServletHolderFactory(config, logProvider, secureXForwardFilter));
         factory.addPackages(packageNames, injectables);
 
         log.debug("Adding JAXRS packages %s at [%s]", packageNames, mountPoint);
@@ -218,8 +245,8 @@ public class JettyWebServer implements WebServer, WebContainerThreadInfo {
         mountPoint = ensureRelativeUri(mountPoint);
         mountPoint = trimTrailingSlashToKeepJettyHappy(mountPoint);
 
-        JaxRsServletHolderFactory factory =
-                jaxRsServletHolderFactories.computeIfAbsent(mountPoint, k -> new JaxRsServletHolderFactory());
+        JaxRsServletHolderFactory factory = jaxRsServletHolderFactories.computeIfAbsent(
+                mountPoint, k -> new JaxRsServletHolderFactory(config, logProvider, secureXForwardFilter));
         factory.addClasses(classNames, injectables);
 
         log.debug("Adding JAXRS classes %s at [%s]", classNames, mountPoint);
@@ -272,8 +299,8 @@ public class JettyWebServer implements WebServer, WebContainerThreadInfo {
     }
 
     @Override
-    public void setRequestLog(RequestLog requestLog) {
-        this.requestLog = requestLog;
+    public void setRequestLog(WebServerRequestLog requestLog) {
+        this.requestLog = new JettyWebServerServerLogAdapter(requestLog);
     }
 
     public Server getJetty() {
@@ -362,8 +389,7 @@ public class JettyWebServer implements WebServer, WebContainerThreadInfo {
             switch (staticContent.type()) {
                 case JAR -> {
                     staticContext.setContextPath(mountPoint);
-                    var tempDir = Files.createTempDirectory("decompressed-browser");
-                    tempDir.toFile().deleteOnExit();
+                    var tempDir = createSelfDeletingOnShutdownTempDir();
                     var content = extractZip(browserPath, tempDir);
                     resource = ResourceFactory.root().newResource(content);
                 }
@@ -457,6 +483,15 @@ public class JettyWebServer implements WebServer, WebContainerThreadInfo {
         return -1;
     }
 
+    @Override
+    public String getState() {
+        if (getJetty() != null) {
+            return getJetty().getState();
+        }
+
+        return "";
+    }
+
     private static class FilterDefinition {
         private final Filter filter;
         private final String pathSpec;
@@ -512,5 +547,19 @@ public class JettyWebServer implements WebServer, WebContainerThreadInfo {
             log.warn("Unable to decompress browser archive.", e);
         }
         return null;
+    }
+
+    private Path createSelfDeletingOnShutdownTempDir() throws IOException {
+        var tempDir = Files.createTempDirectory("decompressed-browser");
+
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            try {
+                FileUtils.deleteDirectory(tempDir.toFile());
+            } catch (IOException e) {
+                log.warn("Unable to delete temporary directory for browser decompression ", e);
+            }
+        }));
+
+        return tempDir;
     }
 }

@@ -19,37 +19,38 @@
  */
 package org.neo4j.bolt.negotiation.handler;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
-import static org.neo4j.logging.LogAssertions.assertThat;
 
-import io.netty.channel.embedded.EmbeddedChannel;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
-import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
-import org.neo4j.bolt.negotiation.ProtocolVersion;
 import org.neo4j.bolt.negotiation.codec.ProtocolNegotiationRequestDecoder;
 import org.neo4j.bolt.negotiation.codec.ProtocolNegotiationResponseEncoder;
 import org.neo4j.bolt.negotiation.message.ProtocolCapability;
 import org.neo4j.bolt.negotiation.message.ProtocolNegotiationRequest;
 import org.neo4j.bolt.negotiation.message.ProtocolNegotiationResponse;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 import org.neo4j.bolt.protocol.common.handler.ProtocolLoggingHandler;
 import org.neo4j.bolt.protocol.common.handler.RequestHandler;
+import org.neo4j.bolt.testing.annotation.StrictBufferExtension;
+import org.neo4j.bolt.testing.channel.StrictBufferContext;
 import org.neo4j.bolt.testing.mock.ConnectionMockFactory;
 import org.neo4j.configuration.connectors.BoltConnectorInternalSettings.ProtocolLoggingMode;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.MemoryTracker;
 
+@StrictBufferExtension
 class LegacyProtocolHandshakeHandlerTest extends AbstractProtocolHandshakeHandlerTest {
 
     @Test
-    void shouldNegotiateProtocol() throws Exception {
+    void shouldNegotiateProtocol(StrictBufferContext ctx) {
         // Given
         var version = new ProtocolVersion(2, 0);
         var protocol = newBoltProtocol(version);
@@ -57,7 +58,7 @@ class LegacyProtocolHandshakeHandlerTest extends AbstractProtocolHandshakeHandle
 
         when(protocolRegistry.get(eq(new ProtocolVersion(2, 0)))).thenReturn(Optional.of(protocol));
 
-        var channel = new EmbeddedChannel();
+        var channel = ctx.channel();
         var connection = ConnectionMockFactory.newFactory()
                 .withConnector(factory -> factory.withProtocolRegistry(protocolRegistry))
                 .attachTo(channel, new LegacyProtocolHandshakeHandler(logProvider));
@@ -83,7 +84,7 @@ class LegacyProtocolHandshakeHandlerTest extends AbstractProtocolHandshakeHandle
     }
 
     @Test
-    void shouldChooseFirstAvailableProtocol() throws Exception {
+    void shouldChooseFirstAvailableProtocol(StrictBufferContext ctx) {
         // Given
         var version = new ProtocolVersion(3, 0);
         var protocol = newBoltProtocol(version);
@@ -91,10 +92,11 @@ class LegacyProtocolHandshakeHandlerTest extends AbstractProtocolHandshakeHandle
 
         when(protocolRegistry.get(eq(new ProtocolVersion(3, 0)))).thenReturn(Optional.of(protocol));
 
-        var channel = new EmbeddedChannel();
+        var channel = ctx.channel();
         var connection = ConnectionMockFactory.newFactory()
                 .withConnector(factory -> factory.withProtocolRegistry(protocolRegistry))
-                // Negotiation en- and decoders included at the end of the pipeline as removal will fail hard if they
+                // Negotiation en- and decoders included at the end of the pipeline as removal will fail hard if
+                // they
                 // are not present within the pipeline
                 .attachTo(
                         channel,
@@ -121,7 +123,7 @@ class LegacyProtocolHandshakeHandlerTest extends AbstractProtocolHandshakeHandle
     }
 
     @Test
-    void shouldFailOutOfRangeProtocol() {
+    void shouldFailOutOfRangeProtocol(StrictBufferContext ctx) {
         // Given
         var version = new ProtocolVersion(5, 0);
         var protocolRegistry = newProtocolFactory(version);
@@ -130,10 +132,10 @@ class LegacyProtocolHandshakeHandlerTest extends AbstractProtocolHandshakeHandle
         var scopedTracker = mock(MemoryTracker.class);
         when(memoryTracker.getScopedMemoryTracker()).thenReturn(scopedTracker);
 
-        var channel = ConnectionMockFactory.newFactory()
-                .withConnector(factory -> factory.withProtocolRegistry(protocolRegistry))
-                .withMemoryTracker(memoryTracker)
-                .createChannel(new LegacyProtocolHandshakeHandler(logProvider));
+        var channel = ctx.withConnection(
+                conn -> conn.withConnector(factory -> factory.withProtocolRegistry(protocolRegistry))
+                        .withMemoryTracker(memoryTracker),
+                new LegacyProtocolHandshakeHandler(logProvider));
 
         // When
         channel.writeInbound(new ProtocolNegotiationRequest(
@@ -154,9 +156,9 @@ class LegacyProtocolHandshakeHandlerTest extends AbstractProtocolHandshakeHandle
     }
 
     @Test
-    void shouldRejectIfWrongPreamble() {
+    void shouldRejectIfWrongPreamble(StrictBufferContext ctx) {
         // Given
-        var channel = ConnectionMockFactory.newFactory().createChannel(new LegacyProtocolHandshakeHandler(logProvider));
+        var channel = ctx.withConnection(new LegacyProtocolHandshakeHandler(logProvider));
 
         // When
         channel.writeInbound(new ProtocolNegotiationRequest(
@@ -168,19 +170,18 @@ class LegacyProtocolHandshakeHandlerTest extends AbstractProtocolHandshakeHandle
                         ProtocolVersion.INVALID)));
 
         // Then
-        var msg = channel.readOutbound();
+        var msg = ctx.output(channel.readOutbound());
 
         assertThat(msg).isNull();
         assertThat(channel.isActive()).isFalse();
     }
 
     @Test
-    void shouldFreeMemoryUponRemoval() {
+    void shouldFreeMemoryUponRemoval(StrictBufferContext ctx) {
         var memoryTracker = mock(MemoryTracker.class);
 
-        var channel = ConnectionMockFactory.newFactory()
-                .withMemoryTracker(memoryTracker)
-                .createChannel(new LegacyProtocolHandshakeHandler(logProvider));
+        var channel = ctx.withConnection(
+                conn -> conn.withMemoryTracker(memoryTracker), new LegacyProtocolHandshakeHandler(logProvider));
 
         channel.pipeline().removeFirst();
 
@@ -189,7 +190,7 @@ class LegacyProtocolHandshakeHandlerTest extends AbstractProtocolHandshakeHandle
     }
 
     @Test
-    void shouldInstallProtocolLoggingHandlers() {
+    void shouldInstallProtocolLoggingHandlers(StrictBufferContext ctx) {
         var memoryTracker = mock(MemoryTracker.class);
 
         var version = new ProtocolVersion(5, 0);
@@ -198,12 +199,13 @@ class LegacyProtocolHandshakeHandlerTest extends AbstractProtocolHandshakeHandle
 
         when(protocolRegistry.get(eq(version))).thenReturn(Optional.of(protocol));
 
-        var channel = ConnectionMockFactory.newFactory()
-                .withConnector(factory -> factory.withProtocolRegistry(protocolRegistry)
-                        .withConfiguration(config -> config.withProtocolLogging(ProtocolLoggingMode.BOTH)
-                                .withInboundBufferThrottle(512, 1024)))
-                .withMemoryTracker(memoryTracker)
-                .createChannel(new LegacyProtocolHandshakeHandler(logProvider));
+        var channel = ctx.withConnection(
+                conn -> conn.withConnector(factory -> factory.withProtocolRegistry(protocolRegistry)
+                                .withConfiguration(config -> config.enableProtocolLogging(true)
+                                        .protocolLoggingMode(ProtocolLoggingMode.BOTH)
+                                        .enableInboundBufferThrottle(512, 1024)))
+                        .withMemoryTracker(memoryTracker),
+                new LegacyProtocolHandshakeHandler(logProvider));
 
         // pre-install handlers as would be the case if the prior protocol stage had initialized the
         // pipeline
@@ -223,15 +225,18 @@ class LegacyProtocolHandshakeHandlerTest extends AbstractProtocolHandshakeHandle
 
         var handlers = channel.pipeline().names();
 
-        Assertions.assertThat(handlers)
+        assertThat(handlers)
                 .containsSubsequence("chunkFrameDecoder", ProtocolLoggingHandler.RAW_NAME)
                 .containsSubsequence("readThrottleHandler", ProtocolLoggingHandler.DECODED_NAME);
 
         Mockito.verify(memoryTracker, Mockito.never()).allocateHeap(ProtocolLoggingHandler.SHALLOW_SIZE);
+
+        // do not care about outbound data
+        channel.releaseOutbound();
     }
 
     @Test
-    void shouldInstallRawProtocolLoggingHandlers() {
+    void shouldInstallRawProtocolLoggingHandlers(StrictBufferContext ctx) {
         var memoryTracker = mock(MemoryTracker.class);
 
         var version = new ProtocolVersion(5, 0);
@@ -240,11 +245,11 @@ class LegacyProtocolHandshakeHandlerTest extends AbstractProtocolHandshakeHandle
 
         when(protocolRegistry.get(eq(version))).thenReturn(Optional.of(protocol));
 
-        var channel = ConnectionMockFactory.newFactory()
-                .withConnector(factory -> factory.withProtocolRegistry(protocolRegistry)
-                        .withConfiguration(config -> config.withProtocolLogging(ProtocolLoggingMode.RAW)))
-                .withMemoryTracker(memoryTracker)
-                .createChannel(new LegacyProtocolHandshakeHandler(logProvider));
+        var channel = ctx.withConnection(
+                conn -> conn.withConnector(factory -> factory.withProtocolRegistry(protocolRegistry)
+                                .withConfiguration(config -> config.enableProtocolLogging(ProtocolLoggingMode.RAW)))
+                        .withMemoryTracker(memoryTracker),
+                new LegacyProtocolHandshakeHandler(logProvider));
 
         // pre-install handlers as would be the case if the prior protocol stage had initialized the
         // pipeline
@@ -263,15 +268,18 @@ class LegacyProtocolHandshakeHandlerTest extends AbstractProtocolHandshakeHandle
 
         var handlers = channel.pipeline().names();
 
-        Assertions.assertThat(handlers)
+        assertThat(handlers)
                 .containsSubsequence("chunkFrameDecoder", ProtocolLoggingHandler.RAW_NAME)
                 .doesNotContain(ProtocolLoggingHandler.DECODED_NAME);
 
         Mockito.verify(memoryTracker, Mockito.never()).allocateHeap(ProtocolLoggingHandler.SHALLOW_SIZE);
+
+        // do not care about outbound data
+        channel.releaseOutbound();
     }
 
     @Test
-    void shouldInstallDecodedProtocolLoggingHandlers() {
+    void shouldInstallDecodedProtocolLoggingHandlers(StrictBufferContext ctx) {
         var memoryTracker = mock(MemoryTracker.class);
 
         var version = new ProtocolVersion(5, 0);
@@ -280,12 +288,12 @@ class LegacyProtocolHandshakeHandlerTest extends AbstractProtocolHandshakeHandle
 
         when(protocolRegistry.get(eq(version))).thenReturn(Optional.of(protocol));
 
-        var channel = ConnectionMockFactory.newFactory()
-                .withConnector(factory -> factory.withProtocolRegistry(protocolRegistry)
-                        .withConfiguration(config -> config.withProtocolLogging(ProtocolLoggingMode.DECODED)
-                                .withInboundBufferThrottle(512, 1024)))
-                .withMemoryTracker(memoryTracker)
-                .createChannel(new LegacyProtocolHandshakeHandler(logProvider));
+        var channel = ctx.withConnection(
+                conn -> conn.withConnector(factory -> factory.withProtocolRegistry(protocolRegistry)
+                                .withConfiguration(config -> config.enableProtocolLogging(ProtocolLoggingMode.DECODED)
+                                        .enableInboundBufferThrottle(512, 1024)))
+                        .withMemoryTracker(memoryTracker),
+                new LegacyProtocolHandshakeHandler(logProvider));
 
         // pre-install handlers as would be the case if the prior protocol stage had initialized the
         // pipeline
@@ -304,15 +312,18 @@ class LegacyProtocolHandshakeHandlerTest extends AbstractProtocolHandshakeHandle
 
         var handlers = channel.pipeline().names();
 
-        Assertions.assertThat(handlers)
+        assertThat(handlers)
                 .containsSubsequence("readThrottleHandler", ProtocolLoggingHandler.DECODED_NAME)
                 .doesNotContain(ProtocolLoggingHandler.RAW_NAME);
 
         Mockito.verify(memoryTracker, Mockito.never()).allocateHeap(ProtocolLoggingHandler.SHALLOW_SIZE);
+
+        // do not care about outbound data
+        channel.releaseOutbound();
     }
 
     @Test
-    void shouldSwitchToModernNegotiation() {
+    void shouldSwitchToModernNegotiation(StrictBufferContext ctx) {
         var memoryTracker = mock(MemoryTracker.class);
 
         var version = new ProtocolVersion(5, 0);
@@ -321,13 +332,12 @@ class LegacyProtocolHandshakeHandlerTest extends AbstractProtocolHandshakeHandle
 
         when(protocolRegistry.get(eq(version))).thenReturn(Optional.of(protocol));
 
-        var channel = ConnectionMockFactory.newFactory()
-                .withMemoryTracker(memoryTracker)
-                .createChannel(new LegacyProtocolHandshakeHandler(logProvider));
+        var channel = ctx.withConnection(
+                conn -> conn.withMemoryTracker(memoryTracker), new LegacyProtocolHandshakeHandler(logProvider));
 
         var handlers = channel.pipeline().names();
 
-        Assertions.assertThat(handlers).contains("LegacyProtocolHandshakeHandler#0");
+        assertThat(handlers).contains("LegacyProtocolHandshakeHandler#0");
 
         // pre-install handlers as would be the case if the prior protocol stage had initialized the
         // pipeline
@@ -345,8 +355,11 @@ class LegacyProtocolHandshakeHandlerTest extends AbstractProtocolHandshakeHandle
 
         handlers = channel.pipeline().names();
 
-        Assertions.assertThat(handlers)
+        assertThat(handlers)
                 .contains("ModernProtocolHandshakeHandler#0")
                 .doesNotContain("LegacyProtocolHandshakeHandler#0");
+
+        // don't care about the outbound data
+        channel.releaseOutbound();
     }
 }

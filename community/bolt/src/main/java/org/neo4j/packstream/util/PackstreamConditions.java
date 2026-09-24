@@ -37,7 +37,7 @@ public final class PackstreamConditions {
      */
     public static void requireLength(StructHeader header, int expected) throws IllegalStructSizeException {
         if (header.length() != expected) {
-            throw new IllegalStructSizeException(expected, header.length());
+            throw IllegalStructSizeException.illegalStructSize(expected, header.length());
         }
     }
 
@@ -60,7 +60,7 @@ public final class PackstreamConditions {
      */
     public static void requireNonNull(String fieldName, Object fieldValue) throws IllegalStructArgumentException {
         if (fieldValue == null) {
-            throw new IllegalStructArgumentException(fieldName, "Expected value to be non-null");
+            throw IllegalStructArgumentException.expectedNonNullValue(fieldName);
         }
     }
 
@@ -74,7 +74,7 @@ public final class PackstreamConditions {
     public static void requireNonNullValue(String fieldName, AnyValue fieldValue)
             throws IllegalStructArgumentException {
         if (fieldValue == Values.NO_VALUE) {
-            throw new IllegalStructArgumentException(fieldName, "Expected value to be non-null");
+            throw IllegalStructArgumentException.expectedNonNullValue(fieldName);
         }
     }
 }

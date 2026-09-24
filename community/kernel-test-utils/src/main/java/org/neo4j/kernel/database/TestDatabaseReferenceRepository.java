@@ -117,7 +117,8 @@ public final class TestDatabaseReferenceRepository {
         var normalizedTarget = new NormalizedDatabaseName(targetDatabaseName);
         var normalizedNamespace = new NormalizedDatabaseName(namespace);
         var uuid = UUID.randomUUID();
-        return new DatabaseReferenceImpl.External(normalizedTarget, normalizedAlias, normalizedNamespace, uri, uuid);
+        return new DatabaseReferenceImpl.External(
+                normalizedTarget, normalizedAlias, normalizedNamespace, uri, uuid, false);
     }
 
     public static DatabaseReferenceImpl.Composite compositeDatabaseReference(
@@ -132,12 +133,15 @@ public final class TestDatabaseReferenceRepository {
                 new NormalizedDatabaseName(SYSTEM_DATABASE_NAME), NAMED_SYSTEM_DATABASE_ID, true);
 
         private final Map<NormalizedDatabaseName, DatabaseReference> databaseReferences;
+        private final Map<NormalizedDatabaseName, DatabaseReference> databaseReferencesByDisplayName;
         private final Map<NormalizedCatalogEntry, DatabaseReference> catalogDatabaseReferences;
         private final Map<UUID, DatabaseReference> databaseReferencesByUUID;
 
         public Fixed(Collection<DatabaseReference> databaseReferences) {
             this.databaseReferences =
                     databaseReferences.stream().collect(Collectors.toMap(DatabaseReference::alias, identity()));
+            this.databaseReferencesByDisplayName =
+                    databaseReferences.stream().collect(Collectors.toMap(DatabaseReference::fullName, identity()));
             this.catalogDatabaseReferences =
                     databaseReferences.stream().collect(Collectors.toMap(DatabaseReference::catalogEntry, identity()));
             this.databaseReferencesByUUID =
@@ -147,6 +151,8 @@ public final class TestDatabaseReferenceRepository {
         public Fixed(DatabaseReference... databaseReferences) {
             this.databaseReferences =
                     Arrays.stream(databaseReferences).collect(Collectors.toMap(DatabaseReference::alias, identity()));
+            this.databaseReferencesByDisplayName = Arrays.stream(databaseReferences)
+                    .collect(Collectors.toMap(DatabaseReference::fullName, identity()));
             this.catalogDatabaseReferences = Arrays.stream(databaseReferences)
                     .collect(Collectors.toMap(DatabaseReference::catalogEntry, identity()));
             this.databaseReferencesByUUID = Arrays.stream(databaseReferences)
@@ -168,6 +174,11 @@ public final class TestDatabaseReferenceRepository {
         }
 
         @Override
+        public Optional<DatabaseReference> getByDisplayName(NormalizedDatabaseName displayName) {
+            return Optional.ofNullable(databaseReferencesByDisplayName.get(displayName));
+        }
+
+        @Override
         public Optional<DatabaseReference> getByUuid(UUID databaseId) {
             if (Objects.equals(SYSTEM_DATABASE_REFERENCE.id(), databaseId)) {
                 return Optional.of(SYSTEM_DATABASE_REFERENCE);
@@ -178,16 +189,6 @@ public final class TestDatabaseReferenceRepository {
         @Override
         public Set<DatabaseReference> getAllDatabaseReferences() {
             return Set.copyOf(databaseReferences.values());
-        }
-
-        @Override
-        public Set<DatabaseReferenceImpl.Internal> getInternalDatabaseReferences() {
-            return getDatabaseReferences(DatabaseReferenceImpl.Internal.class);
-        }
-
-        @Override
-        public Set<DatabaseReferenceImpl.External> getExternalDatabaseReferences() {
-            return getDatabaseReferences(DatabaseReferenceImpl.External.class);
         }
 
         @Override

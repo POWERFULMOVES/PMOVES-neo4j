@@ -20,11 +20,8 @@
 package org.neo4j.procedure.impl;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Fail.fail;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
@@ -47,6 +44,8 @@ import org.neo4j.common.DependencyResolver;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.exceptions.KernelException;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.graphdb.GraphDatabaseService;
 import org.neo4j.internal.kernel.api.exceptions.ProcedureException;
 import org.neo4j.internal.kernel.api.procs.Neo4jTypes;
@@ -69,8 +68,7 @@ import org.neo4j.values.storable.LongValue;
 import org.neo4j.values.virtual.MapValue;
 import org.neo4j.values.virtual.VirtualValues;
 
-@SuppressWarnings({"WeakerAccess", "unused"})
-public class UserAggregationFunctionTest {
+class UserAggregationFunctionTest {
     private ProcedureCompiler procedureCompiler;
     private ComponentRegistry components;
     private final DependencyResolver dependencyResolver = new Dependencies();
@@ -89,7 +87,7 @@ public class UserAggregationFunctionTest {
         List<CallableUserAggregationFunction> function = compile(SingleAggregationFunction.class);
 
         // Then
-        assertEquals(1, function.size());
+        assertThat(function).hasSize(1);
         assertThat(function.get(0).signature())
                 .isEqualTo(functionSignature(new QualifiedName("org", "neo4j", "procedure", "impl", "collectCool"))
                         .in("name", Neo4jTypes.NTString)
@@ -146,7 +144,7 @@ public class UserAggregationFunctionTest {
         List<CallableUserAggregationFunction> functions = compile(PrivateConstructorButNoFunctions.class);
 
         // Then
-        assertEquals(0, functions.size());
+        assertThat(functions).isEmpty();
     }
 
     @Test
@@ -175,109 +173,107 @@ public class UserAggregationFunctionTest {
 
     @Test
     void shouldGiveHelpfulErrorOnConstructorThatRequiresArgument() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> compile(WeirdConstructorFunction.class));
-        assertThat(exception.getMessage())
-                .isEqualTo(
+        assertThatThrownBy(() -> compile(WeirdConstructorFunction.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(
                         "Unable to find a usable public no-argument constructor in the class `WeirdConstructorFunction`. Please add a "
                                 + "valid, public constructor, recompile the class and try again.");
     }
 
     @Test
     void shouldGiveHelpfulErrorOnNoPublicConstructor() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> compile(PrivateConstructorFunction.class));
-        assertThat(exception.getMessage())
-                .isEqualTo(
+        assertThatThrownBy(() -> compile(PrivateConstructorFunction.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(
                         "Unable to find a usable public no-argument constructor in the class `PrivateConstructorFunction`. Please add "
                                 + "a valid, public constructor, recompile the class and try again.");
     }
 
     @Test
     void shouldNotAllowVoidOutput() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> compile(FunctionWithVoidOutput.class));
-        assertThat(exception.getMessage()).startsWith("Don't know how to map `void` to the Neo4j Type System.");
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> compile(FunctionWithVoidOutput.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessageStartingWith("Don't know how to map `void` to the Neo4j Type System.")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22NB8)
+                .hasStatusDescription(
+                        "error: data exception - invalid Neo4j type. 'void' is not a recognized Neo4j type.");
     }
 
     @Test
     void shouldNotAllowNonVoidUpdate() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> compile(FunctionWithNonVoidUpdate.class));
-        assertThat(exception.getMessage())
-                .isEqualTo("Update method 'update' in VoidOutput has type 'long' but must have return type 'void'.");
+        assertThatThrownBy(() -> compile(FunctionWithNonVoidUpdate.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage("Update method 'update' in VoidOutput has type 'long' but must have return type 'void'.");
     }
 
     @Test
     void shouldNotAllowMissingAnnotations() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> compile(FunctionWithMissingAnnotations.class));
-        assertThat(exception.getMessage())
-                .isEqualTo(
+        assertThatThrownBy(() -> compile(FunctionWithMissingAnnotations.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(
                         "Class 'MissingAggregator' must contain methods annotated with both '@UserAggregationResult' as well as '@UserAggregationUpdate'.");
     }
 
     @Test
     void shouldNotAllowMultipleUpdateAnnotations() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> compile(FunctionWithDuplicateUpdateAnnotations.class));
-        assertThat(exception.getMessage())
-                .isEqualTo(
+        assertThatThrownBy(() -> compile(FunctionWithDuplicateUpdateAnnotations.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(
                         "Class 'MissingAggregator' contains multiple methods annotated with '@UserAggregationUpdate'.");
     }
 
     @Test
     void shouldNotAllowMultipleResultAnnotations() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> compile(FunctionWithDuplicateResultAnnotations.class));
-        assertThat(exception.getMessage())
-                .isEqualTo(
+        assertThatThrownBy(() -> compile(FunctionWithDuplicateResultAnnotations.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(
                         "Class 'MissingAggregator' contains multiple methods annotated with '@UserAggregationResult'.");
     }
 
     @Test
     void shouldNotAllowNonPublicMethod() {
-        ProcedureException exception = assertThrows(ProcedureException.class, () -> compile(NonPublicTestMethod.class));
-        assertThat(exception.getMessage())
-                .isEqualTo("Aggregation method 'test' in NonPublicTestMethod must be public.");
+        assertThatThrownBy(() -> compile(NonPublicTestMethod.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage("Aggregation method 'test' in NonPublicTestMethod must be public.");
     }
 
     @Test
     void shouldNotAllowNonPublicUpdateMethod() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> compile(NonPublicUpdateMethod.class));
-        assertThat(exception.getMessage())
-                .isEqualTo("Aggregation update method 'update' in InnerAggregator must be public.");
+        assertThatThrownBy(() -> compile(NonPublicUpdateMethod.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage("Aggregation update method 'update' in InnerAggregator must be public.");
     }
 
     @Test
     void shouldNotAllowNonPublicResultMethod() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> compile(NonPublicResultMethod.class));
-        assertThat(exception.getMessage())
-                .isEqualTo("Aggregation result method 'result' in InnerAggregator must be public.");
+        assertThatThrownBy(() -> compile(NonPublicResultMethod.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage("Aggregation result method 'result' in InnerAggregator must be public.");
     }
 
     @Test
     void shouldGiveHelpfulErrorOnFunctionReturningInvalidType() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> compile(FunctionWithInvalidOutput.class));
-        assertThat(exception.getMessage())
-                .isEqualTo(String.format("Don't know how to map `char[]` to the Neo4j Type System.%n"
-                        + "Please refer to to the documentation for full details.%n"
-                        + "For your reference, known types are: [boolean, byte[], double, java.lang.Boolean, "
-                        + "java.lang.Double, java.lang.Long, java.lang.Number, java.lang.Object, "
-                        + "java.lang.String, java.time.LocalDate, java.time.LocalDateTime, "
-                        + "java.time.LocalTime, java.time.OffsetTime, java.time.ZonedDateTime, "
-                        + "java.time.temporal.TemporalAmount, java.util.List, java.util.Map, long]"));
+        String expectedMsg = String.format("Don't know how to map `char[]` to the Neo4j Type System.%n"
+                + "Please refer to to the documentation for full details.%n"
+                + "For your reference, known types are: [boolean, byte[], double, java.lang.Boolean, "
+                + "java.lang.Double, java.lang.Long, java.lang.Number, java.lang.Object, "
+                + "java.lang.String, java.time.LocalDate, java.time.LocalDateTime, "
+                + "java.time.LocalTime, java.time.OffsetTime, java.time.ZonedDateTime, "
+                + "java.time.temporal.TemporalAmount, java.util.List, java.util.Map, java.util.UUID, long]");
+
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> compile(FunctionWithInvalidOutput.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(expectedMsg)
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22NB8)
+                .hasStatusDescription(
+                        "error: data exception - invalid Neo4j type. 'char[]' is not a recognized Neo4j type.");
     }
 
     @Test
     void shouldGiveHelpfulErrorOnContextAnnotatedStaticField() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> compile(FunctionWithStaticContextAnnotatedField.class));
-        assertThat(exception.getMessage())
-                .isEqualTo(String.format(
+        assertThatThrownBy(() -> compile(FunctionWithStaticContextAnnotatedField.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(String.format(
                         "The field `gdb` in the class named `FunctionWithStaticContextAnnotatedField` is annotated as a @Context field,%n"
                                 + "but it is static. @Context fields must be public, non-final and non-static,%n"
                                 + "because they are reset each time a procedure is invoked."));
@@ -290,17 +286,7 @@ public class UserAggregationFunctionTest {
                 compile(FunctionWithOverriddenName.class).get(0);
 
         // Then
-        assertEquals(
-                "org.mystuff.thisisActuallyTheName", method.signature().name().toString());
-    }
-
-    @Test
-    void shouldNotAllowOverridingFunctionNameWithoutNamespace() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> compile(FunctionWithSingleName.class));
-        assertThat(exception.getMessage())
-                .isEqualTo("It is not allowed to define functions in the root namespace. Please define a "
-                        + "namespace, e.g. `@UserFunction(\"org.example.com.singleName\")");
+        assertThat(method.signature().name()).hasToString("org.mystuff.thisisActuallyTheName");
     }
 
     @Test
@@ -309,11 +295,10 @@ public class UserAggregationFunctionTest {
         CallableUserAggregationFunction method =
                 compile(FunctionThatThrowsNullMsgExceptionAtInvocation.class).get(0);
 
-        ProcedureException exception = assertThrows(
-                ProcedureException.class,
-                () -> method.createReducer(prepareContext()).newUpdater().update(new AnyValue[] {}));
-        assertThat(exception.getMessage())
-                .isEqualTo(
+        assertThatThrownBy(() ->
+                        method.createReducer(prepareContext()).newUpdater().update(new AnyValue[] {}))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(
                         "Failed to invoke function `org.neo4j.procedure.impl.test`: Caused by: java.lang.IndexOutOfBoundsException");
     }
 
@@ -353,7 +338,7 @@ public class UserAggregationFunctionTest {
         verify(log)
                 .warn(
                         "The function 'org.neo4j.procedure.impl.collectCool' is not on the allowlist and won't be loaded.");
-        assertThat(method.size()).isEqualTo(0);
+        assertThat(method).hasSize(0);
     }
 
     @Test
@@ -371,7 +356,7 @@ public class UserAggregationFunctionTest {
         verify(log)
                 .warn(
                         "The function 'org.neo4j.procedure.impl.collectCool' is not on the allowlist and won't be loaded.");
-        assertThat(method.size()).isEqualTo(0);
+        assertThat(method).hasSize(0);
     }
 
     @Test
@@ -394,10 +379,15 @@ public class UserAggregationFunctionTest {
             String name = func.signature().name().name();
             func.createReducer(prepareContext());
             switch (name) {
-                case "newFunc" -> assertFalse(func.signature().deprecated().isPresent(), "Should not be deprecated");
+                case "newFunc" ->
+                    assertThat(func.signature().deprecated().isPresent())
+                            .as("Should not be deprecated")
+                            .isFalse();
                 case "oldFunc", "badFunc" -> {
-                    assertTrue(func.signature().deprecated().isPresent(), "Should be deprecated");
-                    assertThat(func.signature().deprecated().get()).isEqualTo("newFunc");
+                    assertThat(func.signature().deprecated().isPresent())
+                            .as("Should be deprecated")
+                            .isTrue();
+                    assertThat(func.signature().deprecated()).contains("newFunc");
                 }
                 default -> fail("Unexpected function: " + name);
             }

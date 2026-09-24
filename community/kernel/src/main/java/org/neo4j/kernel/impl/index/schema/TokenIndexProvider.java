@@ -23,16 +23,16 @@ import static org.apache.commons.lang3.StringUtils.defaultIfEmpty;
 
 import java.io.IOException;
 import java.nio.file.OpenOption;
-import java.nio.file.Path;
 import org.apache.commons.lang3.StringUtils;
 import org.eclipse.collections.api.set.ImmutableSet;
 import org.neo4j.common.EntityType;
 import org.neo4j.common.TokenNameLookup;
+import org.neo4j.exceptions.InvalidArgumentException;
+import org.neo4j.graphdb.WriteOperationsNotAllowedException;
 import org.neo4j.index.internal.gbptree.MetadataMismatchException;
 import org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector;
 import org.neo4j.internal.kernel.api.InternalIndexState;
 import org.neo4j.internal.schema.AllIndexProviderDescriptors;
-import org.neo4j.internal.schema.AnyTokenSchemaDescriptor;
 import org.neo4j.internal.schema.IndexCapability;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexPrototype;
@@ -45,8 +45,10 @@ import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.memory.ByteBufferFactory;
 import org.neo4j.io.pagecache.PageCache;
+import org.neo4j.io.pagecache.PageCacheOpenOptions;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.api.index.IndexAccessor;
@@ -64,6 +66,7 @@ import org.neo4j.values.ElementIdMapper;
 import org.neo4j.values.storable.ValueCategory;
 
 public class TokenIndexProvider extends IndexProvider {
+    private static final String TOKEN_MIGRATOR_PREFIX = "token";
     private final DatabaseIndexContext databaseIndexContext;
     private final RecoveryCleanupWorkCollector recoveryCleanupWorkCollector;
     private final Monitor monitor;
@@ -100,13 +103,31 @@ public class TokenIndexProvider extends IndexProvider {
             TokenNameLookup tokenNameLookup,
             ElementIdMapper elementIdMapper,
             ImmutableSet<OpenOption> openOptions,
-            StorageEngineIndexingBehaviour indexingBehaviour) {
+            StorageEngineIndexingBehaviour indexingBehaviour,
+            IndexPopulator.Configuration configuration) {
         if (databaseIndexContext.readOnlyChecker.isReadOnly()) {
-            throw new UnsupportedOperationException("Can't create populator for read only index");
+            throw WriteOperationsNotAllowedException.noWriteOperationAllowed();
         }
 
-        return new WorkSyncedIndexPopulator(new TokenIndexPopulator(
-                databaseIndexContext, indexFiles(descriptor), descriptor, openOptions, indexingBehaviour));
+        return new WorkSyncedIndexPopulator(createPopulator(descriptor, openOptions, indexingBehaviour, memoryTracker));
+    }
+
+    private IndexPopulator createPopulator(
+            IndexDescriptor descriptor,
+            ImmutableSet<OpenOption> openOptions,
+            StorageEngineIndexingBehaviour indexingBehaviour,
+            MemoryTracker memoryTracker) {
+        if (openOptions.contains(PageCacheOpenOptions.MULTI_VERSIONED)) {
+            return new MultiVersionTokenIndexPopulator(
+                    databaseIndexContext,
+                    indexFiles(descriptor),
+                    descriptor,
+                    openOptions,
+                    indexingBehaviour,
+                    memoryTracker);
+        }
+        return new TokenIndexPopulator(
+                databaseIndexContext, indexFiles(descriptor), descriptor, openOptions, indexingBehaviour);
     }
 
     @Override
@@ -168,7 +189,7 @@ public class TokenIndexProvider extends IndexProvider {
             StorageEngineFactory storageEngineFactory,
             CursorContextFactory contextFactory) {
         return new TokenIndexMigrator(
-                "Token indexes",
+                TOKEN_MIGRATOR_PREFIX,
                 fs,
                 pageCache,
                 pageCacheTracer,
@@ -192,22 +213,35 @@ public class TokenIndexProvider extends IndexProvider {
     @Override
     public IndexPrototype validatePrototype(IndexPrototype prototype) {
         IndexType indexType = prototype.getIndexType();
+        String providerName = getProviderDescriptor().name();
         if (indexType != IndexType.LOOKUP) {
-            throw new IllegalArgumentException("The '" + getProviderDescriptor().name()
-                    + "' index provider does not support " + indexType + " indexes: " + prototype);
+            throw InvalidArgumentException.invalidIndexInput(
+                    providerName,
+                    indexType.name(),
+                    "The '" + providerName + "' index provider does not support " + indexType + " indexes: "
+                            + prototype);
         }
-        if (!prototype.schema().isSchemaDescriptorType(AnyTokenSchemaDescriptor.class)) {
-            throw new IllegalArgumentException("The " + prototype.schema()
-                    + " index schema is not an any-token index schema, which it is required to be for the '"
-                    + getProviderDescriptor().name() + "' index provider to be able to create an index.");
+        if (!prototype.schema().isAnyTokenSchemaDescriptor()) {
+            throw InvalidArgumentException.invalidIndexInput(
+                    providerName,
+                    indexType.name(),
+                    "The " + prototype.schema()
+                            + " index schema is not an any-token index schema, which it is required to be for the '"
+                            + getProviderDescriptor().name() + "' index provider to be able to create an index.");
         }
         if (!prototype.getIndexProvider().equals(AllIndexProviderDescriptors.TOKEN_DESCRIPTOR)) {
-            throw new IllegalArgumentException("The '" + getProviderDescriptor().name()
-                    + "' index provider does not support " + prototype.getIndexProvider() + " indexes: " + prototype);
+            throw InvalidArgumentException.invalidIndexInput(
+                    providerName,
+                    indexType.name(),
+                    "The " + prototype.schema()
+                            + " index schema is not an any-token index schema, which it is required to be for the '"
+                            + getProviderDescriptor().name() + "' index provider to be able to create an index.");
         }
         if (prototype.isUnique()) {
-            throw new IllegalArgumentException("The '" + getProviderDescriptor().name()
-                    + "' index provider does not support uniqueness indexes: " + prototype);
+            throw InvalidArgumentException.invalidIndexInput(
+                    providerName,
+                    indexType.name(),
+                    "The '" + providerName + "' index provider does not support uniqueness indexes: " + prototype);
         }
         return prototype;
     }
@@ -217,7 +251,7 @@ public class TokenIndexProvider extends IndexProvider {
         return IndexType.LOOKUP;
     }
 
-    private Path storeFile(SchemaRule schemaRule) {
+    private StoreFile storeFile(SchemaRule schemaRule) {
         IndexFiles indexFiles = indexFiles(schemaRule);
         return indexFiles.getStoreFile();
     }
@@ -235,18 +269,7 @@ public class TokenIndexProvider extends IndexProvider {
         return new TokenIndexCapability(supportsOrder);
     }
 
-    private static class TokenIndexCapability implements IndexCapability {
-        private final boolean supportsOrdering;
-
-        private TokenIndexCapability(boolean supportsOrdering) {
-            this.supportsOrdering = supportsOrdering;
-        }
-
-        @Override
-        public boolean supportsOrdering() {
-            return supportsOrdering;
-        }
-
+    private record TokenIndexCapability(boolean supportsOrdering) implements IndexCapability {
         @Override
         public boolean supportsReturningValues() {
             return true;

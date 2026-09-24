@@ -35,6 +35,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.stream.Collectors;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.SystemUtils;
@@ -50,6 +51,8 @@ import org.neo4j.server.NeoBootstrapper;
 
 abstract class BootloaderOsAbstraction {
     static final long UNKNOWN_PID = Long.MAX_VALUE;
+    private static final int TEST_VERSION = Integer.getInteger("test.temp.vm.version", 21);
+    private static final String MEMORY_ACCESS_OPTION = "--sun-misc-unsafe-memory-access";
 
     protected final Bootloader bootloader;
 
@@ -57,7 +60,7 @@ abstract class BootloaderOsAbstraction {
         this.bootloader = bootloader;
     }
 
-    abstract Optional<Long> getPidIfRunning();
+    abstract OptionalLong getPidIfRunning();
 
     abstract boolean isRunning(long pid);
 
@@ -75,7 +78,8 @@ abstract class BootloaderOsAbstraction {
                 case NeoBootstrapper.INVALID_CONFIGURATION_ERROR_CODE -> "Configuration is invalid.";
                 case NeoBootstrapper.LICENSE_NOT_ACCEPTED_ERROR_CODE -> "License agreement has not been accepted.";
                 default -> "Unexpected Neo4j server failure.";
-            } + " See log for more info.";
+            }
+            + " See log for more info.";
 
     static class ConsoleProcess implements ProcessStages {
         private final boolean installShutdownHooksForParentProcess;
@@ -174,7 +178,7 @@ abstract class BootloaderOsAbstraction {
 
     private void checkJavaVersion() {
         int version = bootloader.environment.version().feature();
-        if (version != 17 && version != 21) {
+        if (version != 21 && version != 25 && version != TEST_VERSION) {
             // too new java
             printBadRuntime();
         } else {
@@ -227,6 +231,15 @@ abstract class BootloaderOsAbstraction {
                     config.get(GraphDatabaseSettings.logs_directory).resolve("gc.log"),
                     config.get(BootloaderSettings.gc_logging_rotation_keep_number),
                     bytesToSuitableJvmString(config.get(BootloaderSettings.gc_logging_rotation_size))));
+        }
+        if (bootloader.environment.version().feature() >= 25) {
+            if (opts.stream()
+                    .filter(option -> option.startsWith(MEMORY_ACCESS_OPTION))
+                    .findAny()
+                    .isEmpty()) {
+                // if there is no explicitly configured unsafe memory option we allow it by default
+                opts.with(MEMORY_ACCESS_OPTION + "=allow");
+            }
         }
         opts.with("-Dfile.encoding=UTF-8");
         selectHeapSettings(opts);

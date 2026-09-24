@@ -59,7 +59,8 @@ public class CommunityCypherEngineProvider extends QueryEngineProvider {
             CypherParsingConfig parsingConfig,
             CypherPlannerConfiguration plannerConfig,
             CypherRuntimeConfiguration runtimeConfig,
-            CypherQueryCaches queryCaches) {
+            CypherQueryCaches queryCaches,
+            GraphDatabaseAPI graphDatabaseAPI) {
         return new CommunityCompilerFactory(
                 queryService,
                 spi.monitors(),
@@ -75,18 +76,18 @@ public class CommunityCypherEngineProvider extends QueryEngineProvider {
     }
 
     protected ObservableSetting<Integer> getCacheSize(SPI spi) {
-        return new ObservableSetting<>(spi.config(), GraphDatabaseSettings.query_cache_size);
+        return new ObservableSetting<>(spi.databaseConfig(), GraphDatabaseSettings.query_cache_size);
     }
 
     @Override
     protected QueryExecutionEngine createEngine(
-            Dependencies deps, GraphDatabaseAPI graphAPI, boolean isSystemDatabase, SPI spi) {
+            Dependencies deps, GraphDatabaseAPI graphAPI, boolean isSystemDatabase, SPI spi, boolean multiVersion) {
         GraphDatabaseCypherService queryService = deps.satisfyDependency(new GraphDatabaseCypherService(graphAPI));
         deps.satisfyDependency(Neo4jTransactionalContextFactory.create(queryService));
-        CypherConfiguration cypherConfig = CypherConfiguration.fromConfig(spi.config());
+        CypherConfiguration cypherConfig = CypherConfiguration.fromConfig(spi.databaseConfig());
         CypherParsingConfig parsingConfig = CypherParsingConfig.fromCypherConfiguration(cypherConfig);
-        CypherPlannerConfiguration plannerConfig =
-                CypherPlannerConfiguration.fromCypherConfiguration(cypherConfig, spi.config(), isSystemDatabase, false);
+        CypherPlannerConfiguration plannerConfig = CypherPlannerConfiguration.fromCypherConfiguration(
+                cypherConfig, spi.databaseConfig(), isSystemDatabase, false);
         CypherRuntimeConfiguration runtimeConfig = CypherRuntimeConfiguration.fromCypherConfiguration(cypherConfig);
         CacheFactory cacheFactory = getCacheFactory(deps, spi);
         Clock clock = Clock.systemUTC();
@@ -95,16 +96,16 @@ public class CommunityCypherEngineProvider extends QueryEngineProvider {
 
         CypherQueryCaches queryCaches =
                 makeCypherQueryCaches(spi, queryService, cypherConfig, cacheSize, cacheFactory, clock);
-        CompilerFactory compilerFactory =
-                makeCompilerFactory(queryService, spi, parsingConfig, plannerConfig, runtimeConfig, queryCaches);
+        CompilerFactory compilerFactory = makeCompilerFactory(
+                queryService, spi, parsingConfig, plannerConfig, runtimeConfig, queryCaches, graphAPI);
         QueryCacheStatistics cacheStatistics = queryCaches.statistics();
         if (!isSystemDatabase) {
             deps.satisfyDependency(cacheStatistics);
         }
 
         if (isSystemDatabase) {
-            CypherPlannerConfiguration innerPlannerConfig =
-                    CypherPlannerConfiguration.fromCypherConfiguration(cypherConfig, spi.config(), false, false);
+            CypherPlannerConfiguration innerPlannerConfig = CypherPlannerConfiguration.fromCypherConfiguration(
+                    cypherConfig, spi.databaseConfig(), false, false);
             CypherQueryCaches innerQueryCaches =
                     makeCypherQueryCaches(spi, queryService, cypherConfig, cacheSize, cacheFactory, clock);
             QueryCacheStatistics innerCacheStatistics = innerQueryCaches.statistics();
@@ -112,7 +113,7 @@ public class CommunityCypherEngineProvider extends QueryEngineProvider {
                     new CombinedQueryCacheStatistics(cacheStatistics, innerCacheStatistics);
             deps.satisfyDependency(combinedCacheStatistics);
             CompilerFactory innerCompilerFactory = makeCompilerFactory(
-                    queryService, spi, parsingConfig, innerPlannerConfig, runtimeConfig, innerQueryCaches);
+                    queryService, spi, parsingConfig, innerPlannerConfig, runtimeConfig, innerQueryCaches, graphAPI);
             return new SystemExecutionEngine(
                     queryService,
                     spi.logProvider(),
@@ -121,13 +122,14 @@ public class CommunityCypherEngineProvider extends QueryEngineProvider {
                     innerQueryCaches,
                     innerCompilerFactory);
         }
-        if (spi.config().get(GraphDatabaseInternalSettings.snapshot_query)) {
+        if (spi.databaseConfig().get(GraphDatabaseInternalSettings.snapshot_query)) {
             return new SnapshotExecutionEngine(
-                    queryService, spi.config(), queryCaches, spi.logProvider(), compilerFactory);
+                    queryService, spi.databaseConfig(), queryCaches, spi.logProvider(), compilerFactory);
         }
-        if ("multiversion".equals(spi.config().get(GraphDatabaseSettings.db_format))) {
+
+        if (multiVersion) {
             return new MultiVersionExecutionEngine(
-                    queryService, spi.config(), queryCaches, spi.logProvider(), compilerFactory);
+                    queryService, spi.databaseConfig(), queryCaches, spi.logProvider(), compilerFactory);
         }
         return new ExecutionEngine(queryService, queryCaches, spi.logProvider(), compilerFactory);
     }

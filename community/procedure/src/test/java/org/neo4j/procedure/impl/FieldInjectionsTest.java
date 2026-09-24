@@ -20,9 +20,7 @@
 package org.neo4j.procedure.impl;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -35,10 +33,9 @@ class FieldInjectionsTest {
         // Given
         FieldInjections injections = new FieldInjections(new ComponentRegistry());
 
-        ProcedureException exception = assertThrows(
-                ProcedureException.class, () -> injections.setters(ProcedureWithNonInjectedMemberFields.class));
-        assertThat(exception.getMessage())
-                .isEqualTo(
+        assertThatThrownBy(() -> injections.setters(ProcedureWithNonInjectedMemberFields.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(
                         "Field `someState` on `ProcedureWithNonInjectedMemberFields` is not annotated as a @Context and is not static. "
                                 + "If you want to store state along with your procedure, please use a static field.");
     }
@@ -48,10 +45,9 @@ class FieldInjectionsTest {
         // Given
         FieldInjections injections = new FieldInjections(new ComponentRegistry());
 
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> injections.setters(ProcedureWithPrivateMemberField.class));
-        assertThat(exception.getMessage())
-                .isEqualTo("Field `someState` on `ProcedureWithPrivateMemberField` must be non-final and public.");
+        assertThatThrownBy(() -> injections.setters(ProcedureWithPrivateMemberField.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage("Field `someState` on `ProcedureWithPrivateMemberField` must be non-final and public.");
     }
 
     @Test
@@ -63,7 +59,7 @@ class FieldInjectionsTest {
         List<FieldSetter> setters = injections.setters(ProcedureWithStaticFields.class);
 
         // Then
-        assertEquals(0, setters.size());
+        assertThat(setters).isEmpty();
     }
 
     @Test
@@ -79,7 +75,7 @@ class FieldInjectionsTest {
         // Then
         new Outer().classWithSyntheticField();
         for (FieldSetter setter : setters) {
-            assertFalse(setter.field().isSynthetic());
+            assertThat(setter.field().isSynthetic()).isFalse();
         }
     }
 

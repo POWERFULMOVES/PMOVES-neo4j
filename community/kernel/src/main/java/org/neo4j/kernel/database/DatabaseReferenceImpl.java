@@ -26,6 +26,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 import org.neo4j.configuration.helpers.RemoteUri;
 import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel;
 
@@ -53,13 +54,9 @@ public abstract class DatabaseReferenceImpl implements DatabaseReference {
 
     @Override
     public String toPrettyString() {
-        var namespace = namespace().map(ns -> quoteIfNeeded(ns.name()) + ".").orElse("");
-        var name = quoteIfNeeded(alias().name());
+        var namespace = namespace().map(ns -> ns.name() + ".").orElse("");
+        var name = alias().name();
         return namespace + name;
-    }
-
-    private String quoteIfNeeded(String name) {
-        return name.contains(".") ? "`" + name + "`" : name;
     }
 
     @Override
@@ -83,13 +80,18 @@ public abstract class DatabaseReferenceImpl implements DatabaseReference {
         private final NormalizedDatabaseName namespace;
         private final RemoteUri externalUri;
         private final UUID uuid;
+        private final boolean forwardOidcCredentials;
 
         /**
          * Creates an external database reference with no namespace (default namespace)
          */
         public External(
-                NormalizedDatabaseName targetAlias, NormalizedDatabaseName alias, RemoteUri externalUri, UUID uuid) {
-            this(targetAlias, alias, null, externalUri, uuid);
+                NormalizedDatabaseName targetAlias,
+                NormalizedDatabaseName alias,
+                RemoteUri externalUri,
+                UUID uuid,
+                boolean forwardOidcCredentials) {
+            this(targetAlias, alias, null, externalUri, uuid, forwardOidcCredentials);
         }
 
         /**
@@ -100,12 +102,14 @@ public abstract class DatabaseReferenceImpl implements DatabaseReference {
                 NormalizedDatabaseName alias,
                 NormalizedDatabaseName namespace,
                 RemoteUri externalUri,
-                UUID uuid) {
+                UUID uuid,
+                boolean forwardOidcCredentials) {
             this.targetAlias = targetAlias;
             this.alias = alias;
             this.namespace = Objects.equals(namespace, defaultNamespace) ? null : namespace;
             this.externalUri = externalUri;
             this.uuid = uuid;
+            this.forwardOidcCredentials = forwardOidcCredentials;
         }
 
         @Override
@@ -131,9 +135,18 @@ public abstract class DatabaseReferenceImpl implements DatabaseReference {
             return targetAlias;
         }
 
+        public boolean forwardOidcCredentials() {
+            return forwardOidcCredentials;
+        }
+
         @Override
         public UUID id() {
             return uuid;
+        }
+
+        @Override
+        public NamedDatabaseId namedDatabaseId() {
+            return DatabaseIdFactory.from(name(), uuid);
         }
 
         @Override
@@ -150,6 +163,11 @@ public abstract class DatabaseReferenceImpl implements DatabaseReference {
         }
 
         @Override
+        public boolean isShard() {
+            return false;
+        }
+
+        @Override
         public boolean equals(Object o) {
             if (this == o) return true;
             if (o == null || getClass() != o.getClass()) return false;
@@ -158,12 +176,13 @@ public abstract class DatabaseReferenceImpl implements DatabaseReference {
                     && Objects.equals(alias, external.alias)
                     && Objects.equals(namespace, external.namespace)
                     && Objects.equals(externalUri, external.externalUri)
-                    && Objects.equals(uuid, external.uuid);
+                    && Objects.equals(uuid, external.uuid)
+                    && Objects.equals(forwardOidcCredentials, external.forwardOidcCredentials);
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(targetAlias, alias, namespace, externalUri, uuid);
+            return Objects.hash(targetAlias, alias, namespace, externalUri, uuid, forwardOidcCredentials);
         }
 
         @Override
@@ -174,6 +193,7 @@ public abstract class DatabaseReferenceImpl implements DatabaseReference {
                     + ", remoteUri=" + externalUri
                     + ", remoteName=" + targetAlias
                     + ", uuid=" + uuid
+                    + ", forwardOidcCredentials=" + forwardOidcCredentials
                     + '}';
         }
     }
@@ -235,6 +255,11 @@ public abstract class DatabaseReferenceImpl implements DatabaseReference {
         }
 
         @Override
+        public NamedDatabaseId namedDatabaseId() {
+            return namedDatabaseId;
+        }
+
+        @Override
         public NormalizedCatalogEntry catalogEntry() {
             if (namespace != null) {
                 return new NormalizedCatalogEntry(namespace.name(), alias.name());
@@ -245,6 +270,11 @@ public abstract class DatabaseReferenceImpl implements DatabaseReference {
         @Override
         public String owningDatabaseName() {
             return namedDatabaseId.name();
+        }
+
+        @Override
+        public boolean isShard() {
+            return false;
         }
 
         @Override
@@ -272,8 +302,16 @@ public abstract class DatabaseReferenceImpl implements DatabaseReference {
                     + primary + '}';
         }
 
-        public DatabaseReferenceImpl.SPDShard asShard(String ownerDatabase) {
-            return new SPDShard(alias, namedDatabaseId, primary, ownerDatabase);
+        public PropertyShard asShard(String ownerDatabase, int index) {
+            return new PropertyShard(alias, namedDatabaseId, primary, ownerDatabase, index);
+        }
+
+        public DatabaseReferenceImpl.Mirror asMirror() {
+            return new Mirror(alias, namedDatabaseId, primary);
+        }
+
+        public DatabaseReferenceImpl.GraphEngine asGraphEngine() {
+            return new GraphEngine(alias, namedDatabaseId);
         }
     }
 
@@ -346,22 +384,10 @@ public abstract class DatabaseReferenceImpl implements DatabaseReference {
         }
     }
 
-    public static final class SPD extends DatabaseReferenceImpl.Internal {
-        public static String shardName(String databaseName, int index) {
-            return String.format("%s-shard-%02d", databaseName, index);
-        }
+    public static final class GraphEngine extends DatabaseReferenceImpl.Internal {
 
-        private final Map<Integer, DatabaseReference> entityDetailStores;
-
-        /**
-         * Creates a sharded property database reference
-         */
-        public SPD(
-                NormalizedDatabaseName alias,
-                NamedDatabaseId namedDatabaseId,
-                Map<Integer, DatabaseReference> entityDetailStores) {
+        public GraphEngine(NormalizedDatabaseName alias, NamedDatabaseId namedDatabaseId) {
             super(alias, namedDatabaseId, true);
-            this.entityDetailStores = entityDetailStores;
         }
 
         @Override
@@ -369,8 +395,60 @@ public abstract class DatabaseReferenceImpl implements DatabaseReference {
             return Optional.empty();
         }
 
-        public Map<Integer, DatabaseReference> entityDetailStores() {
-            return entityDetailStores;
+        @Override
+        public String toString() {
+            return "GraphEngine{" + "alias="
+                    + alias + ", namespace="
+                    + namespace + ", namedDatabaseId="
+                    + namedDatabaseId + ", primary="
+                    + primary + "}'";
+        }
+
+        @Override
+        public boolean isGraphEngine() {
+            return true;
+        }
+    }
+
+    public static final class VirtualSPD extends DatabaseReferenceImpl.Internal {
+
+        private final DatabaseReference graphShard;
+
+        public VirtualSPD(
+                NormalizedDatabaseName alias,
+                NamedDatabaseId namedDatabaseId,
+                DatabaseReference graphShard,
+                boolean primary) {
+            super(alias, namedDatabaseId, primary);
+            this.graphShard = graphShard;
+        }
+
+        public VirtualSPD(
+                NormalizedDatabaseName alias,
+                NormalizedDatabaseName namespace,
+                NamedDatabaseId namedDatabaseId,
+                DatabaseReference graphShard,
+                boolean primary) {
+            super(alias, namespace, namedDatabaseId, primary);
+            this.graphShard = graphShard;
+        }
+
+        public static String spdName(String shardDatabaseName) {
+            return shardDatabaseName.substring(0, shardDatabaseName.lastIndexOf('-'));
+        }
+
+        public GraphShard graphShard() {
+            return (GraphShard) graphShard;
+        }
+
+        @Override
+        public NamedDatabaseId databaseId() {
+            return graphShard.namedDatabaseId();
+        }
+
+        @Override
+        public UUID id() {
+            return graphShard.id();
         }
 
         @Override
@@ -378,37 +456,78 @@ public abstract class DatabaseReferenceImpl implements DatabaseReference {
             if (this == o) return true;
             if (o == null || getClass() != o.getClass()) return false;
             if (!super.equals(o)) return false;
-            SPD spd = (SPD) o;
-            return Objects.equals(entityDetailStores, spd.entityDetailStores());
+            VirtualSPD spd = (VirtualSPD) o;
+            return Objects.equals(graphShard, spd.graphShard());
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(super.hashCode(), entityDetailStores);
+            return Objects.hash(super.hashCode(), graphShard);
         }
 
         @Override
         public String toString() {
-            return "ShardedPropertyDatabase{" + "alias="
+            return "SPD{" + "alias="
                     + alias + ", namespace="
                     + namespace + ", namedDatabaseId="
                     + namedDatabaseId + ", primary="
-                    + primary + ", entityDetailStores="
-                    + entityDetailStores + '}';
+                    + primary + ", graphShard="
+                    + graphShard + '}';
         }
     }
 
-    public static final class SPDShard extends DatabaseReferenceImpl.Internal {
+    public static final class GraphShard extends DatabaseReferenceImpl.Internal {
+        public static String GRAPH_SHARD_NAME_POSTFIX = "-g000";
+
+        public static String graphShardName(String databaseName) {
+            return databaseName + GRAPH_SHARD_NAME_POSTFIX;
+        }
+
+        public static String virtualDatabaseName(String graphShardName) {
+            return graphShardName.endsWith(GRAPH_SHARD_NAME_POSTFIX)
+                    ? graphShardName.substring(0, graphShardName.length() - GRAPH_SHARD_NAME_POSTFIX.length())
+                    : graphShardName;
+        }
+
+        private static final Pattern graphShardPattern = Pattern.compile("(.)+(-g)([0-9]{3})");
+
+        public static boolean isGraphShardName(String databaseName) {
+            return graphShardPattern.matcher(databaseName).matches();
+        }
 
         private final String owningDatabaseName;
+        private final Map<Integer, PropertyShard> propertyShards;
 
-        public SPDShard(
+        /**
+         * Creates a sharded property database reference
+         */
+        public GraphShard(
                 NormalizedDatabaseName alias,
                 NamedDatabaseId namedDatabaseId,
-                boolean primary,
-                String owningDatabaseName) {
-            super(alias, namedDatabaseId, primary);
+                String owningDatabaseName,
+                Map<Integer, PropertyShard> propertyShards) {
+            super(alias, namedDatabaseId, true);
+            this.propertyShards = propertyShards;
             this.owningDatabaseName = owningDatabaseName;
+        }
+
+        /**
+         * Creates a sharded property database reference in given namespace
+         */
+        public GraphShard(
+                NormalizedDatabaseName alias,
+                NormalizedDatabaseName namespace,
+                NamedDatabaseId namedDatabaseId,
+                String owningDatabaseName,
+                Map<Integer, PropertyShard> propertyShards,
+                boolean isPrimary) {
+            super(alias, namespace, namedDatabaseId, isPrimary);
+            this.propertyShards = propertyShards;
+            this.owningDatabaseName = owningDatabaseName;
+        }
+
+        public Map<Integer, PropertyShard> propertyShards() {
+            return propertyShards;
         }
 
         @Override
@@ -417,8 +536,129 @@ public abstract class DatabaseReferenceImpl implements DatabaseReference {
         }
 
         @Override
+        public boolean isShard() {
+            return true;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            if (!super.equals(o)) return false;
+            GraphShard spd = (GraphShard) o;
+            return Objects.equals(propertyShards, spd.propertyShards())
+                    && owningDatabaseName.equals(spd.owningDatabaseName);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(super.hashCode(), propertyShards);
+        }
+
+        @Override
         public String toString() {
-            return "Shard{" + "alias="
+            return "GraphShard{" + "alias="
+                    + alias + ", namespace="
+                    + namespace + ", namedDatabaseId="
+                    + namedDatabaseId + ", primary="
+                    + primary + ", propertyShards="
+                    + propertyShards + '}';
+        }
+    }
+
+    public static final class PropertyShard extends DatabaseReferenceImpl.Internal {
+
+        public static int MAX_NUMBER_OF_SHARDS = 1000;
+        private final String spdName;
+        private final int index;
+
+        public PropertyShard(NormalizedDatabaseName alias, NamedDatabaseId namedDatabaseId, String spdName, int index) {
+            super(alias, namedDatabaseId, true);
+            this.spdName = spdName;
+            this.index = index;
+        }
+
+        public PropertyShard(
+                NormalizedDatabaseName alias,
+                NamedDatabaseId namedDatabaseId,
+                boolean primary,
+                String owningDatabaseName,
+                int index) {
+            super(alias, namedDatabaseId, primary);
+            this.spdName = owningDatabaseName;
+            this.index = index;
+        }
+
+        private static final Pattern propertyShardPattern = Pattern.compile("(.)+(-p)([0-9]{3})");
+
+        public static String propertyShardName(String databaseName, int index) {
+            return String.format("%s-p%03d", databaseName, index);
+        }
+
+        public static boolean isPropertyShardName(String databaseName) {
+            return propertyShardPattern.matcher(databaseName).matches();
+        }
+
+        public static boolean isPropertyShard(String propertyShardName, String databaseName) {
+            var pattern = Pattern.compile("(%s-p)([0-9]{3})".formatted(databaseName));
+            return pattern.matcher(propertyShardName).matches();
+        }
+
+        public static int propertyShardIndex(String databaseName) {
+            var matcher = propertyShardPattern.matcher(databaseName);
+            return matcher.matches() ? Integer.parseInt(matcher.group(3)) : -1;
+        }
+
+        @Override
+        public boolean isShard() {
+            return true;
+        }
+
+        @Override
+        public String owningDatabaseName() {
+            return spdName;
+        }
+
+        public int index() {
+            return index;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (o instanceof PropertyShard other) {
+                return alias.equals(other.alias)
+                        && Objects.equals(namespace, other.namespace)
+                        && namedDatabaseId.equals(other.namedDatabaseId)
+                        && primary == other.primary
+                        && spdName.equals(other.spdName);
+            }
+            return false;
+        }
+
+        @Override
+        public String toString() {
+            return "PropertyShard{" + "alias="
+                    + alias + ", namespace="
+                    + namespace + ", namedDatabaseId="
+                    + namedDatabaseId + ", primary="
+                    + primary + ", owningDatabaseName="
+                    + spdName + ", index="
+                    + index + '}';
+        }
+    }
+
+    public static final class Mirror extends DatabaseReferenceImpl.Internal {
+        public Mirror(NormalizedDatabaseName alias, NamedDatabaseId namedDatabaseId) {
+            super(alias, namedDatabaseId, true);
+        }
+
+        public Mirror(NormalizedDatabaseName alias, NamedDatabaseId namedDatabaseId, boolean primary) {
+            super(alias, namedDatabaseId, primary);
+        }
+
+        @Override
+        public String toString() {
+            return "Mirror{" + "alias="
                     + alias + ", namespace="
                     + namespace + ", namedDatabaseId="
                     + namedDatabaseId + ", primary="

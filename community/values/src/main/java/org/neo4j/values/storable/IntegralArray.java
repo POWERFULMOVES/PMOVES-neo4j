@@ -21,7 +21,7 @@ package org.neo4j.values.storable;
 
 import org.neo4j.hashing.HashFunction;
 
-public abstract class IntegralArray extends NumberArray {
+public abstract sealed class IntegralArray extends NumberArray permits ByteArray, ShortArray, IntArray, LongArray {
     public abstract long longValue(int offset);
 
     @Override
@@ -35,11 +35,6 @@ public abstract class IntegralArray extends NumberArray {
     @Override
     public int compareTo(FloatingPointArray other) {
         return NumberValues.compareIntegerVsFloatArrays(this, other);
-    }
-
-    @Override
-    public NumberType numberType() {
-        return NumberType.INTEGRAL;
     }
 
     @Override

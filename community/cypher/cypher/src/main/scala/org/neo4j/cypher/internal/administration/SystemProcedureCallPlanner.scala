@@ -19,18 +19,19 @@
  */
 package org.neo4j.cypher.internal.administration
 
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ExecutionEngine
 import org.neo4j.cypher.internal.ExecutionPlan
 import org.neo4j.cypher.internal.ast.Return
 import org.neo4j.cypher.internal.ast.ReturnItems
 import org.neo4j.cypher.internal.expressions.ImplicitProcedureArgument
-import org.neo4j.cypher.internal.frontend.phases.ResolvedCall
+import org.neo4j.cypher.internal.frontend.phases.ResolvedNonLocalCall
 import org.neo4j.cypher.internal.procs.ParameterTransformer
 import org.neo4j.cypher.internal.procs.SystemCommandExecutionPlan
 import org.neo4j.cypher.internal.util.Foldable.TraverseChildren
 import org.neo4j.cypher.rendering.QueryRenderer
-import org.neo4j.internal.kernel.api.security.AccessMode
 import org.neo4j.internal.kernel.api.security.SecurityAuthorizationHandler
+import org.neo4j.internal.kernel.api.security.StaticAccessMode
 import org.neo4j.kernel.impl.api.security.OverriddenAccessMode
 import org.neo4j.kernel.impl.util.ValueUtils
 import org.neo4j.values.virtual.MapValue
@@ -42,12 +43,13 @@ case class SystemProcedureCallPlanner(
 ) {
 
   def planSystemProcedureCall(
-    call: ResolvedCall,
+    version: CypherVersion,
+    call: ResolvedNonLocalCall,
     returns: Option[Return],
     checkCredentialsExpired: Boolean
   ): ExecutionPlan = {
     val queryString = returns match {
-      case Some(rs @ Return(_, ReturnItems(_, items, _), _, _, _, _, _)) if items.nonEmpty =>
+      case Some(rs @ Return(_, ReturnItems(_, items, _), _, _, _, _, _, _, _)) if items.nonEmpty =>
         QueryRenderer.render(Seq(call, rs))
       case _ => QueryRenderer.render(Seq(call))
     }
@@ -70,7 +72,10 @@ case class SystemProcedureCallPlanner(
       MapValue.EMPTY,
       checkCredentialsExpired = checkCredentialsExpired,
       parameterTransformer = ParameterTransformer().convert((_, params) => addParameterDefaults(params)),
-      modeConverter = s => s.withMode(new OverriddenAccessMode(s.mode(), AccessMode.Static.READ))
+      modeConverter = s => s.withMode(new OverriddenAccessMode(s.mode(), StaticAccessMode.READ)),
+      // Procedures can have different signatures and results between cypher versions,
+      // so it's important to use the same cypher version in the inner query as the outer.
+      cypherVersion = version
     )
   }
 

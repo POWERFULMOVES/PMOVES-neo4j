@@ -19,38 +19,31 @@
  */
 package org.neo4j.cypher.internal.runtime.slotted.pipes
 
-import org.neo4j.collection.trackable.HeapTrackingCollections
 import org.neo4j.cypher.internal.expressions.SemanticDirection
-import org.neo4j.cypher.internal.logical.plans.TraversalMatchMode
+import org.neo4j.cypher.internal.logical.plans.TraversalPathMode
 import org.neo4j.cypher.internal.physicalplanning.Slot
 import org.neo4j.cypher.internal.physicalplanning.SlotConfiguration
 import org.neo4j.cypher.internal.physicalplanning.SlotConfigurationUtils.makeGetPrimitiveNodeFromSlotFunctionFor
 import org.neo4j.cypher.internal.runtime.ClosingIterator
 import org.neo4j.cypher.internal.runtime.CypherRow
-import org.neo4j.cypher.internal.runtime.RelationshipContainer
-import org.neo4j.cypher.internal.runtime.RelationshipIterator
+import org.neo4j.cypher.internal.runtime.TraversalContainer
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.Pipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.PipeWithSource
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.QueryState
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.RelationshipTypes
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.TraversalPredicates
-import org.neo4j.cypher.internal.runtime.interpreted.pipes.VarLengthExpandPipe.projectBackwards
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.VarLengthExpandIterator
 import org.neo4j.cypher.internal.runtime.slotted.SlottedRow
 import org.neo4j.cypher.internal.runtime.slotted.helpers.NullChecker.entityIsNull
 import org.neo4j.cypher.internal.util.attribution.Id
-import org.neo4j.values.virtual.ListValue
+import org.neo4j.values.virtual.VirtualNodeValue
 import org.neo4j.values.virtual.VirtualValues
 
-/**
- * On predicates... to communicate the tested entity to the predicate, expressions
- * variable slots have been allocated. The offsets of these slots are `temp*Offset`.
- * If no predicate exists the offset will be `SlottedPipeMapper.NO_PREDICATE_OFFSET`
- */
 case class VarLengthExpandSlottedPipe(
   source: Pipe,
   fromSlot: Slot,
-  relOffset: Int,
-  toSlot: Slot,
+  maybeRelOffset: Option[Int],
+  maybeToSlot: Option[Slot],
   dir: SemanticDirection,
   projectedDir: SemanticDirection,
   types: RelationshipTypes,
@@ -60,13 +53,8 @@ case class VarLengthExpandSlottedPipe(
   slots: SlotConfiguration,
   predicates: TraversalPredicates,
   argumentSize: SlotConfiguration.Size,
-  traversalMatchMode: TraversalMatchMode
+  traversalPathMode: TraversalPathMode
 )(val id: Id = Id.INVALID_ID) extends PipeWithSource(source) {
-  type LNode = Long
-
-  // ===========================================================================
-  // Compile-time initializations
-  // ===========================================================================
   private val getFromNodeFunction = makeGetPrimitiveNodeFromSlotFunctionFor(fromSlot, throwOnTypeError = false)
 
   private val getToNodeFunction =
@@ -74,78 +62,42 @@ case class VarLengthExpandSlottedPipe(
       null
     } // We only need this getter in the ExpandInto case
     else {
-      makeGetPrimitiveNodeFromSlotFunctionFor(toSlot, throwOnTypeError = false)
+      makeGetPrimitiveNodeFromSlotFunctionFor(maybeToSlot.get, throwOnTypeError = false)
     }
-  private val toOffset = toSlot.offset
 
-  // ===========================================================================
-  // Runtime code
-  // ===========================================================================
+  private def newRow(inputRow: CypherRow) = {
+    val resultRow = SlottedRow(slots)
+    resultRow.copyFrom(inputRow, argumentSize.nLongs, argumentSize.nReferences)
+    resultRow
+  }
+
+  private val writer = (maybeRelOffset, maybeToSlot, shouldExpandAll) match {
+    case (Some(r), Some(n), true) =>
+      (resultRow: CypherRow, rels: TraversalContainer, toNode: Long) =>
+        resultRow.setLongAt(n.offset, toNode)
+        resultRow.setRefAt(r, rels.relationshipsAsList)
+        resultRow
+
+    case (Some(r), to, expandAll) if to.isEmpty || !expandAll =>
+      (resultRow: CypherRow, rels: TraversalContainer, _: Long) =>
+        resultRow.setRefAt(r, rels.relationshipsAsList)
+        resultRow
+
+    case (None, Some(n), true) =>
+      (resultRow: CypherRow, _: TraversalContainer, toNode: Long) =>
+        resultRow.setLongAt(n.offset, toNode)
+        resultRow
+    case _ => (resultRow: CypherRow, _: TraversalContainer, _: Long) => resultRow
+  }
 
   private def varLengthExpand(
-    node: LNode,
+    node: VirtualNodeValue,
     state: QueryState,
     row: CypherRow
-  ): ClosingIterator[(LNode, (Int, ListValue))] = {
+  ): ClosingIterator[(VirtualNodeValue, TraversalContainer)] = {
     val memoryTracker = state.memoryTrackerForOperatorProvider.memoryTrackerForOperator(id.x)
-    val stackOfNodes = HeapTrackingCollections.newLongStack(memoryTracker)
-    val stackOfRelContainers = HeapTrackingCollections.newArrayDeque[RelationshipContainer](memoryTracker)
-    stackOfNodes.push(node)
-    stackOfRelContainers.push(RelationshipContainer.empty(memoryTracker, traversalMatchMode))
-
-    new ClosingIterator[(LNode, (Int, ListValue))] {
-      override def next(): (LNode, (Int, ListValue)) = {
-        val fromNode = stackOfNodes.pop()
-        val rels: RelationshipContainer = stackOfRelContainers.pop()
-        if (rels.size < maxDepth.getOrElse(Int.MaxValue)) {
-          val relationships: RelationshipIterator =
-            state.query.getRelationshipsForIds(fromNode, dir, types.types(state.query))
-
-          // relationships get immediately exhausted. Therefore we do not need a ClosingIterator here.
-          while (relationships.hasNext) {
-            val relId = relationships.next()
-            if (rels.canAdd(relId)) {
-              // Before expanding, check that both the relationship and node in question fulfil the predicate
-              val rel = state.query.relationshipById(
-                relId,
-                relationships.startNodeId(),
-                relationships.endNodeId(),
-                relationships.typeId()
-              )
-              val otherNode = VirtualValues.node(relationships.otherNodeId(fromNode))
-
-              if (
-                predicates.filterNode(row, state, otherNode) &&
-                predicates.filterRelationship(row, state, rel, VirtualValues.node(fromNode), otherNode)
-              ) {
-                stackOfNodes.push(relationships.otherNodeId(fromNode))
-                stackOfRelContainers.push(rels.append(VirtualValues.relationship(
-                  relId,
-                  relationships.startNodeId(),
-                  relationships.endNodeId(),
-                  relationships.typeId()
-                )))
-              }
-            }
-          }
-        }
-        val projectedRels =
-          if (projectBackwards(dir, projectedDir)) {
-            rels.asList.reverse
-          } else {
-            rels.asList
-          }
-        rels.close()
-        (fromNode, (rels.size, projectedRels))
-      }
-
-      override def innerHasNext: Boolean = !stackOfNodes.isEmpty
-
-      override protected[this] def closeMore(): Unit = {
-        stackOfNodes.close()
-        stackOfRelContainers.close()
-      }
-    }
+    VarLengthExpandIterator(maybeRelOffset.isDefined, dir, projectedDir, types, traversalPathMode, predicates)
+      .varLengthExpand(node, state, maxDepth, row, memoryTracker)
   }
 
   protected def internalCreateResults(
@@ -161,16 +113,11 @@ case class VarLengthExpandSlottedPipe(
           // Ensure that the start-node also adheres to the node predicate
           if (predicates.filterNode(inputRow, state, state.query.nodeById(fromNode))) {
 
-            val paths: ClosingIterator[(LNode, (Int, ListValue))] = varLengthExpand(fromNode, state, inputRow)
+            val paths: ClosingIterator[(VirtualNodeValue, TraversalContainer)] =
+              varLengthExpand(VirtualValues.node(fromNode), state, inputRow)
             paths collect {
-              case (toNode: LNode, (size, asList)) if size >= min && isToNodeValid(inputRow, toNode) =>
-                val resultRow = SlottedRow(slots)
-                resultRow.copyFrom(inputRow, argumentSize.nLongs, argumentSize.nReferences)
-                if (shouldExpandAll) {
-                  resultRow.setLongAt(toOffset, toNode)
-                }
-                resultRow.setRefAt(relOffset, asList)
-                resultRow
+              case (toNode: VirtualNodeValue, rels) if rels.size >= min && isToNodeValid(inputRow, toNode) =>
+                writer(newRow(inputRow), rels, toNode.id())
             }
           } else {
             ClosingIterator.empty
@@ -179,6 +126,6 @@ case class VarLengthExpandSlottedPipe(
     }
   }
 
-  private def isToNodeValid(row: CypherRow, node: LNode): Boolean =
-    shouldExpandAll || getToNodeFunction.applyAsLong(row) == node
+  private def isToNodeValid(row: CypherRow, node: VirtualNodeValue): Boolean =
+    shouldExpandAll || getToNodeFunction.applyAsLong(row) == node.id()
 }

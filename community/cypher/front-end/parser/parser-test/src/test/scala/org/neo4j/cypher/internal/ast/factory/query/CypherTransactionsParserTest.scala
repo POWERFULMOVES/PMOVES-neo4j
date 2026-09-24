@@ -22,20 +22,24 @@ import org.neo4j.cypher.internal.ast.Statements
 import org.neo4j.cypher.internal.ast.SubqueryCall
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsBatchParameters
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsConcurrencyParameters
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsDisjointByMode
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsDisjointByParameters
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsErrorParameters
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorBreak
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorContinue
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorFail
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorRetryThenBreak
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorRetryThenContinue
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorRetryThenFail
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsParameters
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsReportParameters
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsRetryParameters
+import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
 import org.neo4j.cypher.internal.ast.test.util.AstParsingTestBase
-import org.neo4j.cypher.internal.ast.test.util.LegacyAstParsingTestSupport
-import org.neo4j.cypher.internal.util.OpenCypherExceptionFactory
 import org.neo4j.cypher.internal.util.symbols.CTAny
-import org.neo4j.exceptions.SyntaxException
+import org.neo4j.gqlstatus.GqlStatusInfoCodes
 
-class CypherTransactionsParserTest extends AstParsingTestBase with LegacyAstParsingTestSupport {
+class CypherTransactionsParserTest extends AstParsingTestBase {
 
   test("CALL { CREATE (n) } IN TRANSACTIONS") {
     parses[SubqueryCall].toAstPositioned {
@@ -46,8 +50,8 @@ class CypherTransactionsParserTest extends AstParsingTestBase with LegacyAstPars
             (1, 8, 7)
           ))
         )(defaultPos),
-        Some(InTransactionsParameters(None, None, None, None)((1, 24, 23))),
-        false
+        Some(InTransactionsParameters(None, None, None, None, None)((1, 24, 23))),
+        optional = false
       )(defaultPos)
     }
   }
@@ -137,7 +141,7 @@ class CypherTransactionsParserTest extends AstParsingTestBase with LegacyAstPars
   }
 
   test("CALL { CREATE (n) } IN CONCURRENT TRANSACTIONS OF 13 ROWS") {
-    val expected =
+    parses[SubqueryCall].toAst {
       importingWithSubqueryCallInTransactions(
         inTransactionsParameters(
           Some(InTransactionsBatchParameters(literalInt(13))(pos)),
@@ -147,24 +151,25 @@ class CypherTransactionsParserTest extends AstParsingTestBase with LegacyAstPars
         ),
         create(nodePat(Some("n")))
       )
-    gives[SubqueryCall](expected)
+    }
   }
 
   test("CALL { CREATE (n) } IN 1 CONCURRENT TRANSACTIONS") {
-    val expected = importingWithSubqueryCallInTransactions(
-      inTransactionsParameters(
-        None,
-        Some(InTransactionsConcurrencyParameters(Some(literalInt(1)))(pos)),
-        None,
-        None
-      ),
-      create(nodePat(Some("n")))
-    )
-    gives[SubqueryCall](expected)
+    parses[SubqueryCall].toAst {
+      importingWithSubqueryCallInTransactions(
+        inTransactionsParameters(
+          None,
+          Some(InTransactionsConcurrencyParameters(Some(literalInt(1)))(pos)),
+          None,
+          None
+        ),
+        create(nodePat(Some("n")))
+      )
+    }
   }
 
   test("CALL { CREATE (n) } IN 19 CONCURRENT TRANSACTIONS") {
-    val expected =
+    parses[SubqueryCall].toAst {
       importingWithSubqueryCallInTransactions(
         inTransactionsParameters(
           None,
@@ -174,11 +179,11 @@ class CypherTransactionsParserTest extends AstParsingTestBase with LegacyAstPars
         ),
         create(nodePat(Some("n")))
       )
-    gives[SubqueryCall](expected)
+    }
   }
 
   test("CALL { CREATE (n) } IN 19 CONCURRENT TRANSACTIONS OF 13 ROWS") {
-    val expected =
+    parses[SubqueryCall].toAst {
       importingWithSubqueryCallInTransactions(
         inTransactionsParameters(
           Some(InTransactionsBatchParameters(literalInt(13))(pos)),
@@ -188,7 +193,7 @@ class CypherTransactionsParserTest extends AstParsingTestBase with LegacyAstPars
         ),
         create(nodePat(Some("n")))
       )
-    gives[SubqueryCall](expected)
+    }
   }
 
   test("CALL { CREATE (n) } IN TRANSACTIONS REPORT STATUS AS status") {
@@ -236,28 +241,53 @@ class CypherTransactionsParserTest extends AstParsingTestBase with LegacyAstPars
   // For each error behaviour, allow all possible orders of OF ROWS, ON ERROR and REPORT STATUS
   // The combination FAIL and REPORT STATUS should parse but will be disallowed in semantic checking
   Seq(
-    ("BREAK", OnErrorBreak),
-    ("FAIL", OnErrorFail),
-    ("CONTINUE", OnErrorContinue)
+    ("BREAK", OnErrorBreak, None),
+    ("FAIL", OnErrorFail, None),
+    ("CONTINUE", OnErrorContinue, None),
+    ("RETRY", OnErrorRetryThenFail, None),
+    ("RETRY THEN BREAK", OnErrorRetryThenBreak, None),
+    ("RETRY THEN FAIL", OnErrorRetryThenFail, None),
+    ("RETRY THEN CONTINUE", OnErrorRetryThenContinue, None),
+    ("RETRY 1.8 SECONDS", OnErrorRetryThenFail, Some(InTransactionsRetryParameters(Some(literalFloat(1.8)))(pos))),
+    (
+      "RETRY FOR 1.8 SEC THEN BREAK",
+      OnErrorRetryThenBreak,
+      Some(InTransactionsRetryParameters(Some(literalFloat(1.8)))(pos))
+    ),
+    (
+      "RETRY FOR 1 SECOND THEN FAIL",
+      OnErrorRetryThenFail,
+      Some(InTransactionsRetryParameters(Some(literalInt(1)))(pos))
+    ),
+    (
+      "RETRY 3 SEC THEN CONTINUE",
+      OnErrorRetryThenContinue,
+      Some(InTransactionsRetryParameters(Some(literalInt(3)))(pos))
+    )
   ).foreach {
-    case (errorKeyword, errorBehaviour) =>
+    case (errorKeyword, errorBehaviour, retryParams) =>
       val errorString = s"ON ERROR $errorKeyword"
       val rowString = "OF 50 ROWS"
       val concurrencyString = "7 CONCURRENT"
       val statusString = "REPORT STATUS AS status"
+      val disjointByString = "DISJOINT BY AUTO"
 
       val errorRowPermutations = List(errorString, rowString).permutations.toList
       val errorStatusPermutations = List(errorString, statusString).permutations.toList
       val errorRowStatusPermutations = List(errorString, rowString, statusString).permutations.toList
+      val errorRowStatusDisjointPermutations =
+        List(errorString, rowString, statusString, disjointByString).permutations.toList
 
       val expectedBatchParams = Some(InTransactionsBatchParameters(literalInt(50))(pos))
       val expectedConcurrencyParams = Some(InTransactionsConcurrencyParameters(Some(literalInt(7)))(pos))
-      val expectedErrorParams = Some(InTransactionsErrorParameters(errorBehaviour)(pos))
+      val expectedErrorParams = Some(InTransactionsErrorParameters(errorBehaviour, retryParams)(pos))
       val expectedStatusParams = Some(InTransactionsReportParameters(varFor("status"))(pos))
+      val expectedDisjointByParams =
+        Some(InTransactionsDisjointByParameters(InTransactionsDisjointByMode.DisjointByAuto)(pos))
 
-      test(s"CALL { CREATE (n) } IN TRANSACTIONS $errorString") {
+      test(s"CALL () { CREATE (n) } IN TRANSACTIONS $errorString") {
         val expected =
-          importingWithSubqueryCallInTransactions(
+          scopeClauseSubqueryCallInTransactionsNoImports(
             inTransactionsParameters(
               None,
               None,
@@ -266,13 +296,13 @@ class CypherTransactionsParserTest extends AstParsingTestBase with LegacyAstPars
             ),
             create(nodePat(Some("n")))
           )
-        testName should parseTo[SubqueryCall](expected)
+        parses[SubqueryCall].toAst(expected)
       }
 
       errorRowPermutations.foreach(permutation => {
-        test(s"CALL { CREATE (n) } IN TRANSACTIONS ${permutation.head} ${permutation(1)}") {
+        test(s"CALL () { CREATE (n) } IN TRANSACTIONS ${permutation.head} ${permutation(1)}") {
           val expected =
-            importingWithSubqueryCallInTransactions(
+            scopeClauseSubqueryCallInTransactionsNoImports(
               inTransactionsParameters(
                 expectedBatchParams,
                 None,
@@ -281,11 +311,11 @@ class CypherTransactionsParserTest extends AstParsingTestBase with LegacyAstPars
               ),
               create(nodePat(Some("n")))
             )
-          testName should parseTo[SubqueryCall](expected)
+          parses[SubqueryCall].toAst(expected)
         }
-        test(s"CALL { CREATE (n) } IN $concurrencyString TRANSACTIONS ${permutation.head} ${permutation(1)}") {
+        test(s"CALL () { CREATE (n) } IN $concurrencyString TRANSACTIONS ${permutation.head} ${permutation(1)}") {
           val expected =
-            importingWithSubqueryCallInTransactions(
+            scopeClauseSubqueryCallInTransactionsNoImports(
               inTransactionsParameters(
                 expectedBatchParams,
                 expectedConcurrencyParams,
@@ -294,14 +324,14 @@ class CypherTransactionsParserTest extends AstParsingTestBase with LegacyAstPars
               ),
               create(nodePat(Some("n")))
             )
-          gives[SubqueryCall](expected)
+          parses[SubqueryCall].toAst(expected)
         }
       })
 
       errorStatusPermutations.foreach(permutation => {
-        test(s"CALL { CREATE (n) } IN TRANSACTIONS ${permutation.head} ${permutation(1)}") {
+        test(s"CALL () { CREATE (n) } IN TRANSACTIONS ${permutation.head} ${permutation(1)}") {
           val expected =
-            importingWithSubqueryCallInTransactions(
+            scopeClauseSubqueryCallInTransactionsNoImports(
               inTransactionsParameters(
                 None,
                 None,
@@ -310,11 +340,11 @@ class CypherTransactionsParserTest extends AstParsingTestBase with LegacyAstPars
               ),
               create(nodePat(Some("n")))
             )
-          testName should parseTo[SubqueryCall](expected)
+          parses[SubqueryCall].toAst(expected)
         }
-        test(s"CALL { CREATE (n) } IN $concurrencyString TRANSACTIONS ${permutation.head} ${permutation(1)}") {
+        test(s"CALL () { CREATE (n) } IN $concurrencyString TRANSACTIONS ${permutation.head} ${permutation(1)}") {
           val expected =
-            importingWithSubqueryCallInTransactions(
+            scopeClauseSubqueryCallInTransactionsNoImports(
               inTransactionsParameters(
                 None,
                 expectedConcurrencyParams,
@@ -323,14 +353,14 @@ class CypherTransactionsParserTest extends AstParsingTestBase with LegacyAstPars
               ),
               create(nodePat(Some("n")))
             )
-          gives[SubqueryCall](expected)
+          parses[SubqueryCall].toAst(expected)
         }
       })
 
       errorRowStatusPermutations.foreach(permutation => {
-        test(s"CALL { CREATE (n) } IN TRANSACTIONS ${permutation.head} ${permutation(1)} ${permutation(2)}") {
+        test(s"CALL () { CREATE (n) } IN TRANSACTIONS ${permutation.head} ${permutation(1)} ${permutation(2)}") {
           val expected =
-            importingWithSubqueryCallInTransactions(
+            scopeClauseSubqueryCallInTransactionsNoImports(
               inTransactionsParameters(
                 expectedBatchParams,
                 None,
@@ -339,13 +369,13 @@ class CypherTransactionsParserTest extends AstParsingTestBase with LegacyAstPars
               ),
               create(nodePat(Some("n")))
             )
-          testName should parseTo[SubqueryCall](expected)
+          parses[SubqueryCall].toAst(expected)
         }
         test(
-          s"CALL { CREATE (n) } IN $concurrencyString TRANSACTIONS ${permutation.head} ${permutation(1)} ${permutation(2)}"
+          s"CALL () { CREATE (n) } IN $concurrencyString TRANSACTIONS ${permutation.head} ${permutation(1)} ${permutation(2)}"
         ) {
           val expected =
-            importingWithSubqueryCallInTransactions(
+            scopeClauseSubqueryCallInTransactionsNoImports(
               inTransactionsParameters(
                 expectedBatchParams,
                 expectedConcurrencyParams,
@@ -354,48 +384,328 @@ class CypherTransactionsParserTest extends AstParsingTestBase with LegacyAstPars
               ),
               create(nodePat(Some("n")))
             )
-          gives[SubqueryCall](expected)
+          parses[SubqueryCall].toAst(expected)
+        }
+      })
+
+      errorRowStatusDisjointPermutations.foreach(permutation => {
+        test(
+          s"CALL () { CREATE (n) } IN $concurrencyString TRANSACTIONS ${permutation.head} ${permutation(1)} ${permutation(2)} ${permutation(3)}"
+        ) {
+          val expected =
+            scopeClauseSubqueryCallInTransactionsNoImports(
+              inTransactionsParameters(
+                expectedBatchParams,
+                expectedConcurrencyParams,
+                expectedErrorParams,
+                expectedStatusParams,
+                expectedDisjointByParams
+              ),
+              create(nodePat(Some("n")))
+            )
+          parsesIn[SubqueryCall] {
+            case Cypher5 => _.withAnyFailure
+            case _       => _.toAst(expected)
+          }
         }
       })
   }
 
   // Negative tests
-  test("CALL { CREATE (n) } IN TRANSACTIONS ON ERROR BREAK ON ERROR CONTINUE") {
+  test("CALL () { CREATE (n) } IN TRANSACTIONS ON ERROR BREAK ON ERROR CONTINUE") {
     failsParsing[Statements].withMessageStart("Duplicated ON ERROR parameter")
   }
 
-  test("CALL { CREATE (n) } IN TRANSACTIONS ON ERROR BREAK CONTINUE") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.withMessageStart("Invalid input 'CONTINUE'")
-      case _ => _.withSyntaxError(
-          """Invalid input 'CONTINUE': expected 'FOREACH', 'REPORT STATUS AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'ON ERROR', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OF', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 52 (offset: 51))
-            |"CALL { CREATE (n) } IN TRANSACTIONS ON ERROR BREAK CONTINUE"
-            |                                                    ^""".stripMargin
-        )
+  test("CALL () { CREATE (n) } IN TRANSACTIONS ON ERROR BREAK CONTINUE") {
+    failsParsing[Statements].withSyntaxErrorContaining("Invalid input 'CONTINUE'")
+  }
+
+  test("CALL () { CREATE (n) } IN TRANSACTIONS ON ERROR RETRY CONTINUE") {
+    failsParsing[Statements].withSyntaxErrorContaining("Invalid input ")
+  }
+
+  test("CALL () { CREATE (n) } IN TRANSACTIONS ON ERROR RETRY THEN RETRY") {
+    failsParsing[Statements].withSyntaxErrorContaining("Invalid input 'RETRY'")
+  }
+
+  test("CALL () { CREATE (n) } IN TRANSACTIONS ON ERROR RETRY FOR THEN FAIL") {
+    failsParsing[Statements].withSyntaxErrorContaining("Invalid input")
+  }
+
+  test("CALL () { CREATE (n) } IN TRANSACTIONS ON ERROR BREAK REPORT STATUS AS status ON ERROR CONTINUE") {
+    failsParsing[Statements]
+      .withSyntaxErrorContaining(
+        "Duplicated ON ERROR parameter",
+        GqlStatusInfoCodes.STATUS_42N19,
+        "error: syntax error or access rule violation - duplicate clause. Duplicate `ON ERROR` clause."
+      )
+  }
+
+  test("CALL () { CREATE (n) } IN TRANSACTIONS REPORT STATUS AS status REPORT STATUS AS other") {
+    failsParsing[Statements]
+      .withSyntaxErrorContaining(
+        "Duplicated REPORT STATUS parameter",
+        GqlStatusInfoCodes.STATUS_42N19,
+        "error: syntax error or access rule violation - duplicate clause. Duplicate `REPORT STATUS` clause."
+      )
+  }
+
+  test("CALL () { CREATE (n) } IN TRANSACTIONS OF 5 ROWS ON ERROR BREAK REPORT STATUS AS status OF 42 ROWS") {
+    failsParsing[Statements]
+      .withSyntaxErrorContaining(
+        "Duplicated OF ROWS parameter",
+        GqlStatusInfoCodes.STATUS_42N19,
+        "error: syntax error or access rule violation - duplicate clause. Duplicate `OF ROWS` clause."
+      )
+  }
+
+  // ============================================================
+  // CIP-260: DISJOINT BY (CYPHER 25 only)
+  // ============================================================
+
+  test("CALL (a) { CREATE (n) } IN CONCURRENT TRANSACTIONS DISJOINT BY (a)") {
+    parsesIn[SubqueryCall] {
+      case Cypher5 => _.withAnyFailure
+      case _ => _.toAst {
+          scopeClauseSubqueryCallInTransactions(
+            isImportingAll = false,
+            importedVariables = Seq(varFor("a")),
+            inTransactionsParameters(
+              None,
+              Some(InTransactionsConcurrencyParameters(None)(pos)),
+              None,
+              None,
+              Some(InTransactionsDisjointByParameters(
+                InTransactionsDisjointByMode.DisjointByExpressions(Seq(varFor("a")))
+              )(pos))
+            ),
+            create(nodePat(Some("n")))
+          )
+        }
     }
   }
 
-  test("CALL { CREATE (n) } IN TRANSACTIONS ON ERROR BREAK REPORT STATUS AS status ON ERROR CONTINUE") {
-    failsParsing[Statements]
-      .withMessageStart("Duplicated ON ERROR parameter")
+  test("CALL (a, b) { CREATE (n) } IN CONCURRENT TRANSACTIONS DISJOINT BY (a, b)") {
+    parsesIn[SubqueryCall] {
+      case Cypher5 => _.withAnyFailure
+      case _ => _.toAst {
+          scopeClauseSubqueryCallInTransactions(
+            isImportingAll = false,
+            importedVariables = Seq(varFor("a"), varFor("b")),
+            inTransactionsParameters(
+              None,
+              Some(InTransactionsConcurrencyParameters(None)(pos)),
+              None,
+              None,
+              Some(InTransactionsDisjointByParameters(
+                InTransactionsDisjointByMode.DisjointByExpressions(Seq(varFor("a"), varFor("b")))
+              )(pos))
+            ),
+            create(nodePat(Some("n")))
+          )
+        }
+    }
   }
 
-  test("CALL { CREATE (n) } IN TRANSACTIONS REPORT STATUS AS status REPORT STATUS AS other") {
-    failsParsing[Statements]
-      .withMessageStart("Duplicated REPORT STATUS parameter")
-      .in {
-        case Cypher5JavaCc => _.throws[OpenCypherExceptionFactory.SyntaxException]
-        case _             => _.throws[SyntaxException]
-      }
+  test("CALL (line) { CREATE (n) } IN CONCURRENT TRANSACTIONS DISJOINT BY (line.user, line.movieId)") {
+    parsesIn[SubqueryCall] {
+      case Cypher5 => _.withAnyFailure
+      case _ => _.toAst {
+          scopeClauseSubqueryCallInTransactions(
+            isImportingAll = false,
+            importedVariables = Seq(varFor("line")),
+            inTransactionsParameters(
+              None,
+              Some(InTransactionsConcurrencyParameters(None)(pos)),
+              None,
+              None,
+              Some(InTransactionsDisjointByParameters(
+                InTransactionsDisjointByMode.DisjointByExpressions(Seq(
+                  prop("line", "user"),
+                  prop("line", "movieId")
+                ))
+              )(pos))
+            ),
+            create(nodePat(Some("n")))
+          )
+        }
+    }
   }
 
-  test("CALL { CREATE (n) } IN TRANSACTIONS OF 5 ROWS ON ERROR BREAK REPORT STATUS AS status OF 42 ROWS") {
-    failsParsing[Statements]
-      .withMessageStart("Duplicated OF ROWS parameter")
-      .in {
-        case Cypher5JavaCc => _.throws[OpenCypherExceptionFactory.SyntaxException]
-        case _             => _.throws[SyntaxException]
-      }
+  test("CALL { CREATE (n) } IN CONCURRENT TRANSACTIONS DISJOINT BY AUTO") {
+    parsesIn[SubqueryCall] {
+      case Cypher5 => _.withAnyFailure
+      case _ => _.toAst {
+          importingWithSubqueryCallInTransactions(
+            inTransactionsParameters(
+              None,
+              Some(InTransactionsConcurrencyParameters(None)(pos)),
+              None,
+              None,
+              Some(InTransactionsDisjointByParameters(InTransactionsDisjointByMode.DisjointByAuto)(pos))
+            ),
+            create(nodePat(Some("n")))
+          )
+        }
+    }
+  }
+
+  test("CALL { CREATE (n) } IN CONCURRENT TRANSACTIONS DISJOINT BY NONE") {
+    parsesIn[SubqueryCall] {
+      case Cypher5 => _.withAnyFailure
+      case _ => _.toAst {
+          importingWithSubqueryCallInTransactions(
+            inTransactionsParameters(
+              None,
+              Some(InTransactionsConcurrencyParameters(None)(pos)),
+              None,
+              None,
+              Some(InTransactionsDisjointByParameters(InTransactionsDisjointByMode.DisjointByNone)(pos))
+            ),
+            create(nodePat(Some("n")))
+          )
+        }
+    }
+  }
+
+  test("CALL (a) { CREATE (n) } IN CONCURRENT TRANSACTIONS DISJOINT BY (`AUTO`)") {
+    // Backtick-escaped AUTO is parsed as a variable named AUTO (manual mode with one expression).
+    parsesIn[SubqueryCall] {
+      case Cypher5 => _.withAnyFailure
+      case _ => _.toAst {
+          scopeClauseSubqueryCallInTransactions(
+            isImportingAll = false,
+            importedVariables = Seq(varFor("a")),
+            inTransactionsParameters(
+              None,
+              Some(InTransactionsConcurrencyParameters(None)(pos)),
+              None,
+              None,
+              Some(InTransactionsDisjointByParameters(
+                InTransactionsDisjointByMode.DisjointByExpressions(Seq(varFor("AUTO")))
+              )(pos))
+            ),
+            create(nodePat(Some("n")))
+          )
+        }
+    }
+  }
+
+  test("CALL (a) { CREATE (n) } IN CONCURRENT TRANSACTIONS DISJOINT BY (`NONE`)") {
+    // Backtick-escaped NONE is parsed as a variable named NONE (manual mode with one expression).
+    parsesIn[SubqueryCall] {
+      case Cypher5 => _.withAnyFailure
+      case _ => _.toAst {
+          scopeClauseSubqueryCallInTransactions(
+            isImportingAll = false,
+            importedVariables = Seq(varFor("a")),
+            inTransactionsParameters(
+              None,
+              Some(InTransactionsConcurrencyParameters(None)(pos)),
+              None,
+              None,
+              Some(InTransactionsDisjointByParameters(
+                InTransactionsDisjointByMode.DisjointByExpressions(Seq(varFor("NONE")))
+              )(pos))
+            ),
+            create(nodePat(Some("n")))
+          )
+        }
+    }
+  }
+
+  test(
+    "CALL (a, b, c) { CREATE (n) } IN CONCURRENT TRANSACTIONS OF 5 ROWS DISJOINT BY (a, b, c) ON ERROR RETRY THEN CONTINUE REPORT STATUS AS s"
+  ) {
+    parsesIn[SubqueryCall] {
+      case Cypher5 => _.withAnyFailure
+      case _ => _.toAst {
+          scopeClauseSubqueryCallInTransactions(
+            isImportingAll = false,
+            importedVariables = Seq(varFor("a"), varFor("b"), varFor("c")),
+            inTransactionsParameters(
+              Some(InTransactionsBatchParameters(literalInt(5))(pos)),
+              Some(InTransactionsConcurrencyParameters(None)(pos)),
+              Some(InTransactionsErrorParameters(OnErrorRetryThenContinue, None)(pos)),
+              Some(InTransactionsReportParameters(varFor("s"))(pos)),
+              Some(InTransactionsDisjointByParameters(
+                InTransactionsDisjointByMode.DisjointByExpressions(Seq(varFor("a"), varFor("b"), varFor("c")))
+              )(pos))
+            ),
+            create(nodePat(Some("n")))
+          )
+        }
+    }
+  }
+
+  test("CALL { CREATE (n) } IN CONCURRENT TRANSACTIONS DISJOINT BY") {
+    // Empty manual list is a parse error.
+    parsesIn[SubqueryCall] {
+      case Cypher5 => _.withAnyFailure
+      case _       => _.withAnyFailure
+    }
+  }
+
+  test("CALL (a) { CREATE (n) } IN TRANSACTIONS DISJOINT BY (a)") {
+    // DISJOINT BY without CONCURRENT parses successfully (semantic error caught later).
+    parsesIn[SubqueryCall] {
+      case Cypher5 => _.withAnyFailure
+      case _ => _.toAst {
+          scopeClauseSubqueryCallInTransactions(
+            isImportingAll = false,
+            importedVariables = Seq(varFor("a")),
+            inTransactionsParameters(
+              None,
+              None,
+              None,
+              None,
+              Some(InTransactionsDisjointByParameters(
+                InTransactionsDisjointByMode.DisjointByExpressions(Seq(varFor("a")))
+              )(pos))
+            ),
+            create(nodePat(Some("n")))
+          )
+        }
+    }
+  }
+
+  test("CALL { CREATE (n) } IN CONCURRENT TRANSACTIONS DISJOINT BY AUTO DISJOINT BY NONE") {
+    // Duplicate DISJOINT BY parameter (Cypher5 fails earlier with `BATCH` not allowed at all).
+    parsesIn[Statements] {
+      case Cypher5 => _.withAnyFailure
+      case _       => _.withSyntaxErrorContaining("Duplicated DISJOINT BY parameters")
+    }
+  }
+
+  test("CALL (a) { CREATE (n) } IN CONCURRENT TRANSACTIONS DISJOINT BY a") {
+    // CIP amendment: bare expression list without parens is now a parse error.
+    parsesIn[SubqueryCall] {
+      case Cypher5 => _.withAnyFailure
+      case _       => _.withAnyFailure
+    }
+  }
+
+  test("CALL { CREATE (n) } IN CONCURRENT TRANSACTIONS DISJOINT BY ()") {
+    // Empty paren list is a parse error.
+    parsesIn[SubqueryCall] {
+      case Cypher5 => _.withAnyFailure
+      case _       => _.withAnyFailure
+    }
+  }
+
+  test("CALL (a) { CREATE (n) } IN CONCURRENT TRANSACTIONS DISJOINT BY (a") {
+    // Unterminated parens — parse error.
+    parsesIn[SubqueryCall] {
+      case Cypher5 => _.withAnyFailure
+      case _       => _.withAnyFailure
+    }
+  }
+
+  test("CALL (a) { CREATE (n) } IN CONCURRENT TRANSACTIONS DISJOINT BY a)") {
+    // Missing opening paren — parse error.
+    parsesIn[SubqueryCall] {
+      case Cypher5 => _.withAnyFailure
+      case _       => _.withAnyFailure
+    }
   }
 }

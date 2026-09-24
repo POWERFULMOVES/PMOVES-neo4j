@@ -35,7 +35,6 @@ import org.apache.commons.io.FilenameUtils;
 import org.apache.lucene.index.IndexFileNames;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.common.DependencyResolver;
 import org.neo4j.graphdb.Label;
 import org.neo4j.graphdb.Node;
@@ -44,16 +43,16 @@ import org.neo4j.graphdb.Transaction;
 import org.neo4j.graphdb.schema.IndexType;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.kernel.impl.api.index.IndexingService;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.DbmsExtension;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
 
 @DbmsExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 public class IndexBackupIT {
     private static final String PROPERTY_PREFIX = "property";
     private static final int NUMBER_OF_INDEXES = 10;
@@ -77,20 +76,20 @@ public class IndexBackupIT {
             prepareDatabase(label);
 
             forceCheckpoint(checkPointer);
-            ResourceIterator<Path> firstCheckpointSnapshot = indexingService.snapshotIndexFiles();
+            ResourceIterator<Path> firstCheckpointSnapshot = indexingService.snapshotIndexFiles(fileSystem);
             generateData(label);
             removeOldNodes(LongStream.range(1, 20));
             updateOldNodes(LongStream.range(30, 40));
 
             forceCheckpoint(checkPointer);
-            ResourceIterator<Path> secondCheckpointSnapshot = indexingService.snapshotIndexFiles();
+            ResourceIterator<Path> secondCheckpointSnapshot = indexingService.snapshotIndexFiles(fileSystem);
 
             generateData(label);
             removeOldNodes(LongStream.range(50, 60));
             updateOldNodes(LongStream.range(70, 80));
 
             forceCheckpoint(checkPointer);
-            ResourceIterator<Path> thirdCheckpointSnapshot = indexingService.snapshotIndexFiles();
+            ResourceIterator<Path> thirdCheckpointSnapshot = indexingService.snapshotIndexFiles(fileSystem);
 
             Set<String> firstSnapshotFileNames = getFileNames(firstCheckpointSnapshot);
             Set<String> secondSnapshotFileNames = getFileNames(secondCheckpointSnapshot);
@@ -111,11 +110,11 @@ public class IndexBackupIT {
         Label label = Label.label("testLabel");
         prepareDatabase(label);
 
-        ResourceIterator<Path> firstCheckpointSnapshot = indexingService.snapshotIndexFiles();
+        ResourceIterator<Path> firstCheckpointSnapshot = indexingService.snapshotIndexFiles(fileSystem);
         generateData(label);
-        ResourceIterator<Path> secondCheckpointSnapshot = indexingService.snapshotIndexFiles();
+        ResourceIterator<Path> secondCheckpointSnapshot = indexingService.snapshotIndexFiles(fileSystem);
         generateData(label);
-        ResourceIterator<Path> thirdCheckpointSnapshot = indexingService.snapshotIndexFiles();
+        ResourceIterator<Path> thirdCheckpointSnapshot = indexingService.snapshotIndexFiles(fileSystem);
 
         Set<String> firstSnapshotFileNames = getFileNames(firstCheckpointSnapshot);
         Set<String> secondSnapshotFileNames = getFileNames(secondCheckpointSnapshot);

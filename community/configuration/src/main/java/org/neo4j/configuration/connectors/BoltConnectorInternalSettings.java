@@ -25,16 +25,20 @@ import static java.time.Duration.ofSeconds;
 import static org.neo4j.configuration.SettingConstraints.any;
 import static org.neo4j.configuration.SettingConstraints.is;
 import static org.neo4j.configuration.SettingConstraints.min;
+import static org.neo4j.configuration.SettingConstraints.minSize;
 import static org.neo4j.configuration.SettingConstraints.range;
 import static org.neo4j.configuration.SettingImpl.newBuilder;
 import static org.neo4j.configuration.SettingValueParsers.BOOL;
 import static org.neo4j.configuration.SettingValueParsers.BYTES;
+import static org.neo4j.configuration.SettingValueParsers.CIDR_IP;
 import static org.neo4j.configuration.SettingValueParsers.DURATION;
 import static org.neo4j.configuration.SettingValueParsers.INT;
 import static org.neo4j.configuration.SettingValueParsers.PATH;
 import static org.neo4j.configuration.SettingValueParsers.STRING;
+import static org.neo4j.configuration.SettingValueParsers.listOf;
 import static org.neo4j.io.ByteUnit.kibiBytes;
 
+import inet.ipaddr.IPAddressString;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
@@ -58,26 +62,7 @@ public final class BoltConnectorInternalSettings implements SettingsDeclaration 
     public static final SettingValueParser<ConfiguredProtocolVersion> PROTOCOL_VERSION = new SettingValueParser<>() {
         @Override
         public ConfiguredProtocolVersion parse(String value) {
-            String trimmedValue = value.trim();
-
-            return Optional.of(trimmedValue)
-                    .map(trimmed -> trimmed.split("\\."))
-                    .filter(partsArr -> partsArr.length == 2)
-                    .map(List::of)
-                    .map(partsList -> partsList.stream()
-                            .map(maybeInt -> {
-                                try {
-                                    return Integer.parseInt(maybeInt);
-                                } catch (NumberFormatException ignored) {
-                                    return null;
-                                }
-                            })
-                            .filter(Objects::nonNull)
-                            .toList())
-                    .filter(partsInt -> partsInt.size() == 2)
-                    .map(partsInt -> new ConfiguredProtocolVersion(partsInt.get(0), partsInt.get(1)))
-                    .orElseThrow(() -> new IllegalArgumentException(
-                            format("'%s' is not a valid protocol version value, must be '<major>.<minor>'", value)));
+            return ConfiguredProtocolVersion.fromString(value);
         }
 
         @Override
@@ -137,6 +122,18 @@ public final class BoltConnectorInternalSettings implements SettingsDeclaration 
             newBuilder("internal.server.bolt.tcp_keep_alive", BOOL, true).build();
 
     @Internal
+    @Description("Enable TCP fast open on this connector")
+    public static final Setting<Boolean> tcp_fast_open =
+            newBuilder("internal.server.bolt.tcp_fast_open", BOOL, false).build();
+
+    @Internal
+    @Description("The maximum number of pending TCP fast open connections within this connector")
+    public static final Setting<Integer> tcp_fast_open_max_pending_connections = newBuilder(
+                    "internal.server.bolt.tcp_fast_open_max_pending_connections", INT, 128)
+            .addConstraint(min(1))
+            .build();
+
+    @Internal
     @Description("The maximum time to wait for a user to finish authentication before closing the connection.")
     public static final Setting<Duration> unsupported_bolt_unauth_connection_timeout = newBuilder(
                     "internal.server.bolt.unauth_connection_timeout", DURATION, ofSeconds(30))
@@ -163,30 +160,6 @@ public final class BoltConnectorInternalSettings implements SettingsDeclaration 
                     "internal.server.bolt.unauth_max_structure_depth", INT, 4)
             .addConstraint(range(0, Integer.MAX_VALUE))
             .build();
-
-    @Internal
-    @Description("The absolute path of the file for use with the Unix Domain Socket based loopback interface. "
-            + "This file must be specified and will be created at runtime and deleted on shutdown.")
-    public static final Setting<Path> unsupported_loopback_listen_file =
-            newBuilder("internal.dbms.loopback_file", PATH, null).build();
-
-    @Internal
-    @Description(
-            "Whether or not to delete an existing file for use with the Unix Domain Socket based loopback interface. "
-                    + "This improves the handling of the case where a previous hard shutdown was unable to delete the file.")
-    public static final Setting<Boolean> unsupported_loopback_delete =
-            newBuilder("internal.dbms.loopback_delete", BOOL, false).build();
-
-    @Internal
-    @Description("Enable or disable the bolt loopback connector. "
-            + "A user successfully authenticated over this will execute all queries with no security restrictions. "
-            + "This includes overriding the `"
-            + "internal.dbms.block_create_drop_database" + "`, " + "`"
-            + "internal.dbms.block_start_stop_database" + "` and `"
-            + "internal.dbms.upgrade_restriction_enabled"
-            + "` settings.")
-    public static final Setting<Boolean> enable_loopback_auth =
-            newBuilder("internal.dbms.loopback_enabled", BOOL, false).build();
 
     @Internal
     @Description("The maximum time to wait for the thread pool to finish processing its pending jobs and shutdown")
@@ -259,6 +232,17 @@ public final class BoltConnectorInternalSettings implements SettingsDeclaration 
             .build();
 
     @Internal
+    @Description("Enable/disable PROXY protocol support (HAProxy v1/v2). "
+            + "When enabled, the Bolt connector will automatically detect and decode PROXY protocol headers "
+            + "from load balancers (e.g., HAProxy, AWS NLB with proxy protocol) that provide the real client IP address. "
+            + "The connector gracefully handles both connections with and without PROXY protocol headers, "
+            + "making it safe to enable even in mixed environments. "
+            + "The real client address will be used for authentication, logging, connection tracking, "
+            + "and security auditing instead of the proxy's address.")
+    public static final Setting<Boolean> proxy_protocol_enabled =
+            newBuilder("internal.dbms.bolt.proxy_protocol.enabled", BOOL, false).build();
+
+    @Internal
     @Description("Enable/disable generation of response metrics")
     public static final Setting<Boolean> enable_response_metrics =
             newBuilder("internal.server.bolt.response_metrics", BOOL, false).build();
@@ -302,6 +286,22 @@ public final class BoltConnectorInternalSettings implements SettingsDeclaration 
             newBuilder("internal.dbms.bolt.local_enabled", BOOL, true).build();
 
     @Internal
+    @Description("Define protocol version of object messages on local bolt connector .")
+    public static final Setting<ConfiguredProtocolVersion> enable_object_messages_protocol_version_local_connector =
+            newBuilder(
+                            "internal.dbms.bolt.local_object_protocol_version",
+                            PROTOCOL_VERSION,
+                            ConfiguredProtocolVersion.fromString("6.1"))
+                    .build();
+
+    @Internal
+    @Description(
+            "Permits the use of user-databases (databases other than \"system\") via the Unix Domain Socket connector.")
+    public static final Setting<Boolean> enable_unix_socket_user_database_access = newBuilder(
+                    "internal.dbms.bolt.unix_socket_permit_unix_socket_user_database_access", BOOL, false)
+            .build();
+
+    @Internal
     @Description("Minimum Bolt Protocol version negotiated by the bolt connector.")
     public static final Setting<ConfiguredProtocolVersion> min_protocol_version = newBuilder(
                     "internal.dbms.bolt.min_protocol_version", PROTOCOL_VERSION, null)
@@ -313,13 +313,40 @@ public final class BoltConnectorInternalSettings implements SettingsDeclaration 
                     "internal.dbms.bolt.max_protocol_version", PROTOCOL_VERSION, null)
             .build();
 
+    @Internal
+    @Description("A list of masks permitted for use with the fleet discovery protocol.")
+    public static final Setting<List<IPAddressString>> discovery_network_masks = newBuilder(
+                    "internal.dbms.fleet_discovery.permitted_network_masks",
+                    listOf(CIDR_IP),
+                    List.of(
+                            new IPAddressString("10.0.0.0/8"),
+                            new IPAddressString("169.254.0.0/16"),
+                            new IPAddressString("172.16.0.0/12"),
+                            new IPAddressString("192.168.0.0/16")))
+            .addConstraint(minSize(1))
+            .build();
+
+    @Internal
+    @Description("Period of time between thread liveliness checks (zero disables checks)")
+    public static final Setting<Duration> thread_accountant_check_period = newBuilder(
+                    "internal.dbms.bolt.thread_accountant_check_period", DURATION, Duration.ofSeconds(10))
+            .addConstraint(min(Duration.ZERO))
+            .build();
+
+    @Internal
+    @Description("Maximum duration for which a thread may be occupied before reporting it")
+    public static final Setting<Duration> thread_accountant_max_run_time = newBuilder(
+                    "internal.dbms.bolt.thread_accountant_max_run_time", DURATION, Duration.ofMinutes(10))
+            .addConstraint(min(Duration.ofSeconds(30)))
+            .build();
+
     public enum ProtocolLoggingMode {
         DECODED(false, true),
         RAW(true, false),
         BOTH(true, true);
 
-        private boolean loggingRawTraffic;
-        private boolean loggingDecodedTraffic;
+        private final boolean loggingRawTraffic;
+        private final boolean loggingDecodedTraffic;
 
         ProtocolLoggingMode(boolean loggingRawTraffic, boolean loggingDecodedTraffic) {
             this.loggingRawTraffic = loggingRawTraffic;
@@ -335,5 +362,33 @@ public final class BoltConnectorInternalSettings implements SettingsDeclaration 
         }
     }
 
-    public record ConfiguredProtocolVersion(Integer major, Integer minor) {}
+    public record ConfiguredProtocolVersion(Integer major, Integer minor) {
+        @Override
+        public String toString() {
+            return major + "." + minor;
+        }
+
+        public static ConfiguredProtocolVersion fromString(String value) {
+            String trimmedValue = value.trim();
+
+            return Optional.of(trimmedValue)
+                    .map(trimmed -> trimmed.split("\\."))
+                    .filter(partsArr -> partsArr.length == 2)
+                    .map(List::of)
+                    .map(partsList -> partsList.stream()
+                            .map(maybeInt -> {
+                                try {
+                                    return Integer.parseInt(maybeInt);
+                                } catch (NumberFormatException ignored) {
+                                    return null;
+                                }
+                            })
+                            .filter(Objects::nonNull)
+                            .toList())
+                    .filter(partsInt -> partsInt.size() == 2)
+                    .map(partsInt -> new ConfiguredProtocolVersion(partsInt.get(0), partsInt.get(1)))
+                    .orElseThrow(() -> new IllegalArgumentException(
+                            format("'%s' is not a valid protocol version value, must be '<major>.<minor>'", value)));
+        }
+    }
 }

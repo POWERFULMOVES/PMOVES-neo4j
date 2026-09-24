@@ -20,13 +20,14 @@
 package org.neo4j.kernel.impl.store;
 
 import java.io.IOException;
-import java.nio.file.Path;
 import org.neo4j.internal.helpers.collection.Visitor;
 import org.neo4j.internal.id.IdGenerator;
 import org.neo4j.internal.id.IdSequence;
+import org.neo4j.io.async.AsyncBlockAccessor;
 import org.neo4j.io.pagecache.OutOfDiskSpaceException;
 import org.neo4j.io.pagecache.PageCursor;
 import org.neo4j.io.pagecache.context.CursorContext;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.kernel.impl.store.record.AbstractBaseRecord;
 import org.neo4j.kernel.impl.store.record.RecordLoad;
@@ -51,9 +52,9 @@ import org.neo4j.storageengine.util.IdUpdateListener;
  */
 public interface RecordStore<RECORD extends AbstractBaseRecord> {
     /**
-     * @return the {@link Path} that backs this store.
+     * @return the {@link StoreFile} that backs this store.
      */
-    Path getStorageFile();
+    StoreFile getStoreFile();
 
     IdGenerator getIdGenerator();
 
@@ -96,16 +97,6 @@ public interface RecordStore<RECORD extends AbstractBaseRecord> {
      * @return PageCursor for reading records.
      */
     PageCursor openPageCursorForReading(long id, CursorContext cursorContext);
-
-    /**
-     * Opens a {@link PageCursor} on this store, capable of reading only multi versioned record chain heads.
-     * The caller is responsible for closing it when done with it.
-     *
-     * @param id cursor will initially be placed at the page containing this record id.
-     * @param cursorContext underlying page cursor context.
-     * @return PageCursor for reading head chain records and pages
-     */
-    PageCursor openPageCursorForReadingHeadOnly(long id, CursorContext cursorContext);
 
     /**
      * Opens a {@link PageCursor} on this store, capable of reading records using
@@ -238,7 +229,7 @@ public interface RecordStore<RECORD extends AbstractBaseRecord> {
      * This call is blocking and will ensure all updates since last call to this method are durable
      * once the call returns.
      */
-    void flush(FileFlushEvent flushEvent, CursorContext cursorContext);
+    void flush(FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext);
 
     /**
      * Called once all changes to a record is ready to be converted into a command.

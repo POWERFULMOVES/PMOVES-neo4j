@@ -33,11 +33,13 @@ import static org.neo4j.kernel.impl.index.schema.BlockStorage.Cancellation.NOT_C
 import static org.neo4j.kernel.impl.index.schema.BlockStorage.Monitor.NO_MONITOR;
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
 import static org.neo4j.test.OtherThreadExecutor.command;
+import static org.neo4j.test.Race.throwing;
 
 import java.io.IOException;
 import java.nio.ByteOrder;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
@@ -48,20 +50,20 @@ import org.eclipse.collections.impl.factory.primitive.LongSets;
 import org.eclipse.collections.impl.set.mutable.primitive.LongHashSet;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.index.internal.gbptree.SimpleLongLayout;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.memory.HeapScopedBuffer;
 import org.neo4j.test.Barrier;
 import org.neo4j.test.OtherThreadExecutor;
+import org.neo4j.test.Race;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
 
 @TestDirectoryExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class BlockStorageTest {
     @Inject
     TestDirectory directory;
@@ -311,6 +313,44 @@ class BlockStorageTest {
         assertEquals(100, entryCountForMergeFactorBlocks);
         assertEquals(200, entryCountForMoreThanMergeFactorBlocks);
         assertEquals(300, entryCountForThreeFactorsMergeFactorBlocks);
+    }
+
+    @Test
+    void shouldShareOneBlockStorageWithMultipleThreads() throws IOException {
+        try (BlockStorage<MutableLong, MutableLong> storage =
+                new BlockStorage<>(layout, heapBufferFactory(100), fileSystem, file, NO_MONITOR, INSTANCE)) {
+            // given concurrent additions
+            Race addRace = new Race();
+            int numContestants = 4;
+            List<List<BlockEntry<MutableLong, MutableLong>>> expected =
+                    Collections.synchronizedList(new ArrayList<>(numContestants));
+            addRace.addContestants(
+                    numContestants,
+                    contestantId -> throwing(() -> {
+                        int count = 1_000;
+                        List<BlockEntry<MutableLong, MutableLong>> threadExpected = new ArrayList<>(count);
+                        for (int i = 0, dataId = contestantId; i < count; i++, dataId += numContestants) {
+                            MutableLong key = new MutableLong(dataId);
+                            MutableLong value = new MutableLong(dataId);
+                            storage.add(key, value);
+                            threadExpected.add(new BlockEntry<>(key, value));
+                        }
+                        expected.add(threadExpected);
+                    }));
+            addRace.goUnchecked();
+            storage.doneAdding();
+
+            // when
+            storage.merge(4, NOT_CANCELLABLE);
+
+            // then
+            List<BlockEntry<MutableLong, MutableLong>> mergedExpected = new ArrayList<>();
+            for (List<BlockEntry<MutableLong, MutableLong>> threadExpected : expected) {
+                mergedExpected.addAll(threadExpected);
+            }
+            mergedExpected.sort((o1, o2) -> layout.compare(o1.key(), o2.key()));
+            assertContents(layout, storage, Collections.singletonList(mergedExpected));
+        }
     }
 
     private static Iterable<List<BlockEntry<MutableLong, MutableLong>>> asOneBigBlock(

@@ -20,20 +20,22 @@
 package org.neo4j.kernel.impl.transaction;
 
 import static org.neo4j.common.Subject.ANONYMOUS;
-import static org.neo4j.kernel.impl.transaction.log.LogIndexEncoding.decodeLogIndex;
+import static org.neo4j.kernel.impl.api.LeaseService.NO_LEASE;
 import static org.neo4j.storageengine.AppendIndexProvider.UNKNOWN_APPEND_INDEX;
+import static org.neo4j.wal.LogIndexEncoding.decodeLogIndex;
 
 import java.io.IOException;
 import java.util.List;
 import org.neo4j.io.fs.WritableChannel;
 import org.neo4j.kernel.KernelVersion;
-import org.neo4j.kernel.impl.transaction.log.CompleteCommandBatch;
-import org.neo4j.kernel.impl.transaction.log.LogicalTransactionStore;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntryCommit;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntryStart;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntryWriter;
 import org.neo4j.storageengine.api.CommandBatch;
+import org.neo4j.storageengine.api.Leases;
 import org.neo4j.storageengine.api.StorageCommand;
+import org.neo4j.wal.CompleteCommandBatch;
+import org.neo4j.wal.LogicalTransactionStore;
+import org.neo4j.wal.entry.LogEntryCommit;
+import org.neo4j.wal.entry.LogEntryStart;
+import org.neo4j.wal.entry.LogEntryWriter;
 
 /**
  * This class represents the concept of a TransactionRepresentation that has been
@@ -42,11 +44,21 @@ import org.neo4j.storageengine.api.StorageCommand;
  * asked for a transaction via a cursor.
  */
 public record CompleteBatchRepresentation(
-        LogEntryStart startEntry, CommandBatch commandBatch, LogEntryCommit commitEntry)
+        LogEntryStart startEntry, CommandBatch commandBatch, LogEntryCommit commitEntry, int previousChecksum)
         implements CommittedCommandBatchRepresentation {
 
     public CompleteBatchRepresentation(
-            LogEntryStart startEntry, List<StorageCommand> commands, LogEntryCommit commitEntry) {
+            LogEntryStart startEntry, List<StorageCommand> commands, LogEntryCommit commitEntry, int previousChecksum) {
+        this(startEntry, commands, commitEntry, previousChecksum, NO_LEASE, Leases.NO_LEASES);
+    }
+
+    public CompleteBatchRepresentation(
+            LogEntryStart startEntry,
+            List<StorageCommand> commands,
+            LogEntryCommit commitEntry,
+            int previousChecksum,
+            int leaseId,
+            Leases leases) {
         this(
                 startEntry,
                 new CompleteCommandBatch(
@@ -55,22 +67,18 @@ public record CompleteBatchRepresentation(
                         startEntry.getTimeWritten(),
                         startEntry.getLastCommittedTxWhenTransactionStarted(),
                         commitEntry.getTimeWritten(),
-                        -1,
+                        leaseId,
+                        leases,
                         startEntry.kernelVersion(),
                         ANONYMOUS),
-                commitEntry);
+                commitEntry,
+                previousChecksum);
     }
 
     @Override
     public int serialize(LogEntryWriter<? extends WritableChannel> writer) throws IOException {
         KernelVersion kernelVersion = startEntry.kernelVersion();
-        writer.writeStartEntry(
-                kernelVersion,
-                startEntry.getTimeWritten(),
-                startEntry.getLastCommittedTxWhenTransactionStarted(),
-                startEntry.getAppendIndex(),
-                startEntry.getPreviousChecksum(),
-                startEntry.getAdditionalHeader());
+        writer.writeStartEntry(startEntry);
 
         writer.serialize(commandBatch);
         return writer.writeCommitEntry(kernelVersion, commitEntry.getTxId(), commitEntry.getTimeWritten());
@@ -81,6 +89,11 @@ public record CompleteBatchRepresentation(
         return startEntry.kernelVersion().isAtLeast(KernelVersion.VERSION_APPEND_INDEX_INTRODUCED)
                 ? startEntry.getAppendIndex()
                 : commitEntry.getTxId();
+    }
+
+    @Override
+    public long transactionSequenceNumber() {
+        return startEntry.getTransactionSequenceNumber();
     }
 
     @Override

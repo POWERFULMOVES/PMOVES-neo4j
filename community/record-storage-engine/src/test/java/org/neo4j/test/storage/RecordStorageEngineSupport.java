@@ -24,15 +24,14 @@ import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.imme
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
 
 import java.util.function.Function;
+import org.neo4j.common.TokenNameLookup;
 import org.neo4j.configuration.Config;
 import org.neo4j.graphdb.config.Setting;
 import org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector;
 import org.neo4j.internal.id.DefaultIdGeneratorFactory;
 import org.neo4j.internal.id.IdGeneratorFactory;
-import org.neo4j.internal.kernel.api.exceptions.schema.CreateConstraintFailureException;
-import org.neo4j.internal.recordstorage.LockVerificationFactory;
 import org.neo4j.internal.recordstorage.RecordStorageEngine;
-import org.neo4j.internal.recordstorage.TransactionApplierFactoryChain;
+import org.neo4j.internal.recordstorage.TransactionAppliersDispatcherFactory;
 import org.neo4j.internal.schema.ConstraintDescriptor;
 import org.neo4j.internal.schema.IndexConfigCompleter;
 import org.neo4j.internal.schema.SchemaState;
@@ -48,9 +47,7 @@ import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.impl.muninn.VersionStorage;
 import org.neo4j.io.pagecache.prefetch.PagePrefetcher;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
-import org.neo4j.kernel.database.MetadataCache;
-import org.neo4j.kernel.impl.transaction.log.EmptyLogTailMetadata;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.lifecycle.LifeSupport;
 import org.neo4j.lock.LockService;
 import org.neo4j.lock.ReentrantLockService;
@@ -62,9 +59,12 @@ import org.neo4j.monitoring.DatabaseHealth;
 import org.neo4j.monitoring.HealthEventGenerator;
 import org.neo4j.storageengine.api.ConstraintRuleAccessor;
 import org.neo4j.storageengine.api.IndexUpdateListener;
+import org.neo4j.storageengine.api.LogMetadataProviderImpl;
 import org.neo4j.storageengine.api.TransactionApplicationMode;
 import org.neo4j.token.TokenHolders;
 import org.neo4j.token.api.TokenHolder;
+import org.neo4j.wal.EmptyLogTailMetadata;
+import org.neo4j.wal.LogTailMetadata;
 
 /**
  * Conveniently manages a {@link RecordStorageEngine} in a test. Needs {@link FileSystemAbstraction} and
@@ -90,7 +90,8 @@ public class RecordStorageEngineSupport {
             PageCache pageCache,
             DatabaseHealth databaseHealth,
             RecordDatabaseLayout databaseLayout,
-            Function<TransactionApplierFactoryChain, TransactionApplierFactoryChain> transactionApplierTransformer,
+            Function<TransactionAppliersDispatcherFactory, TransactionAppliersDispatcherFactory>
+                    transactionApplierTransformer,
             IndexUpdateListener indexUpdateListener,
             LockService lockService,
             TokenHolders tokenHolders,
@@ -131,8 +132,8 @@ public class RecordStorageEngineSupport {
         private final PageCache pageCache;
         private DatabaseHealth databaseHealth = new DatabaseHealth(HealthEventGenerator.NO_OP, NullLog.getInstance());
         private final RecordDatabaseLayout databaseLayout;
-        private Function<TransactionApplierFactoryChain, TransactionApplierFactoryChain> transactionApplierTransformer =
-                applierFacade -> applierFacade;
+        private Function<TransactionAppliersDispatcherFactory, TransactionAppliersDispatcherFactory>
+                transactionApplierTransformer = applierFacade -> applierFacade;
         private IndexUpdateListener indexUpdateListener = new IndexUpdateListener.Adapter();
         private LockService lockService = new ReentrantLockService();
         private TokenHolders tokenHolders =
@@ -146,37 +147,37 @@ public class RecordStorageEngineSupport {
 
             @Override
             public ConstraintDescriptor createUniquenessConstraintRule(
-                    long ruleId, UniquenessConstraintDescriptor descriptor, long indexId) {
-                return descriptor.withId(ruleId).withOwnedIndexId(indexId);
+                    UniquenessConstraintDescriptor descriptor, long indexId) {
+                return descriptor.withOwnedIndexId(indexId);
             }
 
             @Override
             public ConstraintDescriptor createKeyConstraintRule(
-                    long ruleId, KeyConstraintDescriptor descriptor, long indexId) {
+                    KeyConstraintDescriptor descriptor, long indexId, TokenNameLookup tokenNameLookup) {
                 throw new UnsupportedOperationException("Not needed a.t.m.");
             }
 
             @Override
-            public ConstraintDescriptor createExistenceConstraint(long ruleId, ConstraintDescriptor descriptor) {
+            public ConstraintDescriptor createExistenceConstraint(
+                    ConstraintDescriptor descriptor, TokenNameLookup tokenNameLookup) {
                 throw new UnsupportedOperationException("Not needed a.t.m.");
             }
 
             @Override
-            public ConstraintDescriptor createPropertyTypeConstraint(long ruleId, TypeConstraintDescriptor descriptor) {
+            public ConstraintDescriptor createPropertyTypeConstraint(
+                    TypeConstraintDescriptor descriptor, TokenNameLookup tokenNameLookup) {
                 throw new UnsupportedOperationException("Not needed a.t.m.");
             }
 
             @Override
             public ConstraintDescriptor createRelationshipEndpointLabelConstraint(
-                    long ruleId, RelationshipEndpointLabelConstraintDescriptor descriptor)
-                    throws CreateConstraintFailureException {
+                    RelationshipEndpointLabelConstraintDescriptor descriptor, TokenNameLookup tokenNameLookup) {
                 throw new UnsupportedOperationException("Not needed a.t.m.");
             }
 
             @Override
             public ConstraintDescriptor createNodeLabelExistenceConstraint(
-                    long ruleId, NodeLabelExistenceConstraintDescriptor descriptor)
-                    throws CreateConstraintFailureException {
+                    NodeLabelExistenceConstraintDescriptor descriptor, TokenNameLookup tokenNameLookup) {
                 throw new UnsupportedOperationException("Not needed a.t.m.");
             }
         };
@@ -189,7 +190,7 @@ public class RecordStorageEngineSupport {
         }
 
         public Builder transactionApplierTransformer(
-                Function<TransactionApplierFactoryChain, TransactionApplierFactoryChain>
+                Function<TransactionAppliersDispatcherFactory, TransactionAppliersDispatcherFactory>
                         transactionApplierTransformer) {
             this.transactionApplierTransformer = transactionApplierTransformer;
             return this;
@@ -247,7 +248,7 @@ public class RecordStorageEngineSupport {
     }
 
     private static class ExtendedRecordStorageEngine extends RecordStorageEngine {
-        private final Function<TransactionApplierFactoryChain, TransactionApplierFactoryChain>
+        private final Function<TransactionAppliersDispatcherFactory, TransactionAppliersDispatcherFactory>
                 transactionApplierTransformer;
 
         ExtendedRecordStorageEngine(
@@ -264,7 +265,8 @@ public class RecordStorageEngineSupport {
                 LockService lockService,
                 DatabaseHealth databaseHealth,
                 IdGeneratorFactory idGeneratorFactory,
-                Function<TransactionApplierFactoryChain, TransactionApplierFactoryChain> transactionApplierTransformer,
+                Function<TransactionAppliersDispatcherFactory, TransactionAppliersDispatcherFactory>
+                        transactionApplierTransformer,
                 LogTailMetadata emptyLogTailMetadata) {
             super(
                     databaseLayout,
@@ -282,19 +284,18 @@ public class RecordStorageEngineSupport {
                     idGeneratorFactory,
                     RecoveryCleanupWorkCollector.immediate(),
                     EmptyMemoryTracker.INSTANCE,
-                    emptyLogTailMetadata,
-                    new MetadataCache(emptyLogTailMetadata),
-                    LockVerificationFactory.NONE,
+                    new LogMetadataProviderImpl(emptyLogTailMetadata),
                     new CursorContextFactory(PageCacheTracer.NULL, EMPTY_CONTEXT_SUPPLIER),
                     PageCacheTracer.NULL,
                     VersionStorage.EMPTY_STORAGE,
-                    PagePrefetcher.DISABLED);
+                    PagePrefetcher.DISABLED,
+                    DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
             this.transactionApplierTransformer = transactionApplierTransformer;
         }
 
         @Override
-        protected TransactionApplierFactoryChain applierChain(TransactionApplicationMode mode) {
-            TransactionApplierFactoryChain recordEngineApplier = super.applierChain(mode);
+        protected TransactionAppliersDispatcherFactory applierDispatcherFactory(TransactionApplicationMode mode) {
+            TransactionAppliersDispatcherFactory recordEngineApplier = super.applierDispatcherFactory(mode);
             return transactionApplierTransformer.apply(recordEngineApplier);
         }
     }

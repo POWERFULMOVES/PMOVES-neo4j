@@ -25,6 +25,8 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import org.eclipse.collections.api.map.primitive.IntObjectMap;
+import org.eclipse.collections.impl.list.mutable.FastList;
+import org.neo4j.batchimport.api.input.ApplicationMode;
 import org.neo4j.batchimport.api.input.InputEntityVisitor;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.internal.batchimport.DataImporter.Monitor;
@@ -44,6 +46,8 @@ import org.neo4j.kernel.impl.store.record.PropertyBlock;
 import org.neo4j.kernel.impl.store.record.PropertyRecord;
 import org.neo4j.kernel.impl.store.record.Record;
 import org.neo4j.memory.MemoryTracker;
+import org.neo4j.storageengine.api.PropertyKeyValue;
+import org.neo4j.storageengine.api.StorageProperty;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.token.api.TokenHolder;
 import org.neo4j.token.api.TokenNotFoundException;
@@ -61,6 +65,7 @@ abstract class EntityImporter extends InputEntityVisitor.Adapter {
     private final PageCursor propertyUpdateCursor;
     protected final StoreCursors storeCursors;
     protected final StoreCursors tempStoreCursors;
+    protected final String storeFormat;
     private PropertyBlock[] propertyBlocks = new PropertyBlock[100];
     private int propertyBlocksCursor;
     private final BatchingIdGetter propertyIds;
@@ -76,6 +81,9 @@ abstract class EntityImporter extends InputEntityVisitor.Adapter {
     private final DynamicRecordAllocator dynamicStringRecordAllocator;
     private final DynamicRecordAllocator dynamicArrayRecordAllocator;
     protected final CursorContext cursorContext;
+    protected final FastList<StorageProperty> properties = FastList.newList();
+    protected String sourceDescription;
+    protected long lineNumber;
 
     EntityImporter(
             BatchingNeoStores stores,
@@ -103,6 +111,7 @@ abstract class EntityImporter extends InputEntityVisitor.Adapter {
         this.dynamicArrayRecordAllocator = new StandardDynamicRecordAllocator(
                 arrayPropertyIds, propertyStore.getStringStore().getRecordDataSize());
         this.propertyUpdateCursor = propertyStore.openPageCursorForWriting(0, cursorContext);
+        this.storeFormat = stores.getRecordFormats().name();
     }
 
     static BatchingIdGetter batchingIdGetter(CommonAbstractStore<? extends AbstractBaseRecord, ?> store) {
@@ -110,27 +119,28 @@ abstract class EntityImporter extends InputEntityVisitor.Adapter {
     }
 
     @Override
-    public boolean property(String key, Object value) {
+    public boolean property(String key, Object value, boolean identifier) {
         assert !hasPropertyId;
         try {
-            return property(propertyKeyTokenRepository.getOrCreateId(key), value);
+            return property(propertyKeyTokenRepository.getOrCreateId(key), value, identifier);
         } catch (KernelException e) {
             throw new RuntimeException(e);
         }
     }
 
     @Override
-    public boolean property(int propertyKeyId, Object value) {
+    public boolean property(int propertyKeyId, Object value, boolean identifier) {
         assert !hasPropertyId;
+        Value v = value instanceof Value ? (Value) value : Values.of(value);
         try {
-            encodeProperty(nextPropertyBlock(), propertyKeyId, value);
+            encodeProperty(nextPropertyBlock(), propertyKeyId, v);
         } catch (Exception e) {
             // Didn't work, we must decrement the propertyBlocksCursor
             propertyBlocksCursor--;
             throw e;
         }
         entityPropertyCount++;
-        schemaMonitor.property(propertyKeyId, value);
+        properties.add(new PropertyKeyValue(propertyKeyId, v));
         return true;
     }
 
@@ -143,11 +153,24 @@ abstract class EntityImporter extends InputEntityVisitor.Adapter {
     }
 
     @Override
+    public boolean sourceDescription(String source) {
+        sourceDescription = source;
+        return true;
+    }
+
+    @Override
+    public boolean lineNumber(long line) {
+        lineNumber = line;
+        return true;
+    }
+
+    @Override
     public void reset() {
         propertyBlocksCursor = 0;
         hasPropertyId = false;
         propertyCount += entityPropertyCount;
         entityPropertyCount = 0;
+        properties.clear();
     }
 
     private PropertyBlock nextPropertyBlock() {
@@ -160,8 +183,7 @@ abstract class EntityImporter extends InputEntityVisitor.Adapter {
         return propertyBlocks[propertyBlocksCursor++];
     }
 
-    private void encodeProperty(PropertyBlock block, int key, Object property) {
-        Value value = property instanceof Value ? (Value) property : Values.of(property);
+    private void encodeProperty(PropertyBlock block, int key, Value value) {
         PropertyStore.encodeValue(
                 block,
                 key,
@@ -169,7 +191,8 @@ abstract class EntityImporter extends InputEntityVisitor.Adapter {
                 dynamicStringRecordAllocator,
                 dynamicArrayRecordAllocator,
                 cursorContext,
-                memoryTracker);
+                memoryTracker,
+                storeFormat);
     }
 
     protected Map<String, Object> namedProperties(IntObjectMap<Value> properties) {
@@ -230,11 +253,20 @@ abstract class EntityImporter extends InputEntityVisitor.Adapter {
     }
 
     @Override
+    public boolean applicationMode(ApplicationMode mode) {
+        if (mode != ApplicationMode.CREATE) {
+            throw new UnsupportedOperationException("Only supports creating new entities");
+        }
+        return true;
+    }
+
+    @Override
     public void close() {
         monitor.propertiesImported(propertyCount);
         propertyUpdateCursor.close();
         storeCursors.close();
         tempStoreCursors.close();
+        schemaMonitor.close();
     }
 
     void freeUnusedIds() {

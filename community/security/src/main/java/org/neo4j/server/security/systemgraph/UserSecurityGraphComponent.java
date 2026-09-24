@@ -21,13 +21,15 @@ package org.neo4j.server.security.systemgraph;
 
 import static org.neo4j.dbms.database.ComponentVersion.SECURITY_USER_COMPONENT;
 import static org.neo4j.dbms.database.KnownSystemComponentVersion.UNKNOWN_VERSION;
-import static org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.AUTH_CONSTRAINT;
-import static org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.AUTH_ID;
-import static org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.AUTH_LABEL;
-import static org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.AUTH_PROVIDER;
-import static org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.USER_ID;
-import static org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.USER_LABEL;
+import static org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.AUTH_CONSTRAINT;
+import static org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.AUTH_ID_PROPERTY;
+import static org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.AUTH_LABEL;
+import static org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.AUTH_PROVIDER_PROPERTY;
+import static org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_ID_PROPERTY;
+import static org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_LABEL;
+import static org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_NAME_PROPERTY;
 
+import java.util.Optional;
 import org.neo4j.configuration.Config;
 import org.neo4j.dbms.database.AbstractSystemGraphComponent;
 import org.neo4j.dbms.database.ComponentVersion;
@@ -52,8 +54,9 @@ import org.neo4j.util.VisibleForTesting;
 
 /**
  * This component contains the users of the dbms.
- * Each user is represented by a node in the system database with the label :User and properties for username, credentials, passwordChangeRequired and status.
- * The schema is the same in both community and enterprise (even if status is an enterprise-only feature).
+ * Each user is represented by a node in the system database with the label :User and properties for username, internal id, credentials, passwordChangeRequired, status and home database.
+ * The user node also connects to a node with label :Auth which holds external auth information for linked users.
+ * The schema is the same in both community and enterprise (even if some of the features are enterprise-only).
  */
 public class UserSecurityGraphComponent extends AbstractSystemGraphComponent
         implements SystemGraphComponentWithVersion {
@@ -115,10 +118,11 @@ public class UserSecurityGraphComponent extends AbstractSystemGraphComponent
     }
 
     @Override
-    public void initializeSystemGraphConstraints(Transaction tx) {
-        initializeSystemGraphConstraint(tx, USER_LABEL, "name");
-        initializeSystemGraphConstraint(tx, USER_LABEL, USER_ID);
-        initializeSystemGraphConstraint(tx, AUTH_CONSTRAINT, AUTH_LABEL, AUTH_PROVIDER, AUTH_ID);
+    public void initializeSystemGraphSchema(GraphDatabaseService system) throws Exception {
+        initializeSystemGraphConstraint(system, USER_LABEL, USER_NAME_PROPERTY);
+        initializeSystemGraphConstraint(system, USER_LABEL, USER_ID_PROPERTY);
+        initializeSystemGraphConstraint(
+                system, Optional.of(AUTH_CONSTRAINT), AUTH_LABEL, AUTH_PROVIDER_PROPERTY, AUTH_ID_PROPERTY);
     }
 
     private void initializeLatestSystemGraph(Transaction tx) throws Exception {
@@ -167,15 +171,19 @@ public class UserSecurityGraphComponent extends AbstractSystemGraphComponent
         if (currentVersion.version == UNKNOWN_VERSION) {
             debugLog.debug("The current version does not have a security graph, doing a full initialization");
             SystemGraphComponent.executeWithFullAccess(system, this::initializeLatestSystemGraph);
-            SystemGraphComponent.executeWithFullAccess(system, this::initializeSystemGraphConstraints);
+            this.initializeSystemGraphSchema(system);
         } else if (currentVersion.migrationSupported()) {
             debugLog.info("Upgrading security graph to latest version");
-            SystemGraphComponent.executeWithFullAccess(system, tx -> knownUserSecurityComponentVersions
-                    .latestComponentVersion()
-                    .upgradeSecurityGraph(tx, currentVersion.version));
-            SystemGraphComponent.executeWithFullAccess(system, tx -> knownUserSecurityComponentVersions
-                    .latestComponentVersion()
-                    .upgradeSecurityGraphSchema(tx, currentVersion.version));
+            SystemGraphComponent.executeWithFullAccess(
+                    system,
+                    tx -> knownUserSecurityComponentVersions
+                            .latestComponentVersion()
+                            .upgradeSecurityGraph(tx, currentVersion.version));
+            SystemGraphComponent.executeWithFullAccess(
+                    system,
+                    tx -> knownUserSecurityComponentVersions
+                            .latestComponentVersion()
+                            .upgradeSecurityGraphSchema(tx, currentVersion.version));
         } else {
             throw currentVersion.unsupported();
         }
@@ -189,5 +197,12 @@ public class UserSecurityGraphComponent extends AbstractSystemGraphComponent
         KnownCommunitySecurityComponentVersion component =
                 knownUserSecurityComponentVersions.detectCurrentComponentVersion(tx);
         return component.requiresAuthObject();
+    }
+
+    public ShowUsersOutput showUsers(
+            Transaction tx, boolean withAuth, boolean allowedToSeeTags, boolean asCommands, boolean enterprise) {
+        KnownCommunitySecurityComponentVersion version =
+                knownUserSecurityComponentVersions.detectCurrentComponentVersion(tx);
+        return version.showUsers(tx, withAuth, allowedToSeeTags, asCommands, enterprise);
     }
 }

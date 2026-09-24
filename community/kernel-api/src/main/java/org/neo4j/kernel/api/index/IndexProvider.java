@@ -21,7 +21,6 @@ package org.neo4j.kernel.api.index;
 
 import java.io.IOException;
 import java.nio.file.OpenOption;
-import java.nio.file.Path;
 import org.apache.commons.lang3.StringUtils;
 import org.eclipse.collections.api.set.ImmutableSet;
 import org.neo4j.common.TokenNameLookup;
@@ -37,6 +36,7 @@ import org.neo4j.io.memory.ByteBufferFactory;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.impl.api.index.IndexSamplingConfig;
@@ -56,7 +56,7 @@ import org.neo4j.values.ElementIdMapper;
  *
  * When an index rule is added, the IndexingService is notified. It will, in turn, ask
  * your {@link IndexProvider} for a
- * {@link #getPopulator(IndexDescriptor, IndexSamplingConfig, ByteBufferFactory, MemoryTracker, TokenNameLookup, ElementIdMapper, ImmutableSet)} batch index writer}.
+ * {@link #getPopulator(IndexDescriptor, IndexSamplingConfig, ByteBufferFactory, MemoryTracker, TokenNameLookup, ElementIdMapper, ImmutableSet, StorageEngineIndexingBehaviour)} batch index writer}.
  *
  * A background index job is triggered, and all existing data that applies to the new rule, as well as new data
  * from the "outside", will be inserted using the writer. You are guaranteed that usage of this writer,
@@ -101,28 +101,28 @@ import org.neo4j.values.ElementIdMapper;
  * <h3>Online operation</h3>
  *
  * Once the index is online, the database will move to using the
- * {@link #getOnlineAccessor(IndexDescriptor, IndexSamplingConfig, TokenNameLookup, ElementIdMapper, ImmutableSet) online accessor} to
+ * {@link #getOnlineAccessor(IndexDescriptor, IndexSamplingConfig, TokenNameLookup, ElementIdMapper, ImmutableSet, StorageEngineIndexingBehaviour) online accessor} to
  * write to the index.
  */
 public abstract class IndexProvider extends LifecycleAdapter implements IndexConfigCompleter {
     public interface Monitor {
         void failedToOpenIndex(IndexDescriptor index, String action, Exception cause);
 
-        void recoveryCleanupRegistered(Path indexFile, IndexDescriptor index);
+        void recoveryCleanupRegistered(StoreFile indexFile, IndexDescriptor index);
 
-        void recoveryCleanupStarted(Path indexFile, IndexDescriptor index);
+        void recoveryCleanupStarted(StoreFile indexFile, IndexDescriptor index);
 
         void recoveryCleanupFinished(
-                Path indexFile,
+                StoreFile indexFile,
                 IndexDescriptor index,
                 long numberOfPagesVisited,
                 long numberOfTreeNodes,
                 long numberOfCleanedCrashPointers,
                 long durationMillis);
 
-        void recoveryCleanupClosed(Path indexFile, IndexDescriptor index);
+        void recoveryCleanupClosed(StoreFile indexFile, IndexDescriptor index);
 
-        void recoveryCleanupFailed(Path indexFile, IndexDescriptor index, Throwable throwable);
+        void recoveryCleanupFailed(StoreFile indexFile, IndexDescriptor index, Throwable throwable);
     }
 
     public static final IndexProvider EMPTY =
@@ -167,7 +167,8 @@ public abstract class IndexProvider extends LifecycleAdapter implements IndexCon
                         TokenNameLookup tokenNameLookup,
                         ElementIdMapper elementIdMapper,
                         ImmutableSet<OpenOption> openOptions,
-                        StorageEngineIndexingBehaviour indexingBehaviour) {
+                        StorageEngineIndexingBehaviour indexingBehaviour,
+                        IndexPopulator.Configuration configuration) {
                     return singlePopulator;
                 }
 
@@ -242,7 +243,29 @@ public abstract class IndexProvider extends LifecycleAdapter implements IndexCon
             TokenNameLookup tokenNameLookup,
             ElementIdMapper elementIdMapper,
             ImmutableSet<OpenOption> openOptions,
-            StorageEngineIndexingBehaviour indexingBehaviour);
+            StorageEngineIndexingBehaviour indexingBehaviour,
+            IndexPopulator.Configuration configuration);
+
+    public final IndexPopulator getPopulator(
+            IndexDescriptor descriptor,
+            IndexSamplingConfig samplingConfig,
+            ByteBufferFactory bufferFactory,
+            MemoryTracker memoryTracker,
+            TokenNameLookup tokenNameLookup,
+            ElementIdMapper elementIdMapper,
+            ImmutableSet<OpenOption> openOptions,
+            StorageEngineIndexingBehaviour indexingBehaviour) {
+        return getPopulator(
+                descriptor,
+                samplingConfig,
+                bufferFactory,
+                memoryTracker,
+                tokenNameLookup,
+                elementIdMapper,
+                openOptions,
+                indexingBehaviour,
+                IndexPopulator.DEFAULT_CONFIGURATION);
+    }
 
     /**
      * Used for updating an index once initial population has completed.
@@ -297,7 +320,7 @@ public abstract class IndexProvider extends LifecycleAdapter implements IndexCon
             IndexDescriptor descriptor, CursorContext cursorContext, ImmutableSet<OpenOption> openOptions);
 
     /**
-     * Validate that the given index prototype can be used to create an index with the given index provider, or throw an {@link IllegalArgumentException} if
+     * Validate that the given index prototype can be used to create an index with the given index provider, or throw an {@link org.neo4j.exceptions.InvalidArgumentException} if
      * that is not the case.
      *
      * @param prototype The prototype to be validated.
@@ -374,7 +397,8 @@ public abstract class IndexProvider extends LifecycleAdapter implements IndexCon
                 TokenNameLookup tokenNameLookup,
                 ElementIdMapper elementIdMapper,
                 ImmutableSet<OpenOption> openOptions,
-                StorageEngineIndexingBehaviour indexingBehaviour) {
+                StorageEngineIndexingBehaviour indexingBehaviour,
+                IndexPopulator.Configuration configuration) {
             return provider.getPopulator(
                     descriptor,
                     samplingConfig,
@@ -383,7 +407,8 @@ public abstract class IndexProvider extends LifecycleAdapter implements IndexCon
                     tokenNameLookup,
                     elementIdMapper,
                     openOptions,
-                    indexingBehaviour);
+                    indexingBehaviour,
+                    configuration);
         }
 
         @Override

@@ -19,7 +19,7 @@
  */
 package org.neo4j.cypher.internal.ir
 
-import org.neo4j.cypher.internal.ast.Hint
+import org.neo4j.cypher.internal.ast.IrHint
 import org.neo4j.cypher.internal.ast.Union.UnionMapping
 import org.neo4j.cypher.internal.expressions.LabelName
 import org.neo4j.cypher.internal.expressions.LogicalVariable
@@ -27,6 +27,7 @@ import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.ir.SinglePlannerQuery.extractLabelInfo
 import org.neo4j.cypher.internal.ir.SinglePlannerQuery.reverseProjectedInterestingOrder
 import org.neo4j.cypher.internal.ir.ordering.InterestingOrder
+import org.neo4j.cypher.internal.util.collection.immutable.ListSet
 import org.neo4j.cypher.internal.util.helpers.MapSupport.PowerMap
 import org.neo4j.exceptions.InternalException
 
@@ -41,17 +42,11 @@ sealed trait PlannerQuery {
   def readOnly: Boolean
   def returns: Set[LogicalVariable]
 
-  def allHints: Set[Hint]
-  def withoutHints(hintsToIgnore: Set[Hint]): PlannerQuery
+  def allHints: ListSet[IrHint]
+  def withoutHints(hintsToIgnore: ListSet[IrHint]): PlannerQuery
+  def withoutImpliedExpressions: PlannerQuery
   def numHints: Int
-  def visitHints[A](acc: A)(f: (A, Hint, QueryGraph) => A): A
-
-  /**
-   * @return all recursively included query graphs, with leaf information for Eagerness analysis.
-   *         Query graphs from pattern expressions and pattern comprehensions will generate variable names that might clash with existing names, so this method
-   *         is not safe to use for planning pattern expressions and pattern comprehensions.
-   */
-  def allQGsWithLeafInfo: collection.Seq[QgWithLeafInfo]
+  def visitHints[A](acc: A)(f: (A, IrHint, QueryGraph) => A): A
 
   /**
    * Use this method when you are certain that you are dealing with a SinglePlannerQuery, and not a UnionQuery.
@@ -88,24 +83,27 @@ case class UnionQuery(
     }.get
   }
 
-  override def allHints: Set[Hint] = lhs.allHints ++ rhs.allHints
+  override def allHints: ListSet[IrHint] = lhs.allHints ++ rhs.allHints
 
-  override def withoutHints(hintsToIgnore: Set[Hint]): PlannerQuery = copy(
+  override def withoutHints(hintsToIgnore: ListSet[IrHint]): PlannerQuery = copy(
     lhs = lhs.withoutHints(hintsToIgnore),
     rhs = rhs.withoutHints(hintsToIgnore)
   )
 
+  override def withoutImpliedExpressions: PlannerQuery = copy(
+    lhs = lhs.withoutImpliedExpressions,
+    rhs = rhs.withoutImpliedExpressions
+  )
+
   override def numHints: Int = lhs.numHints + rhs.numHints
 
-  override def visitHints[A](acc: A)(f: (A, Hint, QueryGraph) => A): A = {
+  override def visitHints[A](acc: A)(f: (A, IrHint, QueryGraph) => A): A = {
     val queryAcc = rhs.visitHints(acc)(f)
     lhs.visitHints(queryAcc)(f)
   }
 
   override def asSinglePlannerQuery: SinglePlannerQuery =
     throw new IllegalStateException("Called asSinglePlannerQuery on a UnionQuery")
-
-  override def allQGsWithLeafInfo: collection.Seq[QgWithLeafInfo] = lhs.allQGsWithLeafInfo ++ rhs.allQGsWithLeafInfo
 
   override def flattenForeach: PlannerQuery = copy(
     lhs = lhs.flattenForeach,
@@ -154,8 +152,11 @@ sealed trait SinglePlannerQuery extends PlannerQuery {
   def lastQueryHorizon: QueryHorizon = last.horizon
 
   def withTail(newTail: SinglePlannerQuery): SinglePlannerQuery = tail match {
-    case None    => copy(tail = Some(newTail))
-    case Some(_) => throw new InternalException("Attempt to set a second tail on a query graph")
+    case None => copy(tail = Some(newTail))
+    case Some(_) => throw InternalException.internalError(
+        this.getClass.getSimpleName,
+        "Attempt to set a second tail on a query graph"
+      )
   }
 
   def withoutTail: SinglePlannerQuery = tail match {
@@ -175,11 +176,19 @@ sealed trait SinglePlannerQuery extends PlannerQuery {
       queryGraph = queryGraph.withArgumentIds(queryGraph.argumentIds ++ queryInput)
     )
 
-  override def withoutHints(hintsToIgnore: Set[Hint]): SinglePlannerQuery = {
+  override def withoutHints(hintsToIgnore: ListSet[IrHint]): SinglePlannerQuery = {
     copy(
       queryGraph = queryGraph.removeHints(hintsToIgnore),
       horizon = horizon.withoutHints(hintsToIgnore),
       tail = tail.map(x => x.withoutHints(hintsToIgnore))
+    )
+  }
+
+  override def withoutImpliedExpressions: SinglePlannerQuery = {
+    copy(
+      queryGraph = queryGraph.removeImpliedExpressions(),
+      horizon = horizon.withoutImpliedExpressions,
+      tail = tail.map(x => x.withoutImpliedExpressions)
     )
   }
 
@@ -229,12 +238,12 @@ sealed trait SinglePlannerQuery extends PlannerQuery {
 
   def isCoveredByHints(other: SinglePlannerQuery): Boolean = allHints.forall(other.allHints.contains)
 
-  override def allHints: Set[Hint] = {
+  override def allHints: ListSet[IrHint] = {
     val headHints = queryGraph.allHints ++ horizon.allHints
     tail.fold(headHints)(_.allHints ++ headHints)
   }
 
-  override def visitHints[A](acc: A)(f: (A, Hint, QueryGraph) => A): A = {
+  override def visitHints[A](acc: A)(f: (A, IrHint, QueryGraph) => A): A = {
     SinglePlannerQuery.visitHints(this, acc, f)
   }
 
@@ -246,7 +255,16 @@ sealed trait SinglePlannerQuery extends PlannerQuery {
 
   def updateQueryProjection(f: QueryProjection => QueryProjection): SinglePlannerQuery = horizon match {
     case projection: QueryProjection => withHorizon(f(projection))
-    case _ => throw new InternalException("Tried updating projection when there was no projection there")
+    case _ => throw InternalException.internalError(
+        this.getClass.getSimpleName,
+        "Tried updating projection when there was no projection there"
+      )
+  }
+
+  def resetQueryProjection(): SinglePlannerQuery = horizon match {
+    case projection: QueryProjection =>
+      withHorizon(RegularQueryProjection(importedExposedSymbols = projection.importedExposedSymbols))
+    case _ => this
   }
 
   def updateTail(f: SinglePlannerQuery => SinglePlannerQuery): SinglePlannerQuery = tail match {
@@ -279,14 +297,21 @@ sealed trait SinglePlannerQuery extends PlannerQuery {
         )
 
       case _ =>
-        throw new InternalException("Tried to concatenate non-regular query projections")
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          "Tried to concatenate non-regular query projections"
+        )
     }
   }
 
   private def either[T](a: Option[T], b: Option[T]): Option[T] = (a, b) match {
-    case (Some(aa), Some(bb)) => throw new InternalException(s"Can't join two query graphs. First: $aa, Second: $bb")
-    case (s @ Some(_), None)  => s
-    case (None, s)            => s
+    case (Some(aa), Some(bb)) =>
+      throw InternalException.internalError(
+        this.getClass.getSimpleName,
+        s"Can't join two query graphs. First: $aa, Second: $bb"
+      )
+    case (s @ Some(_), None) => s
+    case (None, s)           => s
   }
 
   // This is here to stop usage of copy from the outside
@@ -319,9 +344,6 @@ sealed trait SinglePlannerQuery extends PlannerQuery {
 
     recurse(in, this)
   }
-
-  override lazy val allQGsWithLeafInfo: collection.Seq[QgWithLeafInfo] =
-    allPlannerQueries.flatMap(q => q.queryGraph.allQGsWithLeafInfo ++ q.horizon.allQueryGraphs)
 
   // Returns list of planner query and all of its tails
   def allPlannerQueries: collection.Seq[SinglePlannerQuery] = {
@@ -420,7 +442,7 @@ object SinglePlannerQuery {
     labelInfo ++ projectedLabelInfo
   }
 
-  private def visitHints[A](query: SinglePlannerQuery, acc: A, f: (A, Hint, QueryGraph) => A): A = {
+  private def visitHints[A](query: SinglePlannerQuery, acc: A, f: (A, IrHint, QueryGraph) => A): A = {
     query.fold(acc) { case (acc, query) =>
       val qgAcc = query.queryGraph.hints.foldLeft(acc)(f(_, _, query.queryGraph))
       val optAcc = query.queryGraph.optionalMatches.foldLeft(qgAcc) {

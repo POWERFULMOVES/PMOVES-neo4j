@@ -21,14 +21,14 @@ package org.neo4j.internal.unsafe;
 
 import static org.neo4j.io.os.OsBeanUtil.VALUE_UNAVAILABLE;
 import static org.neo4j.io.os.OsBeanUtil.getCommittedVirtualMemory;
-import static org.neo4j.io.os.OsBeanUtil.getFreePhysicalMemory;
-import static org.neo4j.io.os.OsBeanUtil.getTotalPhysicalMemory;
+import static org.neo4j.io.os.OsBeanUtil.getFreeMemory;
+import static org.neo4j.io.os.OsBeanUtil.getTotalMemory;
 
 public class NativeMemoryAllocationRefusedError extends Error {
     private final long attemptedAllocationSizeBytes;
     private final long alreadyAllocatedBytes;
 
-    NativeMemoryAllocationRefusedError(long size, long alreadyAllocatedBytes) {
+    public NativeMemoryAllocationRefusedError(long size, long alreadyAllocatedBytes) {
         this.attemptedAllocationSizeBytes = size;
         this.alreadyAllocatedBytes = alreadyAllocatedBytes;
     }
@@ -41,9 +41,9 @@ public class NativeMemoryAllocationRefusedError extends Error {
         sb.append("So far ").append(alreadyAllocatedBytes);
         sb.append(" bytes have already been successfully allocated. ");
         sb.append("The system currently has ");
-        appendBytes(sb, getTotalPhysicalMemory()).append(" total physical memory, ");
+        appendBytes(sb, getTotalMemory()).append(" total physical memory, ");
         appendBytes(sb, getCommittedVirtualMemory()).append(" committed virtual memory, and ");
-        appendBytes(sb, getFreePhysicalMemory()).append(" free physical memory. ");
+        appendBytes(sb, getFreeMemory()).append(" free physical memory. ");
         sb.append("Relevant system properties: ");
         appendSysProp(sb, "java.vm.name");
         appendSysProp(sb.append(", "), "java.vm.vendor");

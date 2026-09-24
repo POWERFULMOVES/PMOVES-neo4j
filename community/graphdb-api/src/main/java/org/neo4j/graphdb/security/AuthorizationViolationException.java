@@ -19,6 +19,8 @@
  */
 package org.neo4j.graphdb.security;
 
+import static java.lang.String.format;
+
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
 import org.neo4j.gqlstatus.GqlRuntimeException;
@@ -35,21 +37,9 @@ public class AuthorizationViolationException extends GqlRuntimeException impleme
 
     private final Status statusCode;
 
-    @Deprecated
-    public AuthorizationViolationException(String message, Status statusCode) {
-        super(message);
-        this.statusCode = statusCode;
-    }
-
-    public AuthorizationViolationException(ErrorGqlStatusObject gqlStatusObject, String message, Status statusCode) {
+    private AuthorizationViolationException(ErrorGqlStatusObject gqlStatusObject, String message, Status statusCode) {
         super(gqlStatusObject, message);
         this.statusCode = statusCode;
-    }
-
-    @Deprecated
-    public AuthorizationViolationException(String message) {
-        super(message);
-        statusCode = Status.Security.Forbidden;
     }
 
     private AuthorizationViolationException(ErrorGqlStatusObject gqlStatusObject, String message) {
@@ -61,6 +51,27 @@ public class AuthorizationViolationException extends GqlRuntimeException impleme
         var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42NFF)
                 .build();
         return new AuthorizationViolationException(gql, message);
+    }
+
+    public static AuthorizationViolationException credentialsExpired(String oldMessage) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42NFF)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42NFD)
+                        .build())
+                .build();
+
+        return new AuthorizationViolationException(gql, oldMessage, Status.Security.CredentialsExpired);
+    }
+
+    public static AuthorizationViolationException alterCurrentUserNotAllowed() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42NFF)
+                .build();
+        return new AuthorizationViolationException(gql, "`ALTER CURRENT USER` is not permitted.");
+    }
+
+    public static AuthorizationViolationException impersonationDisallowed(String oldMessage) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N83)
+                .build();
+        return new AuthorizationViolationException(gql, oldMessage, Status.Security.CredentialsExpired);
     }
 
     public static AuthorizationViolationException permissionDeniedUnauthorized() {
@@ -82,16 +93,28 @@ public class AuthorizationViolationException extends GqlRuntimeException impleme
                 gql, "Not allowed to run updating system commands when impersonating a user.");
     }
 
-    public static AuthorizationViolationException revokingImmutablePrivileges() {
+    public static AuthorizationViolationException revokingImmutablePrivileges(String role) {
         var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42NFF)
                 .build();
-        return new AuthorizationViolationException(gql, "Immutable privileges cannot be revoked.");
+        return new AuthorizationViolationException(
+                gql,
+                "Immutable privileges cannot be revoked. Use `SHOW ROLE %s PRIVILEGES AS COMMANDS YIELD *` to inspect %s's privileges."
+                        .formatted(role, role));
     }
 
-    public static AuthorizationViolationException grantingImmutablePrivileges(String action) {
+    public static AuthorizationViolationException grantingImmutablePrivileges() {
         var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42NFF)
                 .build();
-        return new AuthorizationViolationException(gql, String.format("Permission cannot be granted for %s.", action));
+        return new AuthorizationViolationException(
+                gql,
+                "Immutable privileges cannot be granted. Try granting the privilege without the IMMUTABLE keyword.");
+    }
+
+    public static AuthorizationViolationException denyingImmutablePrivileges() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42NFF)
+                .build();
+        return new AuthorizationViolationException(
+                gql, "Immutable privileges cannot be denied. Try denying the privilege without the IMMUTABLE keyword.");
     }
 
     public static AuthorizationViolationException droppingImmutableRoles() {
@@ -127,8 +150,18 @@ public class AuthorizationViolationException extends GqlRuntimeException impleme
 
     public static AuthorizationViolationException copyingRoleWithImmutablePrivileges(String role) {
         return authorizationViolation(
-                "The role '%s' cannot be copied because it has one or more Immutable Privileges assigned to it. Permission cannot be granted for ASSIGN IMMUTABLE PRIVILEGE."
-                        .formatted(role));
+                "'$role' cannot be copied because it has one or more immutable privileges assigned to it and immutable privileges cannot be copied. Use `SHOW ROLE $role PRIVILEGES AS COMMANDS YIELD *` to inspect $role's privileges."
+                        .replace("$role", role));
+    }
+
+    public static String generateCredentialsExpiredMessage(String message) {
+        return format(
+                "%s%n%nThe credentials you provided were valid, but must be changed before you can use this instance. "
+                        + "If this is the first time you are using Neo4j, this is to ensure you are not using the default credentials in production. "
+                        + "If you are not using default credentials, you are getting this message because an administrator requires a password change.%n"
+                        + "To change your password, issue an `ALTER CURRENT USER SET PASSWORD FROM 'current password' TO 'new password'` "
+                        + "statement against the system database.",
+                message);
     }
 
     /** The Neo4j status code associated with this exception type. */

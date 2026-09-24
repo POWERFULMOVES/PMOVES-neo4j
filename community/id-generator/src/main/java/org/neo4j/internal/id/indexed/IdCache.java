@@ -21,7 +21,6 @@ package org.neo4j.internal.id.indexed;
 
 import static java.lang.Integer.min;
 import static org.apache.commons.lang3.ArrayUtils.EMPTY_LONG_ARRAY;
-import static org.neo4j.internal.id.indexed.FreeIdScanner.MAX_SLOT_SIZE;
 import static org.neo4j.util.Preconditions.checkArgument;
 
 import java.util.Arrays;
@@ -43,7 +42,6 @@ class IdCache {
     private final ConcurrentLongQueue[] queues;
     private final AtomicInteger size = new AtomicInteger();
     private final int singleIdSlotIndex;
-    private final boolean singleSlotted;
     private final int[] slotIndexBySize;
 
     IdCache(IdSlotDistribution.Slot... slots) {
@@ -53,7 +51,6 @@ class IdCache {
         for (int slotIndex = 0; slotIndex < slots.length; slotIndex++) {
             int slotSize = slotSizes[slotIndex] = slots[slotIndex].slotSize();
             int capacity = slots[slotIndex].capacity();
-            checkArgument(slotSize <= MAX_SLOT_SIZE, "Max slot size is %d", MAX_SLOT_SIZE);
             checkArgument(
                     slotIndex == 0 || slotSize > slotSizes[slotIndex - 1],
                     "Slot sizes should be provided ordered from smaller to bigger");
@@ -63,10 +60,9 @@ class IdCache {
             // large amount of memory.
             var queue = multiSlots || capacity > DYNAMIC_CHUNK_SIZE
                     ? new DynamicConcurrentLongQueue(DYNAMIC_CHUNK_SIZE, capacity)
-                    : new MpmcLongQueue(capacity);
+                    : new SeqMpmcLongQueue(capacity);
             queues[slotIndex] = queue;
         }
-        singleSlotted = isSingleSlotted();
         singleIdSlotIndex = findSingleSlotIndex(slotSizes);
         this.slotIndexBySize = buildSlotIndexBySize(slotSizes);
     }
@@ -78,15 +74,6 @@ class IdCache {
         }
         slotIndexBySize[slotIndexBySize.length - 1] = slotSizes.length - 1;
         return slotIndexBySize;
-    }
-
-    private boolean isSingleSlotted() {
-        for (int slotSize : slotSizes) {
-            if (slotSize != 1) {
-                return false;
-            }
-        }
-        return true;
     }
 
     private static int findSingleSlotIndex(int[] slotSizes) {
@@ -184,10 +171,11 @@ class IdCache {
         }
     }
 
-    int[] availableSpaceBySlotIndex() {
+    int[] availableSpaceBySlotIndex(int numPartitions) {
         int[] availableSpace = new int[slotSizes.length];
         for (int i = 0; i < availableSpace.length; i++) {
-            availableSpace[i] = queues[i].availableSpace();
+            int space = queues[i].availableSpace();
+            availableSpace[i] = space > 0 ? Math.max(1, space / numPartitions) : 0;
         }
         return availableSpace;
     }
@@ -214,7 +202,6 @@ class IdCache {
     }
 
     long[] drainRange(int idsPerPage) {
-        assert singleSlotted;
         long[] ids = null;
         int position = 0;
         long idPageLowerBoundary = Long.MIN_VALUE;

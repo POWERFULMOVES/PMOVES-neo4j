@@ -45,8 +45,8 @@ class NodeIndexScanSlottedPipeTest extends CypherFunSuite {
     val state = QueryStateHelper.emptyWithResourceManager(resourceManager)
     val slots = SlotConfigurationBuilder.empty.newLong("n", nullable = false, CTNode).build()
 
-    val cursor = new StubNodeValueIndexCursor().withNode(0)
-    when(state.query.nodeIndexScan(any[IndexReadSession], any[Boolean], any[IndexOrder])).thenAnswer(
+    val cursor = new StubNodeValueIndexCursor().withEntity(0)
+    when(state.query.nodeIndexScan(any[IndexReadSession], any[Boolean], any[IndexOrder], any[Boolean])).thenAnswer(
       (_: InvocationOnMock) => {
         // NOTE: this is what is done in TransactionBoundQueryContext
         resourceManager.trace(cursor)
@@ -60,7 +60,8 @@ class NodeIndexScanSlottedPipeTest extends CypherFunSuite {
       Seq(SlottedIndexedProperty(0, None)),
       0,
       IndexOrderNone,
-      slots
+      slots,
+      includeChangesFromThisTransaction = true
     )()
     pipe.rowFactory = SlottedCypherRowFactory(slots, SlotConfiguration.Size.zero)
     // exhaust
@@ -74,8 +75,8 @@ class NodeIndexScanSlottedPipeTest extends CypherFunSuite {
     val state = QueryStateHelper.emptyWithResourceManager(resourceManager)
     val slots = SlotConfigurationBuilder.empty.newLong("n", nullable = false, CTNode).build()
 
-    val cursor = new StubNodeValueIndexCursor().withNode(0)
-    when(state.query.nodeIndexScan(any[IndexReadSession], any[Boolean], any[IndexOrder])).thenAnswer(
+    val cursor = new StubNodeValueIndexCursor().withEntity(0)
+    when(state.query.nodeIndexScan(any[IndexReadSession], any[Boolean], any[IndexOrder], any[Boolean])).thenAnswer(
       (_: InvocationOnMock) => {
         // NOTE: this is what is done in TransactionBoundQueryContext
         resourceManager.trace(cursor)
@@ -88,7 +89,8 @@ class NodeIndexScanSlottedPipeTest extends CypherFunSuite {
       Seq(SlottedIndexedProperty(0, None)),
       0,
       IndexOrderNone,
-      slots
+      slots,
+      includeChangesFromThisTransaction = true
     )()
     pipe.rowFactory = SlottedCypherRowFactory(slots, SlotConfiguration.Size.zero)
     val result = pipe.createResults(state)

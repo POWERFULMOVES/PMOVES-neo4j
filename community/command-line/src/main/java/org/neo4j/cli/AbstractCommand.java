@@ -21,14 +21,21 @@ package org.neo4j.cli;
 
 import static java.util.Objects.requireNonNull;
 
+import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Callable;
+import org.neo4j.commandline.dbms.CannotWriteException;
 import org.neo4j.configuration.Config;
+import org.neo4j.io.locker.Locker;
+import org.neo4j.kernel.api.exceptions.ConsoleFriendlyException;
 import org.neo4j.kernel.diagnostics.providers.SystemDiagnostics;
 import org.neo4j.kernel.internal.Version;
+import picocli.CommandLine;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Model.CommandSpec;
 import picocli.CommandLine.Option;
@@ -82,6 +89,11 @@ public abstract class AbstractCommand implements Callable<Integer> {
         return config;
     }
 
+    // Support hooking for extra info
+    protected void wrappedExecute() throws Exception {
+        execute();
+    }
+
     @Override
     public Integer call() throws Exception {
         if (verbose) {
@@ -89,17 +101,69 @@ public abstract class AbstractCommand implements Callable<Integer> {
             printConfigInformation();
         }
         try {
-            execute();
-        } catch (CommandFailedException e) {
+            wrappedExecute();
+        } catch (CommandLine.ParameterException e) {
+            // Let through ParameterException, which is e.g. when an option/argument is missing.
+            // Typically, PicoCLI throws this itself during parsing (i.e. before even getting to executing the command,
+            // but there are scenarios where options/arguments are conditionally required and in such cases
+            // the command's execute() method can manually throw these types of exceptions.
+            // These are let through because PicoCLI will treat these with a printout of the command and generally
+            // be helpful about the error to the user.
+            throw e;
+        } catch (Throwable e) {
+            Path problematicFile = findFileForPotentialPermissionProblems(e);
+            problematicFile = problematicFile != null ? problematicFile : ctx.homeDir();
+            collectAndPrintPermissionProblems(problematicFile);
+
+            // Handle stack printing before any exception pretty-printing so the user-friendly stuff is at the tail.
             if (verbose) {
                 e.printStackTrace(ctx.err());
+            }
+
+            if (ConsoleFriendlyException.willPrettyPrint(e)) {
+                ((ConsoleFriendlyException) e).prettyPrint(ctx.err(), "Command Failed");
             } else {
                 ctx.err().println(e.getMessage());
-                ctx.err().println("Run with '--verbose' for a more detailed error message.");
+                if (!verbose) {
+                    ctx.err().println("Run with '--verbose' for a more detailed error message.");
+                }
             }
-            return e.getExitCode();
+
+            return e instanceof CommandFailedException cfe ? cfe.getExitCode() : ExitCode.FAIL;
         }
         return ExitCode.OK;
+    }
+
+    private void collectAndPrintPermissionProblems(Path file) {
+        String problems = Locker.tryCollectPermissionInformation(ctx.fs(), file);
+        if (problems != null) {
+            ctx.err().println(problems);
+        }
+    }
+
+    /**
+     * Look for causes in this exception for traces of file related problems so that there can be a
+     * permission analysis for it.
+     * @param e the exception the command ran into.
+     * @return {@code null} if there's no
+     */
+    private Path findFileForPotentialPermissionProblems(Throwable e) {
+        Throwable t = e;
+        Set<Throwable> seen = new HashSet<>();
+        while (t != null) {
+            // Guard for circular causes
+            if (!seen.add(t)) {
+                break;
+            }
+            if (t instanceof IOException) {
+                return ctx.homeDir();
+            }
+            if (t instanceof CannotWriteException cwe) {
+                return cwe.getFile();
+            }
+            t = t.getCause();
+        }
+        return null;
     }
 
     private void printVerboseHeader() {

@@ -20,14 +20,18 @@
 package org.neo4j.importer;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.neo4j.importer.ImportCommand.Base.DEFAULT_CSV_CONFIG;
+import static org.neo4j.io.fs.FileSystemAbstraction.PatternStyle.REGEX;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.PrintStream;
 import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -37,9 +41,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.neo4j.batchimport.api.input.IdType;
+import org.neo4j.cli.CommandFailedException;
 import org.neo4j.cli.ContextInjectingFactory;
 import org.neo4j.cli.ExecutionContext;
 import org.neo4j.cloud.storage.SchemeFileSystemAbstraction;
+import org.neo4j.common.EntityType;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.importer.ImportCommand.InputFilesGroup;
@@ -48,6 +54,7 @@ import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
 import picocli.CommandLine;
 import picocli.CommandLine.Help;
+import picocli.CommandLine.ParameterException;
 
 @TestDirectoryExtension
 class ImportCommandTest {
@@ -62,68 +69,67 @@ class ImportCommandTest {
         var subcommands = help.subcommands().keySet();
         // Incremental should not be shown in community
         var expectedSubcommands = Set.of("full", "help");
-        assertThat(subcommands).isEqualTo(expectedSubcommands);
+        assertThat(subcommands).hasSameElementsAs(expectedSubcommands);
     }
 
-    private static final String[] sharedOptions = {
-        "-h",
-        "--expand-commands",
-        "--verbose",
-        "--additional-config",
-        "--report-file",
-        "--id-type",
-        "--input-encoding",
-        "--ignore-extra-columns",
-        "--multiline-fields",
-        "--multiline-fields-format",
-        "--ignore-empty-strings",
-        "--trim-strings",
-        "--legacy-style-quoting",
-        "--delimiter",
-        "--array-delimiter",
-        "--quote",
-        "--schema",
-        "--read-buffer-size",
-        "--max-off-heap-memory",
-        "--high-parallel-io",
-        "--threads",
-        "--bad-tolerance",
-        "--skip-bad-entries-logging",
-        "--skip-bad-relationships",
-        "--skip-duplicate-nodes",
-        "--strict",
-        "--normalize-types",
-        "--nodes",
-        "--relationships",
-        "--auto-skip-subsequent-headers",
-        "--input-type"
-    };
-
-    private static final String[] sharedPositionals = {"<database>"};
+    @Test
+    void readBufferSizeDefaultShouldBeSet() {
+        // We want "--help" to print the default value that is applied when we don't use
+        // "--skidbladnir".
+        final var command = new ImportCommand.Full(getExecutionContext());
+        final var help = getUsageHelp(command);
+        Object readBufferSizeDefault =
+                help.commandSpec().optionsMap().get("--read-buffer-size").initialValue();
+        assertThat(readBufferSizeDefault).isEqualTo((long) DEFAULT_CSV_CONFIG.bufferSize());
+    }
 
     @Test
     void printUsageHelpForSubcommandFull() {
         final var command = new ImportCommand.Full(getExecutionContext());
         final var help = getUsageHelp(command);
         final var options = getOptions(help);
-        var expectedOptions = new ArrayList<>(List.of(sharedOptions));
-        expectedOptions.addAll(List.of("--overwrite-destination", "--format"));
+        var expectedOptions = List.of(
+                "-h",
+                "--expand-commands",
+                "--verbose",
+                "--additional-config",
+                "--dry-run",
+                "--report-file",
+                "--id-type",
+                "--input-encoding",
+                "--ignore-extra-columns",
+                "--multiline-fields",
+                "--multiline-fields-format",
+                "--ignore-empty-strings",
+                "--trim-strings",
+                "--legacy-style-quoting",
+                "--delimiter",
+                "--array-delimiter",
+                "--vector-delimiter",
+                "--quote",
+                "--schema",
+                "--read-buffer-size",
+                "--max-off-heap-memory",
+                "--high-parallel-io",
+                "--threads",
+                "--bad-tolerance",
+                "--skip-bad-entries-logging",
+                "--skip-bad-relationships",
+                "--skip-duplicate-nodes",
+                "--strict",
+                "--normalize-types",
+                "--nodes",
+                "--temp-path",
+                "--relationships",
+                "--auto-skip-subsequent-headers",
+                "--input-type",
+                "--overwrite-destination",
+                "--format",
+                "--path-pattern-style",
+                "--profile",
+                "--profile-results-path");
         final var positionals = getPositionals(help);
-        final var expectedPositionals = List.of(sharedPositionals);
-
-        assertThat(options.toArray()).containsOnly(expectedOptions.toArray());
-        assertThat(positionals.toArray()).containsOnly(expectedPositionals.toArray());
-    }
-
-    @Test
-    void printUsageHelpForSubcommandIncremental() {
-        final var command = new ImportCommand.Incremental(getExecutionContext());
-        final var help = getUsageHelp(command);
-        final var options = getOptions(help);
-        var expectedOptions = new ArrayList<>(List.of(sharedOptions));
-        expectedOptions.addAll(List.of("--stage", "--force"));
-        final var positionals = getPositionals(help);
-        final var expectedPositionals = List.of(sharedPositionals);
+        final var expectedPositionals = List.of("<database>");
 
         assertThat(options.toArray()).containsOnly(expectedOptions.toArray());
         assertThat(positionals.toArray()).containsOnly(expectedPositionals.toArray());
@@ -138,21 +144,434 @@ class ImportCommandTest {
         assertIdTypeAliases(requiredArgs, List.of("INTEGER", "integer"), IdType.INTEGER);
     }
 
-    private void assertIdTypeAliases(List<String> requiredArgs, List<String> aliases, IdType idType) {
-        for (var alias : aliases) {
-            var command = new ImportCommand.Full(getExecutionContext());
-            var args = Stream.concat(Stream.of("--id-type", alias), requiredArgs.stream());
-            new CommandLine(command).parseArgs(args.toArray(String[]::new));
-            assertThat(command.idType).isEqualTo(idType);
-        }
-    }
-
     @Test
     void shouldAllowDifferentCasingForInputType() {
         var tempFileName = testDir.createFile("dummy").toString();
         var requiredArgs = List.of("--nodes", tempFileName, "--relationships", tempFileName);
         assertInputTypeAliases(requiredArgs, List.of("CSV", "csv"), FileImporter.FileInputType.CSV);
         assertInputTypeAliases(requiredArgs, List.of("PARQUET", "parquet"), FileImporter.FileInputType.PARQUET);
+    }
+
+    @Test
+    void shouldKeepSpecifiedNeo4jHomeWhenAdditionalConfigIsPresent() {
+        // given
+        final var homeDir = testDir.directory("other", "place");
+        final var additionalConfigFile = testDir.createFile("empty.conf");
+        final var ctx = new ExecutionContext(
+                homeDir, testDir.directory("conf"), System.out, System.err, testDir.getFileSystem());
+        // Does not matter which command Full/Incremental
+        final var command = new ImportCommand.Full(ctx);
+        final var foo = testDir.createFile("foo.csv");
+
+        CommandLine.populateCommand(
+                command,
+                "--additional-config",
+                additionalConfigFile.toAbsolutePath().toString(),
+                "--nodes=" + foo.toAbsolutePath());
+
+        // when
+        Config resultingConfig = command.loadNeo4jConfig("");
+
+        // then
+        assertThat(resultingConfig.get(GraphDatabaseSettings.neo4j_home)).isEqualTo(homeDir);
+    }
+
+    @Test
+    void shouldKeepSpecifiedNeo4jHomeWhenNoAdditionalConfigIsPresent() {
+        // given
+        final var homeDir = testDir.directory("other", "place");
+        final var ctx = new ExecutionContext(
+                homeDir, testDir.directory("conf"), System.out, System.err, testDir.getFileSystem());
+        // Does not matter which command Full/Incremental
+        final var command = new ImportCommand.Full(ctx);
+        final var foo = testDir.createFile("foo.csv");
+
+        CommandLine.populateCommand(command, "--nodes=" + foo.toAbsolutePath());
+
+        // when
+        Config resultingConfig = command.loadNeo4jConfig("");
+
+        // then
+        assertThat(resultingConfig.get(GraphDatabaseSettings.neo4j_home)).isEqualTo(homeDir);
+    }
+
+    @Test
+    void shouldRejectMultibyteDelimiter() {
+        // given
+        var nodes = testDir.createFile("nodes.csv");
+        var rels = testDir.createFile("rels.csv");
+        var command = new ImportCommand.Full(getExecutionContext());
+
+        // when/then - using a 3-byte UTF-8 character (€ = U+20AC)
+        CommandLine.populateCommand(command, "--nodes=" + nodes, "--relationships=" + rels, "--delimiter=U+20AC");
+
+        assertThatThrownBy(() -> command.importConfigurationValidation(
+                        new SchemeFileSystemAbstraction(testDir.getFileSystem()), "block", Config.defaults()))
+                .isInstanceOf(CommandLine.ParameterException.class)
+                .hasMessageContaining("Delimiter must be a single byte character (In UTF-8)");
+    }
+
+    @Test
+    void shouldAcceptSingleByteDelimiter() {
+        // given
+        var nodes = testDir.createFile("nodes.csv");
+        var rels = testDir.createFile("rels.csv");
+        var command = new ImportCommand.Full(getExecutionContext());
+
+        // when - using a single-byte character (pipe = U+007C)
+        CommandLine.populateCommand(command, "--nodes=" + nodes, "--relationships=" + rels, "--delimiter=U+007C");
+
+        // then - should not throw
+        command.importConfigurationValidation(
+                new SchemeFileSystemAbstraction(testDir.getFileSystem()), "block", Config.defaults());
+    }
+
+    @Test
+    void shouldAcceptMultibyteDelimiterWhenExplicitlyAllowed() {
+        // given
+        var nodes = testDir.createFile("nodes.csv");
+        var rels = testDir.createFile("rels.csv");
+        var command = new ImportCommand.Full(getExecutionContext());
+
+        // when - using a multibyte character but with the flag enabled
+        CommandLine.populateCommand(
+                command,
+                "--nodes=" + nodes,
+                "--relationships=" + rels,
+                "--delimiter=U+20AC",
+                "--accept-multibyte-delimiter");
+
+        // then - should not throw
+        command.importConfigurationValidation(
+                new SchemeFileSystemAbstraction(testDir.getFileSystem()), "block", Config.defaults());
+    }
+
+    @Test
+    void shouldAcceptSkidbladnirWithoutMultilineFieldsAndUseLegacyForNodesButNotForRelationships() {
+        var nodes = testDir.createFile("nodes.csv");
+        var command = new ImportCommand.Full(getExecutionContext());
+
+        CommandLine.populateCommand(command, "--nodes=" + nodes, "--skidbladnir");
+
+        var csvConfig = command.csvConfiguration(new SchemeFileSystemAbstraction(testDir.getFileSystem()));
+        // and multiline-fields should be true for nodes, but not for relationships
+        assertThat(csvConfig.legacyMultilineFields(EntityType.NODE)).isTrue();
+        assertThat(csvConfig.legacyMultilineFields(EntityType.RELATIONSHIP)).isFalse();
+    }
+
+    @Test
+    void shouldAcceptSkidbladnirWithMultilineFieldsFalseAndUseLegacyForNodesButNotForRelationships() {
+        var nodes = testDir.createFile("nodes.csv");
+        var command = new ImportCommand.Full(getExecutionContext());
+
+        CommandLine.populateCommand(command, "--nodes=" + nodes, "--skidbladnir", "--multiline-fields=false");
+
+        var csvConfig = command.csvConfiguration(new SchemeFileSystemAbstraction(testDir.getFileSystem()));
+        // and multiline-fields should be true for nodes, but not for relationships
+        assertThat(csvConfig.legacyMultilineFields(EntityType.NODE)).isTrue();
+        assertThat(csvConfig.legacyMultilineFields(EntityType.RELATIONSHIP)).isFalse();
+    }
+
+    @Test
+    void shouldAcceptSkidbladnirWithMultilineFieldsTrueAndUseLegacyForNodesAndForRelationships() {
+        var nodes = testDir.createFile("nodes.csv");
+        var command = new ImportCommand.Full(getExecutionContext());
+
+        CommandLine.populateCommand(command, "--nodes=" + nodes, "--skidbladnir", "--multiline-fields=true");
+
+        var csvConfig = command.csvConfiguration(new SchemeFileSystemAbstraction(testDir.getFileSystem()));
+        // and multiline-fields should be true for nodes and relationships
+        assertThat(csvConfig.legacyMultilineFields(EntityType.NODE)).isTrue();
+        assertThat(csvConfig.legacyMultilineFields(EntityType.RELATIONSHIP)).isTrue();
+    }
+
+    @Test
+    void shouldAcceptSkidbladnirWithMultilineFieldsFormatV2AndUseLegacyForNodesAndV2ForRelationships() {
+        var nodes = testDir.createFile("nodes.csv");
+        var rels1 = testDir.createFile("rels1.csv");
+        var rels2 = testDir.createFile("rels2.csv");
+        var command = new ImportCommand.Full(getExecutionContext());
+
+        CommandLine.populateCommand(
+                command,
+                "--nodes=" + nodes,
+                "--relationships=" + rels1,
+                "--relationships=" + rels2,
+                "--skidbladnir",
+                "--multiline-fields-format=v2",
+                "--multiline-fields=" + rels1);
+
+        var csvConfig = command.csvConfiguration(new SchemeFileSystemAbstraction(testDir.getFileSystem()));
+        assertThat(csvConfig.legacyMultilineFields(EntityType.NODE)).isTrue();
+        assertThat(csvConfig.legacyMultilineFields(EntityType.RELATIONSHIP)).isFalse();
+        assertThat(csvConfig.multilineDocuments().test(nodes.toString())).isFalse();
+        assertThat(csvConfig.multilineDocuments().test(rels1.toString())).isTrue();
+        assertThat(csvConfig.multilineDocuments().test(rels2.toString())).isFalse();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"block", "multiversion_block"})
+    void shouldAcceptSkidbladnirForBlockFormats(String dbFormat) {
+        var nodes = testDir.createFile("nodes.csv");
+        var command = new ImportCommand.Full(getExecutionContext());
+
+        CommandLine.populateCommand(command, "--nodes=" + nodes, "--skidbladnir");
+
+        // then - should not throw
+        command.importConfigurationValidation(
+                new SchemeFileSystemAbstraction(testDir.getFileSystem()), dbFormat, Config.defaults());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"aligned", "standard", "high_limit"})
+    void shouldRejectSkidbladnirForNonBlockFormats(String dbFormat) {
+        var nodes = testDir.createFile("nodes.csv");
+        var command = new ImportCommand.Full(getExecutionContext());
+
+        CommandLine.populateCommand(command, "--nodes=" + nodes, "--skidbladnir");
+
+        assertThatThrownBy(() -> command.importConfigurationValidation(
+                        new SchemeFileSystemAbstraction(testDir.getFileSystem()), dbFormat, Config.defaults()))
+                .isInstanceOf(CommandFailedException.class)
+                .hasMessageContaining("Skidbladnir import is only supported for the 'block' format, "
+                        + "but '%s' was specified.".formatted(dbFormat));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"block", "multiversion_block"})
+    void shouldRejectHighParallelIoForBlockFormats(String dbFormat) {
+        var nodes = testDir.createFile("nodes.csv");
+        var command = new ImportCommand.Full(getExecutionContext());
+
+        CommandLine.populateCommand(command, "--nodes=" + nodes, "--high-parallel-io=on");
+
+        assertThatThrownBy(() -> command.importConfigurationValidation(
+                        new SchemeFileSystemAbstraction(testDir.getFileSystem()), dbFormat, Config.defaults()))
+                .isInstanceOf(CommandFailedException.class)
+                .hasMessageContaining(
+                        "'--high-parallel-io=on' is not supported for the '%s' format.".formatted(dbFormat));
+    }
+
+    @Test
+    void bufferSizeDefaultIsOverwrittenForSkidbladnir() {
+        var nodes = testDir.createFile("nodes.csv");
+        var command = new ImportCommand.Full(getExecutionContext());
+
+        CommandLine.populateCommand(command, "--nodes=" + nodes, "--skidbladnir");
+
+        // when
+        command.importConfigurationValidation(
+                new SchemeFileSystemAbstraction(testDir.getFileSystem()), "block", Config.defaults());
+        // then
+        assertThat(command.bufferSize())
+                .isEqualTo(org.neo4j.csv.reader.Configuration.Builder.DEFAULT_BUFFER_SIZE_IF_SKIDBLADNIR);
+    }
+
+    @Test
+    void resumeAbortsWhenNoPreviousImportAttemptExists() {
+        ExecutionContext ctx = homedExecutionContext();
+        ImportCommand.Full command = new ImportCommand.Full(ctx);
+        CommandLine.populateCommand(command, "--resume");
+
+        assertThatThrownBy(command::rerunFromPreviousAttempt)
+                .isInstanceOf(CommandFailedException.class)
+                .hasMessageContaining("nothing to resume found");
+    }
+
+    @Test
+    void resumeFailsWhenPreviousImportAttemptDidNotUseSkidbladnir() throws IOException {
+        ExecutionContext ctx = homedExecutionContext();
+        ImportCommand.Full command = new ImportCommand.Full(ctx);
+        writePreviousAttemptCliArgs(command.loadNeo4jConfig("block"), "--nodes=old.csv");
+        CommandLine.populateCommand(command, "--resume");
+
+        assertThatThrownBy(command::rerunFromPreviousAttempt)
+                .isInstanceOf(CommandFailedException.class)
+                .hasMessageContaining("'--resume' is only supported")
+                .hasMessageContaining("--skidbladnir");
+    }
+
+    @Test
+    void resumeRerunsPreviousSkidbladnirAttemptVerbatim() throws IOException {
+        ExecutionContext ctx = homedExecutionContext();
+        ImportCommand.Full command = new ImportCommand.Full(ctx);
+        writePreviousAttemptCliArgs(
+                command.loadNeo4jConfig("block"), "--nodes=old.csv", "--skidbladnir", "--overwrite-destination");
+        CommandLine.populateCommand(command, "--resume");
+
+        command.rerunFromPreviousAttempt();
+
+        assertThat(command.overwriteDestination).isTrue();
+        assertThat(command.isSkidbladnir()).isTrue();
+    }
+
+    @Test
+    void resumeAbortsWhenThePreviousImportAttemptCompleted() throws IOException {
+        ExecutionContext ctx = homedExecutionContext();
+        ImportCommand.Full command = new ImportCommand.Full(ctx);
+        Path contextDir = writePreviousAttemptCliArgs(
+                command.loadNeo4jConfig("block"), "--nodes=old.csv", "--skidbladnir", "--overwrite-destination");
+        Files.writeString(contextDir.resolve(ImportContext.SUCCESS_FILE_NAME), "");
+        CommandLine.populateCommand(command, "--resume");
+
+        assertThatThrownBy(command::rerunFromPreviousAttempt)
+                .isInstanceOf(CommandFailedException.class)
+                .hasMessageContaining("completed successfully")
+                .hasMessageContaining("nothing to resume");
+    }
+
+    @Test
+    void resumeAcceptsTheDatabaseToResume() {
+        ExecutionContext ctx = homedExecutionContext();
+        ImportCommand.Full command = new ImportCommand.Full(ctx);
+        CommandLine.populateCommand(command, "--resume", "otherdb");
+
+        // the database is not an option, so it is not rejected - it says which database's attempt to look for
+        assertThatThrownBy(command::rerunFromPreviousAttempt)
+                .isInstanceOf(CommandFailedException.class)
+                .hasMessageContaining("otherdb");
+    }
+
+    @Test
+    void resumeRejectsOptionsThatAreNotAllowedAlongsideIt() throws IOException {
+        ExecutionContext ctx = homedExecutionContext();
+        ImportCommand.Full command = new ImportCommand.Full(ctx);
+        Path nodes = testDir.createFile("nodes.csv");
+        writePreviousAttemptCliArgs(command.loadNeo4jConfig("block"), "--nodes=old.csv", "--skidbladnir");
+        CommandLine.populateCommand(command, "--nodes=" + nodes, "--verbose", "--resume");
+
+        assertThatThrownBy(command::rerunFromPreviousAttempt)
+                .isInstanceOf(ParameterException.class)
+                .hasMessageContaining("can only be combined with")
+                .hasMessageContaining("--skip-bad-relationships")
+                .hasMessageContaining("--skip-duplicate-nodes")
+                .hasMessageContaining("Remove: --nodes, --verbose");
+    }
+
+    @Test
+    void resumeAcceptsAllowedOptionsAndTheyOverrideThePreviousAttempt() throws IOException {
+        ExecutionContext ctx = homedExecutionContext();
+        ImportCommand.Full command = new ImportCommand.Full(ctx);
+        writePreviousAttemptCliArgs(
+                command.loadNeo4jConfig("block"),
+                "--nodes=old.csv",
+                "--skidbladnir",
+                "--skip-duplicate-nodes=false",
+                "--skip-bad-relationships");
+        CommandLine.populateCommand(command, "--skip-duplicate-nodes", "--skip-bad-relationships=false", "--resume");
+
+        command.rerunFromPreviousAttempt();
+
+        assertThat(command.skipDuplicateNodes).isTrue();
+        assertThat(command.skipBadRelationships).isFalse();
+    }
+
+    @Test
+    void resumeKeepsThePreviousAttemptsValueForAllowedOptionsItIsNotGiven() throws IOException {
+        ExecutionContext ctx = homedExecutionContext();
+        ImportCommand.Full command = new ImportCommand.Full(ctx);
+        writePreviousAttemptCliArgs(
+                command.loadNeo4jConfig("block"), "--nodes=old.csv", "--skidbladnir", "--skip-duplicate-nodes");
+        CommandLine.populateCommand(command, "--resume");
+
+        command.rerunFromPreviousAttempt();
+
+        assertThat(command.skipDuplicateNodes).isTrue();
+        assertThat(command.skipBadRelationships).isFalse();
+    }
+
+    @Test
+    void resumeSetToFalseLeavesOtherOptionsAlone() throws IOException {
+        ExecutionContext ctx = homedExecutionContext();
+        ImportCommand.Full command = new ImportCommand.Full(ctx);
+        Path nodes = testDir.createFile("nodes.csv");
+        CommandLine.populateCommand(command, "--nodes=" + nodes, "--resume=false");
+
+        command.rerunFromPreviousAttempt();
+
+        assertThat(command.overwriteDestination).isFalse();
+    }
+
+    @Test
+    void resumeIsNoOpWhenNotRequested() throws IOException {
+        ExecutionContext ctx = homedExecutionContext();
+        ImportCommand.Full command = new ImportCommand.Full(ctx);
+        Path nodes = testDir.createFile("nodes.csv");
+        CommandLine.populateCommand(command, "--nodes=" + nodes, "--skidbladnir");
+
+        // then - should not throw even though no previous import attempt exists, and not rerun anything
+        command.rerunFromPreviousAttempt();
+
+        assertThat(command.overwriteDestination).isFalse();
+    }
+
+    @Test
+    void resumeAbortsWhenTheStateWasLaidOutUnderDifferentSettings() throws IOException {
+        ExecutionContext ctx = homedExecutionContext();
+        ImportCommand.Full command = new ImportCommand.Full(ctx);
+        Config databaseConfig = command.loadNeo4jConfig("block");
+        Path contextDir =
+                writePreviousAttemptCliArgs(databaseConfig, "--nodes=old.csv", "--skidbladnir", "--format=block");
+        // the attempt ran with its data somewhere this run no longer looks, so its store and intermediary data are
+        // not where a resume would continue them
+        var asRecorded = ImportContext.configValuesStringMapping(databaseConfig);
+        asRecorded.put(GraphDatabaseSettings.data_directory.name(), "/somewhere/else");
+        Files.writeString(contextDir.resolve(ImportContext.CONFIG_FILE_NAME), ImportContext.asConfigFile(asRecorded));
+        CommandLine.populateCommand(command, "--resume");
+        // the message names the setting's resolved value, which a rooted path is only half of on a platform where a
+        // root is per-drive
+        Path recordedDataDirectory =
+                databaseConfig.get(GraphDatabaseSettings.neo4j_home).resolve("/somewhere/else");
+
+        assertThatThrownBy(command::rerunFromPreviousAttempt)
+                .isInstanceOf(CommandFailedException.class)
+                .hasMessageContaining("settings that no longer hold")
+                .hasMessageContaining(GraphDatabaseSettings.data_directory.name())
+                .hasMessageContaining(recordedDataDirectory.toString());
+    }
+
+    @Test
+    void resumeProceedsWhenTheSettingsTheStateDependsOnAreUnchanged() throws IOException {
+        ExecutionContext ctx = homedExecutionContext();
+        ImportCommand.Full command = new ImportCommand.Full(ctx);
+        Config databaseConfig = command.loadNeo4jConfig("block");
+        Path contextDir =
+                writePreviousAttemptCliArgs(databaseConfig, "--nodes=old.csv", "--skidbladnir", "--format=block");
+        Files.writeString(
+                contextDir.resolve(ImportContext.CONFIG_FILE_NAME),
+                ImportContext.asConfigFile(ImportContext.configValuesStringMapping(databaseConfig)));
+        CommandLine.populateCommand(command, "--resume");
+
+        command.rerunFromPreviousAttempt();
+
+        assertThat(command.isSkidbladnir()).isTrue();
+    }
+
+    private Path writePreviousAttemptCliArgs(Config databaseConfig, String... cliArgs) throws IOException {
+        Path logsDir = databaseConfig.get(GraphDatabaseSettings.logs_directory);
+        Path contextDir =
+                logsDir.resolve(GraphDatabaseSettings.DEFAULT_DATABASE_NAME + "-admin-import-20200101.000000");
+        Files.createDirectories(contextDir);
+        Files.writeString(contextDir.resolve(ImportContext.CLI_ARGS_FILE_NAME), String.join("\n", cliArgs));
+        return contextDir;
+    }
+
+    private ExecutionContext homedExecutionContext() {
+        return homedExecutionContext(System.out);
+    }
+
+    private ExecutionContext homedExecutionContext(PrintStream out) {
+        return new ExecutionContext(
+                testDir.homePath(), testDir.directory("conf"), out, System.err, testDir.getFileSystem());
+    }
+
+    private void assertIdTypeAliases(List<String> requiredArgs, List<String> aliases, IdType idType) {
+        for (var alias : aliases) {
+            var command = new ImportCommand.Full(getExecutionContext());
+            var args = Stream.concat(Stream.of("--id-type", alias), requiredArgs.stream());
+            new CommandLine(command).parseArgs(args.toArray(String[]::new));
+            assertThat(command.defaultIdType).isEqualTo(idType);
+        }
     }
 
     private void assertInputTypeAliases(
@@ -162,29 +581,6 @@ class ImportCommandTest {
             var args = Stream.concat(Stream.of("--input-type", alias), requiredArgs.stream());
             new CommandLine(command).parseArgs(args.toArray(String[]::new));
             assertThat(command.fileInputType).isEqualTo(inputType);
-        }
-    }
-
-    @Test
-    void shouldAllowAliasesForIncrementalStage() {
-        var tempFileName = testDir.createFile("dummy").toString();
-        var requiredArgs = List.of("--force", "--nodes", tempFileName, "--relationships", tempFileName);
-
-        assertIncrementalStageAliases(
-                requiredArgs, List.of("prepare", "PREPARE", "1"), ImportCommand.IncrementalStage.prepare);
-        assertIncrementalStageAliases(
-                requiredArgs, List.of("build", "BUILD", "2"), ImportCommand.IncrementalStage.build);
-        assertIncrementalStageAliases(
-                requiredArgs, List.of("merge", "MERGE", "3"), ImportCommand.IncrementalStage.merge);
-    }
-
-    private void assertIncrementalStageAliases(
-            List<String> requiredArgs, List<String> aliases, ImportCommand.IncrementalStage stage) {
-        for (var alias : aliases) {
-            var command = new ImportCommand.Incremental(getExecutionContext());
-            var args = Stream.concat(Stream.of("--stage", alias), requiredArgs.stream());
-            new CommandLine(command).parseArgs(args.toArray(String[]::new));
-            assertThat(command.stage).isEqualTo(stage);
         }
     }
 
@@ -220,61 +616,22 @@ class ImportCommandTest {
         return positionals;
     }
 
-    @Test
-    void shouldKeepSpecifiedNeo4jHomeWhenAdditionalConfigIsPresent() {
-        // given
-        final var homeDir = testDir.directory("other", "place");
-        final var additionalConfigFile = testDir.createFile("empty.conf");
-        final var ctx = new ExecutionContext(
-                homeDir, testDir.directory("conf"), System.out, System.err, testDir.getFileSystem());
-        // Does not matter which command Full/Incremental
-        final var command = new ImportCommand.Full(ctx);
-        final var foo = testDir.createFile("foo.csv");
-
-        CommandLine.populateCommand(
-                command,
-                "--additional-config",
-                additionalConfigFile.toAbsolutePath().toString(),
-                "--nodes=" + foo.toAbsolutePath());
-
-        // when
-        Config resultingConfig = command.loadNeo4jConfig("");
-
-        // then
-        assertEquals(homeDir, resultingConfig.get(GraphDatabaseSettings.neo4j_home));
-    }
-
-    @Test
-    void shouldKeepSpecifiedNeo4jHomeWhenNoAdditionalConfigIsPresent() {
-        // given
-        final var homeDir = testDir.directory("other", "place");
-        final var ctx = new ExecutionContext(
-                homeDir, testDir.directory("conf"), System.out, System.err, testDir.getFileSystem());
-        // Does not matter which command Full/Incremental
-        final var command = new ImportCommand.Full(ctx);
-        final var foo = testDir.createFile("foo.csv");
-
-        CommandLine.populateCommand(command, "--nodes=" + foo.toAbsolutePath());
-
-        // when
-        Config resultingConfig = command.loadNeo4jConfig("");
-
-        // then
-        assertEquals(homeDir, resultingConfig.get(GraphDatabaseSettings.neo4j_home));
-    }
-
     @Nested
     class ParseNodeFilesGroup {
         @Test
         void illegalEqualsPosition() {
-            assertThrows(IllegalArgumentException.class, () -> ImportCommand.parseNodeFilesGroup("=foo.csv"));
-            assertThrows(IllegalArgumentException.class, () -> ImportCommand.parseNodeFilesGroup("foo="));
+            assertThatExceptionOfType(IllegalArgumentException.class)
+                    .isThrownBy(() -> ImportCommand.parseNodeFilesGroup("=foo.csv"));
+            assertThatExceptionOfType(IllegalArgumentException.class)
+                    .isThrownBy(() -> ImportCommand.parseNodeFilesGroup("foo="));
         }
 
         @Test
         void validateFileExistence() {
-            assertThrows(IllegalArgumentException.class, () -> ImportCommand.parseNodeFilesGroup("nonexisting.file")
-                    .toPaths(testDir.getFileSystem()));
+            assertThatThrownBy(() -> ImportCommand.parseNodeFilesGroup("nonexisting.file")
+                            .toPathArray(testDir.getFileSystem(), REGEX))
+                    .isInstanceOf(UncheckedIOException.class)
+                    .hasCauseInstanceOf(NoSuchFileException.class);
         }
 
         @ParameterizedTest
@@ -312,6 +669,13 @@ class ImportCommandTest {
             assertPathsFound(testDir, g, foo, bar);
         }
 
+        @Test
+        void labelsKeepTheOrderTheyWereSpecifiedIn() {
+            final var foo = testDir.createFile("foo.csv");
+            final var g = ImportCommand.parseNodeFilesGroup("Middle:Alpha:Zebra=" + foo);
+            assertThat(g.key).containsExactly("Middle", "Alpha", "Zebra");
+        }
+
         @ParameterizedTest
         @ValueSource(booleans = {true, false})
         void filesRegex(boolean useURIs) {
@@ -331,25 +695,28 @@ class ImportCommandTest {
     class ParseRelationshipFilesGroup {
         @Test
         void illegalEqualsPosition() {
-            assertThrows(IllegalArgumentException.class, () -> ImportCommand.parseRelationshipFilesGroup("=foo.csv"));
-            assertThrows(IllegalArgumentException.class, () -> ImportCommand.parseRelationshipFilesGroup("foo="));
+            assertThatExceptionOfType(IllegalArgumentException.class)
+                    .isThrownBy(() -> ImportCommand.parseRelationshipFilesGroup("=foo.csv"));
+            assertThatExceptionOfType(IllegalArgumentException.class)
+                    .isThrownBy(() -> ImportCommand.parseRelationshipFilesGroup("foo="));
         }
 
         @Test
         void validateFileExistence() {
-            assertThrows(
-                    IllegalArgumentException.class, () -> ImportCommand.parseRelationshipFilesGroup("nonexisting.file")
-                            .toPaths(testDir.getFileSystem()));
+            assertThatThrownBy(() -> ImportCommand.parseRelationshipFilesGroup("nonexisting.file")
+                            .toPathArray(testDir.getFileSystem(), REGEX))
+                    .isInstanceOf(UncheckedIOException.class)
+                    .hasCauseInstanceOf(NoSuchFileException.class);
         }
 
         @ParameterizedTest
         @ValueSource(booleans = {true, false})
-        void filesWithoutLabels(boolean useURIs) {
+        void filesWithoutRelType(boolean useURIs) {
             final var foo = testDir.createFile("foo.csv");
             final var bar = testDir.createFile("bar.csv");
             final var pathStr = useURIs ? foo.toUri() + "," + bar.toUri() : foo + "," + bar;
             final var g = ImportCommand.parseRelationshipFilesGroup(pathStr);
-            assertThat(g.key).isEmpty();
+            assertThat(g.key).isNull();
             assertPathsFound(testDir, g, foo, bar);
         }
 
@@ -382,7 +749,7 @@ class ImportCommandTest {
     private static void assertPathsFound(TestDirectory dir, InputFilesGroup<?> group, Path... expectedPaths) {
         // the groups will have either local paths or file URIs so will be handled by the simple scheme system below
         try (var fs = new SchemeFileSystemAbstraction(dir.getFileSystem())) {
-            assertThat(group.toPaths(fs)).containsOnly(expectedPaths);
+            assertThat(group.toPathArray(fs, REGEX)).containsOnly(expectedPaths);
         } catch (IOException ex) {
             throw new UncheckedIOException(ex);
         }

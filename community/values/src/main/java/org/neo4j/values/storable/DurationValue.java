@@ -32,9 +32,9 @@ import static java.time.temporal.ChronoUnit.SECONDS;
 import static java.util.Objects.requireNonNull;
 import static java.util.regex.Pattern.CASE_INSENSITIVE;
 import static org.neo4j.memory.HeapEstimator.shallowSizeOfInstance;
-import static org.neo4j.values.storable.NumberType.NO_NUMBER;
 import static org.neo4j.values.storable.NumberValue.castToLong;
 import static org.neo4j.values.storable.NumberValue.safeCastFloatingPoint;
+import static org.neo4j.values.storable.Values.NO_VALUE;
 import static org.neo4j.values.utils.TemporalUtil.AVG_NANOS_PER_MONTH;
 import static org.neo4j.values.utils.TemporalUtil.AVG_SECONDS_PER_MONTH;
 import static org.neo4j.values.utils.TemporalUtil.NANOS_PER_SECOND;
@@ -51,10 +51,12 @@ import java.time.temporal.TemporalUnit;
 import java.time.temporal.UnsupportedTemporalTypeException;
 import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.neo4j.exceptions.InvalidArgumentException;
+import org.neo4j.exceptions.TemporalParseException;
 import org.neo4j.exceptions.UnsupportedTemporalUnitException;
 import org.neo4j.gqlstatus.GqlHelper;
 import org.neo4j.hashing.HashFunction;
@@ -63,6 +65,7 @@ import org.neo4j.values.Comparison;
 import org.neo4j.values.Equality;
 import org.neo4j.values.StructureBuilder;
 import org.neo4j.values.ValueMapper;
+import org.neo4j.values.utils.ValueTypeNames;
 import org.neo4j.values.virtual.MapValue;
 
 /**
@@ -75,6 +78,7 @@ public final class DurationValue extends ScalarValue implements TemporalAmount, 
 
     public static final DurationValue MIN_VALUE = duration(0, 0, Long.MIN_VALUE, 0);
     public static final DurationValue MAX_VALUE = duration(0, 0, Long.MAX_VALUE, 999_999_999);
+    public static final String CYPHER_TYPE_NAME = "DURATION";
 
     public static final DurationValue ZERO = new DurationValue(0, 0, 0, 0);
     private static final List<TemporalUnit> UNITS = List.of(MONTHS, DAYS, SECONDS, NANOS);
@@ -136,7 +140,9 @@ public final class DurationValue extends ScalarValue implements TemporalAmount, 
     }
 
     public static DurationValue build(MapValue map) {
-        return StructureBuilder.build(builder(), map);
+        // A field explicitly set to null is ignored, so that e.g. duration({days: null}) behaves like duration({}).
+        // This filtering happens before the "at least one field" (22N30) check and the field type check.
+        return StructureBuilder.build(builder(), map.filter((key, value) -> value != NO_VALUE));
     }
 
     public static DurationValue between(TemporalUnit unit, Temporal from, Temporal to) {
@@ -151,10 +157,12 @@ public final class DurationValue extends ScalarValue implements TemporalAmount, 
                 case SECONDS:
                     return durationInSecondsAndNanos(from, to);
                 default:
-                    throw new UnsupportedTemporalUnitException("Unsupported unit: " + unit);
+                    throw UnsupportedTemporalUnitException.internalError(
+                            DurationValue.class.getSimpleName(), "Unsupported unit: " + unit);
             }
         } else {
-            throw new UnsupportedTemporalUnitException("Unsupported unit: " + unit);
+            throw UnsupportedTemporalUnitException.internalError(
+                    DurationValue.class.getSimpleName(), "Unsupported unit: " + unit);
         }
     }
 
@@ -197,17 +205,29 @@ public final class DurationValue extends ScalarValue implements TemporalAmount, 
                                     + castToLong("nanoseconds", nanoseconds));
                 } else {
                     return approximate(
-                            safeCastFloatingPoint("years", years, 0) * 12 + safeCastFloatingPoint("months", months, 0),
-                            safeCastFloatingPoint("weeks", weeks, 0) * 7 + safeCastFloatingPoint("days", days, 0),
-                            safeCastFloatingPoint("hours", hours, 0) * 3600
-                                    + safeCastFloatingPoint("minutes", minutes, 0) * 60
-                                    + safeCastFloatingPoint("seconds", seconds, 0),
-                            safeCastFloatingPoint("milliseconds", milliseconds, 0) * 1_000_000
-                                    + safeCastFloatingPoint("microseconds", microseconds, 0) * 1_000
-                                    + safeCastFloatingPoint("nanoseconds", nanoseconds, 0));
+                            safeCastDurationField("years", years) * 12 + safeCastDurationField("months", months),
+                            safeCastDurationField("weeks", weeks) * 7 + safeCastDurationField("days", days),
+                            safeCastDurationField("hours", hours) * 3600
+                                    + safeCastDurationField("minutes", minutes) * 60
+                                    + safeCastDurationField("seconds", seconds),
+                            safeCastDurationField("milliseconds", milliseconds) * 1_000_000
+                                    + safeCastDurationField("microseconds", microseconds) * 1_000
+                                    + safeCastDurationField("nanoseconds", nanoseconds));
                 }
             }
         };
+    }
+
+    /**
+     * Casts a duration field value to a floating point, turning the type mismatch reported by
+     * {@link NumberValue#safeCastFloatingPoint} into a proper (non-internal) error.
+     */
+    private static double safeCastDurationField(String name, AnyValue value) {
+        try {
+            return safeCastFloatingPoint(name, value, 0);
+        } catch (IllegalArgumentException e) {
+            throw UnsupportedTemporalUnitException.cannotAssignDurationField(name, ValueTypeNames.nameOfType(value), e);
+        }
     }
 
     @Override
@@ -501,14 +521,16 @@ public final class DurationValue extends ScalarValue implements TemporalAmount, 
             try {
                 from = from.plus(months, ChronoUnit.MONTHS);
             } catch (DateTimeException | java.lang.ArithmeticException e) {
-                throw new org.neo4j.exceptions.ArithmeticException(e.getMessage(), e);
+                throw org.neo4j.exceptions.ArithmeticException.wrappedArithmeticException(
+                        String.format("durationBetween(%s, %s)", from, to), "durationBetween()", e);
             }
 
             days = assertValidUntil(from, to, ChronoUnit.DAYS);
             try {
                 from = from.plus(days, ChronoUnit.DAYS);
             } catch (DateTimeException | java.lang.ArithmeticException e) {
-                throw new org.neo4j.exceptions.ArithmeticException(e.getMessage(), e);
+                throw org.neo4j.exceptions.ArithmeticException.wrappedArithmeticException(
+                        String.format("durationBetween(%s, %s)", from, to), "durationBetween()", e);
             }
         }
         long nanos = assertValidUntil(from, to, NANOS);
@@ -625,6 +647,402 @@ public final class DurationValue extends ScalarValue implements TemporalAmount, 
         return str.toString();
     }
 
+    @Override
+    public String prettify() {
+        return prettyPrint();
+    }
+
+    private enum DurationToken {
+        YEARS_TOKEN(true),
+        QUARTERS_TOKEN(true),
+        MONTHS_TOKEN(true),
+        WEEKS_TOKEN(true),
+        DAYS_TOKEN(true),
+        HOURS_TOKEN(true),
+        MINUTES_TOKEN(true),
+        SECONDS_TOKEN(true),
+        MILLISECONDS_TOKEN(true),
+        FRACTION_TOKEN(true),
+        NANOSECONDS_TOKEN(true),
+        ESCAPE_TOKEN(false),
+        NOT_A_COMPONENT_TOKEN(false);
+
+        public final boolean isToken;
+
+        DurationToken(boolean isToken) {
+            this.isToken = isToken;
+        }
+    }
+
+    private static DurationToken getComponent(char c) {
+        return switch (c) {
+            case 'y', 'Y', 'u' -> DurationToken.YEARS_TOKEN;
+            case 'q', 'Q' -> DurationToken.QUARTERS_TOKEN;
+            case 'M', 'L' -> DurationToken.MONTHS_TOKEN;
+            case 'w', 'W' -> DurationToken.WEEKS_TOKEN;
+            case 'd', 'D' -> DurationToken.DAYS_TOKEN;
+            case 'h', 'H', 'k', 'K' -> DurationToken.HOURS_TOKEN;
+            case 'm' -> DurationToken.MINUTES_TOKEN;
+            case 's' -> DurationToken.SECONDS_TOKEN;
+            case 'n', 'S' -> DurationToken.FRACTION_TOKEN;
+            case 'A' -> DurationToken.MILLISECONDS_TOKEN;
+            case 'N' -> DurationToken.NANOSECONDS_TOKEN;
+            case '\'' -> DurationToken.ESCAPE_TOKEN;
+            default -> DurationToken.NOT_A_COMPONENT_TOKEN;
+        };
+    }
+
+    public void padLeftZeros(StringBuilder sb, long input, int length) {
+        int strLength = Long.toString(input).length();
+        if (strLength < length) {
+            int padLength = sb.length() + length - strLength;
+            sb.repeat('0', padLength - sb.length());
+        }
+        sb.append(input);
+    }
+
+    /**
+     * Format according to the following pattern.
+     * A character will consume as much as possible of the remainder of the duration.
+     * +-----------------+------------+--------------------+
+     * | Component Group | Characters | Field              |
+     * +-----------------+------------+--------------------+
+     * |                 | y/Y/u      | Years              |
+     * +                 +------------+--------------------+
+     * |     Months      | q/Q        | Quarters           |
+     * +                 +------------+--------------------+
+     * |                 | M/L        | Months             |
+     * +-----------------+------------+--------------------+
+     * |                 | w/W        | Weeks              |
+     * +      Days       +------------+--------------------+
+     * |                 | d/D        | Days               |
+     * +-----------------+------------+--------------------+
+     * |                 | h/H/k/K    | Hours              |
+     * +                 +------------+--------------------+
+     * |                 | m          | Minutes            |
+     * +                 +------------+--------------------+
+     * |                 | s          | Seconds            |
+     * +     Seconds     +------------+--------------------+
+     * |                 | n/S        | Fraction of Second |
+     * +                 +------------+--------------------+
+     * |                 | A          | Milliseconds       |
+     * +                 +------------+--------------------+
+     * |                 | N          | Nanoseconds        |
+     * +-----------------+------------+--------------------+
+     */
+    public String format(String pattern) {
+        DurationToken previousToken = DurationToken.NOT_A_COMPONENT_TOKEN;
+        boolean inEscape = false;
+
+        int[] counters = new int[DurationToken.values().length];
+
+        for (int i = 0; i < pattern.length(); i++) {
+            char c = pattern.charAt(i);
+            DurationToken cType = getComponent(c);
+            if (inEscape) {
+                if (cType == DurationToken.ESCAPE_TOKEN) {
+                    if (i + 1 < pattern.length() && getComponent(pattern.charAt(i + 1)) == DurationToken.ESCAPE_TOKEN) {
+                        i += 1;
+                    } else {
+                        inEscape = false;
+                    }
+                }
+            } else if (cType.isToken) {
+                if (previousToken != cType) counters[cType.ordinal()] = 0;
+                counters[cType.ordinal()] += 1;
+            } else if (cType == DurationToken.ESCAPE_TOKEN) {
+                inEscape = true;
+            }
+            previousToken = cType;
+        }
+
+        if (inEscape) {
+            throw InvalidArgumentException.patternParsingFailed();
+        }
+
+        boolean hasHours = counters[DurationToken.HOURS_TOKEN.ordinal()] > 0;
+        boolean hasMinutes = counters[DurationToken.MINUTES_TOKEN.ordinal()] > 0;
+        boolean hasSeconds = counters[DurationToken.SECONDS_TOKEN.ordinal()] > 0;
+        boolean hasMilliseconds = counters[DurationToken.MILLISECONDS_TOKEN.ordinal()] > 0;
+
+        long years = get(DurationFields.YEARS.propertyKey).longValue();
+        long quarters = get(counters[DurationToken.YEARS_TOKEN.ordinal()] > 0
+                        ? DurationFields.QUARTERS_OF_YEAR.propertyKey
+                        : DurationFields.QUARTERS.propertyKey)
+                .longValue();
+        long months = get(counters[DurationToken.QUARTERS_TOKEN.ordinal()] > 0
+                        ? DurationFields.MONTHS_OF_QUARTER.propertyKey
+                        : counters[DurationToken.YEARS_TOKEN.ordinal()] > 0
+                                ? DurationFields.MONTHS_OF_YEAR.propertyKey
+                                : DurationFields.MONTHS.propertyKey)
+                .longValue();
+        long weeks = get(DurationFields.WEEKS.propertyKey).longValue();
+        long days = get(counters[DurationToken.WEEKS_TOKEN.ordinal()] > 0
+                        ? DurationFields.DAYS_OF_WEEK.propertyKey
+                        : DurationFields.DAYS.propertyKey)
+                .longValue();
+        long hours = hasHours ? get(DurationFields.HOURS.propertyKey).longValue() : 0;
+        long minutes = hasMinutes
+                ? get(hasHours ? DurationFields.MINUTES_OF_HOUR.propertyKey : DurationFields.MINUTES.propertyKey)
+                        .longValue()
+                : 0;
+        long seconds = hasSeconds
+                ? get(DurationFields.SECONDS.propertyKey).longValue()
+                        - TimeUnit.HOURS.toSeconds(hours)
+                        - TimeUnit.MINUTES.toSeconds(minutes)
+                : 0;
+        long millis = hasMilliseconds
+                ? get(DurationFields.MILLISECONDS.propertyKey).longValue()
+                        - TimeUnit.HOURS.toMillis(hours)
+                        - TimeUnit.MINUTES.toMillis(minutes)
+                        - TimeUnit.SECONDS.toMillis(seconds)
+                : 0;
+        long nanos = get(DurationFields.NANOSECONDS.propertyKey).longValue()
+                - TimeUnit.HOURS.toNanos(hours)
+                - TimeUnit.MINUTES.toNanos(minutes)
+                - TimeUnit.SECONDS.toNanos(seconds)
+                - TimeUnit.MILLISECONDS.toNanos(millis);
+
+        long fraction = get(DurationFields.NANOSECONDS_OF_SECOND.propertyKey).longValue();
+
+        long[] calculatedUnits =
+                new long[] {years, quarters, months, weeks, days, hours, minutes, seconds, millis, fraction, nanos, 0, 0
+                };
+
+        StringBuilder str = new StringBuilder();
+        previousToken = DurationToken.NOT_A_COMPONENT_TOKEN;
+
+        for (int i = 0; i < pattern.length(); i++) {
+            char c = pattern.charAt(i);
+            DurationToken cType = getComponent(c);
+            if (inEscape) {
+                if (cType == DurationToken.ESCAPE_TOKEN) {
+                    if (i + 1 < pattern.length() && getComponent(pattern.charAt(i + 1)) == DurationToken.ESCAPE_TOKEN) {
+                        str.append(c);
+                        i += 1;
+                    } else {
+                        inEscape = false;
+                    }
+                } else {
+                    str.append(c);
+                }
+            } else {
+                if (previousToken != cType && previousToken == DurationToken.FRACTION_TOKEN) {
+                    StringBuilder frac = new StringBuilder(Long.toString(fraction));
+                    while (frac.length() < 9) {
+                        frac.insert(0, "0");
+                    }
+                    str.append(frac, 0, counters[previousToken.ordinal()]);
+                } else if (previousToken != cType && previousToken.isToken) {
+                    padLeftZeros(str, calculatedUnits[previousToken.ordinal()], counters[previousToken.ordinal()]);
+                }
+
+                if (cType.isToken) {
+                    if (previousToken != cType) counters[cType.ordinal()] = 0;
+                    counters[cType.ordinal()] += 1;
+                } else if (cType == DurationToken.ESCAPE_TOKEN) {
+                    inEscape = true;
+                } else {
+                    str.append(c);
+                }
+            }
+            previousToken = cType;
+        }
+
+        if (previousToken == DurationToken.FRACTION_TOKEN) {
+            StringBuilder frac = new StringBuilder(Long.toString(fraction));
+            while (frac.length() < 9) {
+                frac.insert(0, "0");
+            }
+            str.append(frac, 0, counters[previousToken.ordinal()]);
+        } else if (previousToken.isToken) {
+            padLeftZeros(str, calculatedUnits[previousToken.ordinal()], counters[previousToken.ordinal()]);
+        }
+
+        return str.toString();
+    }
+
+    static class ParseContext {
+        boolean[] seenElements;
+        long[] values;
+        int inputIndex;
+        boolean inEscape;
+        String pattern;
+        String input;
+
+        public ParseContext(
+                boolean[] seenElements, long[] values, int inputIndex, boolean inEscape, String pattern, String input) {
+            this.seenElements = seenElements;
+            this.values = values;
+            this.inputIndex = inputIndex;
+            this.inEscape = false;
+            this.pattern = pattern;
+            this.input = input;
+        }
+
+        public void incIndex() {
+            inputIndex += 1;
+        }
+
+        public void incIndex(int inc) {
+            inputIndex += inc;
+        }
+
+        public void matchInputChar(char literal) {
+            if (inputIndex >= input.length() || input.charAt(inputIndex) != literal) {
+                throw TemporalParseException.mismatchedPattern(pattern, input, CYPHER_TYPE_NAME);
+            }
+            inputIndex += 1;
+        }
+
+        public void toggleEscape() {
+            inEscape = !inEscape;
+        }
+
+        public void seen(int token) {
+            seenElements[token] = true;
+        }
+
+        public void hasSeen(int token) {
+            if (seenElements[token]) {
+                throw TemporalParseException.mismatchedPattern(pattern, input, CYPHER_TYPE_NAME);
+            }
+        }
+
+        public void setValue(int token, String value) {
+            try {
+                values[token] = Long.parseLong(value);
+            } catch (NumberFormatException e) {
+                throw TemporalParseException.mismatchedPattern(pattern, input, CYPHER_TYPE_NAME);
+            }
+        }
+
+        private char nextChar(int length, boolean last) {
+            if (inputIndex + length + 1 >= input.length()) {
+                if (last) {
+                    return '!';
+                } else {
+                    throw TemporalParseException.mismatchedPattern(pattern, input, CYPHER_TYPE_NAME);
+                }
+            }
+            return input.charAt(inputIndex + length + 1);
+        }
+
+        public void getValue(int previous, boolean last) {
+            String intTokens = "0123456789";
+            hasSeen(previous);
+            if (inputIndex >= input.length()) {
+                throw TemporalParseException.mismatchedPattern(pattern, input, CYPHER_TYPE_NAME);
+            }
+
+            StringBuilder value = new StringBuilder().append(input.charAt(inputIndex));
+            int valueLength = 0;
+            char nextInputChar = nextChar(0, last);
+            while (intTokens.indexOf(nextInputChar) > -1) {
+                value.append(nextInputChar);
+
+                valueLength += 1;
+                nextInputChar = nextChar(valueLength, last);
+            }
+
+            incIndex(valueLength);
+
+            if (previous == DurationToken.FRACTION_TOKEN.ordinal()) {
+                value.repeat('0', Math.max(0, 9 - value.length()));
+            }
+
+            seen(previous);
+            setValue(previous, value.toString());
+            incIndex();
+        }
+
+        public DurationValue getDuration() {
+            // years * 12 + quarters * 3 + months
+            // weeks * 7 + days
+            // hours * 3600 + minutes * 60 + seconds
+            // milliseconds * 1000000 + fraction + nanoseconds
+            return newDuration(
+                    values[0] * 12 + values[1] * 3 + values[2],
+                    values[3] * 7 + values[4],
+                    TimeUnit.HOURS.toSeconds(values[5]) + TimeUnit.MINUTES.toSeconds(values[6]) + values[7],
+                    TimeUnit.MILLISECONDS.toNanos(values[8]) + values[9] + values[10]);
+        }
+    }
+
+    public static DurationValue parsePattern(TextValue text, TextValue patternInput) {
+
+        String input = text.stringValue();
+        String pattern = patternInput.stringValue();
+
+        // A malformed pattern must be reported as such even when the input would fail to match first,
+        // so the escape balance is validated before any input is consumed.
+        boolean escapeOpen = false;
+        for (int i = 0; i < pattern.length(); i++) {
+            if (getComponent(pattern.charAt(i)) == DurationToken.ESCAPE_TOKEN) {
+                if (escapeOpen
+                        && i + 1 < pattern.length()
+                        && getComponent(pattern.charAt(i + 1)) == DurationToken.ESCAPE_TOKEN) {
+                    i += 1;
+                } else {
+                    escapeOpen = !escapeOpen;
+                }
+            }
+        }
+        if (escapeOpen) {
+            throw InvalidArgumentException.patternParsingFailed();
+        }
+
+        ParseContext ctx = new ParseContext(
+                new boolean[DurationToken.values().length],
+                new long[DurationToken.values().length],
+                0,
+                false,
+                pattern,
+                input);
+
+        DurationToken currentToken;
+        DurationToken previousToken = DurationToken.NOT_A_COMPONENT_TOKEN;
+
+        for (int i = 0; i < pattern.length(); i++) {
+            currentToken = getComponent(pattern.charAt(i));
+
+            if (ctx.inEscape) {
+                if (currentToken == DurationToken.ESCAPE_TOKEN) {
+                    if (i + 1 < pattern.length() && getComponent(pattern.charAt(i + 1)) == DurationToken.ESCAPE_TOKEN) {
+                        i += 1;
+                        ctx.matchInputChar(pattern.charAt(i));
+                    } else {
+                        ctx.toggleEscape();
+                    }
+                } else {
+                    ctx.matchInputChar(pattern.charAt(i));
+                }
+            } else {
+                if (previousToken.isToken && currentToken != previousToken) {
+                    ctx.getValue(previousToken.ordinal(), false);
+                }
+
+                if (currentToken == DurationToken.ESCAPE_TOKEN) {
+                    ctx.toggleEscape();
+                } else if (currentToken == DurationToken.NOT_A_COMPONENT_TOKEN) {
+                    ctx.matchInputChar(pattern.charAt(i));
+                }
+            }
+
+            previousToken = currentToken;
+        }
+
+        if (previousToken.isToken) {
+            ctx.getValue(previousToken.ordinal(), true);
+        }
+
+        if (ctx.inputIndex + 1 < input.length()) {
+            throw TemporalParseException.mismatchedPattern(pattern, input, CYPHER_TYPE_NAME);
+        }
+
+        return ctx.getDuration();
+    }
+
     private static void nanos(StringBuilder str, int nanos) {
         str.append('.');
         int n = nanos < 0 ? -nanos : nanos;
@@ -643,11 +1061,6 @@ public final class DurationValue extends ScalarValue implements TemporalAmount, 
     @Override
     public ValueRepresentation valueRepresentation() {
         return ValueRepresentation.DURATION;
-    }
-
-    @Override
-    public NumberType numberType() {
-        return NO_NUMBER;
     }
 
     @Override
@@ -689,7 +1102,8 @@ public final class DurationValue extends ScalarValue implements TemporalAmount, 
                     break;
             }
         }
-        throw new UnsupportedTemporalUnitException("Unsupported unit: " + unit);
+        throw UnsupportedTemporalUnitException.internalError(
+                DurationValue.class.getSimpleName(), "Unsupported unit: " + unit);
     }
 
     /**
@@ -912,7 +1326,7 @@ public final class DurationValue extends ScalarValue implements TemporalAmount, 
      */
     private static long safeDoubleToLong(double d) {
         if (d > Long.MAX_VALUE || d < Long.MIN_VALUE) {
-            throw new org.neo4j.exceptions.ArithmeticException("long overflow");
+            throw org.neo4j.exceptions.ArithmeticException.longOverflow(String.valueOf(d), "Double to Long");
         }
         return (long) d;
     }
@@ -921,7 +1335,7 @@ public final class DurationValue extends ScalarValue implements TemporalAmount, 
         try {
             return Math.addExact(y, x);
         } catch (ArithmeticException e) {
-            var gql = GqlHelper.get22015_22N28("duration()");
+            var gql = GqlHelper.getGql22015_22N28("duration()");
             throw new InvalidArgumentException(
                     gql, "Invalid value for duration, will cause overflow. Value was " + String.format(msg, args), e);
         }
@@ -931,7 +1345,7 @@ public final class DurationValue extends ScalarValue implements TemporalAmount, 
         try {
             return Math.multiplyExact(x, y);
         } catch (ArithmeticException e) {
-            var gql = GqlHelper.get22015_22N28("duration()");
+            var gql = GqlHelper.getGql22015_22N28("duration()");
             throw new InvalidArgumentException(
                     gql, "Invalid value for duration, will cause overflow. Value was " + String.format(msg, args), e);
         }
@@ -941,7 +1355,8 @@ public final class DurationValue extends ScalarValue implements TemporalAmount, 
         try {
             return temporal.plus(amountToAdd, unit);
         } catch (DateTimeException | java.lang.ArithmeticException e) {
-            throw new org.neo4j.exceptions.ArithmeticException(e.getMessage(), e);
+            throw org.neo4j.exceptions.ArithmeticException.wrappedArithmeticException(
+                    String.format("%s + %s %s", temporal, amountToAdd, unit), "+", e);
         }
     }
 
@@ -949,7 +1364,8 @@ public final class DurationValue extends ScalarValue implements TemporalAmount, 
         try {
             return temporal.minus(amountToAdd, unit);
         } catch (DateTimeException | java.lang.ArithmeticException e) {
-            throw new org.neo4j.exceptions.ArithmeticException(e.getMessage(), e);
+            throw org.neo4j.exceptions.ArithmeticException.wrappedArithmeticException(
+                    String.format("%s - %s %s", temporal, amountToAdd, unit), "-", e);
         }
     }
 
@@ -960,13 +1376,14 @@ public final class DurationValue extends ScalarValue implements TemporalAmount, 
             String prettyVal = unit instanceof Value v ? v.prettyPrint() : String.valueOf(unit);
             throw UnsupportedTemporalUnitException.cannotProcess(prettyVal, e);
         } catch (DateTimeException e) {
-            throw new InvalidArgumentException(e.getMessage(), e);
+            String prettyVal = to instanceof Value v ? v.prettyPrint() : String.valueOf(to);
+            throw InvalidArgumentException.cannotProcessTemporal(prettyVal, e);
         }
     }
 
     private static InvalidArgumentException invalidDuration(
             long months, long days, long seconds, long nanos, Exception e) {
-        var gql = GqlHelper.get22015_22N28("duration()");
+        var gql = GqlHelper.getGql22015_22N28("duration()");
         return new InvalidArgumentException(
                 gql,
                 String.format(
@@ -977,7 +1394,7 @@ public final class DurationValue extends ScalarValue implements TemporalAmount, 
 
     private static InvalidArgumentException invalidDuration(
             long months, long days, long hours, long minutes, long seconds, long nanos, Exception e) {
-        var gql = GqlHelper.get22015_22N28("duration()");
+        var gql = GqlHelper.getGql22015_22N28("duration()");
         return new InvalidArgumentException(
                 gql,
                 String.format(
@@ -987,20 +1404,20 @@ public final class DurationValue extends ScalarValue implements TemporalAmount, 
     }
 
     private static InvalidArgumentException invalidDurationAdd(DurationValue o1, DurationValue o2, Exception e) {
-        var gql = GqlHelper.get22015_22N28("+");
+        var gql = GqlHelper.getGql22015_22N28("+");
         return new InvalidArgumentException(
                 gql, String.format("Can not add duration %s and %s without causing overflow.", o1, o2), e);
     }
 
     private static InvalidArgumentException invalidDurationSubtract(DurationValue o1, DurationValue o2, Exception e) {
-        var gql = GqlHelper.get22015_22N28("-");
+        var gql = GqlHelper.getGql22015_22N28("-");
         return new InvalidArgumentException(
                 gql, String.format("Can not subtract duration %s and %s without causing overflow.", o1, o2), e);
     }
 
     private static InvalidArgumentException invalidDurationMultiply(
             DurationValue o1, NumberValue numberValue, Exception e) {
-        var gql = GqlHelper.get22015_22N28("*");
+        var gql = GqlHelper.getGql22015_22N28("*");
         return new InvalidArgumentException(
                 gql,
                 String.format("Can not multiply duration %s with %s without causing overflow.", o1, numberValue),
@@ -1009,7 +1426,7 @@ public final class DurationValue extends ScalarValue implements TemporalAmount, 
 
     private static InvalidArgumentException invalidDurationDivision(
             DurationValue o1, NumberValue numberValue, Exception e) {
-        var gql = GqlHelper.get22015_22N28("/");
+        var gql = GqlHelper.getGql22015_22N28("/");
         return new InvalidArgumentException(
                 gql, String.format("Can not divide duration %s with %s without causing overflow.", o1, numberValue), e);
     }

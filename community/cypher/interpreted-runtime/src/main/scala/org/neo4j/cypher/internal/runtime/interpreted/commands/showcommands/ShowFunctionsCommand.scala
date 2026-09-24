@@ -21,9 +21,7 @@ package org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands
 
 import org.neo4j.cypher.internal.ast.AllFunctions
 import org.neo4j.cypher.internal.ast.BuiltInFunctions
-import org.neo4j.cypher.internal.ast.CommandResultItem
 import org.neo4j.cypher.internal.ast.ExecutableBy
-import org.neo4j.cypher.internal.ast.ShowColumn
 import org.neo4j.cypher.internal.ast.ShowFunctionType
 import org.neo4j.cypher.internal.ast.ShowFunctionsClause.aggregatingColumn
 import org.neo4j.cypher.internal.ast.ShowFunctionsClause.argumentDescriptionColumn
@@ -38,9 +36,12 @@ import org.neo4j.cypher.internal.ast.ShowFunctionsClause.rolesBoostedExecutionCo
 import org.neo4j.cypher.internal.ast.ShowFunctionsClause.rolesExecutionColumn
 import org.neo4j.cypher.internal.ast.ShowFunctionsClause.signatureColumn
 import org.neo4j.cypher.internal.ast.UserDefinedFunctions
+import org.neo4j.cypher.internal.logical.plans.CommandDefaultColumn
+import org.neo4j.cypher.internal.logical.plans.CommandYieldColumn
 import org.neo4j.cypher.internal.runtime.ClosingIterator
 import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.QueryState
+import org.neo4j.exceptions.InternalException
 import org.neo4j.graphdb.GraphDatabaseService
 import org.neo4j.internal.kernel.api.procs.UserFunctionSignature
 import org.neo4j.internal.kernel.api.security.AdminActionOnResource
@@ -55,13 +56,14 @@ import org.neo4j.values.storable.Values
 
 import scala.jdk.CollectionConverters.IteratorHasAsScala
 import scala.jdk.CollectionConverters.ListHasAsScala
+import scala.jdk.CollectionConverters.SetHasAsScala
 
 // SHOW [ALL | BUILT IN | USER DEFINED] FUNCTION[S] [EXECUTABLE [BY {CURRENT USER | username}]] [WHERE clause | YIELD clause]
 case class ShowFunctionsCommand(
   functionType: ShowFunctionType,
   executableBy: Option[ExecutableBy],
-  columns: List[ShowColumn],
-  yieldColumns: List[CommandResultItem],
+  columns: List[CommandDefaultColumn],
+  yieldColumns: List[CommandYieldColumn],
   isCommunity: Boolean,
   scope: QueryLanguage
 ) extends Command(columns, yieldColumns) {
@@ -109,7 +111,7 @@ case class ShowFunctionsCommand(
     val languageFunctionsInfo = functionType match {
       case UserDefinedFunctions =>
         List.empty // Will anyway filter out all built-in functions and all of these are built-in
-      case _ => state.query.providedLanguageFunctions.map(f => FunctionInfo(f)).toList
+      case _ => state.query.providedLanguageFunctions.map(f => FunctionInfo(f)).filter(_.scopes.contains(scope)).toList
     }
 
     // gets you all non-aggregating functions that are registered in the db (incl. those from libs like apoc)
@@ -123,16 +125,20 @@ case class ShowFunctionsCommand(
     val loadedAggregationFunctions =
       txContext.procedures.aggregationFunctionGetAll(scope).iterator.asScala
 
+    // gets you all shadowed namespaces which should be excluded from SHOW FUNCTIONS
+    val shadowedNamespaces =
+      txContext.procedures.shadowedNamespaces(scope).iterator().asScala.toSet
+
     // filters out functions annotated with @Internal and gets the FunctionInfo
     val loadedAggregationFunctionsInfo =
       loadedAggregationFunctions.filter(f => !f.internal).map(f => FunctionInfo(f, aggregating = true)).toList
 
     val allFunctions = languageFunctionsInfo ++ loadedFunctionsInfo ++ loadedAggregationFunctionsInfo
-    val filteredFunctions = functionType match {
+    val filteredFunctions = (functionType match {
       case AllFunctions         => allFunctions
       case BuiltInFunctions     => allFunctions.filter(f => f.isBuiltIn)
       case UserDefinedFunctions => allFunctions.filter(f => !f.isBuiltIn)
-    }
+    }).filter(f => !(shadowedNamespaces.contains(f.name) && f.isBuiltIn))
     val sortedFunctions = filteredFunctions.sortBy(a => a.name)
 
     val rows = sortedFunctions.map { func =>
@@ -155,8 +161,7 @@ case class ShowFunctionsCommand(
       }
     }.filter(m => m.nonEmpty)
 
-    val updatedRows = updateRowsWithPotentiallyRenamedColumns(rows)
-    ClosingIterator.apply(updatedRows.iterator)
+    ClosingIterator.apply(rows.iterator)
   }
 
   private def getResultMap(
@@ -208,7 +213,11 @@ case class ShowFunctionsCommand(
       case unknown              =>
         // This match should cover all existing columns but we get scala warnings
         // on non-exhaustive match due to it being string values
-        throw new IllegalStateException(s"Missing case for column: $unknown")
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"Unknown column for show functions. Missing case for column: $unknown.",
+          s"Missing case for column: $unknown"
+        )
     }.toMap[String, AnyValue]
   }
 
@@ -229,7 +238,8 @@ case class ShowFunctionsCommand(
     retDescr: String,
     aggregating: Boolean,
     deprecated: Boolean,
-    deprecatedBy: String
+    deprecatedBy: String,
+    scopes: Set[QueryLanguage]
   )
 
   private object FunctionInfo {
@@ -244,6 +254,7 @@ case class ShowFunctionsCommand(
       val returnDescr = info.outputType.toString
       val deprecated = info.isDeprecated
       val deprecatedBy = if (info.deprecated() == null || info.deprecated.isEmpty) null else info.deprecated.get
+      val scopes = info.supportedQueryLanguages().asScala.toSet
       FunctionInfo(
         name,
         category,
@@ -254,7 +265,8 @@ case class ShowFunctionsCommand(
         returnDescr,
         aggregating,
         deprecated,
-        deprecatedBy
+        deprecatedBy,
+        scopes
       )
     }
 
@@ -268,6 +280,7 @@ case class ShowFunctionsCommand(
       val returnDescr = info.returnType
       val deprecated = info.isDeprecated
       val deprecatedBy = if (info.deprecatedBy() == null || info.deprecatedBy.isEmpty) null else info.deprecatedBy.get
+      val scopes = info.scopes().asScala.toSet
       FunctionInfo(
         name,
         category,
@@ -278,7 +291,8 @@ case class ShowFunctionsCommand(
         returnDescr,
         aggregating,
         deprecated,
-        deprecatedBy
+        deprecatedBy,
+        scopes
       )
     }
   }

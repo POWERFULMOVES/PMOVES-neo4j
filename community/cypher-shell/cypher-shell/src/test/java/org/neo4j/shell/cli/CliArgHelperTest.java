@@ -109,6 +109,8 @@ class CliArgHelperTest extends LocaleDependentTestBase {
                 "--change-password",
                 "--log",
                 tempFile.toString(),
+                "--debug",
+                tempFile.toString(),
                 "--history",
                 "myhistfile",
                 "--notifications",
@@ -357,17 +359,17 @@ class CliArgHelperTest extends LocaleDependentTestBase {
     void nonsenseArgsGiveError() {
         String failure = parseAndFail("-notreally");
 
-        assertTrue(failure.contains("cypher-shell [-h]"));
-        assertTrue(failure.contains("cypher-shell: error: unrecognized arguments: '-notreally'"));
+        assertThat(failure).contains("usage: cypher-shell");
+        assertThat(failure).contains("cypher-shell: error: unrecognized arguments: '-notreally'");
     }
 
     @Test
     void nonsenseUrlGivesError() {
         String failure = parseAndFail("--address", "host port");
 
-        assertTrue(failure.contains("cypher-shell [-h]"));
-        assertTrue(failure.contains("cypher-shell: error: Failed to parse address"));
-        assertTrue(failure.contains("\nAddress should be of the form:"));
+        assertThat(failure).contains("usage: cypher-shell");
+        assertThat(failure).contains("cypher-shell: error: Failed to parse address");
+        assertThat(failure).contains("\nAddress should be of the form:");
     }
 
     @Test
@@ -452,6 +454,12 @@ class CliArgHelperTest extends LocaleDependentTestBase {
     }
 
     @Test
+    void defaultEmptyDebugLogHandler() {
+        CliArgs arguments = parse("--debug");
+        assertThat(arguments.logHandler()).containsInstanceOf(ConsoleHandler.class);
+    }
+
+    @Test
     void fileLogHandler() throws IOException {
         final var dir = Files.createTempDirectory("temp-dir");
         final var file = new File(dir.toFile(), "shell.log");
@@ -461,8 +469,31 @@ class CliArgHelperTest extends LocaleDependentTestBase {
     }
 
     @Test
+    void fileDebugLogHandler() throws IOException {
+        final var dir = Files.createTempDirectory("temp-dir");
+        final var file = new File(dir.toFile(), "shell.log");
+        CliArgs arguments = parse("--debug", file.getAbsolutePath());
+        assertThat(arguments.logHandler()).containsInstanceOf(FileHandler.class);
+        file.delete();
+    }
+
+    @Test
     void history() {
         assertThat(parse().getHistoryBehaviour()).isInstanceOf(CypherShellTerminal.DefaultHistory.class);
+        assertThat(parse("--history", "in-memory").getHistoryBehaviour())
+                .isInstanceOf(CypherShellTerminal.InMemoryHistory.class);
+        assertThat(parse("--history", "/some/path/file.history").getHistoryBehaviour())
+                .isEqualTo(new CypherShellTerminal.FileHistory(Path.of("/some/path/file.history")));
+        assertThatThrownBy(() -> parse("--history")).hasMessageContaining("Failed to parse arguments: [--history]");
+        assertThat(parse("--history", "disable").getHistoryBehaviour())
+                .isInstanceOf(CypherShellTerminal.DisableHistory.class);
+    }
+
+    @Test
+    void historyEnv() {
+        env.put("NEO4J_CYPHER_SHELL_HISTORY", "path/from/env");
+        final var expected = new CypherShellTerminal.FileHistory(Path.of("path/from/env"));
+        assertThat(parse().getHistoryBehaviour()).isEqualTo(expected);
         assertThat(parse("--history", "in-memory").getHistoryBehaviour())
                 .isInstanceOf(CypherShellTerminal.InMemoryHistory.class);
         assertThat(parse("--history", "/some/path/file.history").getHistoryBehaviour())
@@ -526,6 +557,28 @@ class CliArgHelperTest extends LocaleDependentTestBase {
                 "4h5m6s");
     }
 
+    @Test
+    void txTimeout() {
+        assertThat(parse().getTxTimeout()).isEmpty();
+        assertThat(parse("--transaction-timeout", "1s").getTxTimeout()).contains(Duration.ofSeconds(1));
+        assertThat(parse("--transaction-timeout", "1m").getTxTimeout()).contains(Duration.ofMinutes(1));
+        assertThat(parse("--transaction-timeout", "1h").getTxTimeout()).contains(Duration.ofHours(1));
+        assertThat(parse("--transaction-timeout", "2h3m").getTxTimeout()).contains(Duration.parse("PT2H3M0S"));
+        assertThat(parse("--transaction-timeout", "2h3m4s").getTxTimeout()).contains(Duration.parse("PT2H3M4S"));
+    }
+
+    @Test
+    void errorFormat() {
+        assertEquals(ErrorFormat.GQL, parser.parse("--error-format", "gql").getErrorFormat());
+        assertEquals(
+                ErrorFormat.LEGACY, parser.parse("--error-format", "legacy").getErrorFormat());
+        assertEquals(
+                ErrorFormat.STACKTRACE,
+                parser.parse("--error-format", "stacktrace").getErrorFormat());
+        assertEquals(ErrorFormat.GQL, parser.parse().getErrorFormat());
+        assertEquals(ErrorFormat.DEFAULT, parser.parse().getErrorFormat());
+    }
+
     private void assertTimeout(Duration timeout, Duration delay, String... params) {
         final var args = parse(params);
         assertEquals(timeout, args.getIdleTimeout());
@@ -546,15 +599,16 @@ class CliArgHelperTest extends LocaleDependentTestBase {
             System.setOut(defaultOut);
         }
 
-        var expectedHelpText =
-                """
+        var expectedHelpText = """
 usage: cypher-shell [-h] [-a ADDRESS] [-u USERNAME] [--impersonate IMPERSONATE] [-p PASSWORD]
                     [--encryption {true,false,default}] [-d DATABASE] [--access-mode {read,write}]
                     [--enable-autocompletions] [--format {auto,verbose,plain}] [-P PARAM]
                     [--non-interactive] [--sample-rows SAMPLE-ROWS] [--wrap {true,false}] [-v]
                     [--driver-version] [-f FILE] [--change-password] [--log [LOG-FILE]]
                     [--history HISTORY-BEHAVIOUR] [--notifications] [--idle-timeout IDLE-TIMEOUT]
-                    [--fail-fast | --fail-at-end] [cypher]
+                    [--error-format {gql,legacy,stacktrace}]
+                    [--transaction-timeout TRANSACTION-TIMEOUT] [--fail-fast | --fail-at-end]
+                    [cypher]
 
 Cypher Shell is a command-line tool used to  run  queries and perform administrative tasks against a
 Neo4j instance. By default, the shell  is  interactive,  but  you  can  also use it for scripting by
@@ -568,7 +622,7 @@ positional arguments:
   cypher                 An optional string of Cypher to execute and then exit.
 
 named arguments:
-  -h, --help             show this help message and exit
+  -h, --help             Show this help message and exit.
   --fail-fast            Exit and report failure on the first  error  when reading from a file (this
                          is the default behavior).
   --fail-at-end          Exit and report failures at the end of the input when reading from a file.
@@ -582,8 +636,8 @@ named arguments:
                          `verbose` displays results in tabular format and prints statistics.
                          `plain` displays data with minimal formatting. (default: auto)
   -P PARAM, --param PARAM
-                         Add a parameter to this session.  Example:  `-P  {a:  1}`  or `-P {a: 1, b:
-                         duration({seconds: 1})}`. This argument  can  be  specified multiple times.
+                         Add a parameter to this session. Example:  `-P  '{a: 1}'` or `-P '{a: 1, b:
+                         duration({seconds: 1})}'`. This argument  can  be specified multiple times.
                          (default: [])
   --non-interactive      Force non-interactive mode. Only useful  when auto-detection fails (like on
                          Windows). (default: false)
@@ -597,16 +651,24 @@ named arguments:
   -f FILE, --file FILE   Pass a file with  Cypher  statements  to  be  executed. After executing all
                          statements, Cypher Shell shuts down.
   --change-password      Change the neo4j user password and exit. (default: false)
-  --log [LOG-FILE]       Enable logging to the specified  file,  or  standard  error  if the file is
+  --log [LOG-FILE], --debug [LOG-FILE]
+                         Enable logging to the specified  file,  or  standard  error  if the file is
                          omitted.
   --history HISTORY-BEHAVIOUR
-                         File path of a query  and  a  command  history  file or `in-memory` for in-
-                         memory history. Defaults  to  <user home>/.neo4j/.cypher_shell_history. Can
-                         also be set using the environment variable NEO4J_CYPHER_SHELL_HISTORY.
+                         File path of a query and a  command history file, `in-memory` for in-memory
+                         history or `disable` to disable history.  If the option is omitted, history
+                         is saved  to  <user  home>/.neo4j/.cypher_shell_history.  Can  also  be set
+                         using the environment variable NEO4J_CYPHER_SHELL_HISTORY.
   --notifications        Enable notifications in interactive mode. (default: false)
   --idle-timeout IDLE-TIMEOUT
                          Closes  the  application  after  the  specified  amount  of  idle  time  in
                          interactive  mode.  You  can   specify   the   duration  using  the  format
+                         `<hours>h<minutes>m<seconds>s`, for example `1h` (1  hour), `1h30m` (1 hour
+                         30 minutes), or `30m` (30 minutes).
+  --error-format {gql,legacy,stacktrace}
+                         Controls how errors are displayed. (default: gql)
+  --transaction-timeout TRANSACTION-TIMEOUT
+                         Transaction  timeout.  You  can  specify  the  duration  using  the  format
                          `<hours>h<minutes>m<seconds>s`, for example `1h` (1  hour), `1h30m` (1 hour
                          30 minutes), or `30m` (30 minutes).
 
@@ -634,12 +696,8 @@ connection arguments:
   --access-mode {read,write}
                          Access mode. Defaults to WRITE. (default: write)
 """;
-        assertThat(windowsSafe(helpText))
+        assertThat(helpText)
                 .describedAs("\n⚠️️️️⚠️⚠️ Help has changed. Remember to update docs!! ⚠️⚠️⚠️\n")
-                .isEqualTo(windowsSafe(expectedHelpText));
-    }
-
-    private String windowsSafe(String s) {
-        return s.replace("\r\n", "\n");
+                .isEqualToNormalizingNewlines(expectedHelpText);
     }
 }

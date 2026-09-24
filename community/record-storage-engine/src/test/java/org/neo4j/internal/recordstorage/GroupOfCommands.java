@@ -21,20 +21,23 @@ package org.neo4j.internal.recordstorage;
 
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.storageengine.AppendIndexProvider.UNKNOWN_APPEND_INDEX;
+import static org.neo4j.storageengine.api.LogPositionMetadata.NO_METADATA;
 import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_CHUNK_ID;
 
 import java.util.List;
 import java.util.function.LongConsumer;
 import org.neo4j.common.Subject;
 import org.neo4j.io.pagecache.context.CursorContext;
-import org.neo4j.kernel.impl.transaction.log.CompleteCommandBatch;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
 import org.neo4j.storageengine.api.CommandBatch;
+import org.neo4j.storageengine.api.Leases;
+import org.neo4j.storageengine.api.LogPositionMetadata;
 import org.neo4j.storageengine.api.StorageCommand;
 import org.neo4j.storageengine.api.StorageEngineTransaction;
 import org.neo4j.storageengine.api.TransactionIdStore;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.test.LatestVersions;
+import org.neo4j.wal.CompleteCommandBatch;
+import org.neo4j.wal.LogPosition;
 
 public class GroupOfCommands implements StorageEngineTransaction {
     private final long transactionId;
@@ -55,6 +58,11 @@ public class GroupOfCommands implements StorageEngineTransaction {
     @Override
     public long transactionId() {
         return transactionId;
+    }
+
+    @Override
+    public long transactionId(long externalId) {
+        throw new IllegalStateException("This impl isn't relevant for this test and should never be called.");
     }
 
     @Override
@@ -99,14 +107,27 @@ public class GroupOfCommands implements StorageEngineTransaction {
     @Override
     public CommandBatch commandBatch() {
         return new CompleteCommandBatch(
-                List.of(commands), 0, 0, 0, 0, 0, LatestVersions.LATEST_KERNEL_VERSION, Subject.SYSTEM);
+                List.of(commands),
+                0,
+                0,
+                0,
+                0,
+                0,
+                Leases.NO_LEASES,
+                LatestVersions.LATEST_KERNEL_VERSION,
+                Subject.SYSTEM);
+    }
+
+    @Override
+    public LogPositionMetadata logPositionMetadata() {
+        return NO_METADATA;
     }
 
     @Override
     public void batchAppended(long appendIndex, LogPosition beforeCommit, LogPosition positionAfter, int checksum) {}
 
     @Override
-    public void updateClusteredInfo(long transactionId, long appendIndex) {}
+    public void updateClusteredInfo(long transactionId, long appendIndex, long chunkId) {}
 
     @Override
     public void close() {}

@@ -44,25 +44,24 @@ import java.util.function.LongSupplier;
 import org.apache.commons.lang3.mutable.MutableBoolean;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.io.pagecache.PageCursor;
 import org.neo4j.io.pagecache.PageCursorUtil;
 import org.neo4j.io.pagecache.impl.DelegatingPageCursor;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 abstract class SeekCursorTestBase<KEY, VALUE> {
     private static final int PAGE_SIZE = 256;
-    private static long stableGeneration = GenerationSafePointer.MIN_GENERATION;
-    private static long unstableGeneration = stableGeneration + 1;
-    private static final LongSupplier generationSupplier =
-            () -> Generation.generation(stableGeneration, unstableGeneration);
-    private static final RootCatchup failingRootCatchup = (id, context) -> {
+    private static final RootCatchup FAILING_ROOT_CATCHUP = (id, context) -> {
         throw new AssertionError("Should not happen");
     };
-    private static final Consumer<Throwable> exceptionDecorator = t -> {};
+    private static final Consumer<Throwable> EMPTY_EXCEPTION_DECORATOR = t -> {};
+
+    private long stableGeneration = GenerationSafePointer.MIN_GENERATION + 1;
+    private long unstableGeneration = stableGeneration + 1;
+    private final LongSupplier generationSupplier = () -> Generation.generation(stableGeneration, unstableGeneration);
 
     @Inject
     private RandomSupport random;
@@ -73,6 +72,7 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
     private InternalTreeLogic<KEY, VALUE> treeLogic;
     private StructurePropagation<KEY> structurePropagation;
 
+    private PageAwareByteArrayCursor navigationCursor;
     private PageAwareByteArrayCursor cursor;
     private PageAwareByteArrayCursor utilCursor;
     private SimpleIdProvider id;
@@ -85,6 +85,7 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
     void setUp() throws IOException {
         cursor = new PageAwareByteArrayCursor(PAGE_SIZE);
         utilCursor = cursor.duplicate();
+        navigationCursor = cursor.duplicate();
         id = new SimpleIdProvider(cursor::duplicate);
 
         layout = getLayout();
@@ -98,8 +99,9 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
                 id, leaf, internal, layout, NO_MONITOR, TreeWriterCoordination.NO_COORDINATION, DATA_LAYER_FLAG);
         structurePropagation = new StructurePropagation<>(layout.newKey(), layout.newKey(), layout.newKey());
 
-        long firstPage = id.acquireNewId(stableGeneration, unstableGeneration, CursorCreator.bind(cursor));
+        long firstPage = id.acquireNewId(stableGeneration, CursorCreator.bind(cursor), NULL_CONTEXT);
         goTo(cursor, firstPage);
+        goTo(navigationCursor, firstPage);
         goTo(utilCursor, firstPage);
 
         leaf.initialize(cursor, DATA_LAYER_FLAG, stableGeneration, unstableGeneration);
@@ -118,10 +120,11 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
         PageCursorUtil.goTo(cursor, "test", pointer(pageId));
     }
 
-    private void updateRoot() {
+    private void updateRoot() throws IOException {
         rootId = cursor.getCurrentPageId();
+        goTo(navigationCursor, rootId);
         rootGeneration = unstableGeneration;
-        treeLogic.initialize(cursor, InternalTreeLogic.DEFAULT_SPLIT_RATIO, StructureWriteLog.EMPTY);
+        treeLogic.initialize(navigationCursor, cursor, InternalTreeLogic.DEFAULT_SPLIT_RATIO, StructureWriteLog.EMPTY);
     }
 
     /* NO CONCURRENT INSERT */
@@ -341,6 +344,32 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
     }
 
     @Test
+    void shouldHandleEmptyTree() throws IOException {
+        // GIVEN
+        long fromInclusive = 0;
+        long toExclusive = 10;
+
+        // WHEN
+        try (SeekCursor<KEY, VALUE> cursor = seekCursor(fromInclusive, toExclusive)) {
+            // THEN
+            assertFalse(cursor.next());
+        }
+    }
+
+    @Test
+    void shouldHandleEmptyTreeBackwards() throws IOException {
+        // GIVEN
+        long fromInclusive = 10;
+        long toExclusive = 0;
+
+        // WHEN
+        try (SeekCursor<KEY, VALUE> cursor = seekCursor(fromInclusive, toExclusive)) {
+            // THEN
+            assertFalse(cursor.next());
+        }
+    }
+
+    @Test
     void shouldHandleBackwardsWithNoExactHitOnFromInclusive() throws IOException {
         // GIVEN
         insert(0);
@@ -448,7 +477,6 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
 
         // when
         try (SeekCursor<KEY, VALUE> seek = seekCursor(expectedNext, lastSeed)) {
-            assertEquals(rightChild, cursor.getCurrentPageId());
             while (seek.next()) {
                 assertKeyAndValue(seek, expectedNext);
                 expectedNext++;
@@ -471,7 +499,6 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
 
         // when
         try (SeekCursor<KEY, VALUE> seek = seekCursor(expectedNext, -1)) {
-            assertEquals(rightChild, cursor.getCurrentPageId());
             while (seek.next()) {
                 assertKeyAndValue(seek, expectedNext);
                 expectedNext--;
@@ -770,6 +797,37 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
             while (cursor.next()) {
                 long key = expected.get(readKeys);
                 assertKeyAndValue(cursor, key);
+                readKeys++;
+            }
+            assertEquals(expected.size(), readKeys);
+        }
+    }
+
+    @Test
+    void mustContinueToNextLeafWhenLeafIsSplitWithFullRangeGoingToTheRight() throws Exception {
+        // GIVEN
+        List<Long> expected = new ArrayList<>();
+        long maxKeyCount = fullLeaf(expected);
+        long fromInclusive = maxKeyCount * 3 / 4;
+        long toExclusive = maxKeyCount + 1; // We will add maxKeyCount later
+
+        // WHEN
+        PageAwareByteArrayCursor seekCursor = cursor.duplicate();
+        seekCursor.next();
+        try (SeekCursor<KEY, VALUE> cursor = seekCursor(fromInclusive, toExclusive, seekCursor)) {
+            int readKeys = (int) fromInclusive;
+            cursor.next();
+            assertKeyAndValue(cursor, expected.get(readKeys));
+            readKeys++;
+
+            // Seeker pauses and writer insert new key which causes a split
+            expected.add(maxKeyCount);
+            insert(maxKeyCount);
+
+            seekCursor.forceRetry();
+
+            while (cursor.next()) {
+                assertKeyAndValue(cursor, expected.get(readKeys));
                 readKeys++;
             }
             assertEquals(expected.size(), readKeys);
@@ -1161,10 +1219,16 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
 
         // WHEN
         try (SeekCursor<KEY, VALUE> cursor = new SeekCursor<>(
-                        this.cursor, layout, leaf, internal, generationSupplier, exceptionDecorator, NULL_CONTEXT)
+                        this.cursor,
+                        layout,
+                        leaf,
+                        internal,
+                        generationSupplier,
+                        EMPTY_EXCEPTION_DECORATOR,
+                        NULL_CONTEXT)
                 .initialize(
                         rootInitializer(unstableGeneration),
-                        failingRootCatchup,
+                        FAILING_ROOT_CATCHUP,
                         from,
                         to,
                         1,
@@ -1357,7 +1421,6 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
         TestPageCursor seekCursor = new TestPageCursor(cursor.duplicate(rootId));
         seekCursor.next();
         try (SeekCursor<KEY, VALUE> seeker = seekCursor(fromInclusive, toExclusive, seekCursor)) {
-            assertThat(seekCursor.getCurrentPageId()).isEqualTo(leftChild);
             seekRangeWithUnderflowMidSeek(seeker, seekCursor, fromInclusive, toExclusive, rightChild);
             readCursor.next(rootId);
             assertTrue(TreeNodeUtil.isLeaf(readCursor));
@@ -1388,7 +1451,6 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
         TestPageCursor seekCursor = new TestPageCursor(cursor.duplicate(rootId));
         seekCursor.next();
         try (SeekCursor<KEY, VALUE> seeker = seekCursor(fromInclusive, toExclusive, seekCursor)) {
-            assertThat(seekCursor.getCurrentPageId()).isEqualTo(rightChild);
             seekRangeWithUnderflowMidSeek(seeker, seekCursor, fromInclusive, toExclusive, leftChild);
             readCursor.next(rootId);
             assertTrue(TreeNodeUtil.isLeaf(readCursor));
@@ -1419,7 +1481,6 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
         TestPageCursor seekCursor = new TestPageCursor(cursor.duplicate(rootId));
         seekCursor.next();
         try (SeekCursor<KEY, VALUE> seeker = seekCursor(fromInclusive, toExclusive, seekCursor)) {
-            assertThat(seekCursor.getCurrentPageId()).isEqualTo(rightChild);
             seekRangeWithUnderflowMidSeek(seeker, seekCursor, fromInclusive, toExclusive, leftChild);
             readCursor.next(rootId);
             assertTrue(TreeNodeUtil.isLeaf(readCursor));
@@ -1451,7 +1512,6 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
         TestPageCursor seekCursor = new TestPageCursor(cursor.duplicate(rootId));
         seekCursor.next();
         try (SeekCursor<KEY, VALUE> seeker = seekCursor(fromInclusive, toExclusive, seekCursor)) {
-            assertThat(seekCursor.getCurrentPageId()).isEqualTo(leftChild);
             seekRangeWithUnderflowMidSeek(seeker, seekCursor, fromInclusive, toExclusive, rightChild);
             readCursor.next(rootId);
             assertTrue(TreeNodeUtil.isLeaf(readCursor));
@@ -1470,12 +1530,12 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
         }
 
         long currentNode = cursor.getCurrentPageId();
-        try (SeekCursor<KEY, VALUE> seek = seekCursor(0L, i, cursor)) {
+        PageAwareByteArrayCursor duplicate = cursor.duplicate(currentNode);
+        duplicate.next();
+        try (SeekCursor<KEY, VALUE> seek = seekCursor(0L, i, duplicate)) {
             // when right sibling gets an successor
             checkpoint();
-            PageAwareByteArrayCursor duplicate = cursor.duplicate(currentNode);
-            duplicate.next();
-            insert(i, i * 10, duplicate);
+            insert(i, i * 10);
 
             // then
             // we should not fail to read right sibling
@@ -1529,14 +1589,14 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
         }
 
         long currentNode = cursor.getCurrentPageId();
-        try (SeekCursor<KEY, VALUE> seek = seekCursor(0L, 5, cursor)) {
+        PageAwareByteArrayCursor duplicate = cursor.duplicate(currentNode);
+        duplicate.next();
+        try (SeekCursor<KEY, VALUE> seek = seekCursor(0L, 5, duplicate)) {
             // when
             checkpoint();
-            PageAwareByteArrayCursor duplicate = cursor.duplicate(currentNode);
-            duplicate.next();
-            insert(i, i, duplicate); // Create successor of leaf
+            insert(i, i); // Create successor of leaf
             expected.add(i);
-            cursor.forceRetry();
+            duplicate.forceRetry();
 
             while (seek.next()) {
                 actual.add(getSeed(seek.key()));
@@ -1556,16 +1616,16 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
         }
 
         long currentNode = cursor.getCurrentPageId();
-        try (SeekCursor<KEY, VALUE> seek = seekCursor(0L, 5, cursor)) {
+        PageAwareByteArrayCursor duplicate = cursor.duplicate(currentNode);
+        duplicate.next();
+        try (SeekCursor<KEY, VALUE> seek = seekCursor(0L, 5, duplicate)) {
             // when
             checkpoint();
-            PageAwareByteArrayCursor duplicate = cursor.duplicate(currentNode);
-            duplicate.next();
-            insert(i, i, duplicate); // Create successor of leaf
+            insert(i, i); // Create successor of leaf
 
             // and corrupt successor pointer
-            corruptGSPP(duplicate, TreeNodeUtil.BYTE_POS_SUCCESSOR);
-            cursor.forceRetry();
+            corruptGSPP(cursor, TreeNodeUtil.BYTE_POS_SUCCESSOR);
+            duplicate.forceRetry();
 
             // then
             assertThrows(TreeInconsistencyException.class, () -> {
@@ -1662,7 +1722,8 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
         assertThrows(
                 TreeInconsistencyException.class,
                 () -> seekCursor(
-                        position, position + 1, pageCursorForSeeker, oldStableGeneration, oldUnstableGeneration));
+                                position, position + 1, pageCursorForSeeker, oldStableGeneration, oldUnstableGeneration)
+                        .next());
     }
 
     @Test
@@ -1731,7 +1792,8 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
         assertThrows(
                 TreeInconsistencyException.class,
                 () -> seekCursor(
-                        position, position + 1, pageCursorForSeeker, oldStableGeneration, oldUnstableGeneration));
+                                position, position + 1, pageCursorForSeeker, oldStableGeneration, oldUnstableGeneration)
+                        .next());
     }
 
     @Test
@@ -1746,9 +1808,8 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
         };
 
         // when
-        //noinspection EmptyTryBlock
-        try (SeekCursor<KEY, VALUE> ignored = new SeekCursor<>(
-                        cursor, layout, leaf, internal, generationSupplier, exceptionDecorator, NULL_CONTEXT)
+        try (var seekCursor = new SeekCursor<>(
+                        cursor, layout, leaf, internal, generationSupplier, EMPTY_EXCEPTION_DECORATOR, NULL_CONTEXT)
                 .initialize(
                         rootInitializer(generation - 1),
                         rootCatchup,
@@ -1757,7 +1818,7 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
                         1,
                         LEAF_LEVEL,
                         SeekCursor.NO_MONITOR)) {
-            // do nothing
+            seekCursor.next();
         }
 
         // then
@@ -1804,9 +1865,8 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
         // when
         KEY from = key(1L);
         KEY to = key(2L);
-        //noinspection EmptyTryBlock
-        try (SeekCursor<KEY, VALUE> ignored = new SeekCursor<>(
-                        cursor, layout, leaf, internal, generationSupplier, exceptionDecorator, NULL_CONTEXT)
+        try (var seekCursor = new SeekCursor<>(
+                        cursor, layout, leaf, internal, generationSupplier, EMPTY_EXCEPTION_DECORATOR, NULL_CONTEXT)
                 .initialize(
                         rootInitializer(unstableGeneration),
                         rootCatchup,
@@ -1815,7 +1875,7 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
                         1,
                         LEAF_LEVEL,
                         SeekCursor.NO_MONITOR)) {
-            // do nothing
+            seekCursor.next();
         }
 
         // then
@@ -1868,7 +1928,7 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
                         leaf,
                         internal,
                         firstOlderThenCurrentGenerationSupplier,
-                        exceptionDecorator,
+                        EMPTY_EXCEPTION_DECORATOR,
                         NULL_CONTEXT)
                 .initialize(
                         rootInitializer(unstableGeneration),
@@ -2003,7 +2063,9 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
 
             // THEN
             List<Long> expected = allKeysOnLevel(level, fromInclusive, toExclusive);
-            assertThat(readBySeeker).isEqualTo(expected);
+            assertThat(readBySeeker)
+                    .as("read at level %d from %d to %d", level, fromInclusive, toExclusive)
+                    .isEqualTo(expected);
         }
     }
 
@@ -2075,8 +2137,9 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
         return allKeysOnNode;
     }
 
-    private static boolean goToRightSibling(PageCursor cursor) throws IOException {
-        long rightSibling = pointer(TreeNodeUtil.rightSibling(cursor, stableGeneration, unstableGeneration));
+    private boolean goToRightSibling(PageCursor cursor) throws IOException {
+        long rightSibling = pointer(TreeNodeUtil.rightSibling(cursor, stableGeneration, unstableGeneration)
+                .pointer());
         boolean hasRightSibling = rightSibling != TreeNodeUtil.NO_NODE_FLAG;
         if (hasRightSibling) {
             goTo(cursor, rightSibling);
@@ -2142,7 +2205,8 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
         int prevKeyCount = midKeyCount + 1;
 
         PageCursor rightSiblingCursor = null;
-        long rightSibling = TreeNodeUtil.rightSibling(readCursor, stableGeneration, unstableGeneration);
+        long rightSibling = TreeNodeUtil.rightSibling(readCursor, stableGeneration, unstableGeneration)
+                .pointer();
         int rightKeyCount = 0;
         int prevRightKeyCount = 1;
         boolean monitorRight = TreeNodeUtil.isNode(rightSibling);
@@ -2165,14 +2229,14 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
         }
     }
 
-    private static void checkpoint() {
+    private void checkpoint() {
         stableGeneration = unstableGeneration;
         unstableGeneration++;
     }
 
     private void newRootFromSplit(StructurePropagation<KEY> split) throws IOException {
         assertTrue(split.hasRightKeyInsert);
-        long rootId = id.acquireNewId(stableGeneration, unstableGeneration, CursorCreator.bind(cursor));
+        long rootId = id.acquireNewId(stableGeneration, CursorCreator.bind(cursor), NULL_CONTEXT);
         cursor.next(rootId);
         internal.initialize(cursor, DATA_LAYER_FLAG, stableGeneration, unstableGeneration);
         internal.setChildAt(cursor, split.midChild, 0, stableGeneration, unstableGeneration);
@@ -2196,12 +2260,7 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
     }
 
     private void insert(long key, long value) throws IOException {
-        insert(key, value, cursor);
-    }
-
-    private void insert(long key, long value, PageCursor cursor) throws IOException {
         treeLogic.insert(
-                cursor,
                 structurePropagation,
                 key(key),
                 value(value),
@@ -2215,7 +2274,6 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
 
     private void remove(long key) throws IOException {
         treeLogic.remove(
-                cursor,
                 structurePropagation,
                 key(key),
                 new ValueHolder<>(layout.newValue()),
@@ -2237,10 +2295,11 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
 
     private SeekCursor<KEY, VALUE> seekCursorOnLevel(int level, long fromInclusive, long toExclusive)
             throws IOException {
-        return new SeekCursor<>(cursor, layout, leaf, internal, generationSupplier, exceptionDecorator, NULL_CONTEXT)
+        return new SeekCursor<>(
+                        cursor, layout, leaf, internal, generationSupplier, EMPTY_EXCEPTION_DECORATOR, NULL_CONTEXT)
                 .initialize(
                         rootInitializer(unstableGeneration),
-                        failingRootCatchup,
+                        FAILING_ROOT_CATCHUP,
                         key(fromInclusive),
                         key(toExclusive),
                         random.nextInt(1, DEFAULT_MAX_READ_AHEAD),
@@ -2261,7 +2320,7 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
             long fromInclusive, long toExclusive, PageCursor pageCursor, long stableGeneration, long unstableGeneration)
             throws IOException {
         return seekCursor(
-                fromInclusive, toExclusive, pageCursor, stableGeneration, unstableGeneration, failingRootCatchup);
+                fromInclusive, toExclusive, pageCursor, stableGeneration, unstableGeneration, FAILING_ROOT_CATCHUP);
     }
 
     private SeekCursor<KEY, VALUE> seekCursor(
@@ -2275,7 +2334,7 @@ abstract class SeekCursorTestBase<KEY, VALUE> {
         LongSupplier generationSupplier =
                 firstCustomThenCurrentGenerationSupplier(stableGeneration, unstableGeneration);
         return new SeekCursor<>(
-                        pageCursor, layout, leaf, internal, generationSupplier, exceptionDecorator, NULL_CONTEXT)
+                        pageCursor, layout, leaf, internal, generationSupplier, EMPTY_EXCEPTION_DECORATOR, NULL_CONTEXT)
                 .initialize(
                         rootInitializer(unstableGeneration),
                         rootCatchup,

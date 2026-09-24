@@ -25,6 +25,8 @@ import org.neo4j.cypher.internal.runtime.spec.Edition
 import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 
+object SelectOrSemiApplyTestBase
+
 abstract class SelectOrSemiApplyTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
@@ -538,6 +540,37 @@ abstract class SelectOrSemiApplyTestBase[CONTEXT <: RuntimeContext](
     // then
     val runtimeResult = execute(logicalQuery, runtime)
     runtimeResult should beColumns("prop").withRows((0 until 20).map(Array[Any](_)))
+  }
+
+  test("should not drop rows when predicate is mixed and RHS has multi-row scan with sort") {
+    // Regression test for RUN-997: pipelined runtime drops the last FALSE-predicate row when
+    // selectOrSemiApply has a mixed predicate and the RHS contains a pipeline-breaking sort
+    // above a multi-row scan. The sort causes the RHS to accumulate rows per argument before
+    // outputting, and the last argument's result is lost.
+    givenGraph {
+      lollipopGraph()
+    }
+
+    // given - 6 input rows with mixed predicate results
+    val inputRows = (0 until 6).map { i =>
+      Array[Any](i.toLong)
+    }
+
+    // predicate "x < 2" is TRUE for x=0,1 and FALSE for x=2,3,4,5
+    // For FALSE rows, the RHS (sort + allNodeScan) produces rows -> semi-apply should pass them
+    // For TRUE rows, the predicate passes directly
+    // All 6 rows should appear in the result
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("x")
+      .selectOrSemiApply("x < 2")
+      .|.sort("a ASC")
+      .|.allNodeScan("a", "x")
+      .input(variables = Seq("x"))
+      .build()
+
+    // then - all rows should be output
+    val runtimeResult = execute(logicalQuery, runtime, inputValues(inputRows: _*))
+    runtimeResult should beColumns("x").withRows(inputRows)
   }
 
   test("limit after selectOrSemiApply on the RHS of apply") {
@@ -1115,7 +1148,7 @@ trait OrderedSelectOrSemiApplyTestBase[CONTEXT <: RuntimeContext] {
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("x")
-      .apply
+      .apply()
       .|.distinct("x AS x")
       .|.union()
       .|.|.selectOrSemiApply("x = 8 AND j = 1").withLeveragedOrder()

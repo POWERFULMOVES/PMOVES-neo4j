@@ -20,8 +20,8 @@
 package org.neo4j.internal.schema;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.neo4j.internal.schema.constraints.ConstraintDescriptorFactory.existsForLabel;
 import static org.neo4j.internal.schema.constraints.ConstraintDescriptorFactory.nodeKeyForLabel;
 import static org.neo4j.internal.schema.constraints.ConstraintDescriptorFactory.nodeLabelExistenceForLabel;
@@ -48,9 +48,8 @@ class ConstraintDescriptorTest extends SchemaRuleTestBase {
         assertThat(constraint.getId()).isEqualTo(RULE_ID);
         assertThat(constraint.schema()).isEqualTo(descriptor.schema());
         assertThat(constraint).isEqualTo(descriptor);
-        assertThrows(
-                IllegalStateException.class,
-                () -> constraint.asIndexBackedConstraint().ownedIndexId());
+        assertThatExceptionOfType(IllegalStateException.class)
+                .isThrownBy(() -> constraint.asIndexBackedConstraint().ownedIndexId());
     }
 
     @Test
@@ -74,9 +73,8 @@ class ConstraintDescriptorTest extends SchemaRuleTestBase {
         assertThat(constraint.getId()).isEqualTo(RULE_ID);
         assertThat(constraint.schema()).isEqualTo(descriptor.schema());
         assertThat(constraint).isEqualTo(descriptor);
-        assertThrows(
-                IllegalStateException.class,
-                () -> constraint.asIndexBackedConstraint().ownedIndexId());
+        assertThatExceptionOfType(IllegalStateException.class)
+                .isThrownBy(() -> constraint.asIndexBackedConstraint().ownedIndexId());
     }
 
     @Test
@@ -100,9 +98,8 @@ class ConstraintDescriptorTest extends SchemaRuleTestBase {
         assertThat(constraint.getId()).isEqualTo(RULE_ID);
         assertThat(constraint.schema()).isEqualTo(descriptor.schema());
         assertThat(constraint).isEqualTo(descriptor);
-        assertThrows(
-                IllegalStateException.class,
-                () -> constraint.asIndexBackedConstraint().ownedIndexId());
+        assertThatExceptionOfType(IllegalStateException.class)
+                .isThrownBy(() -> constraint.asIndexBackedConstraint().ownedIndexId());
     }
 
     @ParameterizedTest
@@ -111,15 +108,16 @@ class ConstraintDescriptorTest extends SchemaRuleTestBase {
         // GIVEN
         RelationshipEndpointLabelConstraintDescriptor descriptor =
                 relationshipEndpointLabelForRelType(REL_TYPE_ID, LABEL_ID, endpointType);
-        var constraint = descriptor.withId(RULE_ID);
-        var relationshipEndpointLabelConstraint = constraint.asRelationshipEndpointLabelConstraint();
+        RelationshipEndpointLabelConstraintDescriptor constraint = descriptor.withId(RULE_ID);
+        RelationshipEndpointLabelConstraintDescriptor relationshipEndpointLabelConstraint =
+                constraint.asRelationshipEndpointLabelConstraint();
 
         assertThat(constraint.getId()).isEqualTo(RULE_ID);
         assertThat(constraint.schema()).isEqualTo(descriptor.schema());
         assertThat(constraint).isEqualTo(descriptor);
         assertThat(relationshipEndpointLabelConstraint.endpointLabelId()).isEqualTo(LABEL_ID);
         assertThat(relationshipEndpointLabelConstraint.endpointType()).isEqualTo(endpointType);
-        assertThrows(IllegalStateException.class, constraint::asPropertyExistenceConstraint);
+        assertThatExceptionOfType(IllegalStateException.class).isThrownBy(constraint::asPropertyExistenceConstraint);
     }
 
     @Test
@@ -144,14 +142,15 @@ class ConstraintDescriptorTest extends SchemaRuleTestBase {
     void shouldCreateNodeLabelExistenceConstraint() {
         // GIVEN
         NodeLabelExistenceConstraintDescriptor descriptor = nodeLabelExistenceForLabel(LABEL_ID, 11);
-        var constraint = descriptor.withId(RULE_ID);
-        var nodeLabelExistenceConstraint = constraint.asNodeLabelExistenceConstraint();
+        NodeLabelExistenceConstraintDescriptor constraint = descriptor.withId(RULE_ID);
+        NodeLabelExistenceConstraintDescriptor nodeLabelExistenceConstraint =
+                constraint.asNodeLabelExistenceConstraint();
 
         assertThat(constraint.getId()).isEqualTo(RULE_ID);
         assertThat(constraint.schema()).isEqualTo(descriptor.schema());
         assertThat(constraint).isEqualTo(descriptor);
         assertThat(nodeLabelExistenceConstraint.requiredLabelId()).isEqualTo(11);
-        assertThrows(IllegalStateException.class, constraint::asPropertyExistenceConstraint);
+        assertThatExceptionOfType(IllegalStateException.class).isThrownBy(constraint::asPropertyExistenceConstraint);
     }
 
     @Test
@@ -204,6 +203,26 @@ class ConstraintDescriptorTest extends SchemaRuleTestBase {
                 ConstraintDescriptorFactory.existsForRelType(false, REL_TYPE_ID, PROPERTY_ID_1);
         assertThat(relationshipExistenceConstraintDescriptor.isRelationshipEndpointLabelConstraint())
                 .isFalse();
+    }
+
+    @Test
+    void sameSchemaDifferentIndexTypesShouldNotConflict() {
+        LabelSchemaDescriptor schemaDescriptor = SchemaDescriptors.forLabel(LABEL_ID, PROPERTY_ID_1);
+        UniquenessConstraintDescriptor range =
+                ConstraintDescriptorFactory.uniqueForSchema(schemaDescriptor, IndexType.RANGE);
+        UniquenessConstraintDescriptor text =
+                ConstraintDescriptorFactory.uniqueForSchema(schemaDescriptor, IndexType.TEXT);
+        assertThat(range.conflictsWith(text)).isFalse();
+    }
+
+    @Test
+    void sameSchemaSameIndexTypesShouldConflict() {
+        LabelSchemaDescriptor schemaDescriptor = SchemaDescriptors.forLabel(LABEL_ID, PROPERTY_ID_1);
+        UniquenessConstraintDescriptor range =
+                ConstraintDescriptorFactory.uniqueForSchema(schemaDescriptor, IndexType.RANGE);
+        UniquenessConstraintDescriptor range2 =
+                ConstraintDescriptorFactory.uniqueForSchema(schemaDescriptor, IndexType.RANGE);
+        assertThat(range.conflictsWith(range2)).isTrue();
     }
 
     private static void assertEqualityByDescriptor(UniquenessConstraintDescriptor descriptor) {

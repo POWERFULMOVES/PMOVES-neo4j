@@ -19,12 +19,15 @@
  */
 package org.neo4j.cypher
 
+import org.neo4j.configuration.GraphDatabaseSettings
+import org.neo4j.configuration.GraphDatabaseSettings.CypherVersion.Cypher25
 import org.neo4j.configuration.GraphDatabaseSettings.auth_enabled
+import org.neo4j.configuration.GraphDatabaseSettings.default_language
 import org.neo4j.graphdb.config.Setting
 
 class CommunityRoleAdministrationCommandAcceptanceTest extends CommunityAdministrationCommandAcceptanceTestBase {
 
-  override def databaseConfig(): Map[Setting[_], Object] =
+  override def databaseConfig(): Map[Setting[?], Object] =
     super.databaseConfig() ++ Map(auth_enabled -> java.lang.Boolean.TRUE)
 
   test("should fail on showing roles from community") {
@@ -32,6 +35,18 @@ class CommunityRoleAdministrationCommandAcceptanceTest extends CommunityAdminist
     assertFailure(
       "SHOW POPULATED ROLES WITH USERS",
       "Unsupported administration command: SHOW POPULATED ROLES WITH USERS"
+    )
+  }
+
+  test("should fail on showing roles with auth rules from community") {
+    restartWithConfig(databaseConfig() ++ Map(
+      default_language -> Cypher25
+    ))
+    selectDatabase(GraphDatabaseSettings.SYSTEM_DATABASE_NAME)
+    assertFailure("SHOW ROLES WITH AUTH RULES", "Unsupported administration command: SHOW ROLES WITH AUTH RULES")
+    assertFailure(
+      "SHOW POPULATED ROLES WITH AUTH RULES",
+      "Unsupported administration command: SHOW POPULATED ROLES WITH AUTH RULES"
     )
   }
 

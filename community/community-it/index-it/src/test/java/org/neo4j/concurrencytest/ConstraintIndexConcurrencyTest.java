@@ -110,9 +110,13 @@ class ConstraintIndexConcurrencyTest {
             long node = ktx.dataWrite().nodeCreate();
             ktx.dataWrite().nodeAddLabel(node, labelId);
 
-            var e = assertThrows(UniquePropertyValueValidationException.class, () -> ktx.dataWrite()
-                    .nodeSetProperty(node, propertyKeyId, Values.of(conflictingValue)));
-            assertEquals(ConstraintDescriptorFactory.uniqueForLabel(labelId, propertyKeyId), e.constraint());
+            UniquePropertyValueValidationException e = assertThrows(
+                    UniquePropertyValueValidationException.class,
+                    () -> ktx.dataWrite().nodeSetProperty(node, propertyKeyId, Values.of(conflictingValue)));
+            assertEquals(
+                    ConstraintDescriptorFactory.uniqueForLabel(labelId, propertyKeyId)
+                            .withName(constraintName),
+                    e.constraint());
             IndexEntryConflictException conflict =
                     Iterators.single(e.conflicts().iterator());
             assertEquals(

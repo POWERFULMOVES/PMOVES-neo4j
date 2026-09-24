@@ -19,33 +19,25 @@
  */
 package org.neo4j.cypher.internal.compiler.planner.logical.steps.index
 
-import org.neo4j.cypher.internal.compiler.planner.logical.LeafPlanRestrictions
 import org.neo4j.cypher.internal.compiler.planner.logical.LogicalPlanningContext
-import org.neo4j.cypher.internal.compiler.planner.logical.steps.RelationshipLeafPlanner.planHiddenSelectionAndRelationshipLeafPlan
-import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.RelationshipIndexLeafPlanner.RelationshipIndexMatch
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.leafplanner.RelationshipLeafPlanner.planHiddenSelectionAndRelationshipLeafPlan
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.leafplanner.index.RelationshipIndexLeafPlanner.RelationshipIndexMatch
 import org.neo4j.cypher.internal.expressions.Contains
 import org.neo4j.cypher.internal.expressions.EndsWith
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.ir.PatternRelationship
 import org.neo4j.cypher.internal.ir.QueryGraph
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
-import org.neo4j.exceptions.InternalException
 
 object RelationshipIndexStringSearchScanPlanProvider extends RelationshipIndexPlanProvider {
 
   override def createPlans(
     indexMatches: Set[RelationshipIndexMatch],
     queryGraph: QueryGraph,
-    restrictions: LeafPlanRestrictions,
     context: LogicalPlanningContext
   ): Set[LogicalPlan] = for {
     indexMatch <- indexMatches
-    // Use isAllowedByRestrictions from EntityIndexSeekPlanProvider, since we also want to plan Nested-Index-Joins
-    // with nodeIndexStringSearchScanPlans.
-    if EntityIndexSeekPlanProvider.isAllowedByRestrictions(
-      indexMatch.propertyPredicates,
-      restrictions
-    ) && indexMatch.indexDescriptor.properties.size == 1
+    if indexMatch.indexDescriptor.properties.size == 1
     plan <- doCreatePlans(indexMatch, queryGraph, context)
   } yield plan
 
@@ -62,7 +54,6 @@ object RelationshipIndexStringSearchScanPlanProvider extends RelationshipIndexPl
               (contains.rhs, ContainsSearchMode)
             case endsWith: EndsWith =>
               (endsWith.rhs, EndsWithSearchMode)
-            case x => throw new InternalException(s"Expected Contains or EndsWith but was ${x.getClass}")
           }
           val singlePredicateSet =
             indexMatch.predicateSet(Seq(indexPredicate), exactPredicatesCanGetValue = false, context, queryGraph)

@@ -21,9 +21,7 @@ package org.neo4j.cypher.internal.runtime.spec.rewriters
 
 import org.neo4j.cypher.internal.LogicalQuery
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
-import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.EffectiveCardinalities
-import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.LeveragedOrders
-import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.ProvidedOrders
+import org.neo4j.cypher.internal.physicalplanning.PhysicalPlanAttributes
 import org.neo4j.cypher.internal.runtime.spec.rewriters.TestPlanCombinationRewriter.TestPlanCombinationRewriterHint
 import org.neo4j.cypher.internal.runtime.spec.rewriters.TestPlanCombinationRewriterConfig.PlanRewriterStep
 import org.neo4j.cypher.internal.runtime.spec.rewriters.TestPlanCombinationRewriterConfig.PlanRewriterStepConfig
@@ -75,9 +73,12 @@ case object TestPlanCombinationRewriter {
 
     val planRewriterContext = PlanRewriterContext(
       config,
-      query.effectiveCardinalities,
-      query.providedOrders,
-      query.leveragedOrders,
+      PhysicalPlanAttributes(
+        query.effectiveCardinalities,
+        query.providedOrders,
+        query.leveragedOrders,
+        query.stableLeafPlans
+      ),
       parallelExecution,
       anonymousVariableNameGenerator,
       query.idGen
@@ -219,10 +220,12 @@ case class TestPlanCombinationRewriterConfig(
        |  seed = Some(${_seed}L),
        |  randomizeMiddleStepOrdering = $randomizeMiddleStepOrdering,
        |  ${if (preSteps.nonEmpty) s"preSteps = Seq(${preSteps.mkString(s"$nl    ", s"$nl    ", "")}$nl  )," else ""}
-       |  ${if (middleSteps.nonEmpty) s"middleSteps = Seq(${middleSteps.mkString(s"$nl    ", s"$nl    ", "")}$nl  ),"
-      else ""}
+       |  ${
+        if (middleSteps.nonEmpty) s"middleSteps = Seq(${middleSteps.mkString(s"$nl    ", s"$nl    ", "")}$nl  ),"
+        else ""
+      }
        |  ${if (postSteps.nonEmpty) s"postSteps = Seq(${postSteps.mkString(s"$nl    ", s"$nl    ", "")}$nl  )" else ""}
-       |  ${if (hints.nonEmpty) s"hints = Set(${hints.mkString(s"$nl    ", s"$nl    ", "")}$nl  )" else ""}
+       |  ${if (hints.nonEmpty) s"hints = ListSet(${hints.mkString(s"$nl    ", s"$nl    ", "")}$nl  )" else ""}
        |)""".stripMargin
   }
 
@@ -237,21 +240,17 @@ case class TestPlanCombinationRewriterConfig(
 
 case class PlanRewriterContext(
   config: TestPlanCombinationRewriterConfig,
-  effectiveCardinalities: EffectiveCardinalities,
-  providedOrders: ProvidedOrders,
-  leveragedOrders: LeveragedOrders,
+  attributes: PhysicalPlanAttributes,
   parallelExecution: Boolean,
   anonymousVariableNameGenerator: AnonymousVariableNameGenerator,
   idGen: IdGen
 ) {
 
   def copyAttributes(source: LogicalPlan, target: LogicalPlan): Unit = {
-    effectiveCardinalities.copy(source.id, target.id)
-    providedOrders.copy(source.id, target.id)
-    leveragedOrders.copy(source.id, target.id)
+    attributes.copyAll(source.id, target.id)
   }
 }
 
 object PlanRewriterContext {
-  val pos: InputPosition = InputPosition.NONE
+  val pos: InputPosition.Range = InputPosition.NONE
 }

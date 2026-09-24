@@ -28,7 +28,6 @@ import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.CursorContextFactory.NULL_CONTEXT_FACTORY;
 import static org.neo4j.io.pagecache.tracing.PageCacheTracer.NULL;
 import static org.neo4j.logging.LogAssertions.assertThat;
-import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -51,11 +50,9 @@ import org.neo4j.io.fs.EphemeralFileSystemAbstraction;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.layout.Neo4jLayout;
-import org.neo4j.io.pagecache.impl.SingleFilePageSwapperFactory;
 import org.neo4j.io.pagecache.impl.muninn.MuninnPageCache;
 import org.neo4j.kernel.impl.factory.DbmsInfo;
 import org.neo4j.kernel.impl.scheduler.JobSchedulerFactory;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.logging.AssertableLogProvider;
 import org.neo4j.storageengine.api.MetadataProvider;
@@ -64,6 +61,7 @@ import org.neo4j.storageengine.api.StoreId;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.Neo4jLayoutExtension;
+import org.neo4j.test.extension.SkipOnSpd;
 
 @Neo4jLayoutExtension
 class DatabaseStartupTest {
@@ -74,6 +72,7 @@ class DatabaseStartupTest {
     private Neo4jLayout neoLayout;
 
     @Test
+    @SkipOnSpd
     void startDatabaseWithWrongVersionShouldFail() throws Throwable {
         // given
         // create a store
@@ -102,7 +101,7 @@ class DatabaseStartupTest {
         try {
 
             assertThrows(DatabaseShutdownException.class, databaseService::beginTx);
-            DatabaseStateService dbStateService =
+            DatabaseStateService<?> dbStateService =
                     databaseService.getDependencyResolver().resolveDependency(DatabaseStateService.class);
             assertTrue(
                     dbStateService.causeOfFailure(databaseService.databaseId()).isPresent());
@@ -117,6 +116,7 @@ class DatabaseStartupTest {
     }
 
     @Test
+    @SkipOnSpd
     void startDatabaseWithWrongTransactionFilesShouldFail() throws Exception {
         // Create a store
         DatabaseManagementService managementService = new TestDatabaseManagementServiceBuilder(neoLayout).build();
@@ -134,7 +134,8 @@ class DatabaseStartupTest {
             var originalId = metadataProvider.getStoreId();
             var newStoreId = new StoreId(
                     System.currentTimeMillis() + 1,
-                    originalId.getRandom(),
+                    // Make sure to change the random - from logformat V11 only the random value connects logs and store
+                    originalId.getRandom() + 1,
                     originalId.getStorageEngineName(),
                     originalId.getFormatName(),
                     originalId.getMajorVersion(),
@@ -148,7 +149,7 @@ class DatabaseStartupTest {
             db = (GraphDatabaseAPI) managementService.database(DEFAULT_DATABASE_NAME);
             assertFalse(db.isAvailable(10));
 
-            DatabaseStateService dbStateService =
+            DatabaseStateService<?> dbStateService =
                     db.getDependencyResolver().resolveDependency(DatabaseStateService.class);
             Optional<Throwable> cause = dbStateService.causeOfFailure(db.databaseId());
             assertTrue(cause.isPresent());
@@ -159,6 +160,7 @@ class DatabaseStartupTest {
     }
 
     @Test
+    @SkipOnSpd
     void startDatabaseWithoutStoreFilesAndWithTransactionLogFilesFailure() throws IOException {
         // Create a store
         DatabaseManagementService managementService = new TestDatabaseManagementServiceBuilder(neoLayout).build();
@@ -178,7 +180,7 @@ class DatabaseStartupTest {
             db = (GraphDatabaseAPI) managementService.database(DEFAULT_DATABASE_NAME);
             assertFalse(db.isAvailable(10));
 
-            DatabaseStateService dbStateService =
+            DatabaseStateService<?> dbStateService =
                     db.getDependencyResolver().resolveDependency(DatabaseStateService.class);
             Optional<Throwable> cause = dbStateService.causeOfFailure(db.databaseId());
             assertTrue(cause.isPresent());
@@ -241,19 +243,9 @@ class DatabaseStartupTest {
             StorageEngineFactory storageEngineFactory, DatabaseLayout databaseLayout, Consumer<MetadataProvider> tamper)
             throws Exception {
         try (var scheduler = JobSchedulerFactory.createInitialisedScheduler();
-                var pageCache = new MuninnPageCache(
-                        new SingleFilePageSwapperFactory(fs, NULL, INSTANCE),
-                        scheduler,
-                        MuninnPageCache.config(1_000));
+                var pageCache = new MuninnPageCache(fs, scheduler, MuninnPageCache.forPages(1_000));
                 var metadataProvider = storageEngineFactory.transactionMetaDataStore(
-                        fs,
-                        databaseLayout,
-                        Config.defaults(),
-                        pageCache,
-                        writable(),
-                        NULL_CONTEXT_FACTORY,
-                        LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
-                        NULL)) {
+                        fs, databaseLayout, Config.defaults(), pageCache, writable(), NULL_CONTEXT_FACTORY, NULL)) {
             tamper.accept(metadataProvider);
         }
     }

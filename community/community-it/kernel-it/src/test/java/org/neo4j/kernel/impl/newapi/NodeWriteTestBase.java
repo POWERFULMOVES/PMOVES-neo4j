@@ -27,7 +27,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 import static org.neo4j.graphdb.Label.label;
 import static org.neo4j.internal.helpers.collection.MapUtil.map;
 import static org.neo4j.test.Race.throwing;
@@ -45,15 +44,14 @@ import org.eclipse.collections.api.set.primitive.IntSet;
 import org.eclipse.collections.api.set.primitive.MutableIntSet;
 import org.eclipse.collections.impl.factory.primitive.IntObjectMaps;
 import org.eclipse.collections.impl.factory.primitive.IntSets;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.graphdb.Label;
 import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.NotFoundException;
 import org.neo4j.graphdb.ResourceIterator;
 import org.neo4j.graphdb.Transaction;
-import org.neo4j.internal.helpers.collection.Iterables;
 import org.neo4j.internal.kernel.api.CursorFactory;
 import org.neo4j.internal.kernel.api.NodeCursor;
 import org.neo4j.internal.kernel.api.PropertyCursor;
@@ -66,19 +64,27 @@ import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.test.Race;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.values.storable.RandomValuesUtils;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.ValueTuple;
 import org.neo4j.values.storable.Values;
 
 @SuppressWarnings("Duplicates")
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 public abstract class NodeWriteTestBase<G extends KernelAPIWriteTestSupport> extends KernelAPIWriteTestBase<G> {
-    private static final String propertyKey = "prop";
+    protected static final String propertyKey = "prop";
     private static final String labelName = "Town";
 
     @Inject
     private RandomSupport random;
+
+    @BeforeEach
+    void setup() {
+        /* Not all storage engines support vectors. */
+        random.withConfiguration(RandomValuesUtils.selectStorageEngineDependentConfiguration(graphDb))
+                .reset();
+    }
 
     @Test
     void shouldCreateNode() throws Exception {
@@ -88,7 +94,7 @@ public abstract class NodeWriteTestBase<G extends KernelAPIWriteTestSupport> ext
             tx.commit();
         }
 
-        try (org.neo4j.graphdb.Transaction tx = graphDb.beginTx()) {
+        try (Transaction tx = graphDb.beginTx()) {
             assertEquals(node, tx.getNodeById(node).getId());
         }
     }
@@ -101,12 +107,12 @@ public abstract class NodeWriteTestBase<G extends KernelAPIWriteTestSupport> ext
             tx.rollback();
         }
 
-        try (org.neo4j.graphdb.Transaction tx = graphDb.beginTx()) {
-            tx.getNodeById(node);
-            fail("There should be no node");
-        } catch (NotFoundException e) {
-            // expected
-        }
+        assertThatThrownBy(() -> {
+                    try (Transaction tx = graphDb.beginTx()) {
+                        tx.getNodeById(node);
+                    }
+                })
+                .isInstanceOf(NotFoundException.class);
     }
 
     @Test
@@ -117,13 +123,8 @@ public abstract class NodeWriteTestBase<G extends KernelAPIWriteTestSupport> ext
             tx.dataWrite().nodeDelete(node);
             tx.commit();
         }
-        try (org.neo4j.graphdb.Transaction tx = graphDb.beginTx()) {
-            try {
-                tx.getNodeById(node);
-                fail("Did not remove node");
-            } catch (NotFoundException e) {
-                // expected
-            }
+        try (Transaction tx = graphDb.beginTx()) {
+            assertThatThrownBy(() -> tx.getNodeById(node)).isInstanceOf(NotFoundException.class);
         }
     }
 
@@ -277,6 +278,21 @@ public abstract class NodeWriteTestBase<G extends KernelAPIWriteTestSupport> ext
     }
 
     @Test
+    void shouldWriteWhenSettingPropertyToSameValue() throws Exception {
+        // Given
+        Value theValue = stringValue("The Value");
+        long nodeId = createNodeWithProperty(propertyKey, theValue.asObject());
+
+        // When
+        try (KernelTransaction tx = beginTransaction()) {
+            int property = tx.token().propertyKeyGetOrCreateForName(propertyKey);
+            tx.dataWrite().nodeSetProperty(nodeId, property, theValue);
+            // Then
+            assertThat(tx.commit()).isNotEqualTo(KernelTransaction.READ_ONLY_ID);
+        }
+    }
+
+    @Test
     void shouldRemovePropertyFromNode() throws Exception {
         // Given
         long node = createNodeWithProperty(propertyKey, 42);
@@ -285,6 +301,40 @@ public abstract class NodeWriteTestBase<G extends KernelAPIWriteTestSupport> ext
         try (KernelTransaction tx = beginTransaction()) {
             int token = tx.token().propertyKeyGetOrCreateForName(propertyKey);
             assertThat(tx.dataWrite().nodeRemoveProperty(node, token)).isEqualTo(intValue(42));
+            tx.commit();
+        }
+
+        // Then
+        assertNoProperty(node, propertyKey);
+    }
+
+    @Test
+    void shouldRemoveAddedPropertyFromNode() throws Exception {
+        // Given
+        long node = createNode();
+
+        // When
+        try (KernelTransaction tx = beginTransaction()) {
+            int token = tx.token().propertyKeyGetOrCreateForName(propertyKey);
+            tx.dataWrite().nodeSetProperty(node, token, Values.intValue(42));
+            assertThat(tx.dataWrite().nodeRemoveProperty(node, token)).isEqualTo(Values.intValue(42));
+            tx.commit();
+        }
+
+        // Then
+        assertNoProperty(node, propertyKey);
+    }
+
+    @Test
+    void shouldRemoveChangedPropertyFromNode() throws Exception {
+        // Given
+        long node = createNodeWithProperty(propertyKey, 42);
+
+        // When
+        try (KernelTransaction tx = beginTransaction()) {
+            int token = tx.token().propertyKeyGetOrCreateForName(propertyKey);
+            tx.dataWrite().nodeSetProperty(node, token, Values.intValue(24));
+            assertThat(tx.dataWrite().nodeRemoveProperty(node, token)).isEqualTo(Values.intValue(24));
             tx.commit();
         }
 
@@ -361,20 +411,6 @@ public abstract class NodeWriteTestBase<G extends KernelAPIWriteTestSupport> ext
 
         // then
         assertNoProperty(node, propertyKey);
-    }
-
-    @Test
-    void shouldNotWriteWhenSettingPropertyToSameValue() throws Exception {
-        // Given
-        Value theValue = stringValue("The Value");
-        long nodeId = createNodeWithProperty(propertyKey, theValue.asObject());
-
-        // When
-        KernelTransaction tx = beginTransaction();
-        int property = tx.token().propertyKeyGetOrCreateForName(propertyKey);
-        tx.dataWrite().nodeSetProperty(nodeId, property, theValue);
-
-        assertThat(tx.commit()).isEqualTo(KernelTransaction.READ_ONLY_ID);
     }
 
     @Test
@@ -696,6 +732,26 @@ public abstract class NodeWriteTestBase<G extends KernelAPIWriteTestSupport> ext
     }
 
     @Test
+    void nodeApplyChangesShouldWriteIfPropertyIsSameValue() throws Exception {
+        // Given
+        Value theValue = stringValue("The Value");
+        long nodeId = createNodeWithProperty(propertyKey, theValue.asObject());
+
+        // When
+        try (KernelTransaction tx = beginTransaction()) {
+            int key = tx.token().propertyKeyGetOrCreateForName(propertyKey);
+            tx.dataWrite()
+                    .nodeApplyChanges(
+                            nodeId,
+                            IntSets.immutable.empty(),
+                            IntSets.immutable.empty(),
+                            IntObjectMaps.immutable.of(key, theValue));
+            // Then
+            assertThat(tx.commit()).isNotEqualTo(KernelTransaction.READ_ONLY_ID);
+        }
+    }
+
+    @Test
     void nodeApplyChangesShouldRemoveProperty() throws Exception {
         // Given
         String keyName = "key";
@@ -898,9 +954,9 @@ public abstract class NodeWriteTestBase<G extends KernelAPIWriteTestSupport> ext
         // Then
         try (Transaction tx = graphDb.beginTx()) {
             try (ResourceIterator<Node> nodes = tx.findNodes(label, map(key1Name, "D", key2Name, "C"))) {
-                assertThat(nodes.hasNext()).isTrue();
+                assertThat(nodes).hasNext();
                 assertThat(nodes.next().getId()).isEqualTo(node);
-                assertThat(nodes.hasNext()).isFalse();
+                assertThat(nodes).isExhausted();
             }
         }
     }
@@ -1024,7 +1080,7 @@ public abstract class NodeWriteTestBase<G extends KernelAPIWriteTestSupport> ext
 
     private long createNode() {
         long node;
-        try (org.neo4j.graphdb.Transaction ctx = graphDb.beginTx()) {
+        try (Transaction ctx = graphDb.beginTx()) {
             node = ctx.createNode().getId();
             ctx.commit();
         }
@@ -1032,7 +1088,7 @@ public abstract class NodeWriteTestBase<G extends KernelAPIWriteTestSupport> ext
     }
 
     private void deleteNode(long node) {
-        try (org.neo4j.graphdb.Transaction tx = graphDb.beginTx()) {
+        try (Transaction tx = graphDb.beginTx()) {
             tx.getNodeById(node).delete();
             tx.commit();
         }
@@ -1040,7 +1096,7 @@ public abstract class NodeWriteTestBase<G extends KernelAPIWriteTestSupport> ext
 
     private long createNodeWithLabels(String... labelNames) {
         long node;
-        try (org.neo4j.graphdb.Transaction ctx = graphDb.beginTx()) {
+        try (Transaction ctx = graphDb.beginTx()) {
             node = ctx.createNode(stream(labelNames).map(Label::label).toArray(Label[]::new))
                     .getId();
             ctx.commit();
@@ -1048,9 +1104,9 @@ public abstract class NodeWriteTestBase<G extends KernelAPIWriteTestSupport> ext
         return node;
     }
 
-    private long createNodeWithProperty(String propertyKey, Object value) {
+    protected long createNodeWithProperty(String propertyKey, Object value) {
         Node node;
-        try (org.neo4j.graphdb.Transaction ctx = graphDb.beginTx()) {
+        try (Transaction ctx = graphDb.beginTx()) {
             node = ctx.createNode();
             node.setProperty(propertyKey, value);
             ctx.commit();
@@ -1059,25 +1115,25 @@ public abstract class NodeWriteTestBase<G extends KernelAPIWriteTestSupport> ext
     }
 
     private void assertNoLabels(long nodeId) {
-        try (org.neo4j.graphdb.Transaction tx = graphDb.beginTx()) {
-            assertThat(tx.getNodeById(nodeId).getLabels()).isEqualTo(Iterables.empty());
+        try (Transaction tx = graphDb.beginTx()) {
+            assertThat(tx.getNodeById(nodeId).getLabels()).isEmpty();
         }
     }
 
     private void assertLabels(long nodeId, String label) {
-        try (org.neo4j.graphdb.Transaction tx = graphDb.beginTx()) {
+        try (Transaction tx = graphDb.beginTx()) {
             assertThat(tx.getNodeById(nodeId).getLabels()).contains(label(label));
         }
     }
 
     private void assertNoProperty(long node, String propertyKey) {
-        try (org.neo4j.graphdb.Transaction tx = graphDb.beginTx()) {
+        try (Transaction tx = graphDb.beginTx()) {
             assertFalse(tx.getNodeById(node).hasProperty(propertyKey));
         }
     }
 
     private void assertProperty(long node, String propertyKey, Object value) {
-        try (org.neo4j.graphdb.Transaction tx = graphDb.beginTx()) {
+        try (Transaction tx = graphDb.beginTx()) {
             assertThat(tx.getNodeById(node).getProperty(propertyKey)).isEqualTo(value);
         }
     }

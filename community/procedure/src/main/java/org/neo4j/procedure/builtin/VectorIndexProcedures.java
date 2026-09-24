@@ -19,6 +19,8 @@
  */
 package org.neo4j.procedure.builtin;
 
+import static java.lang.Math.clamp;
+import static org.neo4j.kernel.api.impl.schema.vector.Neo4jVectorSimilarityFunction.EUCLIDEAN;
 import static org.neo4j.procedure.Mode.READ;
 import static org.neo4j.procedure.Mode.SCHEMA;
 import static org.neo4j.procedure.Mode.WRITE;
@@ -32,6 +34,7 @@ import java.util.function.Consumer;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 import org.neo4j.common.EntityType;
+import org.neo4j.cypher.operations.CypherCoercions;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.graphdb.Entity;
 import org.neo4j.graphdb.Label;
@@ -40,7 +43,6 @@ import org.neo4j.graphdb.NotFoundException;
 import org.neo4j.graphdb.Relationship;
 import org.neo4j.graphdb.Transaction;
 import org.neo4j.graphdb.schema.IndexSetting;
-import org.neo4j.internal.helpers.MathUtil;
 import org.neo4j.internal.kernel.api.Cursor;
 import org.neo4j.internal.kernel.api.CursorFactory;
 import org.neo4j.internal.kernel.api.IndexQueryConstraints;
@@ -55,16 +57,13 @@ import org.neo4j.internal.kernel.api.ValueIndexCursor;
 import org.neo4j.internal.kernel.api.procs.ProcedureCallContext;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexType;
-import org.neo4j.internal.schema.SettingsAccessor.IndexConfigAccessor;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.api.QueryLanguage;
 import org.neo4j.kernel.api.impl.schema.vector.VectorIndexVersion;
-import org.neo4j.kernel.api.impl.schema.vector.VectorSimilarityFunctions;
 import org.neo4j.kernel.api.procedure.QueryLanguageScope;
 import org.neo4j.kernel.api.txstate.TxStateHolder;
-import org.neo4j.kernel.api.vector.VectorCandidate;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.procedure.Context;
@@ -74,6 +73,7 @@ import org.neo4j.procedure.Procedure;
 import org.neo4j.util.FeatureToggles;
 import org.neo4j.util.Preconditions;
 import org.neo4j.values.AnyValue;
+import org.neo4j.values.VectorCandidate;
 import org.neo4j.values.storable.Values;
 
 @SuppressWarnings("unused")
@@ -97,9 +97,11 @@ public class VectorIndexProcedures {
     @Context
     public ProcedureCallContext callContext;
 
+    @Context
+    public SpdBuiltInProcedures spdBuiltInProcedures;
+
     @Deprecated(since = "5.26.0", forRemoval = true)
-    @Description(
-            """
+    @Description("""
             Create a named node vector index for the specified label and property with the given vector dimensionality using either the EUCLIDEAN or COSINE similarity function.
             Both similarity functions are case-insensitive.
             Use the `db.index.vector.queryNodes` procedure to query the named index.
@@ -117,7 +119,7 @@ public class VectorIndexProcedures {
         Objects.requireNonNull(propertyKey, "'propertyKey' must not be null");
         Objects.requireNonNull(vectorDimension, "'vectorDimension' must not be null");
 
-        final var version = VectorIndexVersion.latestSupportedVersion(kernelVersion);
+        VectorIndexVersion version = VectorIndexVersion.latestSupportedVersion(kernelVersion);
         Preconditions.checkState(
                 version != VectorIndexVersion.UNKNOWN, "Vector index version `%s` is not a valid version.");
         Preconditions.checkArgument(
@@ -137,46 +139,94 @@ public class VectorIndexProcedures {
                 .create();
     }
 
-    @Description(
-            """
+    @Description("""
             Query the given node vector index.
             Returns requested number of nearest neighbors to the provided query vector,
             and their similarity score to that query vector, based on the configured similarity function for the index.
             The similarity score is a value between [0, 1]; where 0 indicates least similar, 1 most similar.
             """)
     @Procedure(name = "db.index.vector.queryNodes", mode = READ)
+    @QueryLanguageScope(scope = {QueryLanguage.CYPHER_5})
+    public Stream<NodeNeighbor> queryNodeVectorIndexCypher5(
+            @Name(value = "indexName", description = "The name of the vector index.") String name,
+            @Name(value = "numberOfNearestNeighbours", description = "The size of the vector neighbourhood.")
+                    Long numberOfNearestNeighbours,
+            @Name(value = "query", description = "The object to find approximate matches for.") AnyValue candidateQuery)
+            throws KernelException {
+        VectorCandidate query = validateQueryArguments(name, numberOfNearestNeighbours, candidateQuery);
+        if (callContext.isSystemDatabase()) {
+            return Stream.empty();
+        }
+        return new NodeIndexQuery(tx, ktx, kernelVersion, name, !spdBuiltInProcedures.isSpd())
+                .query(Math.toIntExact(numberOfNearestNeighbours), query);
+    }
+
+    @Deprecated(since = "2026.04", forRemoval = true)
+    @Description("""
+            Query the given node vector index.
+            Returns requested number of nearest neighbors to the provided query vector,
+            and their similarity score to that query vector, based on the configured similarity function for the index.
+            The similarity score is a value between [0, 1]; where 0 indicates least similar, 1 most similar.
+            """)
+    @Procedure(name = "db.index.vector.queryNodes", mode = READ, deprecatedBy = "SEARCH")
+    @QueryLanguageScope(scope = {QueryLanguage.CYPHER_25})
     public Stream<NodeNeighbor> queryNodeVectorIndex(
             @Name(value = "indexName", description = "The name of the vector index.") String name,
             @Name(value = "numberOfNearestNeighbours", description = "The size of the vector neighbourhood.")
                     Long numberOfNearestNeighbours,
             @Name(value = "query", description = "The object to find approximate matches for.") AnyValue candidateQuery)
             throws KernelException {
-        final var query = validateQueryArguments(name, numberOfNearestNeighbours, candidateQuery);
+        VectorCandidate query = validateQueryArguments(name, numberOfNearestNeighbours, candidateQuery);
         if (callContext.isSystemDatabase()) {
             return Stream.empty();
         }
-        return new NodeIndexQuery(tx, ktx, name).query(Math.toIntExact(numberOfNearestNeighbours), query);
+        return new NodeIndexQuery(tx, ktx, kernelVersion, name, !spdBuiltInProcedures.isSpd())
+                .query(Math.toIntExact(numberOfNearestNeighbours), query);
     }
 
-    @Description(
-            """
+    @Description("""
             Query the given relationship vector index.
             Returns requested number of nearest neighbors to the provided query vector,
             and their similarity score to that query vector, based on the configured similarity function for the index.
             The similarity score is a value between [0, 1]; where 0 indicates least similar, 1 most similar.
             """)
     @Procedure(name = "db.index.vector.queryRelationships", mode = READ)
+    @QueryLanguageScope(scope = {QueryLanguage.CYPHER_5})
+    public Stream<RelationshipNeighbor> queryRelationshipVectorIndexCypher5(
+            @Name(value = "indexName", description = "The name of the vector index.") String name,
+            @Name(value = "numberOfNearestNeighbours", description = "The size of the vector neighbourhood.")
+                    Long numberOfNearestNeighbours,
+            @Name(value = "query", description = "The object to find approximate matches for.") AnyValue candidateQuery)
+            throws KernelException {
+        VectorCandidate query = validateQueryArguments(name, numberOfNearestNeighbours, candidateQuery);
+        if (callContext.isSystemDatabase()) {
+            return Stream.empty();
+        }
+        return new RelationshipIndexQuery(tx, ktx, kernelVersion, name, !spdBuiltInProcedures.isSpd())
+                .query(Math.toIntExact(numberOfNearestNeighbours), query);
+    }
+
+    @Deprecated(since = "2026.04", forRemoval = true)
+    @Description("""
+            Query the given relationship vector index.
+            Returns requested number of nearest neighbors to the provided query vector,
+            and their similarity score to that query vector, based on the configured similarity function for the index.
+            The similarity score is a value between [0, 1]; where 0 indicates least similar, 1 most similar.
+            """)
+    @Procedure(name = "db.index.vector.queryRelationships", mode = READ, deprecatedBy = "SEARCH")
+    @QueryLanguageScope(scope = {QueryLanguage.CYPHER_25})
     public Stream<RelationshipNeighbor> queryRelationshipVectorIndex(
             @Name(value = "indexName", description = "The name of the vector index.") String name,
             @Name(value = "numberOfNearestNeighbours", description = "The size of the vector neighbourhood.")
                     Long numberOfNearestNeighbours,
             @Name(value = "query", description = "The object to find approximate matches for.") AnyValue candidateQuery)
             throws KernelException {
-        final var query = validateQueryArguments(name, numberOfNearestNeighbours, candidateQuery);
+        VectorCandidate query = validateQueryArguments(name, numberOfNearestNeighbours, candidateQuery);
         if (callContext.isSystemDatabase()) {
             return Stream.empty();
         }
-        return new RelationshipIndexQuery(tx, ktx, name).query(Math.toIntExact(numberOfNearestNeighbours), query);
+        return new RelationshipIndexQuery(tx, ktx, kernelVersion, name, !spdBuiltInProcedures.isSpd())
+                .query(Math.toIntExact(numberOfNearestNeighbours), query);
     }
 
     private static VectorCandidate validateQueryArguments(
@@ -191,7 +241,7 @@ public class VectorIndexProcedures {
                     new NullPointerException("'query' must not be null"));
         }
 
-        final var query = VectorCandidate.maybeFrom(candidateQuery);
+        VectorCandidate query = VectorCandidate.maybeFrom(candidateQuery);
         if (query == null) {
             throw new IllegalArgumentException("'query' must be a non-null numerical array");
         }
@@ -220,7 +270,9 @@ public class VectorIndexProcedures {
     }
 
     // specifically for the deprecated `db.create.setVectorProperty`
-    public record NodeRecord(@Description("The node on which the vector property was set.") Node node) {}
+    public record NodeRecord(
+            @Description("The node on which the vector property was set.")
+            Node node) {}
 
     @Description(
             "Set a vector property on a given relationship in a more space efficient representation than Cypher's SET.")
@@ -242,31 +294,16 @@ public class VectorIndexProcedures {
                     "'vector' must not be NO_VALUE, which is treated as null",
                     new NullPointerException("'vector' must not be null"));
         }
-        final var vector = VectorCandidate.maybeFrom(candidateVector);
+        VectorCandidate vector = VectorCandidate.maybeFrom(candidateVector);
         if (vector == null) {
             throw new IllegalArgumentException("'vector' must be a non-null numerical array");
         }
         // assume EUCLIDEAN as the bare minimum invariant
-        entity.setProperty(propKey, VectorSimilarityFunctions.EUCLIDEAN.toValidVector(vector));
-    }
-
-    private static float[] validateAndConvertQuery(IndexDescriptor index, VectorCandidate query) {
-        final var version = VectorIndexVersion.fromDescriptor(index.getIndexProvider());
-        final var vectorIndexConfig = version.indexSettingValidator()
-                .trustIsValidToVectorIndexConfig(new IndexConfigAccessor(index.getIndexConfig()));
-
-        final var dimensions = vectorIndexConfig.dimensions();
-        if (dimensions.isPresent() && query.dimensions() != dimensions.getAsInt()) {
-            throw new IllegalArgumentException("Index query vector has %d dimensions, but indexed vectors have %d."
-                    .formatted(query.dimensions(), dimensions.getAsInt()));
-        }
-
-        final var similarityFunction = vectorIndexConfig.similarityFunction();
-        return similarityFunction.toValidVector(query);
+        entity.setProperty(propKey, EUCLIDEAN.toValidVector(vector));
     }
 
     private IndexDescriptor getValidIndex(String name) {
-        final var index = ktx.schemaRead().indexGetForName(name);
+        IndexDescriptor index = ktx.schemaRead().indexGetForName(name);
         if (index == IndexDescriptor.NO_INDEX || index.getIndexType() != IndexType.VECTOR) {
             throw new IllegalArgumentException("There is no such vector schema index: " + name);
         }
@@ -274,8 +311,9 @@ public class VectorIndexProcedures {
     }
 
     private static class NodeIndexQuery extends IndexQuery<NodeValueIndexCursor, NodeNeighbor> {
-        private NodeIndexQuery(Transaction tx, KernelTransaction ktx, String name) {
-            super(EntityType.NODE, tx, ktx, name);
+        private NodeIndexQuery(
+                Transaction tx, KernelTransaction ktx, KernelVersion kernelVersion, String name, boolean awaitOnline) {
+            super(EntityType.NODE, tx, ktx, kernelVersion, name, awaitOnline);
         }
 
         @Override
@@ -303,8 +341,9 @@ public class VectorIndexProcedures {
     }
 
     private static class RelationshipIndexQuery extends IndexQuery<RelationshipValueIndexCursor, RelationshipNeighbor> {
-        private RelationshipIndexQuery(Transaction tx, KernelTransaction ktx, String name) {
-            super(EntityType.RELATIONSHIP, tx, ktx, name);
+        private RelationshipIndexQuery(
+                Transaction tx, KernelTransaction ktx, KernelVersion kernelVersion, String name, boolean awaitOnline) {
+            super(EntityType.RELATIONSHIP, tx, ktx, kernelVersion, name, awaitOnline);
         }
 
         @Override
@@ -334,18 +373,26 @@ public class VectorIndexProcedures {
     private abstract static class IndexQuery<CURSOR extends ValueIndexCursor, NEIGHBOR extends Neighbor<?, NEIGHBOR>> {
         protected final Transaction tx;
         private final KernelTransaction ktx;
+        private final KernelVersion kernelVersion;
         private final IndexDescriptor index;
 
-        private IndexQuery(EntityType entityType, Transaction tx, KernelTransaction ktx, String name) {
+        private IndexQuery(
+                EntityType entityType,
+                Transaction tx,
+                KernelTransaction ktx,
+                KernelVersion kernelVersion,
+                String name,
+                boolean awaitOnline) {
             this.tx = tx;
             this.ktx = ktx;
+            this.kernelVersion = kernelVersion;
 
-            final var index = ktx.schemaRead().indexGetForName(name);
+            IndexDescriptor index = ktx.schemaRead().indexGetForName(name);
             if (index == IndexDescriptor.NO_INDEX || index.getIndexType() != IndexType.VECTOR) {
                 throw new IllegalArgumentException("There is no such vector schema index: " + name);
             }
 
-            final var entityTypeFromIndex = index.schema().entityType();
+            EntityType entityTypeFromIndex = index.schema().entityType();
             if (entityTypeFromIndex != entityType) {
                 throw new IllegalArgumentException(
                         "The '%s' index (%s) is an index on %s, so it cannot be queried for nodes."
@@ -353,7 +400,12 @@ public class VectorIndexProcedures {
             }
 
             this.index = index;
-            awaitIndexOnline();
+            if (awaitOnline) {
+                // It's expensive to check if an index is online on an SPD, we will do that when we call the index on
+                // each
+                // shard instead.
+                awaitIndexOnline();
+            }
         }
 
         abstract CURSOR cursor(CursorFactory cursorFactory, CursorContext cursorContext, MemoryTracker memoryTracker);
@@ -370,8 +422,8 @@ public class VectorIndexProcedures {
         abstract Stream<NEIGHBOR> stream(CURSOR cursor, int k);
 
         Stream<NEIGHBOR> query(int k, VectorCandidate query) throws KernelException {
-            final var validatedQuery = validateAndConvertQuery(index, query);
-            final var cursor = cursor(ktx.cursors(), ktx.cursorContext(), ktx.memoryTracker());
+            float[] validatedQuery = CypherCoercions.validateAndConvertVectorIndexQuery(index, kernelVersion, query);
+            CURSOR cursor = cursor(ktx.cursors(), ktx.cursorContext(), ktx.memoryTracker());
             seek(
                     ktx.dataRead(),
                     ktx.queryContext(),
@@ -388,15 +440,12 @@ public class VectorIndexProcedures {
             // held by the index populator. Also, if the index was created in this transaction, then we will never see
             // it come online in this transaction anyway.
             // Indexes don't come online until the transaction that creates them has committed.
-            // It's expensive to check if an index is online on an SPD, we will do that when we call the index on each
-            // shard instead.
-            final var txStateHolder = (TxStateHolder) ktx;
+            TxStateHolder txStateHolder = (TxStateHolder) ktx;
             if ((!txStateHolder.hasTxStateWithChanges()
-                            || !txStateHolder
-                                    .txState()
-                                    .indexDiffSetsBySchema(index.schema())
-                                    .isAdded(index))
-                    && !ktx.isSPDTransaction()) {
+                    || !txStateHolder
+                            .txState()
+                            .indexDiffSetsBySchema(index.schema())
+                            .isAdded(index))) {
                 // If the index was not created in this transaction, then wait for it to come online before querying.
                 tx.schema().awaitIndexOnline(index.getName(), INDEX_ONLINE_QUERY_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             }
@@ -410,8 +459,11 @@ public class VectorIndexProcedures {
      * @param score similarity in [0, 1]; 0 indicates furthest, 1 closest.
      */
     public record NodeNeighbor(
-            @Description("A node which contains a vector property similar to the query object.") Node node,
-            @Description("The score measuring how similar the node property is to the query object.") double score)
+            @Description("A node which contains a vector property similar to the query object.")
+            Node node,
+
+            @Description("The score measuring how similar the node property is to the query object.")
+            double score)
             implements Neighbor<Node, NodeNeighbor> {
         @Override
         public Node entity() {
@@ -434,9 +486,10 @@ public class VectorIndexProcedures {
      */
     public record RelationshipNeighbor(
             @Description("A relationship which contains a vector property similar to the query object.")
-                    Relationship relationship,
+            Relationship relationship,
+
             @Description("The score measuring how similar the relationship property is to the query object.")
-                    double score)
+            double score)
             implements Neighbor<Relationship, RelationshipNeighbor> {
         @Override
         public Relationship entity() {
@@ -472,8 +525,7 @@ public class VectorIndexProcedures {
             implements NeighborSpliterator<NodeNeighbor> {
         @Override
         public NodeNeighbor neighbor() {
-            return NodeNeighbor.forExistingEntityOrNull(
-                    tx, cursor.nodeReference(), MathUtil.clamp(cursor.score(), 0.0, 1.0));
+            return NodeNeighbor.forExistingEntityOrNull(tx, cursor.nodeReference(), clamp(cursor.score(), 0.0, 1.0));
         }
     }
 
@@ -482,7 +534,7 @@ public class VectorIndexProcedures {
         @Override
         public RelationshipNeighbor neighbor() {
             return RelationshipNeighbor.forExistingEntityOrNull(
-                    tx, cursor.relationshipReference(), MathUtil.clamp(cursor.score(), 0.0, 1.0));
+                    tx, cursor.relationshipReference(), clamp(cursor.score(), 0.0, 1.0));
         }
     }
 
@@ -495,9 +547,9 @@ public class VectorIndexProcedures {
 
         @Override
         default boolean tryAdvance(Consumer<? super NEIGHBOR> action) {
-            final var cursor = cursor();
+            Cursor cursor = cursor();
             while (cursor.next()) {
-                final var neighbor = neighbor();
+                NEIGHBOR neighbor = neighbor();
                 if (neighbor != null) {
                     action.accept(neighbor);
                     return true;
@@ -532,7 +584,7 @@ public class VectorIndexProcedures {
         }
 
         default Stream<NEIGHBOR> stream() {
-            final var stream = StreamSupport.stream(this, false);
+            Stream<NEIGHBOR> stream = StreamSupport.stream(this, false);
             return stream.onClose(cursor()::close);
         }
     }

@@ -45,6 +45,7 @@ import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.KernelVersionProvider;
 import org.neo4j.kernel.impl.store.DynamicAllocatorProvider;
 import org.neo4j.kernel.impl.store.DynamicAllocatorProviders;
@@ -59,7 +60,6 @@ import org.neo4j.kernel.impl.store.record.PrimitiveRecord;
 import org.neo4j.kernel.impl.store.record.PropertyBlock;
 import org.neo4j.kernel.impl.store.record.PropertyRecord;
 import org.neo4j.kernel.impl.store.record.Record;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.lock.LockTracer;
 import org.neo4j.lock.ResourceLocker;
 import org.neo4j.logging.NullLogProvider;
@@ -106,7 +106,7 @@ class PropertyCreatorTest {
                         logProvider,
                         new CursorContextFactory(pageCacheTracer, EMPTY_CONTEXT_SUPPLIER),
                         false,
-                        LogTailLogVersionsMetadata.EMPTY_LOG_TAIL)
+                        DatabaseCreationOptions.EMPTY_CREATION_OPTIONS)
                 .openAllNeoStores();
         allocatorProvider = DynamicAllocatorProviders.nonTransactionalAllocator(neoStores);
 
@@ -127,7 +127,7 @@ class PropertyCreatorTest {
                 logProvider,
                 dense_node_threshold.defaultValue(),
                 Config.defaults(),
-                false);
+                "db-format-2000");
         context.initialize(
                 KernelVersionProvider.THROWING_PROVIDER,
                 cursorContext,
@@ -141,7 +141,8 @@ class PropertyCreatorTest {
                 allocatorProvider.allocator(StoreType.PROPERTY_ARRAY),
                 new PropertyTraverser(),
                 new TransactionIdSequenceProvider(neoStores),
-                cursorContext);
+                cursorContext,
+                "db-format-2000");
     }
 
     @AfterEach
@@ -151,7 +152,7 @@ class PropertyCreatorTest {
 
     @Test
     void noPageCacheAccessOnCleanIdGenerator() {
-        assertZeroCursor();
+        assertCursorTracing(0);
 
         existingChain(
                 record(property(0, 0), property(1, 1), property(2, 2), property(3, 3)),
@@ -159,16 +160,16 @@ class PropertyCreatorTest {
 
         setProperty(10, 10);
 
-        assertZeroCursor();
+        assertCursorTracing(0);
     }
 
     @Test
     void pageCacheAccessOnPropertyCreation() {
-        assertZeroCursor();
+        assertCursorTracing(0);
         prepareDirtyGenerator(propertyStore);
 
         setProperty(10, 10);
-        assertOneCursor();
+        assertCursorTracing(2);
     }
 
     @Test
@@ -385,16 +386,10 @@ class PropertyCreatorTest {
         idGenerator.clearCache(true, NULL_CONTEXT);
     }
 
-    private void assertZeroCursor() {
-        assertThat(cursorContext.getCursorTracer().hits()).isZero();
-        assertThat(cursorContext.getCursorTracer().pins()).isZero();
-        assertThat(cursorContext.getCursorTracer().unpins()).isZero();
-    }
-
-    private void assertOneCursor() {
-        assertThat(cursorContext.getCursorTracer().hits()).isOne();
-        assertThat(cursorContext.getCursorTracer().pins()).isOne();
-        assertThat(cursorContext.getCursorTracer().unpins()).isOne();
+    private void assertCursorTracing(int count) {
+        assertThat(cursorContext.getCursorTracer().hits()).isEqualTo(count);
+        assertThat(cursorContext.getCursorTracer().pins()).isEqualTo(count);
+        assertThat(cursorContext.getCursorTracer().unpins()).isEqualTo(count);
     }
 
     private void existingChain(ExpectedRecord... initialRecords) {
@@ -431,7 +426,8 @@ class PropertyCreatorTest {
                     allocatorProvider.allocator(StoreType.PROPERTY_STRING),
                     allocatorProvider.allocator(StoreType.PROPERTY_ARRAY),
                     cursorContext,
-                    INSTANCE);
+                    INSTANCE,
+                    "db-format-2000");
             record.addPropertyBlock(block);
         }
         assertTrue(record.size() <= PropertyType.getPayloadSize());

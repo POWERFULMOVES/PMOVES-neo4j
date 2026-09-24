@@ -19,18 +19,13 @@
  */
 package org.neo4j.cypher.internal.compiler.planner.logical.steps
 
-import org.neo4j.configuration.GraphDatabaseInternalSettings.RemoteBatchPropertiesImplementation
-import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
 import org.neo4j.cypher.internal.ast.semantics.SemanticTable
 import org.neo4j.cypher.internal.compiler.phases.CompilationContains
-import org.neo4j.cypher.internal.compiler.phases.LogicalPlanCondition
 import org.neo4j.cypher.internal.compiler.phases.LogicalPlanState
 import org.neo4j.cypher.internal.compiler.phases.PlannerContext
 import org.neo4j.cypher.internal.compiler.planner.logical.plans.rewriter.AndedPropertyInequalitiesRemoved
 import org.neo4j.cypher.internal.compiler.planner.logical.plans.rewriter.CardinalityRewriter
 import org.neo4j.cypher.internal.compiler.planner.logical.plans.rewriter.LogicalPlanRewritten
-import org.neo4j.cypher.internal.compiler.planner.logical.plans.rewriter.MergeRemoteBatchPropertiesRewriter
-import org.neo4j.cypher.internal.compiler.planner.logical.plans.rewriter.RemoteBatchPropertiesFilterMergeRewriter
 import org.neo4j.cypher.internal.compiler.planner.logical.plans.rewriter.eager.LogicalPlanContainsEagerIfNeeded
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.InsertCachedProperties.PropertyUsages
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.InsertCachedProperties.PropertyUsagesAndRenamings
@@ -38,6 +33,7 @@ import org.neo4j.cypher.internal.compiler.planner.logical.steps.RestrictedCachin
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.RestrictedCaching.CachedPropertiesTracker
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.RestrictedCaching.ProtectedProperties
 import org.neo4j.cypher.internal.expressions.ASTCachedProperty
+import org.neo4j.cypher.internal.expressions.ASTCachedPropertyWithValue
 import org.neo4j.cypher.internal.expressions.CachedHasProperty
 import org.neo4j.cypher.internal.expressions.CachedProperty
 import org.neo4j.cypher.internal.expressions.CaseExpression
@@ -56,6 +52,7 @@ import org.neo4j.cypher.internal.frontend.phases.CompilationPhaseTracer
 import org.neo4j.cypher.internal.frontend.phases.CompilationPhaseTracer.CompilationPhase.LOGICAL_PLANNING
 import org.neo4j.cypher.internal.frontend.phases.Phase
 import org.neo4j.cypher.internal.frontend.phases.Transformer
+import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerConfig
 import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerFactory
 import org.neo4j.cypher.internal.ir.RemoveLabelPattern
 import org.neo4j.cypher.internal.ir.SetDynamicPropertyPattern
@@ -86,8 +83,11 @@ import org.neo4j.cypher.internal.logical.plans.IndexedPropertyProvidingPlan
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 import org.neo4j.cypher.internal.logical.plans.LogicalPlans
 import org.neo4j.cypher.internal.logical.plans.Merge
+import org.neo4j.cypher.internal.logical.plans.MergeInto
+import org.neo4j.cypher.internal.logical.plans.MergeUniqueNode
 import org.neo4j.cypher.internal.logical.plans.NestedPlanExpression
 import org.neo4j.cypher.internal.logical.plans.NodeIndexLeafPlan
+import org.neo4j.cypher.internal.logical.plans.PhysicalPlanningPlan
 import org.neo4j.cypher.internal.logical.plans.ProduceResult
 import org.neo4j.cypher.internal.logical.plans.ProjectingPlan
 import org.neo4j.cypher.internal.logical.plans.RelationshipIndexLeafPlan
@@ -139,14 +139,7 @@ case class InsertCachedProperties(pushdownPropertyReads: Boolean)
   override def postConditions: Set[StepSequencer.Condition] = InsertCachedProperties.postConditions
 
   override def process(from: LogicalPlanState, context: PlannerContext): LogicalPlanState = {
-    val remoteBatchPropertiesImplementation =
-      from.maybeRemoteBatchPropertiesImplementation.getOrElse(throw new IllegalStateException(
-        "Expected the remote batch properties implementation in the logical plan state, but found nothing."
-      ))
-
-    if (
-      context.materializedEntitiesMode || remoteBatchPropertiesImplementation == RemoteBatchPropertiesImplementation.PLANNER
-    ) {
+    if (context.materializedEntitiesMode || context.planContext.databaseMode == DatabaseMode.SHARDED) {
       // When working with materialized entities only, caching properties is not useful.
       // Moreover, the runtime implementation of CachedProperty does not work with virtual entities.
       return from
@@ -154,13 +147,10 @@ case class InsertCachedProperties(pushdownPropertyReads: Boolean)
 
     val logicalPlan =
       // always push down property reads in a sharded properties database
-      if (
-        pushdownPropertyReads ||
-        context.planContext.databaseMode == DatabaseMode.SHARDED && remoteBatchPropertiesImplementation == RemoteBatchPropertiesImplementation.REWRITER
-      ) {
+      if (pushdownPropertyReads) {
         val effectiveCardinalities = from.planningAttributes.effectiveCardinalities
         val attributes = from.planningAttributes.asAttributes(context.logicalPlanIdGen)
-        val newPlan = PushdownPropertyReads.pushdown(
+        PushdownPropertyReads.pushdown(
           from.logicalPlan,
           effectiveCardinalities,
           attributes,
@@ -168,11 +158,6 @@ case class InsertCachedProperties(pushdownPropertyReads: Boolean)
           if (from.logicalPlan.readOnly) context.planContext.databaseMode else DatabaseMode.SINGLE,
           context.cancellationChecker
         )
-        if (context.config.cachePropertiesForEntitiesWithFilter())
-          newPlan.endoRewrite(RemoteBatchPropertiesFilterMergeRewriter)
-            .endoRewrite(MergeRemoteBatchPropertiesRewriter)
-        else
-          newPlan
       } else {
         from.logicalPlan
       }
@@ -238,10 +223,10 @@ case class InsertCachedProperties(pushdownPropertyReads: Boolean)
             }
           case indexPlan: RelationshipIndexLeafPlan =>
             indexPlan.properties.filter(_.getValueFromIndex == CanGetValue).foldLeft(
-              accWithProps.registerIndexedEntity(indexPlan.idName.name)
+              accWithProps.registerIndexedEntity(indexPlan.idName.get.name)
             ) {
               (innerAcc, indexedProp) =>
-                innerAcc.addIndexRelationshipProperty(property(indexPlan.idName, indexedProp.propertyKeyToken.name))
+                innerAcc.addIndexRelationshipProperty(property(indexPlan.idName.get, indexedProp.propertyKeyToken.name))
             }
 
           case _ => accWithProps
@@ -376,7 +361,7 @@ case class InsertCachedProperties(pushdownPropertyReads: Boolean)
             .returnColumns
             .map(column =>
               cachedPropertiesTracker.get(acc.variableWithOriginalName(asVariable(column.variable))).fold(column) {
-                cached: Set[ASTCachedProperty] =>
+                (cached: Set[ASTCachedProperty]) =>
                   column.copy(cachedProperties = cached.collect {
                     case cp: CachedProperty => cp.copy(failOnMissingEntity = false)(cp.position)
                   })
@@ -389,10 +374,12 @@ case class InsertCachedProperties(pushdownPropertyReads: Boolean)
         aggregating
 
       case properties @ Properties(variable: LogicalVariable) if cachePropertiesForEntities =>
-        cachedPropertiesTracker.get(acc.variableWithOriginalName(asVariable(variable))) match {
-          case Some(cached) => PropertiesUsingCachedProperties(variable, cached)
-          case None         => properties
-        }
+        val maybeCachedProps: Option[Set[ASTCachedPropertyWithValue]] =
+          cachedPropertiesTracker
+            .get(acc.variableWithOriginalName(asVariable(variable)))
+            .map { xs => xs.collect { case x: ASTCachedPropertyWithValue => x } }
+            .filter(_.nonEmpty)
+        maybeCachedProps.fold(properties)(PropertiesUsingCachedProperties(variable, _))
 
       // Rewrite properties to be cached if they are used more than once, or can be fetched from an index
       case prop @ Property(v: Variable, propertyKeyName) =>
@@ -436,9 +423,9 @@ case class InsertCachedProperties(pushdownPropertyReads: Boolean)
         val rewrittenIndexPlan = rewriteIndexPlan(
           acc,
           indexPlan,
-          indexPlan.idName
+          indexPlan.idName.get
         )
-        cachedPropertiesTracker.addMany(indexPlan.idName, rewrittenIndexPlan.cachedProperties)
+        cachedPropertiesTracker.addMany(indexPlan.idName.get, rewrittenIndexPlan.cachedProperties)
         rewrittenIndexPlan
     })
 
@@ -486,6 +473,7 @@ case class InsertCachedProperties(pushdownPropertyReads: Boolean)
 
 case object InsertCachedProperties extends StepSequencer.Step with DefaultPostCondition
     with PlanPipelineTransformerFactory {
+  case object CachedPropertiesInserted extends StepSequencer.Condition
 
   override def preConditions: Set[StepSequencer.Condition] = Set(
     // This rewriter operates on the LogicalPlan
@@ -510,12 +498,11 @@ case object InsertCachedProperties extends StepSequencer.Step with DefaultPostCo
   )
 
   override def postConditions: Set[StepSequencer.Condition] =
-    super.postConditions + LogicalPlanCondition(OrderedIndexPlansUseCachedProperties)
+    super.postConditions ++ Seq(OrderedIndexPlansUseCachedProperties, CachedPropertiesInserted)
 
-  override def getTransformer(
-    pushdownPropertyReads: Boolean,
-    semanticFeatures: Seq[SemanticFeature]
-  ): Transformer[PlannerContext, LogicalPlanState, LogicalPlanState] = InsertCachedProperties(pushdownPropertyReads)
+  override def getTransformer(planPipelineConfig: PlanPipelineTransformerConfig)
+    : Transformer[PlannerContext, LogicalPlanState, LogicalPlanState] =
+    InsertCachedProperties(planPipelineConfig.pushdownPropertyReads)
 
   /**
    * A summary of all usages of a property
@@ -819,6 +806,20 @@ object RestrictedCaching {
         }
         if (protectedMergeProps.nonEmpty) Some(CombinedProtectedProperties(protectedMergeProps))
         else None
+      case mergeInto: MergeInto =>
+        val protectedMergeIntoProps = mergeInto.onMatchProperties.map {
+          case (p, v) => protectedProperties(mergeInto.idName, Seq(p.name -> v))
+        }
+        if (protectedMergeIntoProps.nonEmpty) Some(CombinedProtectedProperties(protectedMergeIntoProps))
+        else None
+
+      case upsert: MergeUniqueNode =>
+        val protectedUpsertProps = upsert.onMatchProperties.map {
+          case (p, v) => protectedProperties(upsert.idName, Seq(p.name -> v))
+        }
+        if (protectedUpsertProps.nonEmpty) Some(CombinedProtectedProperties(protectedUpsertProps))
+        else None
+
       case _: Create                 => None
       case _: DeleteExpression       => None
       case _: DeleteNode             => None
@@ -830,6 +831,8 @@ object RestrictedCaching {
       case _: Foreach                => None
       case _: RemoveLabels           => None
       case _: SetLabels              => None
+      case _: PhysicalPlanningPlan =>
+        throw new IllegalStateException(s"Unsupported plan in insert-cached-properties: $plan")
     }
 
     protectedProps.map(plan -> _)

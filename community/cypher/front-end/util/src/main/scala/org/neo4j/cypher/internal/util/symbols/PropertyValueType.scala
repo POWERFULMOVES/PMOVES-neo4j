@@ -20,7 +20,7 @@ import org.neo4j.cypher.internal.util.InputPosition
 
 case class PropertyValueType(isNullable: Boolean)(val position: InputPosition) extends CypherType {
   val parentType: CypherType = CTAny
-  override val toString = "Property Value"
+  override val toClassString = "PropertyValue"
   override val toCypherTypeString = "PROPERTY VALUE"
 
   // This is technically a special case of a closed dynamic union
@@ -30,6 +30,7 @@ case class PropertyValueType(isNullable: Boolean)(val position: InputPosition) e
   def expandToTypes: List[CypherType] = List(
     BooleanType(isNullable)(position),
     StringType(isNullable)(position),
+    UUIDType(isNullable)(position),
     IntegerType(isNullable)(position),
     FloatType(isNullable)(position),
     DateType(isNullable)(position),
@@ -39,8 +40,10 @@ case class PropertyValueType(isNullable: Boolean)(val position: InputPosition) e
     ZonedDateTimeType(isNullable)(position),
     DurationType(isNullable)(position),
     PointType(isNullable)(position),
+    VectorType(None, None, isNullable)(position),
     ListType(BooleanType(isNullable = false)(position), isNullable = isNullable)(position),
     ListType(StringType(isNullable = false)(position), isNullable = isNullable)(position),
+    ListType(UUIDType(isNullable = false)(position), isNullable = isNullable)(position),
     ListType(DateType(isNullable = false)(position), isNullable = isNullable)(position),
     ListType(LocalTimeType(isNullable = false)(position), isNullable = isNullable)(position),
     ListType(ZonedTimeType(isNullable = false)(position), isNullable = isNullable)(position),

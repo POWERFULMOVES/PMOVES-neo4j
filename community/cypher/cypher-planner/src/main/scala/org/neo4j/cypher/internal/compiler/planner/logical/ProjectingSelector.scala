@@ -19,7 +19,9 @@
  */
 package org.neo4j.cypher.internal.compiler.planner.logical
 
+import org.neo4j.cypher.internal.compiler.planner.logical.SelectorHeuristic.defaultPlanDescriptor
 import org.neo4j.cypher.internal.compiler.planner.logical.idp.BestResults
+import org.neo4j.cypher.internal.compiler.planner.logical.ordering.InterestingOrderConfig
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 
 trait ProjectingSelector[P] {
@@ -44,7 +46,8 @@ trait ProjectingSelector[P] {
     input: Iterable[X],
     resolved: => String,
     resolvedPerPlan: LogicalPlan => String,
-    heuristic: SelectorHeuristic
+    heuristic: SelectorHeuristic,
+    planDescriptor: X => Option[String] = defaultPlanDescriptor[X](_)
   ): Option[X]
 
   def ofBestResults(
@@ -53,14 +56,21 @@ trait ProjectingSelector[P] {
     resolvedPerPan: LogicalPlan => String
   ): Option[BestResults[P]] = {
     val best = applyWithResolvedPerPlan(plans.map(_.bestResult), s"overall $resolved", resolvedPerPan)
-    val bestFulfillingReq =
-      applyWithResolvedPerPlan(plans.flatMap(_.bestResultFulfillingReq), s"sorted $resolved", resolvedPerPan)
-    best.map(BestResults(_, bestFulfillingReq))
+    val bestSorted =
+      applyWithResolvedPerPlan(plans.flatMap(_.bestSortedResult), s"sorted $resolved", resolvedPerPan)
+    val bestWithExtraProperties = applyWithResolvedPerPlan(
+      plans.flatMap(_.bestExtraPropertiesResult),
+      s"with extra properties $resolved",
+      resolvedPerPan
+    )
+    best.map(BestResults(_, bestSorted, bestWithExtraProperties))
   }
 }
 
 object SelectorHeuristic {
   val constant: SelectorHeuristic = (_: LogicalPlan) => 0
+
+  def defaultPlanDescriptor[X](plan: X): Option[String] = None
 }
 
 @FunctionalInterface
@@ -68,4 +78,22 @@ trait SelectorHeuristic {
 
   /** Heuristic used to break ties between plans with the same cost */
   def tieBreaker(plan: LogicalPlan): Int
+}
+
+/**
+ * A heuristic that selects the plan with the most satisfied interesting order candidates.
+ */
+case class InterestingOrderSelectorHeuristic(
+  context: LogicalPlanningContext,
+  interestingOrderConfig: InterestingOrderConfig
+) extends SelectorHeuristic {
+
+  final override def tieBreaker(plan: LogicalPlan): Int = {
+    val providedOrder = context.staticComponents.planningAttributes.providedOrders.get(plan.id)
+    providedOrder.satisfiesAnyInterestingOrder(interestingOrderConfig.orderToSolve.asInteresting)
+      .foldLeft(0) { (acc, order) =>
+        acc + order.satisfiedPrefix.size
+      }
+  }
+
 }

@@ -21,35 +21,38 @@ package org.neo4j.bolt.negotiation.codec;
 
 import static org.neo4j.bolt.testing.assertions.ByteBufAssertions.assertThat;
 
-import io.netty.buffer.ByteBuf;
-import io.netty.channel.embedded.EmbeddedChannel;
 import org.junit.jupiter.api.Test;
-import org.neo4j.bolt.negotiation.ProtocolVersion;
 import org.neo4j.bolt.negotiation.message.ProtocolNegotiationResponse;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
+import org.neo4j.bolt.testing.annotation.StrictBufferExtension;
+import org.neo4j.bolt.testing.channel.StrictBufferContext;
 
+@StrictBufferExtension
 class ProtocolNegotiationResponseEncoderTest {
 
     @Test
-    void shouldEncodeResponse() {
+    void shouldEncodeResponse(StrictBufferContext ctx) {
         var msg = new ProtocolNegotiationResponse(new ProtocolVersion(4, 3));
 
-        var channel = new EmbeddedChannel(new ProtocolNegotiationResponseEncoder());
-
+        var channel = ctx.channel(new ProtocolNegotiationResponseEncoder());
         channel.writeOutbound(msg);
 
-        var buf = channel.<ByteBuf>readOutbound();
-
-        assertThat(buf).isNotNull().hasReadableBytes(4).containsInt(0x00000304).hasNoRemainingReadableBytes();
+        assertThat(ctx.output(channel.readOutbound()))
+                .isNotNull()
+                .hasReadableBytes(4)
+                .containsInt(0x00000304)
+                .hasNoRemainingReadableBytes();
     }
 
     @Test
-    void shouldEncodeRejectionResponse() {
-        var channel = new EmbeddedChannel(new ProtocolNegotiationResponseEncoder());
-
+    void shouldEncodeRejectionResponse(StrictBufferContext ctx) {
+        var channel = ctx.channel(new ProtocolNegotiationResponseEncoder());
         channel.writeOutbound(new ProtocolNegotiationResponse(ProtocolVersion.INVALID));
 
-        var buf = channel.<ByteBuf>readOutbound();
-
-        assertThat(buf).isNotNull().hasReadableBytes(4).containsInt(0x00000000).hasNoRemainingReadableBytes();
+        assertThat(ctx.output(channel.readOutbound()))
+                .isNotNull()
+                .hasReadableBytes(4)
+                .containsInt(0x00000000)
+                .hasNoRemainingReadableBytes();
     }
 }

@@ -36,7 +36,7 @@ abstract class RuntimeDebugLoggingTestBase[CONTEXT <: RuntimeContext](
   runtime: CypherRuntime[CONTEXT],
   val sizeHint: Int
 ) extends RuntimeTestSuite[CONTEXT](withDebugLog(edition), runtime)
-    with RandomValuesTestSupport {
+    with RandomValuesTestSupport[CONTEXT] {
 
   test("log ignored errors in transaction foreach") {
     assume(runtime.name != "interpreted")
@@ -55,7 +55,7 @@ abstract class RuntimeDebugLoggingTestBase[CONTEXT <: RuntimeContext](
       .argument()
       .build()
 
-    val result = executePlan(buildPlan(logicalQuery, runtime), readOnly = true, implicitTx = true)
+    val result = execute(logicalQuery, implicitTx = true)
 
     val expected = Range(0, size).map(x => Array[Any](x))
     result should beColumns("x").withRows(inOrder(expected))
@@ -80,7 +80,7 @@ abstract class RuntimeDebugLoggingTestBase[CONTEXT <: RuntimeContext](
       .argument()
       .build()
 
-    val result = executePlan(buildPlan(logicalQuery, runtime), readOnly = true, implicitTx = true)
+    val result = execute(logicalQuery, implicitTx = true)
 
     val expected = Range(0, size).map(x => Array[Any](x))
     result should beColumns("x").withRows(inOrder(expected))

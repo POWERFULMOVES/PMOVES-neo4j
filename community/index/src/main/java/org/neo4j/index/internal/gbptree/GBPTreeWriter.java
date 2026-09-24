@@ -22,7 +22,7 @@ package org.neo4j.index.internal.gbptree;
 import static java.lang.String.format;
 import static org.neo4j.index.internal.gbptree.Generation.stableGeneration;
 import static org.neo4j.index.internal.gbptree.Generation.unstableGeneration;
-import static org.neo4j.index.internal.gbptree.PointerChecking.assertNoSuccessor;
+import static org.neo4j.index.internal.gbptree.PointerChecking.assertNoSuccessorReadCursor;
 import static org.neo4j.index.internal.gbptree.PointerChecking.checkOutOfBounds;
 import static org.neo4j.index.internal.gbptree.TreeNodeUtil.generation;
 import static org.neo4j.index.internal.gbptree.TreeNodeUtil.isInternal;
@@ -30,6 +30,7 @@ import static org.neo4j.index.internal.gbptree.TreeNodeUtil.keyCount;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.util.OptionalLong;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
@@ -44,7 +45,7 @@ class GBPTreeWriter<K, V> implements Writer<K, V> {
     private final InternalTreeLogic<K, V> treeLogic;
     private final ReadWriteLock checkpointLock;
     private final ReadWriteLock writerLock;
-    private final FreeListIdProvider freeList;
+    private final FreelistIdProvider freeList;
     private final Monitor monitor;
     private final Consumer<Throwable> exceptionMessageAppender;
     private final LongSupplier generationSupplier;
@@ -59,10 +60,12 @@ class GBPTreeWriter<K, V> implements Writer<K, V> {
     private final TreeRootExchange rootExchange;
     private final Layout<K, V> layout;
     private boolean writerLockAcquired;
+    private PageCursor navigationCursor;
     private PageCursor cursor;
     private CursorContext cursorContext;
     private double ratioToKeepInLeftOnSplit;
     private Root root;
+    private boolean mustEagerlyFlush;
 
     // Writer can't live past a checkpoint because of the mutex with checkpoint,
     // therefore safe to locally cache these generation fields from the volatile generation in the tree
@@ -80,7 +83,7 @@ class GBPTreeWriter<K, V> implements Writer<K, V> {
             TreeRootExchange rootExchange,
             ReadWriteLock checkpointLock,
             ReadWriteLock writerLock,
-            FreeListIdProvider freeList,
+            FreelistIdProvider freeList,
             Monitor monitor,
             Consumer<Throwable> exceptionMessageAppender,
             LongSupplier generationSupplier,
@@ -112,12 +115,14 @@ class GBPTreeWriter<K, V> implements Writer<K, V> {
      * <ul>
      *    <li>{@link #checkpointLock} - acquired read lock</li>
      *    <li>{@link #writerLock} - acquired read/write lock depending on parallel or not</li>
+     *    <li>{@link #navigationCursor} - not null</li>
      *    <li>{@link #cursor} - not null</li>
      * </ul>
      * Of fully closed:
      * <ul>
      *    <li>{@link #checkpointLock} - released read lock</li>
      *    <li>{@link #writerLockAcquired} - released read/write lock depending on parallel or not</li>
+     *    <li>{@link #navigationCursor} - null</li>
      *    <li>{@link #cursor} - null</li>
      * </ul>
      *
@@ -135,6 +140,8 @@ class GBPTreeWriter<K, V> implements Writer<K, V> {
         boolean success = false;
         try {
             writerLockAcquired = true;
+            navigationCursor = pagedFile.io(0L /*ignored*/, PagedFile.PF_SHARED_READ_LOCK, cursorContext);
+            mustEagerlyFlush = mustEagerlyFlushSupplier.getAsBoolean();
             cursor = pagedFile.io(0L /*Ignored*/, writeCursorFlags(), cursorContext);
             coordination.initialize(cursor);
             this.cursorContext = cursorContext;
@@ -156,7 +163,7 @@ class GBPTreeWriter<K, V> implements Writer<K, V> {
 
     private int writeCursorFlags() {
         var flags = PagedFile.PF_SHARED_WRITE_LOCK;
-        if (mustEagerlyFlushSupplier.getAsBoolean()) {
+        if (mustEagerlyFlush) {
             flags |= PagedFile.PF_EAGER_FLUSH;
         }
         return flags;
@@ -207,9 +214,8 @@ class GBPTreeWriter<K, V> implements Writer<K, V> {
         try {
             // Try optimistic mode first
             coordination.beginOperation();
-            if (!goToRoot()
+            if (!goToRoot(mustEagerlyFlush)
                     || !treeLogic.insert(
-                            cursor,
                             structurePropagation,
                             key,
                             value,
@@ -223,9 +229,8 @@ class GBPTreeWriter<K, V> implements Writer<K, V> {
                 valueMerger.reset();
                 assert structurePropagation.isEmpty();
                 treeLogic.reset();
-                if (!goToRoot()
+                if (!goToRoot(mustEagerlyFlush)
                         || !treeLogic.insert(
-                                cursor,
                                 structurePropagation,
                                 key,
                                 value,
@@ -257,11 +262,12 @@ class GBPTreeWriter<K, V> implements Writer<K, V> {
     /**
      * @return true if operation is permitted
      */
-    private boolean goToRoot() throws IOException {
+    private boolean goToRoot(boolean useNavigationCursor) throws IOException {
         if (treeLogic.depth() >= 0) {
             return true;
         }
 
+        PageCursor cursor = useNavigationCursor ? navigationCursor : this.cursor;
         while (true) {
             coordination.beforeTraversingToChild(root.id(), 0);
             // check again, after locked
@@ -272,19 +278,26 @@ class GBPTreeWriter<K, V> implements Writer<K, V> {
                 root = rootAfterLock;
             } else {
                 TreeNodeUtil.goTo(cursor, "Root", root.id());
+                if (useNavigationCursor) {
+                    this.cursor.unpin();
+                }
                 break;
             }
         }
 
-        assert assertNoSuccessor(cursor, stableGeneration, unstableGeneration);
-        treeLogic.initialize(cursor, ratioToKeepInLeftOnSplit, structureWriteLog);
-        int keyCount = keyCount(cursor);
-        var isInternal = isInternal(cursor);
-        return coordination.arrivedAtChild(
-                isInternal,
-                (isInternal ? internalNode : leafNode).availableSpace(cursor, keyCount),
-                generation(cursor) != unstableGeneration,
-                keyCount);
+        assert assertNoSuccessorReadCursor(cursor, stableGeneration, unstableGeneration);
+        treeLogic.initialize(cursor, this.cursor, ratioToKeepInLeftOnSplit, structureWriteLog);
+        int keyCount;
+        boolean isInternal;
+        int availableSpace;
+        long generation;
+        do {
+            keyCount = keyCount(cursor);
+            isInternal = isInternal(cursor);
+            availableSpace = (isInternal ? internalNode : leafNode).availableSpace(cursor, keyCount);
+            generation = generation(cursor);
+        } while (cursor.shouldRetry());
+        return coordination.arrivedAtChild(isInternal, availableSpace, generation != unstableGeneration, keyCount);
     }
 
     private void setRoot(long rootPointer) throws IOException {
@@ -299,9 +312,8 @@ class GBPTreeWriter<K, V> implements Writer<K, V> {
         try {
             // Try optimistic mode
             coordination.beginOperation();
-            if (!goToRoot()
+            if (!goToRoot(true)
                     || (result = treeLogic.remove(
-                                    cursor,
                                     structurePropagation,
                                     key,
                                     removedValue,
@@ -313,9 +325,8 @@ class GBPTreeWriter<K, V> implements Writer<K, V> {
                 coordination.flipToPessimisticMode();
                 assert structurePropagation.isEmpty();
                 treeLogic.reset();
-                if (!goToRoot()
+                if (!goToRoot(true)
                         || (result = treeLogic.remove(
-                                        cursor,
                                         structurePropagation,
                                         key,
                                         removedValue,
@@ -340,7 +351,7 @@ class GBPTreeWriter<K, V> implements Writer<K, V> {
         }
 
         checkOutOfBounds(cursor);
-        return result == InternalTreeLogic.RemoveResult.REMOVED && removedValue.defined ? removedValue.value : null;
+        return result == InternalTreeLogic.RemoveResult.REMOVED && !removedValue.deleted ? removedValue.value : null;
     }
 
     @Override
@@ -370,7 +381,7 @@ class GBPTreeWriter<K, V> implements Writer<K, V> {
 
     private void executeWithRetryInPessimisticMode(TreeWriteOperation<K, V> operation) throws IOException {
         coordination.beginOperation();
-        if (goToRoot()
+        if (goToRoot(false)
                 && operation.run(
                         layout,
                         treeLogic,
@@ -388,7 +399,7 @@ class GBPTreeWriter<K, V> implements Writer<K, V> {
         coordination.flipToPessimisticMode();
         assert structurePropagation.isEmpty();
         treeLogic.reset();
-        if (goToRoot()
+        if (goToRoot(false)
                 && operation.run(
                         layout,
                         treeLogic,
@@ -427,7 +438,7 @@ class GBPTreeWriter<K, V> implements Writer<K, V> {
         var didRootStructureChange = false;
         if (structurePropagation.hasRightKeyInsert) {
             // New root
-            long newRootId = freeList.acquireNewId(stableGeneration, unstableGeneration, CursorCreator.bind(cursor));
+            long newRootId = freeList.acquireNewId(stableGeneration, CursorCreator.bind(cursor), cursorContext);
             PageCursorUtil.goTo(cursor, "new root", newRootId);
 
             structureWriteLog.growTree(unstableGeneration, newRootId);
@@ -463,6 +474,24 @@ class GBPTreeWriter<K, V> implements Writer<K, V> {
         }
     }
 
+    /**
+     * @param nodeId the tree node ID to create a successor for.
+     * @return the tree node ID of the newly created successor, or false if a successor couldn't be created..
+     * @throws IOException on I/O error.
+     */
+    OptionalLong forceCreateSuccessor(long nodeId) throws IOException {
+        reset();
+        if (!goToRoot(false)) {
+            return OptionalLong.empty();
+        }
+        OptionalLong successorId = treeLogic.forceCreateSuccessor(
+                structurePropagation, nodeId, stableGeneration, unstableGeneration, cursorContext);
+        if (successorId.isPresent()) {
+            handleStructureChanges(cursorContext);
+        }
+        return successorId;
+    }
+
     @Override
     public void close() {
         if (!writerLockAcquired) {
@@ -482,9 +511,12 @@ class GBPTreeWriter<K, V> implements Writer<K, V> {
     }
 
     private void closeCursor() {
-        if (cursor != null) {
-            cursor.close();
-            cursor = null;
+        PageCursor navigationCursor = this.navigationCursor;
+        PageCursor cursor = this.cursor;
+        try (navigationCursor;
+                cursor) {
+            this.navigationCursor = null;
+            this.cursor = null;
         }
     }
 

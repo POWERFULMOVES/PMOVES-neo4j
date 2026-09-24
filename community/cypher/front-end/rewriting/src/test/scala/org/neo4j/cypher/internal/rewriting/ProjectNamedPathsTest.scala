@@ -16,9 +16,12 @@
  */
 package org.neo4j.cypher.internal.rewriting
 
+import org.neo4j.cypher.internal.CypherVersion
+import org.neo4j.cypher.internal.ast.AddedInRewriteGeneral
 import org.neo4j.cypher.internal.ast.AliasedReturnItem
 import org.neo4j.cypher.internal.ast.AscSortItem
 import org.neo4j.cypher.internal.ast.AstConstructionTestSupport.VariableStringInterpolator
+import org.neo4j.cypher.internal.ast.FreeProjection
 import org.neo4j.cypher.internal.ast.ImportingWithSubqueryCall
 import org.neo4j.cypher.internal.ast.Match
 import org.neo4j.cypher.internal.ast.OrderBy
@@ -27,12 +30,14 @@ import org.neo4j.cypher.internal.ast.Return
 import org.neo4j.cypher.internal.ast.ReturnItems
 import org.neo4j.cypher.internal.ast.ScopeClauseSubqueryCall
 import org.neo4j.cypher.internal.ast.SingleQuery
+import org.neo4j.cypher.internal.ast.Statement
 import org.neo4j.cypher.internal.ast.UnionDistinct
 import org.neo4j.cypher.internal.ast.Where
 import org.neo4j.cypher.internal.ast.With
-import org.neo4j.cypher.internal.ast.semantics.SemanticCheckContext
-import org.neo4j.cypher.internal.ast.semantics.SemanticState
+import org.neo4j.cypher.internal.ast.prettifier.ExpressionStringifier
+import org.neo4j.cypher.internal.ast.prettifier.Prettifier
 import org.neo4j.cypher.internal.expressions.CountStar
+import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.MatchMode
 import org.neo4j.cypher.internal.expressions.MultiRelationshipPathStep
 import org.neo4j.cypher.internal.expressions.NilPathStep
@@ -49,35 +54,31 @@ import org.neo4j.cypher.internal.expressions.SemanticDirection.INCOMING
 import org.neo4j.cypher.internal.expressions.SemanticDirection.OUTGOING
 import org.neo4j.cypher.internal.expressions.SingleRelationshipPathStep
 import org.neo4j.cypher.internal.expressions.Variable
-import org.neo4j.cypher.internal.rewriting.rewriters.QuantifiedPathPatternNodeInsertRewriter
-import org.neo4j.cypher.internal.rewriting.rewriters.expandStar
-import org.neo4j.cypher.internal.rewriting.rewriters.nameAllPatternElements
-import org.neo4j.cypher.internal.rewriting.rewriters.normalizeWithAndReturnClauses
-import org.neo4j.cypher.internal.rewriting.rewriters.projectNamedPaths
+import org.neo4j.cypher.internal.rewriting.rewriters.ProjectNamedPaths
+import org.neo4j.cypher.internal.rewriting.rewriters.astRewriters.NameAllPatternElements
+import org.neo4j.cypher.internal.rewriting.rewriters.astRewriters.QuantifiedPathPatternNodeInsertRewriter
+import org.neo4j.cypher.internal.rewriting.rewriters.preparatoryRewriters.NormalizeWithAndReturnClauses
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
-import org.neo4j.cypher.internal.util.OpenCypherExceptionFactory
+import org.neo4j.cypher.internal.util.Neo4jCypherExceptionFactory
 import org.neo4j.cypher.internal.util.inSequence
 import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 import org.neo4j.cypher.internal.util.test_helpers.TestName
 
 class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport with TestName {
 
-  private def projectionInlinedAst(queryText: String) = ast(queryText).endoRewrite(projectNamedPaths)
+  private def projectionInlinedAst(queryText: String) = ast(queryText).endoRewrite(ProjectNamedPaths)
 
   private def projectionInlinedQppAst(queryText: String) = ast(queryText).endoRewrite(
     QuantifiedPathPatternNodeInsertRewriter.instance
-  ).endoRewrite(nameAllPatternElements(new AnonymousVariableNameGenerator)).endoRewrite(projectNamedPaths)
+  ).endoRewrite(NameAllPatternElements(new AnonymousVariableNameGenerator)).endoRewrite(ProjectNamedPaths)
 
   private def ast(queryText: String) = {
-    val parsed = parse(queryText, OpenCypherExceptionFactory(None))
-    val exceptionFactory = OpenCypherExceptionFactory(Some(pos))
-    val normalized = parsed.endoRewrite(inSequence(normalizeWithAndReturnClauses(exceptionFactory)))
-    val checkResult = normalized.semanticCheck.run(SemanticState.clean, SemanticCheckContext.default)
-    normalized.endoRewrite(inSequence(expandStar(checkResult.state)))
+    val exceptionFactory = Neo4jCypherExceptionFactory(queryText, Some(pos))
+    val parsed = parse(queryText, exceptionFactory)
+    parsed.endoRewrite(inSequence(NormalizeWithAndReturnClauses(exceptionFactory, Some(CypherVersion.Cypher5))))
   }
 
-  private def parseReturnedExpr(queryText: String) = {
-    val query = projectionInlinedAst(queryText).asInstanceOf[Query]
+  private def findReturnPExp(query: Statement): Expression = {
     query.asInstanceOf[SingleQuery].clauses.last.asInstanceOf[Return].returnItems.items.collectFirst {
       case AliasedReturnItem(expr, Variable("p")) => expr
     }.get
@@ -90,94 +91,232 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
     }.get
   }
 
+  private def assertRewritten(query: String, rewrittenQuery: String): Unit = {
+    val rewritten = projectionInlinedAst(query)
+    Prettifier(ExpressionStringifier()).asString(rewritten) shouldBe rewrittenQuery
+  }
+
+  private def assertRewrittenReturnP(query: String, rewrittenQuery: String, returnExpr: Expression): Unit = {
+    val rewritten = projectionInlinedAst(query)
+    Prettifier(ExpressionStringifier()).asString(rewritten) shouldBe rewrittenQuery
+    findReturnPExp(rewritten) shouldBe returnExpr
+  }
+
   test("MATCH p = (a) RETURN p") {
-    val returns = parseReturnedExpr("MATCH p = (a) RETURN p")
-
-    val expected = PathExpression(
-      NodePathStep(varFor("a"), NilPathStep()(pos))(pos)
-    ) _
-
-    returns should equal(expected: PathExpression)
+    assertRewrittenReturnP(
+      "MATCH p = (a) RETURN p",
+      """MATCH (a)
+        |RETURN (a) AS p""".stripMargin,
+      PathExpression(
+        NodePathStep(varFor("a"), NilPathStep()(pos))(pos)
+      )(pos)
+    )
   }
 
   test("MATCH p = (a) CALL () {RETURN 1} RETURN p") {
-    val returns = parseReturnedExpr(testName)
-
-    val expected = PathExpression(
-      NodePathStep(varFor("a"), NilPathStep()(pos))(pos)
-    ) _
-
-    returns should equal(expected: PathExpression)
+    assertRewrittenReturnP(
+      testName,
+      """MATCH (a)
+        |CALL () {
+        |  RETURN 1 AS `1`
+        |}
+        |RETURN (a) AS p""".stripMargin,
+      PathExpression(
+        NodePathStep(varFor("a"), NilPathStep()(pos))(pos)
+      )(pos)
+    )
   }
 
   test("MATCH p = (a) CALL {RETURN 1} RETURN p") {
-    val returns = parseReturnedExpr(testName)
-
-    val expected = PathExpression(
-      NodePathStep(varFor("a"), NilPathStep()(pos))(pos)
-    ) _
-
-    returns should equal(expected: PathExpression)
+    assertRewrittenReturnP(
+      testName,
+      """MATCH (a)
+        |CALL {
+        |  RETURN 1 AS `1`
+        |}
+        |RETURN (a) AS p""".stripMargin,
+      PathExpression(
+        NodePathStep(varFor("a"), NilPathStep()(pos))(pos)
+      )(pos)
+    )
   }
 
   test("MATCH p = (a) CALL (a) {RETURN 1} RETURN p") {
-    val returns = parseReturnedExpr(testName)
-
-    val expected = PathExpression(
-      NodePathStep(varFor("a"), NilPathStep()(pos))(pos)
-    ) _
-
-    returns should equal(expected: PathExpression)
+    assertRewrittenReturnP(
+      testName,
+      """MATCH (a)
+        |CALL (a) {
+        |  RETURN 1 AS `1`
+        |}
+        |RETURN (a) AS p""".stripMargin,
+      PathExpression(
+        NodePathStep(varFor("a"), NilPathStep()(pos))(pos)
+      )(pos)
+    )
   }
 
   test("MATCH p = (a) CALL {WITH a RETURN 1} RETURN p") {
-    val returns = parseReturnedExpr(testName)
-
-    val expected = PathExpression(
-      NodePathStep(varFor("a"), NilPathStep()(pos))(pos)
-    ) _
-
-    returns should equal(expected: PathExpression)
+    assertRewrittenReturnP(
+      testName,
+      """MATCH (a)
+        |CALL {
+        |  WITH a AS a
+        |  RETURN 1 AS `1`
+        |}
+        |RETURN (a) AS p""".stripMargin,
+      PathExpression(
+        NodePathStep(varFor("a"), NilPathStep()(pos))(pos)
+      )(pos)
+    )
   }
 
   test("MATCH p = (a) CALL () {RETURN 1 AS one UNION RETURN 2 as one} RETURN p") {
-    val returns = parseReturnedExpr(testName)
-
-    val expected = PathExpression(
-      NodePathStep(varFor("a"), NilPathStep()(pos))(pos)
-    ) _
-
-    returns should equal(expected: PathExpression)
+    assertRewrittenReturnP(
+      testName,
+      """MATCH (a)
+        |CALL () {
+        |  RETURN 1 AS one
+        |  UNION
+        |  RETURN 2 AS one
+        |}
+        |RETURN (a) AS p""".stripMargin,
+      PathExpression(
+        NodePathStep(varFor("a"), NilPathStep()(pos))(pos)
+      )(pos)
+    )
   }
 
   test("MATCH p = (a) CALL {RETURN 1 AS one UNION RETURN 2 as one} RETURN p") {
-    val returns = parseReturnedExpr(testName)
-
-    val expected = PathExpression(
-      NodePathStep(varFor("a"), NilPathStep()(pos))(pos)
-    ) _
-
-    returns should equal(expected: PathExpression)
+    assertRewrittenReturnP(
+      testName,
+      """MATCH (a)
+        |CALL {
+        |  RETURN 1 AS one
+        |  UNION
+        |  RETURN 2 AS one
+        |}
+        |RETURN (a) AS p""".stripMargin,
+      PathExpression(
+        NodePathStep(varFor("a"), NilPathStep()(pos))(pos)
+      )(pos)
+    )
   }
 
   test("MATCH p = (a) CALL (a) {RETURN 1 AS one UNION RETURN 2 as one} RETURN p") {
-    val returns = parseReturnedExpr(testName)
+    assertRewrittenReturnP(
+      testName,
+      """MATCH (a)
+        |CALL (a) {
+        |  RETURN 1 AS one
+        |  UNION
+        |  RETURN 2 AS one
+        |}
+        |RETURN (a) AS p""".stripMargin,
+      PathExpression(
+        NodePathStep(varFor("a"), NilPathStep()(pos))(pos)
+      )(pos)
+    )
 
-    val expected = PathExpression(
-      NodePathStep(varFor("a"), NilPathStep()(pos))(pos)
-    ) _
-
-    returns should equal(expected: PathExpression)
   }
 
   test("MATCH p = (a) CALL {WITH a RETURN 1 AS one UNION WITH a RETURN 2 as one} RETURN p") {
-    val returns = parseReturnedExpr(testName)
+    assertRewrittenReturnP(
+      testName,
+      """MATCH (a)
+        |CALL {
+        |  WITH a AS a
+        |  RETURN 1 AS one
+        |  UNION
+        |  WITH a AS a
+        |  RETURN 2 AS one
+        |}
+        |RETURN (a) AS p""".stripMargin,
+      PathExpression(
+        NodePathStep(varFor("a"), NilPathStep()(pos))(pos)
+      )(pos)
+    )
+  }
 
-    val expected = PathExpression(
-      NodePathStep(varFor("a"), NilPathStep()(pos))(pos)
-    ) _
+  test("Usage with redeclaration and usage later in query") {
+    assertRewritten(
+      """MATCH p = (a)-[r:R]->(b)
+        |CALL(p) {
+        |  WITH p, nodes(p) AS y
+        |  CALL(p, y) {
+        |    RETURN nodes(p) AS z
+        |  }
+        |  RETURN z
+        |}
+        |RETURN p, z""".stripMargin,
+      """MATCH (a)-[r:R]->(b)
+        |CALL (b,r,a) {
+        |  WITH (a)-[r]->(b) AS p, nodes((a)-[r]->(b)) AS y
+        |  CALL (p,y) {
+        |    RETURN nodes(p) AS z
+        |  }
+        |  RETURN z AS z
+        |}
+        |RETURN (a)-[r]->(b) AS p, z AS z""".stripMargin
+    )
+  }
 
-    returns should equal(expected: PathExpression)
+  test("Usage without redeclaration and usage later in query") {
+    assertRewritten(
+      """MATCH p = (a)-[r:R]->(b)
+        |CALL(p) {
+        |  WITH nodes(p) AS y
+        |  CALL(p, y) {
+        |    RETURN nodes(p) AS z
+        |  }
+        |  RETURN z
+        |}
+        |RETURN p AS p, z AS z""".stripMargin,
+      """MATCH (a)-[r:R]->(b)
+        |CALL (b,r,a) {
+        |  WITH nodes((a)-[r]->(b)) AS y
+        |  CALL (b,r,a,y) {
+        |    RETURN nodes((a)-[r]->(b)) AS z
+        |  }
+        |  RETURN z AS z
+        |}
+        |RETURN (a)-[r]->(b) AS p, z AS z""".stripMargin
+    )
+  }
+
+  test("Usage in aggregation without redeclaration and usage later in query") {
+    assertRewritten(
+      """MATCH p = (a)-[r:R]->(b)
+        |CALL(p) {
+        |  WITH count(p) AS y
+        |  CALL(p, y) {
+        |    RETURN nodes(p) AS z
+        |  }
+        |  RETURN z
+        |}
+        |RETURN p AS p, z AS z""".stripMargin,
+      """MATCH (a)-[r:R]->(b)
+        |CALL (b,r,a) {
+        |  WITH count((a)-[r]->(b)) AS y
+        |  CALL (b,r,a,y) {
+        |    RETURN nodes((a)-[r]->(b)) AS z
+        |  }
+        |  RETURN z AS z
+        |}
+        |RETURN (a)-[r]->(b) AS p, z AS z""".stripMargin
+    )
+  }
+
+  test("Redeclaration and usage in the same clause") {
+    assertRewritten(
+      """MATCH p = (a)-[r:R]->(b)
+        |WITH p, COUNT {
+        |    RETURN p AS x
+        |  } AS x
+        |RETURN p AS p, x AS x""".stripMargin,
+      """MATCH (a)-[r:R]->(b)
+        |WITH (a)-[r]->(b) AS p, COUNT { RETURN (a)-[r]->(b) AS x } AS x
+        |RETURN p AS p, x AS x""".stripMargin
+    )
   }
 
   test("CALL () {MATCH p = (a) RETURN p} RETURN p") {
@@ -193,6 +332,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           NodePattern(Some(a), None, None, None)(pos)
         ),
         List(),
+        None,
         None
       )(pos)
 
@@ -200,11 +340,15 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         Return(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
-              AliasedReturnItem(PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos), p)(pos)
+              AliasedReturnItem(
+                PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos),
+                p
+              )(pos, AliasedReturnItem.wasAutoAliasedDefault)
             )
           )(pos),
+          None,
           None,
           None,
           None
@@ -217,11 +361,12 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
-            AliasedReturnItem(p, p)(pos)
+            AliasedReturnItem(p, p)(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -245,6 +390,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           NodePattern(Some(a), None, None, None)(pos)
         ),
         List(),
+        None,
         None
       )(pos)
 
@@ -252,11 +398,15 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         Return(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
-              AliasedReturnItem(PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos), p)(pos)
+              AliasedReturnItem(
+                PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos),
+                p
+              )(pos, AliasedReturnItem.wasAutoAliasedDefault)
             )
           )(pos),
+          None,
           None,
           None,
           None
@@ -269,11 +419,12 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
-            AliasedReturnItem(p, p)(pos)
+            AliasedReturnItem(p, p)(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -298,6 +449,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         NodePattern(Some(a), None, None, None)(pos)
       ),
       List(),
+      None,
       None
     )(pos)
 
@@ -306,11 +458,12 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         Return(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
               AliasedReturnItem(literalInt(1), one)(pos)
             )
           )(pos),
+          None,
           None,
           None,
           None
@@ -323,11 +476,15 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
-            AliasedReturnItem(PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos), p)(pos)
+            AliasedReturnItem(
+              PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos),
+              p
+            )(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -352,6 +509,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         NodePattern(Some(a), None, None, None)(pos)
       ),
       List(),
+      None,
       None
     )(pos)
 
@@ -360,26 +518,32 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         With(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
-              AliasedReturnItem(a, a)(pos)
+              AliasedReturnItem(a, a)(pos, AliasedReturnItem.wasAutoAliasedDefault)
             )
           )(pos),
           None,
           None,
           None,
-          None
+          None,
+          None,
+          withType = AddedInRewriteGeneral()
         )(pos)
 
       val WITH2 =
         With(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
-              AliasedReturnItem(PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos), p)(pos)
+              AliasedReturnItem(
+                PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos),
+                p
+              )(pos, AliasedReturnItem.wasAutoAliasedDefault)
             )
           )(pos),
+          None,
           None,
           None,
           None,
@@ -390,11 +554,12 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         Return(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
               AliasedReturnItem(literalInt(1), one)(pos)
             )
           )(pos),
+          None,
           None,
           None,
           None
@@ -407,11 +572,15 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
-            AliasedReturnItem(PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos), p)(pos)
+            AliasedReturnItem(
+              PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos),
+              p
+            )(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -442,6 +611,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         )(pos)
       ),
       List(),
+      None,
       None
     )(pos)
 
@@ -450,24 +620,26 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         With(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
-              AliasedReturnItem(b, b)(pos),
-              AliasedReturnItem(r, r)(pos),
-              AliasedReturnItem(a, a)(pos)
+              AliasedReturnItem(b, b)(pos, AliasedReturnItem.wasAutoAliasedDefault),
+              AliasedReturnItem(r, r)(pos, AliasedReturnItem.wasAutoAliasedDefault),
+              AliasedReturnItem(a, a)(pos, AliasedReturnItem.wasAutoAliasedDefault)
             )
           )(pos),
           None,
           None,
           None,
-          None
+          None,
+          None,
+          withType = AddedInRewriteGeneral()
         )(pos)
 
       val WITH2 =
         With(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
               AliasedReturnItem(
                 PathExpression(NodePathStep(
@@ -481,6 +653,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           None,
           None,
           None,
+          None,
           None
         )(pos)
 
@@ -488,14 +661,15 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         Return(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
               AliasedReturnItem(
                 p,
                 p1
-              )(pos)
+              )(pos, AliasedReturnItem.wasAutoAliasedDefault)
             )
           )(pos),
+          None,
           None,
           None,
           None
@@ -508,7 +682,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
             AliasedReturnItem(
               PathExpression(NodePathStep(
@@ -520,9 +694,10 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
             AliasedReturnItem(
               p1,
               p1
-            )(pos)
+            )(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -554,6 +729,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         )(pos)
       ),
       List(),
+      None,
       None
     )(pos)
 
@@ -562,7 +738,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         Return(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
               AliasedReturnItem(
                 PathExpression(NodePathStep(
@@ -575,6 +751,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           )(pos),
           None,
           None,
+          None,
           None
         )(pos)
 
@@ -585,7 +762,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
             AliasedReturnItem(
               PathExpression(NodePathStep(
@@ -597,9 +774,10 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
             AliasedReturnItem(
               p1,
               p1
-            )(pos)
+            )(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -631,6 +809,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         )(pos)
       ),
       List(),
+      None,
       None
     )(pos)
 
@@ -639,11 +818,12 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         Return(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
               AliasedReturnItem(literalInt(1), one)(pos)
             )
           )(pos),
+          None,
           None,
           None,
           None
@@ -656,7 +836,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
             AliasedReturnItem(
               PathExpression(NodePathStep(
@@ -667,6 +847,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
             )(pos)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -698,6 +879,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         )(pos)
       ),
       List(),
+      None,
       None
     )(pos)
 
@@ -706,24 +888,26 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         With(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
-              AliasedReturnItem(b, b)(pos),
-              AliasedReturnItem(r, r)(pos),
-              AliasedReturnItem(a, a)(pos)
+              AliasedReturnItem(b, b)(pos, AliasedReturnItem.wasAutoAliasedDefault),
+              AliasedReturnItem(r, r)(pos, AliasedReturnItem.wasAutoAliasedDefault),
+              AliasedReturnItem(a, a)(pos, AliasedReturnItem.wasAutoAliasedDefault)
             )
           )(pos),
           None,
           None,
           None,
-          None
+          None,
+          None,
+          withType = AddedInRewriteGeneral()
         )(pos)
 
       val WITH2 =
         With(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
               AliasedReturnItem(
                 PathExpression(NodePathStep(
@@ -737,6 +921,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           None,
           None,
           None,
+          None,
           None
         )(pos)
 
@@ -744,11 +929,12 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         Return(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
               AliasedReturnItem(literalInt(1), one)(pos)
             )
           )(pos),
+          None,
           None,
           None,
           None
@@ -761,7 +947,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
             AliasedReturnItem(
               PathExpression(NodePathStep(
@@ -772,6 +958,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
             )(pos)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -809,6 +996,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         )(pos)
       ),
       List(),
+      None,
       None
     )(pos)
 
@@ -817,11 +1005,12 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         Return(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
               AliasedReturnItem(literalInt(1), one)(pos)
             )
           )(pos),
+          None,
           None,
           None,
           None
@@ -834,7 +1023,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
             AliasedReturnItem(
               PathExpression(NodePathStep(
@@ -845,6 +1034,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
             )(pos)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -883,6 +1073,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         )(pos)
       ),
       List(),
+      None,
       None
     )(pos)
 
@@ -891,26 +1082,28 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         With(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
-              AliasedReturnItem(b, b)(pos),
-              AliasedReturnItem(r, r)(pos),
-              AliasedReturnItem(a, a)(pos),
-              AliasedReturnItem(c, c)(pos),
-              AliasedReturnItem(s, s)(pos)
+              AliasedReturnItem(b, b)(pos, AliasedReturnItem.wasAutoAliasedDefault),
+              AliasedReturnItem(r, r)(pos, AliasedReturnItem.wasAutoAliasedDefault),
+              AliasedReturnItem(a, a)(pos, AliasedReturnItem.wasAutoAliasedDefault),
+              AliasedReturnItem(c, c)(pos, AliasedReturnItem.wasAutoAliasedDefault),
+              AliasedReturnItem(s, s)(pos, AliasedReturnItem.wasAutoAliasedDefault)
             )
           )(pos),
           None,
           None,
           None,
-          None
+          None,
+          None,
+          withType = AddedInRewriteGeneral()
         )(pos)
 
       val WITH2 =
         With(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
               AliasedReturnItem(
                 PathExpression(NodePathStep(
@@ -931,6 +1124,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           None,
           None,
           None,
+          None,
           None
         )(pos)
 
@@ -938,11 +1132,12 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         Return(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
               AliasedReturnItem(literalInt(1), one)(pos)
             )
           )(pos),
+          None,
           None,
           None,
           None
@@ -955,7 +1150,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
             AliasedReturnItem(
               PathExpression(NodePathStep(
@@ -966,6 +1161,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
             )(pos)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -1002,6 +1198,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         )(pos)
       ),
       List(),
+      None,
       None
     )(pos)
 
@@ -1010,11 +1207,12 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         Return(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
               AliasedReturnItem(literalInt(1), one)(pos)
             )
           )(pos),
+          None,
           None,
           None,
           None
@@ -1027,7 +1225,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
             AliasedReturnItem(
               PathExpression(
@@ -1045,6 +1243,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
             )(pos)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -1081,6 +1280,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         )(pos)
       ),
       List(),
+      None,
       None
     )(pos)
 
@@ -1089,26 +1289,28 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         With(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
-              AliasedReturnItem(s, s)(pos),
-              AliasedReturnItem(r, r)(pos),
-              AliasedReturnItem(b, b)(pos),
-              AliasedReturnItem(a, a)(pos),
-              AliasedReturnItem(c, c)(pos)
+              AliasedReturnItem(s, s)(pos, AliasedReturnItem.wasAutoAliasedDefault),
+              AliasedReturnItem(r, r)(pos, AliasedReturnItem.wasAutoAliasedDefault),
+              AliasedReturnItem(b, b)(pos, AliasedReturnItem.wasAutoAliasedDefault),
+              AliasedReturnItem(a, a)(pos, AliasedReturnItem.wasAutoAliasedDefault),
+              AliasedReturnItem(c, c)(pos, AliasedReturnItem.wasAutoAliasedDefault)
             )
           )(pos),
           None,
           None,
           None,
-          None
+          None,
+          None,
+          withType = AddedInRewriteGeneral()
         )(pos)
 
       val WITH2 =
         With(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
               AliasedReturnItem(
                 PathExpression(
@@ -1129,6 +1331,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           None,
           None,
           None,
+          None,
           None
         )(pos)
 
@@ -1136,11 +1339,12 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         Return(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
               AliasedReturnItem(literalInt(1), one)(pos)
             )
           )(pos),
+          None,
           None,
           None,
           None
@@ -1153,7 +1357,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
             AliasedReturnItem(
               PathExpression(
@@ -1171,6 +1375,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
             )(pos)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -1195,6 +1400,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         NodePattern(Some(a), None, None, None)(pos)
       ),
       List(),
+      None,
       None
     )(pos)
 
@@ -1203,11 +1409,12 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         Return(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
               AliasedReturnItem(literalInt(1), one)(pos)
             )
           )(pos),
+          None,
           None,
           None,
           None
@@ -1220,11 +1427,15 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
-            AliasedReturnItem(PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos), p)(pos)
+            AliasedReturnItem(
+              PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos),
+              p
+            )(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -1249,6 +1460,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         NodePattern(Some(a), None, None, None)(pos)
       ),
       List(),
+      None,
       None
     )(pos)
 
@@ -1257,27 +1469,33 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         With(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
-              AliasedReturnItem(a, a)(pos)
+              AliasedReturnItem(a, a)(pos, AliasedReturnItem.wasAutoAliasedDefault)
             )
           )(pos),
           None,
           None,
           None,
-          None
+          None,
+          None,
+          withType = AddedInRewriteGeneral()
         )(pos)
 
       val WITH2 =
         With(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
-              AliasedReturnItem(PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos), p)(pos),
-              AliasedReturnItem(a, a)(pos)
+              AliasedReturnItem(
+                PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos),
+                p
+              )(pos, AliasedReturnItem.wasAutoAliasedDefault),
+              AliasedReturnItem(a, a)(pos, AliasedReturnItem.wasAutoAliasedDefault)
             )
           )(pos),
+          None,
           None,
           None,
           None,
@@ -1288,11 +1506,12 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         Return(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
               AliasedReturnItem(literalInt(1), one)(pos)
             )
           )(pos),
+          None,
           None,
           None,
           None
@@ -1305,11 +1524,15 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
-            AliasedReturnItem(PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos), p)(pos)
+            AliasedReturnItem(
+              PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos),
+              p
+            )(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -1336,6 +1559,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         NodePattern(Some(b), None, None, None)(pos)
       ),
       List(),
+      None,
       None
     )(pos)
 
@@ -1344,11 +1568,12 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         Return(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
               AliasedReturnItem(literalInt(1), one)(pos)
             )
           )(pos),
+          None,
           None,
           None,
           None
@@ -1361,11 +1586,15 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
-            AliasedReturnItem(PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos), p)(pos)
+            AliasedReturnItem(
+              PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos),
+              p
+            )(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -1392,6 +1621,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         NodePattern(Some(b), None, None, None)(pos)
       ),
       List(),
+      None,
       None
     )(pos)
 
@@ -1400,28 +1630,34 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         With(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
-              AliasedReturnItem(a, a)(pos),
-              AliasedReturnItem(b, b)(pos)
+              AliasedReturnItem(a, a)(pos, AliasedReturnItem.wasAutoAliasedDefault),
+              AliasedReturnItem(b, b)(pos, AliasedReturnItem.wasAutoAliasedDefault)
             )
           )(pos),
           None,
           None,
           None,
-          None
+          None,
+          None,
+          withType = AddedInRewriteGeneral()
         )(pos)
 
       val WITH2 =
         With(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
-              AliasedReturnItem(PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos), p)(pos),
-              AliasedReturnItem(b, b)(pos)
+              AliasedReturnItem(
+                PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos),
+                p
+              )(pos, AliasedReturnItem.wasAutoAliasedDefault),
+              AliasedReturnItem(b, b)(pos, AliasedReturnItem.wasAutoAliasedDefault)
             )
           )(pos),
+          None,
           None,
           None,
           None,
@@ -1432,11 +1668,12 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         Return(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(
               AliasedReturnItem(literalInt(1), one)(pos)
             )
           )(pos),
+          None,
           None,
           None,
           None
@@ -1449,11 +1686,15 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
-            AliasedReturnItem(PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos), p)(pos)
+            AliasedReturnItem(
+              PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos),
+              p
+            )(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -1478,6 +1719,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         NodePattern(Some(a), None, None, None)(pos)
       ),
       List(),
+      None,
       None
     )(pos)
 
@@ -1487,11 +1729,12 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           Return(
             distinct = false,
             ReturnItems(
-              includeExisting = false,
+              FreeProjection,
               Seq(
                 AliasedReturnItem(literalInt(1), one)(pos)
               )
             )(pos),
+            None,
             None,
             None,
             None
@@ -1504,11 +1747,12 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           Return(
             distinct = false,
             ReturnItems(
-              includeExisting = false,
+              FreeProjection,
               Seq(
                 AliasedReturnItem(literalInt(2), one)(pos)
               )
             )(pos),
+            None,
             None,
             None,
             None
@@ -1516,24 +1760,22 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
 
         SingleQuery(List(RETURN))(pos)
       }
-      ScopeClauseSubqueryCall(
-        UnionDistinct(LEFT, RIGHT)(pos),
-        false,
-        Seq(a),
-        None,
-        false
-      )(pos)
+      ScopeClauseSubqueryCall(UnionDistinct(LEFT, RIGHT)(pos), false, Seq(a), None, false)(pos)
     }
 
     val RETURN =
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
-            AliasedReturnItem(PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos), p)(pos)
+            AliasedReturnItem(
+              PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos),
+              p
+            )(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -1558,6 +1800,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
         NodePattern(Some(a), None, None, None)(pos)
       ),
       List(),
+      None,
       None
     )(pos)
 
@@ -1567,26 +1810,35 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           With(
             distinct = false,
             ReturnItems(
-              includeExisting = false,
+              FreeProjection,
               Seq(
-                AliasedReturnItem(a, a)(pos)
+                AliasedReturnItem(a, a)(pos, AliasedReturnItem.wasAutoAliasedDefault)
               )
             )(pos),
             None,
             None,
             None,
-            None
+            None,
+            None,
+            withType = AddedInRewriteGeneral()
           )(pos)
 
         val WITH2 =
           With(
             distinct = false,
             ReturnItems(
-              includeExisting = false,
+              FreeProjection,
               Seq(
-                AliasedReturnItem(PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos), p)(pos)
+                AliasedReturnItem(
+                  PathExpression(NodePathStep(
+                    a,
+                    NilPathStep()(pos)
+                  )(pos))(pos),
+                  p
+                )(pos, AliasedReturnItem.wasAutoAliasedDefault)
               )
             )(pos),
+            None,
             None,
             None,
             None,
@@ -1597,11 +1849,12 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           Return(
             distinct = false,
             ReturnItems(
-              includeExisting = false,
+              FreeProjection,
               Seq(
                 AliasedReturnItem(literalInt(1), one)(pos)
               )
             )(pos),
+            None,
             None,
             None,
             None
@@ -1614,26 +1867,35 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           With(
             distinct = false,
             ReturnItems(
-              includeExisting = false,
+              FreeProjection,
               Seq(
-                AliasedReturnItem(a, a)(pos)
+                AliasedReturnItem(a, a)(pos, AliasedReturnItem.wasAutoAliasedDefault)
               )
             )(pos),
             None,
             None,
             None,
-            None
+            None,
+            None,
+            withType = AddedInRewriteGeneral()
           )(pos)
 
         val WITH2 =
           With(
             distinct = false,
             ReturnItems(
-              includeExisting = false,
+              FreeProjection,
               Seq(
-                AliasedReturnItem(PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos), p)(pos)
+                AliasedReturnItem(
+                  PathExpression(NodePathStep(
+                    a,
+                    NilPathStep()(pos)
+                  )(pos))(pos),
+                  p
+                )(pos, AliasedReturnItem.wasAutoAliasedDefault)
               )
             )(pos),
+            None,
             None,
             None,
             None,
@@ -1644,11 +1906,12 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           Return(
             distinct = false,
             ReturnItems(
-              includeExisting = false,
+              FreeProjection,
               Seq(
                 AliasedReturnItem(literalInt(2), one)(pos)
               )
             )(pos),
+            None,
             None,
             None,
             None
@@ -1663,11 +1926,15 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
-            AliasedReturnItem(PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos), p)(pos)
+            AliasedReturnItem(
+              PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos),
+              p
+            )(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -1690,6 +1957,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           NodePattern(Some(a), None, None, None)(pos)
         ),
         List(),
+        None,
         None
       )(pos)
 
@@ -1697,11 +1965,15 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       With(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
-            AliasedReturnItem(PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos), p)(pos)
+            AliasedReturnItem(
+              PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos),
+              p
+            )(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
         None,
         None,
         None,
@@ -1712,11 +1984,12 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
-            AliasedReturnItem(p, p)(pos)
+            AliasedReturnItem(p, p)(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -1740,6 +2013,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           NodePattern(Some(a), None, None, None)(pos)
         ),
         List(),
+        None,
         None
       )(pos)
 
@@ -1747,12 +2021,16 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       With(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
-            AliasedReturnItem(PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos), p)(pos),
-            AliasedReturnItem(a, a)(pos)
+            AliasedReturnItem(
+              PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos),
+              p
+            )(pos, AliasedReturnItem.wasAutoAliasedDefault),
+            AliasedReturnItem(a, a)(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
         None,
         None,
         None,
@@ -1763,11 +2041,12 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
-            AliasedReturnItem(p, p)(pos)
+            AliasedReturnItem(p, p)(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -1793,6 +2072,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           NodePattern(Some(a), None, None, None)(pos)
         ),
         List(),
+        None,
         None
       )(pos)
 
@@ -1800,11 +2080,15 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       With(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
-            AliasedReturnItem(PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos), p)(pos)
+            AliasedReturnItem(
+              PathExpression(NodePathStep(a, NilPathStep()(pos))(pos))(pos),
+              p
+            )(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
         None,
         None,
         None,
@@ -1819,6 +2103,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           NodePattern(Some(b), None, None, None)(pos)
         ),
         List(),
+        None,
         None
       )(pos)
 
@@ -1826,12 +2111,16 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       With(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
-            AliasedReturnItem(p, p)(pos),
-            AliasedReturnItem(PathExpression(NodePathStep(b, NilPathStep()(pos))(pos))(pos), q)(pos)
+            AliasedReturnItem(p, p)(pos, AliasedReturnItem.wasAutoAliasedDefault),
+            AliasedReturnItem(
+              PathExpression(NodePathStep(b, NilPathStep()(pos))(pos))(pos),
+              q
+            )(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
         None,
         None,
         None,
@@ -1842,12 +2131,13 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
-            AliasedReturnItem(p, p)(pos),
-            AliasedReturnItem(q, q)(pos)
+            AliasedReturnItem(p, p)(pos, AliasedReturnItem.wasAutoAliasedDefault),
+            AliasedReturnItem(q, q)(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -1859,55 +2149,69 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
   }
 
   test("MATCH p = (a)-[r]->(b) RETURN p") {
-    val returns = parseReturnedExpr("MATCH p = (a)-[r]->(b) RETURN p")
-
-    val expected = PathExpression(
-      NodePathStep(
-        varFor("a"),
-        SingleRelationshipPathStep(varFor("r"), SemanticDirection.OUTGOING, Some(varFor("b")), NilPathStep()(pos))(pos)
+    assertRewrittenReturnP(
+      "MATCH p = (a)-[r]->(b) RETURN p",
+      """MATCH (a)-[r]->(b)
+        |RETURN (a)-[r]->(b) AS p""".stripMargin,
+      PathExpression(
+        NodePathStep(
+          varFor("a"),
+          SingleRelationshipPathStep(
+            varFor("r"),
+            SemanticDirection.OUTGOING,
+            Some(varFor("b")),
+            NilPathStep()(pos)
+          )(pos)
+        )(pos)
       )(pos)
-    ) _
-
-    returns should equal(expected: PathExpression)
+    )
   }
 
   test("MATCH p = (b)<-[r]->(a) RETURN p") {
-    val returns = parseReturnedExpr("MATCH p = (b)<-[r]-(a) RETURN p")
-
-    val expected = PathExpression(
-      NodePathStep(
-        varFor("b"),
-        SingleRelationshipPathStep(varFor("r"), SemanticDirection.INCOMING, Some(varFor("a")), NilPathStep()(pos))(pos)
+    assertRewrittenReturnP(
+      "MATCH p = (b)<-[r]-(a) RETURN p",
+      """MATCH (b)<-[r]-(a)
+        |RETURN (b)<-[r]-(a) AS p""".stripMargin,
+      PathExpression(
+        NodePathStep(
+          varFor("b"),
+          SingleRelationshipPathStep(
+            varFor("r"),
+            SemanticDirection.INCOMING,
+            Some(varFor("a")),
+            NilPathStep()(pos)
+          )(pos)
+        )(pos)
       )(pos)
-    ) _
-
-    returns should equal(expected: PathExpression)
+    )
   }
 
   test("MATCH p = (a)-[r*]->(b) RETURN p") {
-    val returns = parseReturnedExpr("MATCH p = (a)-[r*]->(b) RETURN p")
-
-    val expected = PathExpression(
-      NodePathStep(
-        varFor("a"),
-        MultiRelationshipPathStep(varFor("r"), SemanticDirection.OUTGOING, Some(varFor("b")), NilPathStep()(pos))(pos)
+    assertRewrittenReturnP(
+      "MATCH p = (a)-[r*]->(b) RETURN p",
+      """MATCH (a)-[r*]->(b)
+        |RETURN (a)-[r*]->(b) AS p""".stripMargin,
+      PathExpression(
+        NodePathStep(
+          varFor("a"),
+          MultiRelationshipPathStep(varFor("r"), SemanticDirection.OUTGOING, Some(varFor("b")), NilPathStep()(pos))(pos)
+        )(pos)
       )(pos)
-    ) _
-
-    returns should equal(expected: PathExpression)
+    )
   }
 
   test("MATCH p = (b)<-[r*]-(a) RETURN p AS p") {
-    val returns = parseReturnedExpr("MATCH p = (b)<-[r*]-(a) RETURN p AS p")
-
-    val expected = PathExpression(
-      NodePathStep(
-        varFor("b"),
-        MultiRelationshipPathStep(varFor("r"), SemanticDirection.INCOMING, Some(varFor("a")), NilPathStep()(pos))(pos)
+    assertRewrittenReturnP(
+      "MATCH p = (b)<-[r*]-(a) RETURN p AS p",
+      """MATCH (b)<-[r*]-(a)
+        |RETURN (b)<-[r*]-(a) AS p""".stripMargin,
+      PathExpression(
+        NodePathStep(
+          varFor("b"),
+          MultiRelationshipPathStep(varFor("r"), SemanticDirection.INCOMING, Some(varFor("a")), NilPathStep()(pos))(pos)
+        )(pos)
       )(pos)
-    ) _
-
-    returns should equal(expected: PathExpression)
+    )
   }
 
   test("MATCH p = (a) ((n)-[r]->(m)-[q]->(o))+ (b) RETURN p AS p") {
@@ -1997,6 +2301,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           )(pos)
         ),
         List(),
+        None,
         None
       )(pos)
 
@@ -2004,7 +2309,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
             AliasedReturnItem(
               PathExpression(NodePathStep(
@@ -2016,6 +2321,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
             AliasedReturnItem(literalInt(42), orderId)(pos)
           )
         )(pos),
+        None,
         Some(OrderBy(List(AscSortItem(orderId)(pos)))(pos)),
         None,
         None
@@ -2059,18 +2365,20 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           )(pos)
         ),
         List(),
-        Some(WHERE)
+        Some(WHERE),
+        None
       )(pos)
 
     val RETURN =
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           List(
             AliasedReturnItem(literalInt(1), varFor("x"))(pos)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -2094,6 +2402,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           NodePattern(Some(a), None, None, None)(pos)
         ),
         List(),
+        None,
         None
       )(pos)
 
@@ -2102,12 +2411,13 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       With(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
             AliasedReturnItem(function("length", pathExpression), l)(pos),
-            AliasedReturnItem(CountStar()(pos), x)(pos)
+            AliasedReturnItem(CountStar()(pos), x)(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
         None,
         None,
         None,
@@ -2118,12 +2428,13 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       With(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
-            AliasedReturnItem(l, l)(pos),
-            AliasedReturnItem(x, x)(pos)
+            AliasedReturnItem(l, l)(pos, AliasedReturnItem.wasAutoAliasedDefault),
+            AliasedReturnItem(x, x)(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
         None,
         None,
         None,
@@ -2134,11 +2445,12 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
             AliasedReturnItem(add(l, x), varFor("l + x"))(pos)
           )
         )(pos),
+        None,
         None,
         None,
         None
@@ -2162,6 +2474,7 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           NodePattern(Some(aId), None, None, None)(pos)
         ),
         List(),
+        None,
         None
       )(pos)
 
@@ -2179,11 +2492,12 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       With(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           Seq(
-            AliasedReturnItem(aId, aId)(pos)
+            AliasedReturnItem(aId, aId)(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
         Some(OrderBy(List(AscSortItem(pathExpression)(pos)))(pos)),
         None,
         None,
@@ -2194,11 +2508,80 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
       Return(
         distinct = false,
         ReturnItems(
-          includeExisting = false,
+          FreeProjection,
           List(
-            AliasedReturnItem(aId, aId)(pos)
+            AliasedReturnItem(aId, aId)(pos, AliasedReturnItem.wasAutoAliasedDefault)
           )
         )(pos),
+        None,
+        None,
+        None,
+        None
+      )(pos)
+
+    val expected: Query = SingleQuery(List(MATCH, WITH, RETURN))(pos)
+
+    rewritten should equal(expected)
+  }
+
+  test("Multiple paths WHERE and ORDER BY on WITH clauses should be rewritten") {
+    val rewritten = projectionInlinedAst("MATCH p = (a), q = (b) WITH p ORDER BY p WHERE length(q) = 1 RETURN p")
+
+    val aId = varFor("a")
+    val bId = varFor("b")
+
+    val pId = varFor("p")
+
+    val MATCH =
+      Match(
+        optional = false,
+        matchMode = MatchMode.default(pos),
+        patternForMatch(
+          NodePattern(Some(aId), None, None, None)(pos),
+          NodePattern(Some(bId), None, None, None)(pos)
+        ),
+        List(),
+        None,
+        None
+      )(pos)
+
+    val pathExpressionA = PathExpression(NodePathStep(aId, NilPathStep()(pos))(pos))(pos)
+    val pathExpressionB = PathExpression(NodePathStep(bId, NilPathStep()(pos))(pos))(pos)
+
+    val WHERE =
+      Where(
+        equals(
+          function("length", pathExpressionB),
+          literalInt(1)
+        )
+      )(pos)
+
+    val WITH =
+      With(
+        distinct = false,
+        ReturnItems(
+          FreeProjection,
+          Seq(
+            AliasedReturnItem(pathExpressionA, pId)(pos, AliasedReturnItem.wasAutoAliasedDefault)
+          )
+        )(pos),
+        None,
+        Some(OrderBy(List(AscSortItem(pId)(pos)))(pos)),
+        None,
+        None,
+        Some(WHERE)
+      )(pos)
+
+    val RETURN =
+      Return(
+        distinct = false,
+        ReturnItems(
+          FreeProjection,
+          List(
+            AliasedReturnItem(pId, pId)(pos, AliasedReturnItem.wasAutoAliasedDefault)
+          )
+        )(pos),
+        None,
         None,
         None,
         None
@@ -2210,9 +2593,10 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
   }
 
   test("Shortest path with predicate and path assignment, 1 relationship, OUTGOING") {
-    val returns = parseReturnedExpr("MATCH p = ANY SHORTEST ((a)-[r]->+(b) WHERE a.prop IS NOT NULL) RETURN p")
-
-    val expectedPathExpression =
+    assertRewrittenReturnP(
+      "MATCH p = ANY SHORTEST ((a)-[r]->+(b) WHERE a.prop IS NOT NULL) RETURN p",
+      """MATCH SHORTEST 1 PATHS ((a) (()-[r]->())+ (b) WHERE a.prop IS NOT NULL)
+        |RETURN (a)-[r*]->(b) AS p""".stripMargin,
       PathExpression(step =
         NodePathStep(
           node = varFor("a"),
@@ -2224,14 +2608,14 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           )(pos)
         )(pos)
       )(pos)
-
-    returns shouldEqual expectedPathExpression
+    )
   }
 
   test("Shortest path with predicate and path assignment, 1 relationship, INCOMING") {
-    val returns = parseReturnedExpr("MATCH p = ANY SHORTEST ((a)<-[r]-+(b) WHERE a.prop IS NOT NULL) RETURN p")
-
-    val expectedPathExpression =
+    assertRewrittenReturnP(
+      "MATCH p = ANY SHORTEST ((a)<-[r]-+(b) WHERE a.prop IS NOT NULL) RETURN p",
+      """MATCH SHORTEST 1 PATHS ((a) (()<-[r]-())+ (b) WHERE a.prop IS NOT NULL)
+        |RETURN (a)<-[r*]-(b) AS p""".stripMargin,
       PathExpression(step =
         NodePathStep(
           node = varFor("a"),
@@ -2243,14 +2627,14 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           )(pos)
         )(pos)
       )(pos)
-
-    returns shouldEqual expectedPathExpression
+    )
   }
 
   test("Shortest path with path assignment, 2 relationships") {
-    val returns = parseReturnedExpr("MATCH p = ANY SHORTEST ((a) ((a_in)-[r]->(b_in)-[r2]->(c_in))+ (c)) RETURN p")
-
-    val expectedPathExpression =
+    assertRewrittenReturnP(
+      "MATCH p = ANY SHORTEST ((a) ((a_in)-[r]->(b_in)-[r2]->(c_in))+ (c)) RETURN p",
+      """MATCH SHORTEST 1 PATHS ((a) ((a_in)-[r]->(b_in)-[r2]->(c_in))+ (c))
+        |RETURN (a) ((a_in)-[r]-(b_in)-[r2]-())* (c) AS p""".stripMargin,
       PathExpression(step =
         NodePathStep(
           node = varFor("a"),
@@ -2261,7 +2645,6 @@ class ProjectNamedPathsTest extends CypherFunSuite with AstRewritingTestSupport 
           )(pos)
         )(pos)
       )(pos)
-
-    returns shouldEqual expectedPathExpression
+    )
   }
 }

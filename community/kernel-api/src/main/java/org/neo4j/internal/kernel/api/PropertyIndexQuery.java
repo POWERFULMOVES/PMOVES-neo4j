@@ -26,8 +26,10 @@ import static org.neo4j.values.storable.Values.utf8Value;
 
 import java.util.Arrays;
 import java.util.Objects;
+import java.util.OptionalLong;
 import org.apache.commons.lang3.builder.ToStringBuilder;
 import org.apache.commons.lang3.builder.ToStringStyle;
+import org.eclipse.collections.api.set.primitive.LongSet;
 import org.neo4j.internal.schema.IndexQuery;
 import org.neo4j.token.api.TokenConstants;
 import org.neo4j.values.AnyValue;
@@ -43,6 +45,7 @@ import org.neo4j.values.storable.ValueTuple;
 import org.neo4j.values.storable.Values;
 
 public abstract class PropertyIndexQuery implements IndexQuery {
+
     /**
      * Scans over the whole index
      *
@@ -53,13 +56,33 @@ public abstract class PropertyIndexQuery implements IndexQuery {
     }
 
     /**
-     * Searches the index for all entries that has the given property.
+     * Searches the index for all entries that have the given property.
      *
      * @param propertyKeyId the property ID to match.
-     * @return an {@link PropertyIndexQuery} instance to be used for querying an index.
+     * @return a {@link PropertyIndexQuery} instance to be used for querying an index.
      */
     public static ExistsPredicate exists(int propertyKeyId) {
         return new ExistsPredicate(propertyKeyId);
+    }
+
+    /**
+     * Searches the index for all entries that doesn't have the given property.
+     *
+     * @param propertyKeyId the property ID to match.
+     * @return a {@link PropertyIndexQuery} instance to be used for querying an index.
+     */
+    public static NotExistsPredicate notExists(int propertyKeyId) {
+        return new NotExistsPredicate(propertyKeyId);
+    }
+
+    /**
+     * Matches all entries given the provided property id, regardless if the property exists or not.
+     *
+     * @param propertyKeyId the property ID to match.
+     * @return a {@link PropertyIndexQuery} instance to be used for querying an index.
+     */
+    public static AllPredicate all(int propertyKeyId) {
+        return new AllPredicate(propertyKeyId);
     }
 
     /**
@@ -67,14 +90,18 @@ public abstract class PropertyIndexQuery implements IndexQuery {
      *
      * @param propertyKeyId the property ID to match.
      * @param value the property value to search for.
-     * @return an {@link PropertyIndexQuery} instance to be used for querying an index.
+     * @return a {@link PropertyIndexQuery} instance to be used for querying an index.
      */
     public static ExactPredicate exact(int propertyKeyId, Object value) {
-        var exactValue = value instanceof Value ? (Value) value : Values.of(value);
+        Value exactValue = value instanceof Value ? (Value) value : Values.of(value);
         if (AnyValue.isNaN(exactValue)) {
             return new IncomparableExactPredicate(propertyKeyId, exactValue);
         }
         return new ExactPredicate(propertyKeyId, exactValue);
+    }
+
+    public static InSetPredicate inSet(int propertyKeyId, Value[] values) {
+        return new InSetPredicate(propertyKeyId, values);
     }
 
     /**
@@ -85,7 +112,7 @@ public abstract class PropertyIndexQuery implements IndexQuery {
      * @param fromInclusive the lower bound is inclusive if true.
      * @param to upper bound of the range or null if unbounded
      * @param toInclusive the upper bound is inclusive if true.
-     * @return an {@link PropertyIndexQuery} instance to be used for querying an index.
+     * @return a {@link PropertyIndexQuery} instance to be used for querying an index.
      */
     public static RangePredicate<?> range(
             int propertyKeyId, Number from, boolean fromInclusive, Number to, boolean toInclusive) {
@@ -115,30 +142,39 @@ public abstract class PropertyIndexQuery implements IndexQuery {
 
         ValueGroup valueGroup = requireNonNullElse(from, to).valueGroup();
         return switch (valueGroup) {
-            case NUMBER -> AnyValue.hasNaNOperand(from, to)
-                    // When the range bounds are explicitly set to NaN, we don't want to find anything
-                    // because any comparison with NaN is false.
-                    ? new IncomparableRangePredicate<>(
-                            propertyKeyId, ValueGroup.NUMBER, from, fromInclusive, to, toInclusive)
-                    : new NumberRangePredicate(
-                            propertyKeyId, (NumberValue) from, fromInclusive, (NumberValue) to, toInclusive);
+            case NUMBER ->
+                AnyValue.hasNaNOperand(from, to)
+                        // When the range bounds are explicitly set to NaN, we don't want to find anything
+                        // because any comparison with NaN is false.
+                        ? new IncomparableRangePredicate<>(
+                                propertyKeyId, ValueGroup.NUMBER, from, fromInclusive, to, toInclusive)
+                        : new NumberRangePredicate(
+                                propertyKeyId, (NumberValue) from, fromInclusive, (NumberValue) to, toInclusive);
 
-            case TEXT -> new TextRangePredicate(
-                    propertyKeyId, (TextValue) from, fromInclusive, (TextValue) to, toInclusive);
+            case TEXT ->
+                new TextRangePredicate(propertyKeyId, (TextValue) from, fromInclusive, (TextValue) to, toInclusive);
 
             case DURATION, DURATION_ARRAY, GEOMETRY, GEOMETRY_ARRAY -> {
                 if (fromInclusive && to == null) {
                     yield new RangePredicate<>(propertyKeyId, valueGroup, from, true, from, true);
                 } else if (toInclusive && from == null) {
                     yield new RangePredicate<>(propertyKeyId, valueGroup, to, true, to, true);
+                } else if (fromInclusive && toInclusive && from.equals(to)) {
+                    // We treat specially ONLY because we want to keep the same behavior we have without an index
+                    yield new RangePredicate<>(propertyKeyId, valueGroup, from, true, to, true);
                 } else {
                     yield new IncomparableRangePredicate<>(
                             propertyKeyId, valueGroup, from, fromInclusive, to, toInclusive);
                 }
             }
-
             default -> new RangePredicate<>(propertyKeyId, valueGroup, from, fromInclusive, to, toInclusive);
         };
+    }
+
+    public static <VALUE extends Value> RangePredicate<?> emptyRange(
+            int propertyKeyId, VALUE from, boolean fromInclusive, VALUE to, boolean toInclusive) {
+        return new IncomparableRangePredicate<>(
+                propertyKeyId, ValueGroup.UNKNOWN, from, fromInclusive, to, toInclusive);
     }
 
     public static BoundingBoxPredicate boundingBox(int propertyKeyId, PointValue from, PointValue to) {
@@ -192,10 +228,26 @@ public abstract class PropertyIndexQuery implements IndexQuery {
     }
 
     public static NearestNeighborsPredicate nearestNeighbors(int k, float[] query) {
-        return new NearestNeighborsPredicate(k, query);
+        return nearestNeighbors(k, Double.NaN, query);
     }
 
-    public static ValueTuple asValueTuple(PropertyIndexQuery.ExactPredicate... query) {
+    public static NearestNeighborsPredicate nearestNeighbors(int k, double searchExpansionFactor, float[] query) {
+        return new NearestNeighborsPredicate(k, searchExpansionFactor, query);
+    }
+
+    public static EntityFilterPredicate entityFilter(LongSet entities) {
+        return new EntityFilterPredicate.MatchEntitySet(entities);
+    }
+
+    public static EntityFilterPredicate entityFilter(PreparedEntityFilter filter) {
+        return new EntityFilterPredicate.MatchPreparedEntityFilter(filter);
+    }
+
+    public static EntityFilterPredicate matchAllEntityFilter() {
+        return EntityFilterPredicate.MatchAll.INSTANCE;
+    }
+
+    public static ValueTuple asValueTuple(PropertyIndexQuery.ExactPredicate[] query) {
         Value[] values = new Value[query.length];
         for (int i = 0; i < query.length; i++) {
             values[i] = query[i].value();
@@ -291,6 +343,54 @@ public abstract class PropertyIndexQuery implements IndexQuery {
         @Override
         public IndexQueryType type() {
             return IndexQueryType.EXISTS;
+        }
+
+        @Override
+        public boolean acceptsValue(Value value) {
+            return value != null && value != NO_VALUE;
+        }
+
+        @Override
+        public boolean acceptsValueAt(PropertyCursor property) {
+            return true;
+        }
+
+        @Override
+        public ValueGroup valueGroup() {
+            return ValueGroup.UNKNOWN;
+        }
+    }
+
+    public static final class NotExistsPredicate extends PropertyIndexQuery {
+        private NotExistsPredicate(int propertyKeyId) {
+            super(propertyKeyId);
+        }
+
+        @Override
+        public IndexQueryType type() {
+            return IndexQueryType.NOT_EXISTS;
+        }
+
+        @Override
+        public boolean acceptsValue(Value value) {
+            return value == null || value == NO_VALUE;
+        }
+
+        @Override
+        public ValueGroup valueGroup() {
+            return ValueGroup.UNKNOWN;
+        }
+    }
+
+    public static class AllPredicate extends PropertyIndexQuery {
+
+        private AllPredicate(int propertyKeyId) {
+            super(propertyKeyId);
+        }
+
+        @Override
+        public IndexQueryType type() {
+            return IndexQueryType.ALL;
         }
 
         @Override
@@ -449,8 +549,10 @@ public abstract class PropertyIndexQuery implements IndexQuery {
             // A little something about NaN.
             // For range queries with numbers we need to redefine the upper bound from NaN to positive infinity.
             // The reason is that we do not want to find NaNs for seeks, but for full scans we do.
-            // The index will treat open upper bound (null) as scan to highest possible value. According to the index
-            // this is NaN, but we don't want to include that so we translate null to Double.POSITIVE_INFINITY here.
+            // The index will treat open upper bound (null) as scan to the highest possible value.
+            // According to the index this is NaN,
+            // but we don't want to include that so we translate null to Double
+            // .POSITIVE_INFINITY here.
             super(
                     propertyKeyId,
                     ValueGroup.NUMBER,
@@ -508,7 +610,7 @@ public abstract class PropertyIndexQuery implements IndexQuery {
 
         @Override
         public boolean acceptsValue(Value value) {
-            if (!(value instanceof final PointValue point)) {
+            if (!(value instanceof PointValue point)) {
                 return false;
             }
 
@@ -646,7 +748,7 @@ public abstract class PropertyIndexQuery implements IndexQuery {
 
         @Override
         public boolean acceptsValue(Value value) {
-            return Values.isTextValue(value) && ((TextValue) value).startsWith(prefix);
+            return value instanceof TextValue textValue && textValue.startsWith(prefix);
         }
 
         public TextValue prefix() {
@@ -690,7 +792,7 @@ public abstract class PropertyIndexQuery implements IndexQuery {
 
         @Override
         public boolean acceptsValue(Value value) {
-            return Values.isTextValue(value) && ((TextValue) value).contains(contains);
+            return value instanceof TextValue textValue && textValue.contains(contains);
         }
 
         public TextValue contains() {
@@ -734,7 +836,7 @@ public abstract class PropertyIndexQuery implements IndexQuery {
 
         @Override
         public boolean acceptsValue(Value value) {
-            return Values.isTextValue(value) && ((TextValue) value).endsWith(suffix);
+            return value instanceof TextValue textValue && textValue.endsWith(suffix);
         }
 
         public TextValue suffix() {
@@ -818,11 +920,13 @@ public abstract class PropertyIndexQuery implements IndexQuery {
 
     public static final class NearestNeighborsPredicate extends PropertyIndexQuery {
         private final int k;
+        private final double searchExpansionFactor;
         private final float[] query;
 
-        private NearestNeighborsPredicate(int k, float... query) {
+        private NearestNeighborsPredicate(int k, double searchExpansionFactor, float... query) {
             super(TokenConstants.NO_TOKEN);
             this.k = k;
+            this.searchExpansionFactor = searchExpansionFactor;
             this.query = query;
         }
 
@@ -842,8 +946,14 @@ public abstract class PropertyIndexQuery implements IndexQuery {
             return IndexQueryType.NEAREST_NEIGHBORS;
         }
 
-        public int numberOfNeighbors() {
-            return k;
+        public int numberOfNeighbors(IndexQueryConstraints constraints, int maxNeighbors) {
+            OptionalLong limit = constraints.limit();
+            long numberOfNeighbors = limit.isPresent() ? Math.min(k, limit.getAsLong()) : k;
+            return Math.clamp(numberOfNeighbors, 1, maxNeighbors);
+        }
+
+        public double searchExpansionFactorOrElse(double defaultValue) {
+            return Double.isNaN(searchExpansionFactor) ? defaultValue : searchExpansionFactor;
         }
 
         public float[] query() {
@@ -862,14 +972,141 @@ public abstract class PropertyIndexQuery implements IndexQuery {
                 return false;
             }
             NearestNeighborsPredicate that = (NearestNeighborsPredicate) o;
-            return k == that.k && Arrays.equals(query, that.query);
+            return k == that.k
+                    // NaN is a possible value, so using == to compare would be wrong
+                    && Double.compare(searchExpansionFactor, that.searchExpansionFactor) == 0
+                    && Arrays.equals(query, that.query);
         }
 
         @Override
         public int hashCode() {
-            int result = Objects.hash(super.hashCode(), k);
+            int result = Objects.hash(super.hashCode(), k, searchExpansionFactor);
             result = 31 * result + Arrays.hashCode(query);
             return result;
+        }
+    }
+
+    public abstract static sealed class EntityFilterPredicate extends PropertyIndexQuery {
+        protected EntityFilterPredicate() {
+            super(TokenConstants.NO_TOKEN);
+        }
+
+        public static final class MatchAll extends EntityFilterPredicate {
+            public static final MatchAll INSTANCE = new MatchAll();
+
+            private MatchAll() {}
+        }
+
+        public static final class MatchEntitySet extends EntityFilterPredicate {
+
+            private final LongSet entities;
+
+            private MatchEntitySet(LongSet entities) {
+                this.entities = entities;
+            }
+
+            public LongSet entities() {
+                return entities;
+            }
+
+            @Override
+            public boolean equals(Object o) {
+                if (this == o) {
+                    return true;
+                }
+                if (o == null || getClass() != o.getClass()) {
+                    return false;
+                }
+                MatchEntitySet that = (MatchEntitySet) o;
+                return entities.equals(that.entities);
+            }
+
+            @Override
+            public int hashCode() {
+                return entities.hashCode();
+            }
+        }
+
+        public static final class MatchPreparedEntityFilter extends EntityFilterPredicate {
+
+            private final PreparedEntityFilter filter;
+
+            private MatchPreparedEntityFilter(PreparedEntityFilter filter) {
+                this.filter = filter;
+            }
+
+            public PreparedEntityFilter filter() {
+                return filter;
+            }
+
+            // NOTE: referential equality — the prepared filter is snapshot-bound and never cached.
+            @Override
+            public boolean equals(Object o) {
+                return this == o;
+            }
+
+            @Override
+            public int hashCode() {
+                return System.identityHashCode(this);
+            }
+        }
+
+        @Override
+        public boolean acceptsValue(Value value) {
+            throw new UnsupportedOperationException("EntityFilterPredicates do not know how to evaluate themselves.");
+        }
+
+        @Override
+        public ValueGroup valueGroup() {
+            return ValueGroup.UNKNOWN;
+        }
+
+        @Override
+        public IndexQueryType type() {
+            return IndexQueryType.ENTITY_FILTER;
+        }
+    }
+
+    public static final class InSetPredicate extends PropertyIndexQuery {
+        private final Value[] values;
+
+        private InSetPredicate(int propertyKeyId, Value[] values) {
+            super(propertyKeyId);
+            this.values = values;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (!super.equals(o)) {
+                return false;
+            }
+            InSetPredicate that = (InSetPredicate) o;
+            return Objects.deepEquals(values, that.values);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(super.hashCode(), Arrays.hashCode(values));
+        }
+
+        @Override
+        public boolean acceptsValue(Value value) {
+            throw new UnsupportedOperationException("EntityFilterPredicates do not know how to evaluate themselves.");
+        }
+
+        @Override
+        public ValueGroup valueGroup() {
+
+            return ValueGroup.UNKNOWN;
+        }
+
+        public Value[] values() {
+            return values;
+        }
+
+        @Override
+        public IndexQueryType type() {
+            return IndexQueryType.IN_SET;
         }
     }
 }

@@ -19,20 +19,30 @@
  */
 package org.neo4j.logging.internal;
 
-import org.neo4j.kernel.database.NamedDatabaseId;
+import org.neo4j.logging.AbstractLogProvider;
 import org.neo4j.logging.InternalLogProvider;
 import org.neo4j.logging.NullLogProvider;
 
-public class DatabaseLogProvider extends PrefixedLogProvider {
-    public DatabaseLogProvider(NamedDatabaseId namedDatabaseId, InternalLogProvider delegate) {
-        this(namedDatabaseId.logPrefix(), delegate);
-    }
-
-    private DatabaseLogProvider(String prefix, InternalLogProvider delegate) {
-        super(delegate, prefix);
-    }
+public class DatabaseLogProvider extends AbstractLogProvider<DatabaseLog> {
+    private final DatabaseLogIdentifier databaseLogIdentifier;
+    private final InternalLogProvider logProvider;
 
     public static DatabaseLogProvider nullDatabaseLogProvider() {
-        return new DatabaseLogProvider("", NullLogProvider.getInstance());
+        return new DatabaseLogProvider(DatabaseLogIdentifier.EMPTY, NullLogProvider.getInstance());
+    }
+
+    public DatabaseLogProvider(DatabaseLogIdentifier databaseLogIdentifier, InternalLogProvider logProvider) {
+        this.databaseLogIdentifier = databaseLogIdentifier;
+        this.logProvider = logProvider;
+    }
+
+    @Override
+    protected DatabaseLog buildLog(Class<?> loggingClass) {
+        return new DatabaseLog(databaseLogIdentifier, logProvider.getLog(loggingClass));
+    }
+
+    @Override
+    protected DatabaseLog buildLog(String name) {
+        return new DatabaseLog(databaseLogIdentifier, logProvider.getLog(name));
     }
 }

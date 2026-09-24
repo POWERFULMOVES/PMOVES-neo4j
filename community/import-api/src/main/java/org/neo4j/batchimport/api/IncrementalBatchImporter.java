@@ -19,18 +19,10 @@
  */
 package org.neo4j.batchimport.api;
 
-import java.io.Closeable;
 import java.io.IOException;
 import org.neo4j.batchimport.api.input.Input;
 
-public interface IncrementalBatchImporter extends BatchImporter, Closeable {
-    @Override
-    default void doImport(Input input) throws IOException {
-        prepare(input);
-        build(input);
-        merge();
-    }
-
+public interface IncrementalBatchImporter extends BatchImporter {
     void prepare(Input input) throws IOException;
 
     void build(Input input) throws IOException;

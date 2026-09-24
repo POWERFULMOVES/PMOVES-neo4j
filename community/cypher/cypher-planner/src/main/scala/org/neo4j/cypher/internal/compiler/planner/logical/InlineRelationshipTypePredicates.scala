@@ -19,7 +19,6 @@
  */
 package org.neo4j.cypher.internal.compiler.planner.logical
 
-import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
 import org.neo4j.cypher.internal.compiler.phases.CompilationContains
 import org.neo4j.cypher.internal.compiler.phases.LogicalPlanState
 import org.neo4j.cypher.internal.compiler.phases.PlannerContext
@@ -30,6 +29,7 @@ import org.neo4j.cypher.internal.expressions.RelTypeName
 import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.frontend.phases.Namespacer
 import org.neo4j.cypher.internal.frontend.phases.Transformer
+import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerConfig
 import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerFactory
 import org.neo4j.cypher.internal.ir.PatternRelationship
 import org.neo4j.cypher.internal.ir.PlannerQuery
@@ -77,9 +77,10 @@ case object InlineRelationshipTypePredicates extends PlannerQueryRewriter with S
           val inlinedRelationships = qg.patternRelationships.map(tryToInline(typePredicates))
 
           qg.withPatternRelationships(inlinedRelationships.map(_.rel))
-            .withSelections(qg.selections.copy(predicates =
-              qg.selections.predicates -- inlinedRelationships.flatMap(_.inlinedPredicate)
-            ))
+            .withSelections {
+              val inlinedPredicates: Set[Predicate] = inlinedRelationships.flatMap(_.inlinedPredicate)
+              qg.selections.filter(p => !inlinedPredicates.contains(p))
+            }
 
         case qpp: QuantifiedPathPattern =>
           val typePredicates = findRelationshipTypePredicatesPerSymbol(qpp.asQueryGraph)
@@ -88,9 +89,10 @@ case object InlineRelationshipTypePredicates extends PlannerQueryRewriter with S
 
           qpp.copy(
             patternRelationships = inlinedRelationships.map(_.rel),
-            selections = qpp.selections.copy(predicates =
-              qpp.selections.predicates -- inlinedRelationships.iterator.flatMap(_.inlinedPredicate)
-            )
+            selections = {
+              val inlinedPredicates: Set[Predicate] = inlinedRelationships.iterator.flatMap(_.inlinedPredicate).toSet
+              qpp.selections.filter(p => !inlinedPredicates.contains(p))
+            }
           )
       }
     )
@@ -135,8 +137,6 @@ case object InlineRelationshipTypePredicates extends PlannerQueryRewriter with S
 
   override def invalidatedConditions: Set[StepSequencer.Condition] = Set.empty
 
-  override def getTransformer(
-    pushdownPropertyReads: Boolean,
-    semanticFeatures: Seq[SemanticFeature]
-  ): Transformer[PlannerContext, LogicalPlanState, LogicalPlanState] = this
+  override def getTransformer(planPipelineConfig: PlanPipelineTransformerConfig)
+    : Transformer[PlannerContext, LogicalPlanState, LogicalPlanState] = this
 }

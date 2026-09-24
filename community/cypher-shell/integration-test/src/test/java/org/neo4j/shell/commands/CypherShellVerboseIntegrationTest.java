@@ -27,6 +27,7 @@ import static org.mockito.Mockito.mock;
 import static org.neo4j.shell.Conditions.contains;
 import static org.neo4j.shell.util.Versions.majorVersion;
 
+import java.util.Optional;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -52,7 +53,7 @@ class CypherShellVerboseIntegrationTest extends CypherShellIntegrationTest {
     void setUp() throws Exception {
         linePrinter.clear();
         var printer = new PrettyPrinter(new PrettyConfig(Format.VERBOSE, true, 1000, false));
-        var boltHandler = new BoltStateHandler(true, AccessMode.WRITE);
+        var boltHandler = new BoltStateHandler(true, AccessMode.WRITE, Optional.empty());
         var parameters = mock(ParameterService.class);
         var dbInfo = mock(DbInfo.class);
         shell = new CypherShell(linePrinter, boltHandler, dbInfo, printer, parameters);
@@ -81,10 +82,22 @@ class CypherShellVerboseIntegrationTest extends CypherShellIntegrationTest {
     @Test
     void cypherWithNoReturnStatements() throws CommandException {
         // when
-        shell.execute(CypherStatement.complete("CREATE (:TestPerson {name: \"Jane Smith\"})"));
+        shell.execute(CypherStatement.complete(
+                "CREATE (:TestPerson {name: \"Jane Smith\"}), (:TestPerson {name: \"Bob Smith\"})"));
 
         // then
-        assertThat(linePrinter.output()).contains("Added 1 nodes, Set 1 properties, Added 1 labels");
+        assertThat(linePrinter.output()).contains("Created 2 nodes, set 2 properties, added 2 labels");
+    }
+
+    @Test
+    void cypherWithNoReturnStatementsAndMoreStatistics() throws CommandException {
+        // when
+        shell.execute(CypherStatement.complete(
+                "CREATE (jane :TestPerson {name: \"Jane Smith\"})-[:KNOWS]->(:TestPerson {name: \"Bob Smith\"})"));
+
+        // then
+        assertThat(linePrinter.output())
+                .contains("Created 2 nodes, created 1 relationship, set 2 properties, added 2 labels");
     }
 
     @Test
@@ -97,7 +110,7 @@ class CypherShellVerboseIntegrationTest extends CypherShellIntegrationTest {
         assertThat(output)
                 .contains("| jane ")
                 .contains("| (:TestPerson {name: \"Jane Smith\"}) |")
-                .contains("Added 1 nodes, Set 1 properties, Added 1 labels");
+                .contains("Created 1 node, set 1 property, added 1 label");
     }
 
     @Test

@@ -34,6 +34,7 @@ import org.neo4j.io.pagecache.PageCursor;
 import org.neo4j.io.pagecache.PageCursorUtil;
 import org.neo4j.io.pagecache.PagedFile;
 import org.neo4j.io.pagecache.context.CursorContext;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.util.Preconditions;
 
 /**
@@ -92,7 +93,7 @@ public class GBPTreeStructure<ROOT_KEY, DATA_KEY, DATA_VALUE> {
             throws IOException {
         var options =
                 openOptions.newWithoutAll(asList(GBPTreeOpenOptions.values())).newWith(StandardOpenOption.READ);
-        try (var pagedFile = pageCache.map(file, pageCache.pageSize(), databaseName, options)) {
+        try (var pagedFile = pageCache.map(new StoreFile(file), databaseName, options)) {
             try (var cursor = pagedFile.io(IdSpace.META_PAGE_ID, PagedFile.PF_SHARED_READ_LOCK, cursorContext)) {
                 visitMeta(cursor, visitor);
             }
@@ -119,7 +120,7 @@ public class GBPTreeStructure<ROOT_KEY, DATA_KEY, DATA_VALUE> {
             throws IOException {
         var options =
                 openOptions.newWithoutAll(asList(GBPTreeOpenOptions.values())).newWith(StandardOpenOption.READ);
-        try (var pagedFile = pageCache.map(file, pageCache.pageSize(), databaseName, options)) {
+        try (var pagedFile = pageCache.map(new StoreFile(file), databaseName, options)) {
             try (var cursor = pagedFile.io(IdSpace.STATE_PAGE_A, PagedFile.PF_SHARED_READ_LOCK, cursorContext)) {
                 visitTreeState(cursor, visitor);
             }
@@ -278,9 +279,7 @@ public class GBPTreeStructure<ROOT_KEY, DATA_KEY, DATA_VALUE> {
         if (isLeaf) {
             visitor.key(key, isLeaf, offloadId);
             visitor.value(value);
-            if (visitor.visitHistory()) {
-                dataLeaf.deepVisitValue(cursor, i, visitor);
-            }
+            dataLeaf.deepVisitValue(cursor, i, visitor);
         } else {
             visitor.child(child);
             visitor.key(key, isLeaf, offloadId);
@@ -345,7 +344,8 @@ public class GBPTreeStructure<ROOT_KEY, DATA_KEY, DATA_VALUE> {
             visitTreeNode(cursor, visitor, cursorContext);
 
             do {
-                rightSibling = TreeNodeUtil.rightSibling(cursor, stableGeneration, unstableGeneration);
+                rightSibling = TreeNodeUtil.rightSibling(cursor, stableGeneration, unstableGeneration)
+                        .pointer();
             } while (cursor.shouldRetry());
 
             if (TreeNodeUtil.isNode(rightSibling)) {

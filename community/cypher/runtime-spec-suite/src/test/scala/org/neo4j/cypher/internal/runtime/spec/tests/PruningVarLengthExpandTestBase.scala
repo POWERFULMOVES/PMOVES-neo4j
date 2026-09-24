@@ -23,16 +23,20 @@ import org.neo4j.cypher.internal.CypherRuntime
 import org.neo4j.cypher.internal.RuntimeContext
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.Predicate
 import org.neo4j.cypher.internal.logical.plans.IndexOrderNone
+import org.neo4j.cypher.internal.logical.plans.TraversalPathMode
 import org.neo4j.cypher.internal.runtime.spec.Edition
 import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.graphdb.Label
 import org.neo4j.graphdb.RelationshipType
 
+object PruningVarLengthExpandTestBase
+
 abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
-  sizeHint: Int
+  sizeHint: Int,
+  protected val traversalPathMode: TraversalPathMode
 ) extends RuntimeTestSuite[CONTEXT](edition, runtime) {
 
   test("var-length-expand with no relationships") {
@@ -43,7 +47,7 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
       .distinct("y AS y")
-      .pruningVarExpand("(x)-[*1..2]->(y)")
+      .pruningVarExpand("(x)-[*1..2]->(y)", pathMode = traversalPathMode)
       .allNodeScan("x")
       .build()
 
@@ -61,7 +65,7 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
       .distinct("y AS y")
-      .pruningVarExpand("(x)-[*..1]->(y)")
+      .pruningVarExpand("(x)-[*..1]->(y)", pathMode = traversalPathMode)
       .nodeByLabelScan("x", "START", IndexOrderNone)
       .build()
 
@@ -81,18 +85,18 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
       .distinct("y AS y")
-      .pruningVarExpand("(x)-[*0..1]->(y)")
+      .pruningVarExpand("(x)-[*0..1]->(y)", pathMode = traversalPathMode)
       .nodeByLabelScan("x", "START", IndexOrderNone)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
 
     // then
-    val expected =
-      Array(
-        Array(n1),
-        Array(n2)
-      )
+    val expected = traversalPathMode match {
+      case TraversalPathMode.Acyclic => Array(Array(n2))
+      case TraversalPathMode.Walk    => Array(Array(n1), Array(n2))
+      case TraversalPathMode.Trail   => Array(Array(n1), Array(n2))
+    }
 
     runtimeResult should beColumns("y").withRows(expected)
   }
@@ -105,7 +109,7 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
       .distinct("y AS y")
-      .pruningVarExpand("(x)-[*2..4]->(y)")
+      .pruningVarExpand("(x)-[*2..4]->(y)", pathMode = traversalPathMode)
       .nodeByLabelScan("x", "START", IndexOrderNone)
       .build()
 
@@ -132,14 +136,18 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
       .distinct("y AS y")
-      .pruningVarExpand("(x)-[*0]->(y)")
+      .pruningVarExpand("(x)-[*0]->(y)", pathMode = traversalPathMode)
       .nodeByLabelScan("x", "START", IndexOrderNone)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
 
     // then
-    val expected = Array(Array(n1))
+    val expected = traversalPathMode match {
+      case TraversalPathMode.Acyclic => Array.empty[Array[Any]]
+      case TraversalPathMode.Walk    => Array(Array(n1))
+      case TraversalPathMode.Trail   => Array(Array(n1))
+    }
     runtimeResult should beColumns("y").withRows(expected)
   }
 
@@ -151,17 +159,18 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
       .distinct("y AS y")
-      .pruningVarExpand("(x)-[*0..1]->(y)")
+      .pruningVarExpand("(x)-[*0..1]->(y)", pathMode = traversalPathMode)
       .nodeByLabelScan("x", "START", IndexOrderNone)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
 
     // then
-    val expected = Array(
-      Array(n1),
-      Array(n2)
-    )
+    val expected = traversalPathMode match {
+      case TraversalPathMode.Acyclic => Array(Array(n2))
+      case TraversalPathMode.Walk    => Array(Array(n1), Array(n2))
+      case TraversalPathMode.Trail   => Array(Array(n1), Array(n2))
+    }
     runtimeResult should beColumns("y").withRows(expected)
   }
 
@@ -173,46 +182,108 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
       .distinct("y AS y")
-      .pruningVarExpand("(x)-[*0..2]->(y)")
+      .pruningVarExpand("(x)-[*0..2]->(y)", pathMode = traversalPathMode)
       .nodeByLabelScan("x", "START", IndexOrderNone)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
 
     // then
-    val expected = Array(
-      Array(n1),
-      Array(n2),
-      Array(n3)
-    )
+    val expected = traversalPathMode match {
+      case TraversalPathMode.Acyclic =>
+        Array(
+          Array(n2),
+          Array(n3)
+        )
+      case TraversalPathMode.Walk =>
+        Array(
+          Array(n1),
+          Array(n2),
+          Array(n3)
+        )
+      case TraversalPathMode.Trail =>
+        Array(
+          Array(n1),
+          Array(n2),
+          Array(n3)
+        )
+    }
     runtimeResult should beColumns("y").withRows(expected)
   }
 
   test("var-length-expand with self-loop") {
     // given
-    val n2 = givenGraph {
+    val (n1, n2) = givenGraph {
       val n1 = tx.createNode(Label.label("START"))
       val n2 = tx.createNode()
       val relType = RelationshipType.withName("R")
       n1.createRelationshipTo(n2, relType)
       n1.createRelationshipTo(n1, relType)
-      n2
+      (n1, n2)
     }
 
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
       .distinct("y AS y")
-      .pruningVarExpand("(x)-[*2..2]-(y)")
+      .pruningVarExpand("(x)-[*2..2]-(y)", pathMode = traversalPathMode)
       .nodeByLabelScan("x", "START", IndexOrderNone)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
 
     // then
-    val expected = Array(
-      Array(n2)
-    )
+    val expected = traversalPathMode match {
+      case TraversalPathMode.Walk =>
+        Array(Array(n2), Array(n1))
+      case TraversalPathMode.Trail   => Array(Array(n2))
+      case TraversalPathMode.Acyclic => Array.empty[Array[Any]]
+    }
+    runtimeResult should beColumns("y").withRows(expected)
+  }
+
+  test("var-length-expand with cycle") {
+    // given
+    val (n0, n1, n2, n3, n4, n5, n6) = givenGraph {
+      //                      (n2) - (n5)
+      //                    /    \
+      //   (n0:START) - (n1)     (n3)
+      //                   \    /
+      //                    (n4) - (n6)
+      val n0 = tx.createNode(Label.label("START"))
+      val n1 = tx.createNode()
+      val n2 = tx.createNode()
+      val n3 = tx.createNode()
+      val n4 = tx.createNode()
+      val n5 = tx.createNode()
+      val n6 = tx.createNode()
+      val relType = RelationshipType.withName("R")
+      n0.createRelationshipTo(n1, relType)
+      n1.createRelationshipTo(n2, relType)
+      n2.createRelationshipTo(n3, relType)
+      n3.createRelationshipTo(n4, relType)
+      n1.createRelationshipTo(n4, relType)
+      n2.createRelationshipTo(n5, relType)
+      n4.createRelationshipTo(n6, relType)
+      (n0, n1, n2, n3, n4, n5, n6)
+    }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("y")
+      .distinct("y AS y")
+      .pruningVarExpand("(x)-[*5..5]-(y)", pathMode = traversalPathMode)
+      .nodeByLabelScan("x", "START", IndexOrderNone)
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    val expected = traversalPathMode match {
+      case TraversalPathMode.Walk    => Array(Array(n1), Array(n3), Array(n5), Array(n6))
+      case TraversalPathMode.Trail   => Array(Array(n1), Array(n5), Array(n6))
+      case TraversalPathMode.Acyclic => Array(Array(n5), Array(n6))
+    }
     runtimeResult should beColumns("y").withRows(expected)
   }
 
@@ -225,7 +296,7 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
      */
 
     // given
-    val n4 = givenGraph {
+    val (n1, n1_2, n2, n3, n4) = givenGraph {
       val n1 = tx.createNode(Label.label("START"))
       val n2 = tx.createNode()
       val n3 = tx.createNode()
@@ -240,23 +311,39 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
       n2.createRelationshipTo(n3, relType)
       n3.createRelationshipTo(n4, relType)
 
-      n4
+      (n1, n1_2, n2, n3, n4)
     }
 
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
       .distinct("y AS y")
-      .pruningVarExpand("(x)-[*4..4]-(y)")
+      .pruningVarExpand("(x)-[*4..4]-(y)", pathMode = traversalPathMode)
       .nodeByLabelScan("x", "START", IndexOrderNone)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
 
     // then
-    val expected = Array(
-      Array(n4)
-    )
+    val expected = traversalPathMode match {
+      case TraversalPathMode.Walk =>
+        Array(
+          Array(n1),
+          Array(n1_2),
+          Array(n2),
+          Array(n3),
+          Array(n4)
+        )
+      case TraversalPathMode.Trail =>
+        Array(
+          Array(n4)
+        )
+      case TraversalPathMode.Acyclic =>
+        Array(
+          Array(n4)
+        )
+    }
+
     runtimeResult should beColumns("y").withRows(expected)
   }
 
@@ -269,7 +356,7 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
      */
 
     // given
-    val n4 = givenGraph {
+    val (n1, n1_2a, n1_2b, n2, n3, n4) = givenGraph {
       val n1 = tx.createNode(Label.label("START"))
       val n2 = tx.createNode()
       val n3 = tx.createNode()
@@ -285,24 +372,36 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
       n1.createRelationshipTo(n2, relType)
       n2.createRelationshipTo(n3, relType)
       n3.createRelationshipTo(n4, relType)
-
-      n4
+      (n1, n1_2a, n1_2b, n2, n3, n4)
     }
 
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
       .distinct("y AS y")
-      .pruningVarExpand("(x)-[*5..5]-(y)")
+      .pruningVarExpand("(x)-[*5..5]-(y)", pathMode = traversalPathMode)
       .nodeByLabelScan("x", "START", IndexOrderNone)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
 
     // then
-    val expected = Array(
-      Array(n4)
-    )
+    val expected = traversalPathMode match {
+      case TraversalPathMode.Walk =>
+        Array(
+          Array(n1_2a),
+          Array(n2),
+          Array(n4)
+        )
+      case TraversalPathMode.Trail =>
+        Array(
+          Array(n4)
+        )
+      case TraversalPathMode.Acyclic =>
+        Array(
+          Array(n4)
+        )
+    }
     runtimeResult should beColumns("y").withRows(expected)
   }
 
@@ -339,7 +438,7 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
       .distinct("y AS y")
-      .pruningVarExpand("(x)-[*1..4]->(y)")
+      .pruningVarExpand("(x)-[*1..4]->(y)", pathMode = traversalPathMode)
       .nodeByLabelScan("x", "START", IndexOrderNone)
       .build()
 
@@ -363,7 +462,7 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
       .distinct("y AS y")
-      .pruningVarExpand("(x)-[*..2]-(y)")
+      .pruningVarExpand("(x)-[*..2]-(y)", pathMode = traversalPathMode)
       .input(nodes = Seq("x"))
       .build()
 
@@ -384,7 +483,7 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
       .distinct("y AS y")
-      .pruningVarExpand("(x)-[*1..2]->(y)")
+      .pruningVarExpand("(x)-[*1..2]->(y)", pathMode = traversalPathMode)
       .nodeByLabelScan("x", "START", IndexOrderNone)
       .build()
 
@@ -411,7 +510,7 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
       .distinct("y AS y")
-      .pruningVarExpand("(x)<-[*1..2]-(y)")
+      .pruningVarExpand("(x)<-[*1..2]-(y)", pathMode = traversalPathMode)
       .nodeByLabelScan("x", "START", IndexOrderNone)
       .build()
 
@@ -432,26 +531,59 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
       .distinct("y AS y")
-      .pruningVarExpand("(x)-[*1..2]-(y)")
+      .pruningVarExpand("(x)-[*1..2]-(y)", pathMode = traversalPathMode)
       .nodeByLabelScan("x", "START", IndexOrderNone)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
 
     // then
-    runtimeResult should beColumns("y").withRows(Array(
-      Array(g.sb1), // outgoing only
-      Array(g.sa1),
-      Array(g.middle),
-      Array(g.sb2),
-      Array(g.sc3),
-      Array(g.ea1),
-      Array(g.eb1),
-      Array(g.ec1),
-      Array(g.sc1), // incoming only
-      Array(g.sc2),
-      Array(g.end)
-    ))
+    val expected = traversalPathMode match {
+      case TraversalPathMode.Walk =>
+        Array(
+          Array(g.sb1), // outgoing only
+          Array(g.sa1),
+          Array(g.middle),
+          Array(g.start),
+          Array(g.sb2),
+          Array(g.sc3),
+          Array(g.ea1),
+          Array(g.eb1),
+          Array(g.ec1),
+          Array(g.sc1), // incoming only
+          Array(g.sc2),
+          Array(g.end)
+        )
+      case TraversalPathMode.Trail =>
+        Array(
+          Array(g.sb1), // outgoing only
+          Array(g.sa1),
+          Array(g.middle),
+          Array(g.sb2),
+          Array(g.sc3),
+          Array(g.ea1),
+          Array(g.eb1),
+          Array(g.ec1),
+          Array(g.sc1), // incoming only
+          Array(g.sc2),
+          Array(g.end)
+        )
+      case TraversalPathMode.Acyclic =>
+        Array(
+          Array(g.sb1), // outgoing only
+          Array(g.sa1),
+          Array(g.middle),
+          Array(g.sb2),
+          Array(g.sc3),
+          Array(g.ea1),
+          Array(g.eb1),
+          Array(g.ec1),
+          Array(g.sc1), // incoming only
+          Array(g.sc2),
+          Array(g.end)
+        )
+    }
+    runtimeResult should beColumns("y").withRows(expected)
   }
 
   // EXPANSION FILTERING, RELATIONSHIP TYPE
@@ -464,7 +596,7 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
       .distinct("y AS y")
-      .pruningVarExpand("(x)-[:A*1..2]->(y)")
+      .pruningVarExpand("(x)-[:A*1..2]->(y)", pathMode = traversalPathMode)
       .nodeByLabelScan("x", "START", IndexOrderNone)
       .build()
 
@@ -488,7 +620,7 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
       .distinct("y AS y")
-      .pruningVarExpand("(x)-[:B*1..2]->(y)")
+      .pruningVarExpand("(x)-[:B*1..2]->(y)", pathMode = traversalPathMode)
       .nodeByLabelScan("x", "START", IndexOrderNone)
       .build()
 
@@ -511,20 +643,45 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
       .distinct("y AS y")
-      .pruningVarExpand("(x)-[*1..2]-(y)", nodePredicates = Seq(Predicate("n", "id(n) <> " + g.middle.getId)))
+      .pruningVarExpand(
+        "(x)-[*1..2]-(y)",
+        nodePredicates = Seq(Predicate("n", "id(n) <> " + g.middle.getId)),
+        pathMode = traversalPathMode
+      )
       .nodeByLabelScan("x", "START", IndexOrderNone)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
 
     // then
-    runtimeResult should beColumns("y").withRows(Array(
-      Array(g.sa1),
-      Array(g.sb1),
-      Array(g.sb2),
-      Array(g.sc1),
-      Array(g.sc2)
-    ))
+    val expected = traversalPathMode match {
+      case TraversalPathMode.Walk =>
+        Array(
+          Array(g.sa1),
+          Array(g.sb1),
+          Array(g.sb2),
+          Array(g.start),
+          Array(g.sc1),
+          Array(g.sc2)
+        )
+      case TraversalPathMode.Trail =>
+        Array(
+          Array(g.sa1),
+          Array(g.sb1),
+          Array(g.sb2),
+          Array(g.sc1),
+          Array(g.sc2)
+        )
+      case TraversalPathMode.Acyclic =>
+        Array(
+          Array(g.sa1),
+          Array(g.sb1),
+          Array(g.sb2),
+          Array(g.sc1),
+          Array(g.sc2)
+        )
+    }
+    runtimeResult should beColumns("y").withRows(expected)
   }
 
   test("should filter on two node predicates") {
@@ -540,7 +697,8 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
         nodePredicates = Seq(
           Predicate("n", "id(n) <> " + g.middle.getId),
           Predicate("n2", "id(n2) <> " + g.sc3.getId)
-        )
+        ),
+        pathMode = traversalPathMode
       )
       .nodeByLabelScan("x", "START", IndexOrderNone)
       .build()
@@ -548,13 +706,34 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
     val runtimeResult = execute(logicalQuery, runtime)
 
     // then
-    runtimeResult should beColumns("y").withRows(Array(
-      Array(g.sa1),
-      Array(g.sb1),
-      Array(g.sb2),
-      Array(g.sc1),
-      Array(g.sc2)
-    ))
+    val expected = traversalPathMode match {
+      case TraversalPathMode.Walk =>
+        Array(
+          Array(g.sa1),
+          Array(g.sb1),
+          Array(g.sb2),
+          Array(g.start),
+          Array(g.sc1),
+          Array(g.sc2)
+        )
+      case TraversalPathMode.Trail =>
+        Array(
+          Array(g.sa1),
+          Array(g.sb1),
+          Array(g.sb2),
+          Array(g.sc1),
+          Array(g.sc2)
+        )
+      case TraversalPathMode.Acyclic =>
+        Array(
+          Array(g.sa1),
+          Array(g.sb1),
+          Array(g.sb2),
+          Array(g.sc1),
+          Array(g.sc2)
+        )
+    }
+    runtimeResult should beColumns("y").withRows(expected)
   }
 
   test("should filter on node predicate on first node") {
@@ -565,7 +744,11 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
       .distinct("y AS y")
-      .pruningVarExpand("(x)-[*1..2]-(y)", nodePredicates = Seq(Predicate("n", "id(n) <> " + g.start.getId)))
+      .pruningVarExpand(
+        "(x)-[*1..2]-(y)",
+        nodePredicates = Seq(Predicate("n", "id(n) <> " + g.start.getId)),
+        pathMode = traversalPathMode
+      )
       .nodeByLabelScan("x", "START", IndexOrderNone)
       .build()
 
@@ -583,7 +766,11 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
       .distinct("y AS y")
-      .pruningVarExpand("(X)-[*1..2]-(y)", nodePredicates = Seq(Predicate("n", "id(n) <> " + g.start.getId)))
+      .pruningVarExpand(
+        "(X)-[*1..2]-(y)",
+        nodePredicates = Seq(Predicate("n", "id(n) <> " + g.start.getId)),
+        pathMode = traversalPathMode
+      )
       .projection("x AS X")
       .nodeByLabelScan("x", "START", IndexOrderNone)
       .build()
@@ -604,7 +791,8 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
       .distinct("y AS y")
       .pruningVarExpand(
         "(x)-[*1..2]->(y)",
-        relationshipPredicates = Seq(Predicate("r", "id(r) <> " + g.startMiddle.getId))
+        relationshipPredicates = Seq(Predicate("r", "id(r) <> " + g.startMiddle.getId)),
+        pathMode = traversalPathMode
       )
       .nodeByLabelScan("x", "START", IndexOrderNone)
       .build()
@@ -633,7 +821,8 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
         relationshipPredicates = Seq(
           Predicate("r", "id(r) <> " + g.startMiddle.getId),
           Predicate("r2", "id(r2) <> " + g.endMiddle.getId)
-        )
+        ),
+        pathMode = traversalPathMode
       )
       .nodeByLabelScan("x", "START", IndexOrderNone)
       .build()
@@ -641,18 +830,49 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
     val runtimeResult = execute(logicalQuery, runtime)
 
     // then
-    runtimeResult should beColumns("y").withRows(Array(
-      Array(g.sa1),
-      Array(g.sb1),
-      Array(g.sc1),
-      Array(g.middle),
-      Array(g.sb2),
-      Array(g.sc2),
-      Array(g.ea1),
-      Array(g.eb1),
-      Array(g.ec1),
-      Array(g.sc3)
-    ))
+    val expected = traversalPathMode match {
+      case TraversalPathMode.Walk =>
+        Array(
+          Array(g.sa1),
+          Array(g.sb1),
+          Array(g.sc1),
+          Array(g.middle),
+          Array(g.start),
+          Array(g.sb2),
+          Array(g.sc2),
+          Array(g.ea1),
+          Array(g.eb1),
+          Array(g.ec1),
+          Array(g.sc3)
+        )
+      case TraversalPathMode.Trail =>
+        Array(
+          Array(g.sa1),
+          Array(g.sb1),
+          Array(g.sc1),
+          Array(g.middle),
+          Array(g.sb2),
+          Array(g.sc2),
+          Array(g.ea1),
+          Array(g.eb1),
+          Array(g.ec1),
+          Array(g.sc3)
+        )
+      case TraversalPathMode.Acyclic =>
+        Array(
+          Array(g.sa1),
+          Array(g.sb1),
+          Array(g.sc1),
+          Array(g.middle),
+          Array(g.sb2),
+          Array(g.sc2),
+          Array(g.ea1),
+          Array(g.eb1),
+          Array(g.ec1),
+          Array(g.sc3)
+        )
+    }
+    runtimeResult should beColumns("y").withRows(expected)
   }
 
   test("should filter on node and relationship predicate") {
@@ -666,7 +886,8 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
       .pruningVarExpand(
         "(x)-[*2..2]-(y)",
         nodePredicates = Seq(Predicate("n", "id(n) <> " + g.sa1.getId)),
-        relationshipPredicates = Seq(Predicate("r", "id(r) <> " + g.startMiddle.getId))
+        relationshipPredicates = Seq(Predicate("r", "id(r) <> " + g.startMiddle.getId)),
+        pathMode = traversalPathMode
       )
       .nodeByLabelScan("x", "START", IndexOrderNone)
       .build()
@@ -674,10 +895,26 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
     val runtimeResult = execute(logicalQuery, runtime)
 
     // then
-    runtimeResult should beColumns("y").withRows(Array(
-      Array(g.sc2),
-      Array(g.sb2)
-    ))
+    val expected = traversalPathMode match {
+      case TraversalPathMode.Walk =>
+        Array(
+          Array(g.sc2),
+          Array(g.start),
+          Array(g.sb2)
+        )
+      case TraversalPathMode.Trail =>
+        Array(
+          Array(g.sc2),
+          Array(g.sb2)
+        )
+      case TraversalPathMode.Acyclic =>
+        Array(
+          Array(g.sc2),
+          Array(g.sb2)
+        )
+
+    }
+    runtimeResult should beColumns("y").withRows(expected)
   }
 
   test("should handle predicate accessing start node") {
@@ -689,7 +926,11 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
       .distinct("y AS y")
-      .pruningVarExpand("(x)-[*..5]->(y)", nodePredicates = Seq(Predicate("n", "'START' IN labels(x)")))
+      .pruningVarExpand(
+        "(x)-[*..5]->(y)",
+        nodePredicates = Seq(Predicate("n", "'START' IN labels(x)")),
+        pathMode = traversalPathMode
+      )
       .input(nodes = Seq("x"))
       .build()
 
@@ -831,7 +1072,7 @@ abstract class PruningVarLengthExpandTestBase[CONTEXT <: RuntimeContext](
         path <- paths
         length <- 0 to 5
       } yield Array(path.take(length).endNode())
-    runtimeResult should beColumns("y").withRows(expected)
+    runtimeResult should beColumns("y").withRows(expected) // TODO: maybe incorrect for ACYCLIC?
   }
 
   // HELPERS

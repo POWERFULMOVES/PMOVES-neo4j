@@ -25,6 +25,7 @@ import java.util.Optional;
 import java.util.function.Supplier;
 import org.neo4j.cypher.internal.ast.CatalogName;
 import org.neo4j.dbms.api.DatabaseNotFoundException;
+import org.neo4j.dbms.api.DatabaseNotFoundHelper;
 import org.neo4j.kernel.database.DatabaseReference;
 import org.neo4j.kernel.database.DatabaseReferenceRepository;
 import org.neo4j.kernel.database.NormalizedCatalogEntry;
@@ -39,7 +40,18 @@ public class DefaultDatabaseReferenceResolver implements DatabaseReferenceResolv
     }
 
     @Override
-    public QueryTarget resolve(DatabaseReference sessionDatabase, CatalogName catalogName) { // boolean: resolveStrictly
+    public QueryTarget resolve(DatabaseReference sessionDatabase, CatalogName catalogName) {
+        if (catalogName.resolveByDisplayName()) {
+            return repository
+                    .getByDisplayName(catalogName.simplifiedQualifiedNameString())
+                    .map(QueryTarget::new)
+                    .orElseThrow(databaseNotFound(catalogName));
+        } else {
+            return resolveByCatalogName(sessionDatabase, catalogName);
+        }
+    }
+
+    private QueryTarget resolveByCatalogName(DatabaseReference sessionDatabase, CatalogName catalogName) {
         var containsQuotedNameParts = !catalogName.names().stream()
                 .filter(name -> name.contains("."))
                 .toList()
@@ -51,39 +63,38 @@ public class DefaultDatabaseReferenceResolver implements DatabaseReferenceResolv
                 List<NormalizedCatalogEntry> allNameCombinations = getAllNameCombinations(catalogName.names());
                 // find first matching reference and add notification
                 return allNameCombinations.stream()
-                        .flatMap(name -> queryTarget(name, catalogName, true).stream())
+                        .flatMap(name -> queryTarget(name).stream())
                         .findFirst()
                         .orElseThrow(databaseNotFound(catalogName));
             }
         } else if (catalogName.names().size() == 2) {
-            if (catalogName.names().get(0).contains("."))
+            if (catalogName.names().getFirst().contains("."))
                 throw databaseNotFound(catalogName).get();
             var constituentEntry = NormalizedCatalogEntry.fromList(catalogName.names());
             var aliasEntry = new NormalizedCatalogEntry(namePartsToName(catalogName.names()));
             if (containsQuotedNameParts) {
                 // consider only user given choice
-                return queryTarget(constituentEntry, catalogName, false).orElseThrow(databaseNotFound(catalogName));
+                return queryTarget(constituentEntry).orElseThrow(databaseNotFound(catalogName));
             } else {
                 if (sessionDatabase.isComposite()) {
                     // prefer constituent over alias
-                    return queryTarget(constituentEntry, catalogName, true)
-                            .or(() -> queryTarget(aliasEntry, catalogName, true))
+                    return queryTarget(constituentEntry)
+                            .or(() -> queryTarget(aliasEntry))
                             .orElseThrow(databaseNotFound(catalogName));
                 } else {
                     // prefer alias over constituent
-                    return queryTarget(aliasEntry, catalogName, true)
-                            .or(() -> queryTarget(constituentEntry, catalogName, true))
+                    return queryTarget(aliasEntry)
+                            .or(() -> queryTarget(constituentEntry))
                             .orElseThrow(databaseNotFound(catalogName));
                 }
             }
         } else {
-            return queryTarget(NormalizedCatalogEntry.fromList(catalogName.names()), catalogName, false)
+            return queryTarget(NormalizedCatalogEntry.fromList(catalogName.names()))
                     .orElseThrow(databaseNotFound(catalogName));
         }
     }
 
-    private Optional<QueryTarget> queryTarget(
-            NormalizedCatalogEntry catalogEntry, CatalogName catalogName, boolean addNotification) {
+    private Optional<QueryTarget> queryTarget(NormalizedCatalogEntry catalogEntry) {
         var databaseReference = repository.getByAlias(catalogEntry);
         return databaseReference.map(QueryTarget::new);
     }
@@ -124,10 +135,10 @@ public class DefaultDatabaseReferenceResolver implements DatabaseReferenceResolv
     }
 
     private static Supplier<DatabaseNotFoundException> databaseNotFound(NormalizedDatabaseName databaseNameRaw) {
-        return () -> new DatabaseNotFoundException("Graph not found: " + databaseNameRaw.name());
+        return () -> DatabaseNotFoundHelper.graphNotFound(databaseNameRaw.name());
     }
 
     private static Supplier<DatabaseNotFoundException> databaseNotFound(CatalogName databaseNameRaw) {
-        return () -> new DatabaseNotFoundException("Graph not found: " + databaseNameRaw.qualifiedNameString());
+        return () -> DatabaseNotFoundHelper.graphNotFound(databaseNameRaw.qualifiedNameString());
     }
 }

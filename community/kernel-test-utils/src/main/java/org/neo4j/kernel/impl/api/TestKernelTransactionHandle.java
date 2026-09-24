@@ -36,6 +36,7 @@ import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.api.query.ExecutingQuery;
 import org.neo4j.kernel.impl.api.transaction.trace.TransactionInitializationTrace;
 import org.neo4j.lock.ActiveLock;
+import org.neo4j.memory.MemoryTracker;
 
 /**
  * A test implementation of {@link KernelTransactionHandle} that simply wraps a given {@link KernelTransaction}.
@@ -125,8 +126,13 @@ public class TestKernelTransactionHandle implements KernelTransactionHandle {
     }
 
     @Override
-    public Collection<ActiveLock> activeLocks() {
+    public Collection<ActiveLock> activeLocks(MemoryTracker memoryTracker) {
         return Collections.emptyList();
+    }
+
+    @Override
+    public long activeLockCount() {
+        return 0L;
     }
 
     @Override
@@ -152,16 +158,6 @@ public class TestKernelTransactionHandle implements KernelTransactionHandle {
     @Override
     public String getStatusDetails() {
         return tx.statusDetails();
-    }
-
-    @Override
-    public long getLastClosedTxId() {
-        return tx.cursorContext().getVersionContext().lastClosedTransactionId();
-    }
-
-    @Override
-    public long getTransactionHorizon() {
-        return tx.cursorContext().getVersionContext().oldestVisibleTransactionNumber();
     }
 
     @Override

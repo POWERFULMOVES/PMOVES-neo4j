@@ -20,11 +20,8 @@
 package org.neo4j.logging.log4j;
 
 import static java.lang.String.format;
-import static java.lang.System.lineSeparator;
 import static java.nio.file.Files.readAllLines;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.neo4j.logging.log4j.LogConfig.STRUCTURED_LOG_JSON_TEMPLATE;
-import static org.neo4j.logging.log4j.LogConfig.STRUCTURED_LOG_JSON_TEMPLATE_WITH_CATEGORY;
 import static org.neo4j.logging.log4j.LogConfig.STRUCTURED_LOG_JSON_TEMPLATE_WITH_MESSAGE;
 import static org.neo4j.logging.log4j.LogConfig.createLoggerFromXmlConfig;
 import static org.neo4j.logging.log4j.LogUtils.newLoggerBuilder;
@@ -91,10 +88,11 @@ class LogConfigTest {
         logger.error("test");
 
         String output = outContent.toString();
-        assertThat(output).contains(Level.DEBUG.toString());
-        assertThat(output).contains(Level.INFO.toString());
-        assertThat(output).contains(Level.WARN.toString());
-        assertThat(output).contains(Level.ERROR.toString());
+        assertThat(output)
+                .contains(Level.DEBUG.toString())
+                .contains(Level.INFO.toString())
+                .contains(Level.WARN.toString())
+                .contains(Level.ERROR.toString());
 
         outContent.reset();
 
@@ -106,10 +104,11 @@ class LogConfigTest {
         logger.error("test");
 
         output = outContent.toString();
-        assertThat(output).doesNotContain(Level.DEBUG.toString());
-        assertThat(output).doesNotContain(Level.INFO.toString());
-        assertThat(output).contains(Level.WARN.toString());
-        assertThat(output).contains(Level.ERROR.toString());
+        assertThat(output)
+                .doesNotContain(Level.DEBUG.toString())
+                .doesNotContain(Level.INFO.toString())
+                .contains(Level.WARN.toString())
+                .contains(Level.ERROR.toString());
     }
 
     @Test
@@ -149,13 +148,15 @@ class LogConfigTest {
         assertThat(targetFile1).exists();
 
         // First file (the one rotated to targetFile1) should not have the header.
-        assertThat(Files.readString(targetFile1))
+        assertThat(targetFile1)
+                .content(StandardCharsets.UTF_8)
                 .matches(DATE_PATTERN
                         + format(
                                 " %-5s \\[className] Long line that will get next message to be written to next file%n",
                                 Level.WARN));
 
-        assertThat(Files.readString(targetFile))
+        assertThat(targetFile)
+                .content(StandardCharsets.UTF_8)
                 .matches(format(
                         DATE_PATTERN + " %-5s \\[o\\.n\\.HeaderClassName] My Header%n" + DATE_PATTERN
                                 + " %-5s \\[o\\.n\\.HeaderClassName] In Two Lines%n" + DATE_PATTERN
@@ -178,7 +179,7 @@ class LogConfigTest {
     }
 
     @Test
-    void standardFormatDefaults() throws IOException {
+    void standardFormatDefaults() {
         Path targetFile = dir.homePath().resolve("debug.log");
 
         ctx = LogConfig.createTemporaryLoggerToSingleFile(fs, targetFile, Level.INFO, true);
@@ -186,12 +187,13 @@ class LogConfigTest {
         ExtendedLogger logger = ctx.getLogger("org.neo4j.classname");
         logger.warn("test");
 
-        assertThat(Files.readString(targetFile))
+        assertThat(targetFile)
+                .content(StandardCharsets.UTF_8)
                 .matches(DATE_PATTERN + format(" %-5s \\[o\\.n\\.classname] test%n", Level.WARN));
     }
 
     @Test
-    void standardFormatNoCategory() throws IOException {
+    void standardFormatNoCategory() {
         Path targetFile = dir.homePath().resolve("debug.log");
 
         ctx = LogConfig.createTemporaryLoggerToSingleFile(fs, targetFile, Level.INFO, false);
@@ -199,11 +201,13 @@ class LogConfigTest {
         ExtendedLogger logger = ctx.getLogger("org.neo4j.classname");
         logger.warn("test");
 
-        assertThat(Files.readString(targetFile)).matches(DATE_PATTERN + format(" %-5s test%n", Level.WARN));
+        assertThat(targetFile)
+                .content(StandardCharsets.UTF_8)
+                .matches(DATE_PATTERN + format(" %-5s test%n", Level.WARN));
     }
 
     @Test
-    void jsonFormatDebugLog() throws IOException {
+    void jsonFormatDebugLog() {
         Path targetFile = dir.homePath().resolve("debug.log");
 
         Path xmlConfig = newTemporaryXmlConfigBuilder(fs)
@@ -219,7 +223,8 @@ class LogConfigTest {
         ExtendedLogger logger = ctx.getLogger("org.neo4j.classname");
         logger.warn("test");
 
-        assertThat(Files.readString(targetFile))
+        assertThat(targetFile)
+                .content(StandardCharsets.UTF_8)
                 .matches(format(
                         "\\{\"time\":\"" + DATE_PATTERN
                                 + "\",\"level\":\"%s\",\"category\":\"o\\.n\\.classname\",\"message\":\"test\"}%n",
@@ -227,7 +232,7 @@ class LogConfigTest {
     }
 
     @Test
-    void jsonFormatStacktrace() throws IOException {
+    void jsonFormatStacktrace() {
         Path targetFile = dir.homePath().resolve("debug.log");
 
         Path xmlConfig = newTemporaryXmlConfigBuilder(fs)
@@ -243,7 +248,8 @@ class LogConfigTest {
         ExtendedLogger logger = ctx.getLogger("org.neo4j.classname");
         logger.warn("test", newThrowable("stack"));
 
-        assertThat(Files.readString(targetFile))
+        assertThat(targetFile)
+                .content(StandardCharsets.UTF_8)
                 .matches(format(
                         "\\{\"time\":\"" + DATE_PATTERN
                                 + "\",\"level\":\"%s\",\"category\":\"o\\.n\\.classname\",\"message\":\"test\",\"stacktrace\":\"stack\"}%n",
@@ -251,54 +257,7 @@ class LogConfigTest {
     }
 
     @Test
-    void jsonFormatStructuredMessage() throws IOException {
-        Path targetFile = dir.homePath().resolve("debug.log");
-
-        Path xmlConfig = newTemporaryXmlConfigBuilder(fs)
-                .withLogger(newLoggerBuilder(ROOT_LOGGER, targetFile)
-                        .withLevel(Level.INFO)
-                        .withCategory(true)
-                        .withJsonFormatTemplate(STRUCTURED_LOG_JSON_TEMPLATE)
-                        .build())
-                .create();
-
-        ctx = createLoggerFromXmlConfig(fs, xmlConfig);
-
-        ExtendedLogger logger = ctx.getLogger("org.neo4j.classname");
-        logger.info(new MyStructure());
-
-        assertThat(Files.readString(targetFile))
-                .matches("\\{\"time\":\"" + DATE_PATTERN
-                        + "\",\"level\":\"INFO\",\"long\":7,"
-                        + "\"string1\":\"my string\",\"string2\":\" special\\\\\" string\"}" + lineSeparator());
-    }
-
-    @Test
-    void jsonFormatStructuredMessageWithException() throws IOException {
-        Path targetFile = dir.homePath().resolve("debug.log");
-
-        Path xmlConfig = newTemporaryXmlConfigBuilder(fs)
-                .withLogger(newLoggerBuilder(ROOT_LOGGER, targetFile)
-                        .withLevel(Level.INFO)
-                        .withCategory(true)
-                        .withJsonFormatTemplate(STRUCTURED_LOG_JSON_TEMPLATE_WITH_CATEGORY)
-                        .build())
-                .create();
-
-        ctx = createLoggerFromXmlConfig(fs, xmlConfig);
-
-        ExtendedLogger logger = ctx.getLogger("org.neo4j.classname");
-        logger.info(new MyStructure(), newThrowable("test"));
-
-        assertThat(Files.readString(targetFile))
-                .matches("\\{\"time\":\"" + DATE_PATTERN
-                        + "\",\"level\":\"INFO\",\"category\":\"o\\.n\\.classname\",\"long\":7,"
-                        + "\"string1\":\"my string\",\"string2\":\" special\\\\\" string\",\"stacktrace\":\"test\"}"
-                        + lineSeparator());
-    }
-
-    @Test
-    void standardFormatWithStructuredMessage() throws IOException {
+    void standardFormatWithStructuredMessage() {
         Path targetFile = dir.homePath().resolve("debug.log");
 
         ctx = LogConfig.createTemporaryLoggerToSingleFile(fs, targetFile, Level.INFO, true);
@@ -306,7 +265,8 @@ class LogConfigTest {
         ExtendedLogger logger = ctx.getLogger("org.neo4j.classname");
         logger.warn(new MyStructure());
 
-        assertThat(Files.readString(targetFile))
+        assertThat(targetFile)
+                .content(StandardCharsets.UTF_8)
                 .matches(DATE_PATTERN + format(" %-5s \\[o\\.n\\.classname] 1c%n", Level.WARN));
     }
 
@@ -346,8 +306,7 @@ class LogConfigTest {
     }
 
     private void useConsoleLogger(boolean daemonMode) throws IOException {
-        String xml =
-                """
+        String xml = """
                 <Configuration>
                    <Appenders>
                        <File name="Neo4jLog" fileName="${config:server.directories.logs}/neo4j.log">
@@ -382,10 +341,10 @@ class LogConfigTest {
             assertThat(i.next()).contains("Removing console appender 'ConsoleAppender' with target 'SYSTEM_OUT'.");
         }
         assertThat(i.next()).matches(DATE_PATTERN + format(" %-5s test", Level.WARN));
-        assertThat(i.hasNext()).isFalse();
+        assertThat(i).isExhausted();
 
         assertThat(suppressOutput.getOutputVoice().containsMessage(format(" %-5s test%n", Level.WARN)))
-                .isEqualTo(!daemonMode);
+                .isNotEqualTo(daemonMode);
     }
 
     private static class MyStructure extends Neo4jMapMessage {

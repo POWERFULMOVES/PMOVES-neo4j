@@ -22,12 +22,12 @@ package org.neo4j.cypher.internal.compiler.planner.logical
 import org.neo4j.cypher.internal.ast.prettifier.ExpressionStringifier
 import org.neo4j.cypher.internal.compiler.planner.logical.ordering.InterestingOrderConfig
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.projection
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.projection.MaybeReportedProjections
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.IsAggregate
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.UnPositionedVariable.varFor
 import org.neo4j.cypher.internal.expressions.Variable
-import org.neo4j.cypher.internal.frontend.phases.Namespacer
 import org.neo4j.cypher.internal.ir
 import org.neo4j.cypher.internal.ir.ordering.ColumnOrder.Asc
 import org.neo4j.cypher.internal.ir.ordering.ColumnOrder.Desc
@@ -38,6 +38,7 @@ import org.neo4j.cypher.internal.logical.plans.Ascending
 import org.neo4j.cypher.internal.logical.plans.ColumnOrder
 import org.neo4j.cypher.internal.logical.plans.Descending
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
+import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 
 object SortPlanner {
 
@@ -155,7 +156,7 @@ object SortPlanner {
    * @param satisfiedPrefix the prefix of the order to solve that is already satisfied.
    * @param interestingOrderConfig the order to solve.
    * @param isPushDownSort `true` if this attempts to plan the sort earlier than written in the original query.
-   * @param updateSolved `true` if the solved attribute should be updated. 
+   * @param updateSolved `true` if the solved attribute should be updated.
    * @return `plan` with Sort on top, if 
    *         * there was an order to solve,
    *         * it was possible to solve it now, and
@@ -176,7 +177,7 @@ object SortPlanner {
         .collectFirst { case (key, e) if e == expression => key }
         .getOrElse(
           varFor(
-            Namespacer.genName(
+            AnonymousVariableNameGenerator.genName(
               context.staticComponents.anonymousVariableNameGenerator,
               ExpressionStringifier.pretty(_ =>
                 context.staticComponents.anonymousVariableNameGenerator.nextName
@@ -197,7 +198,8 @@ object SortPlanner {
         case _              => true
       })
       if (projectionsToPlan.nonEmpty && projectionDeps.forall(e => plan.availableSymbols.contains(e))) {
-        val projectionsToMarkSolved = if (updateSolved) Some(projectionsToPlan) else None
+        val projectionsToMarkSolved =
+          if (updateSolved) MaybeReportedProjections(Some(projectionsToPlan)) else MaybeReportedProjections.empty
         projection(plan, projectionsToPlan, projectionsToMarkSolved, context)
       } else
         plan
@@ -230,11 +232,11 @@ object SortPlanner {
     // First the ones that are part of projection list and may introduce variables that are needed for the second projection
     val projections =
       sortItems.foldLeft(Map.empty[LogicalVariable, Expression])((acc, i) => acc ++ i.providedOrderColumn.projections)
-    val projected1 = projected(plan, projections, updateSolved = updateSolved)
+    val projected1 = projected(plan, projections, updateSolved)
     // And then all the ones from unaliased sort items that may refer to newly introduced variables
     val unaliasedProjections =
       sortItems.foldLeft(Map.empty[LogicalVariable, Expression])((acc, i) => acc ++ i.unaliasedProjections)
-    val projected2 = projected(projected1, unaliasedProjections, updateSolved = false)
+    val projected2 = projected(projected1, unaliasedProjections, false)
 
     val sortColumns: Seq[ColumnOrder] = sortItems.map(_.columnOrder)
     val providedOrderColumns = sortItems.map(_.providedOrderColumn)
@@ -251,7 +253,7 @@ object SortPlanner {
       val fullSortRequired =
         satisfiedPrefix.isEmpty ||
           providedOrderAfterProjections.isEmpty || // order was invalidated, likely by a subquery expression
-          !context.settings.executionModel.providedOrderPreserving // Parallel runtime does currently not support PartialSort
+          !context.settings.executionModel.providedOrderPreserving // PartialSort requires order to be preserved
       if (fullSortRequired) {
         Some(context.staticComponents.logicalPlanProducer.planSort(
           projected2,

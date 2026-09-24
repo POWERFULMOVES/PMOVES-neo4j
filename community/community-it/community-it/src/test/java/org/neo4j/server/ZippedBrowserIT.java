@@ -43,75 +43,75 @@ public class ZippedBrowserIT {
 
     @Test
     public void testBrowserZip() throws IOException, InterruptedException {
-        var dbms = setupDatabase("neo4j-browser.zip");
+        try (var dbms = setupDatabase("neo4j-browser.zip");
+                var client = HttpClient.newBuilder()
+                        .followRedirects(HttpClient.Redirect.NORMAL)
+                        .build(); ) {
 
-        var client = HttpClient.newBuilder()
-                .followRedirects(HttpClient.Redirect.NORMAL)
-                .build();
+            var request = HttpRequest.newBuilder()
+                    .uri(URI.create(databaseUrl(dbms) + "browser/"))
+                    .build();
+            var response = client.send(request, HttpResponse.BodyHandlers.ofString());
 
-        var request = HttpRequest.newBuilder()
-                .uri(URI.create(databaseUrl(dbms) + "browser/"))
-                .build();
-        var response = client.send(request, HttpResponse.BodyHandlers.ofString());
-
-        assertThat(response.statusCode()).isEqualTo(200);
-        assertThat(response.body()).isEqualTo("<h1>New Improved Browser</h1>\n" + "<h2>Designed by Oskar</h2>\n");
-        dbms.shutdown();
+            assertThat(response.statusCode()).isEqualTo(200);
+            assertThat(response.body()).isEqualTo("<h1>New Improved Browser</h1>\n" + "<h2>Designed by Oskar</h2>\n");
+        }
+        ;
     }
 
     @Test
     public void testBrowserZipRedirect() throws IOException, InterruptedException {
-        var dbms = setupDatabase("neo4j-browser.zip");
-        var client = HttpClient.newBuilder()
-                .followRedirects(HttpClient.Redirect.NORMAL)
-                .build();
+        try (var dbms = setupDatabase("neo4j-browser.zip");
+                var client = HttpClient.newBuilder()
+                        .followRedirects(HttpClient.Redirect.NORMAL)
+                        .build(); ) {
 
-        var request = HttpRequest.newBuilder()
-                .uri(URI.create(databaseUrl(dbms)))
-                .header("Accept", "text/html")
-                .build();
-        var response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            var request = HttpRequest.newBuilder()
+                    .uri(URI.create(databaseUrl(dbms)))
+                    .header("Accept", "text/html")
+                    .build();
+            var response = client.send(request, HttpResponse.BodyHandlers.ofString());
 
-        assertThat(response.statusCode()).isEqualTo(200);
-        assertThat(response.body()).isEqualTo("<h1>New Improved Browser</h1>\n" + "<h2>Designed by Oskar</h2>\n");
-        dbms.shutdown();
+            assertThat(response.statusCode()).isEqualTo(200);
+            assertThat(response.body()).isEqualTo("<h1>New Improved Browser</h1>\n" + "<h2>Designed by Oskar</h2>\n");
+        }
     }
 
     @Test
     public void testBrowserZipWithDifferentFileName() throws IOException, InterruptedException {
-        var dbms = setupDatabase("neo4j-browser-2025.01.24+0.zip");
-        var client = HttpClient.newBuilder()
-                .followRedirects(HttpClient.Redirect.NORMAL)
-                .build();
+        try (var dbms = setupDatabase("neo4j-browser-2025.01.24+0.zip");
+                var client = HttpClient.newBuilder()
+                        .followRedirects(HttpClient.Redirect.NORMAL)
+                        .build()) {
 
-        var request = HttpRequest.newBuilder()
-                .uri(URI.create(databaseUrl(dbms)))
-                .header("Accept", "text/html")
-                .build();
-        var response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            var request = HttpRequest.newBuilder()
+                    .uri(URI.create(databaseUrl(dbms)))
+                    .header("Accept", "text/html")
+                    .build();
+            var response = client.send(request, HttpResponse.BodyHandlers.ofString());
 
-        assertThat(response.statusCode()).isEqualTo(200);
-        assertThat(response.body())
-                .isEqualTo("<h1>Browser With Different Zip Name</h1>\n" + "<h2>Designed by Oskar</h2>\n");
-        dbms.shutdown();
+            assertThat(response.statusCode()).isEqualTo(200);
+            assertThat(response.body())
+                    .isEqualTo("<h1>Browser With Different Zip Name</h1>\n" + "<h2>Designed by Oskar</h2>\n");
+        }
     }
 
     @Test
     public void shouldServeLatestWhenMultipleAvailable() throws IOException, InterruptedException {
-        var dbms = setupDatabase("neo4j-browser-2026.01.01+0.zip", "neo4j-browser-2027.01.01+0.zip");
-        var client = HttpClient.newBuilder()
-                .followRedirects(HttpClient.Redirect.NORMAL)
-                .build();
+        try (var dbms = setupDatabase("neo4j-browser-2026.01.01+0.zip", "neo4j-browser-2027.01.01+0.zip");
+                var client = HttpClient.newBuilder()
+                        .followRedirects(HttpClient.Redirect.NORMAL)
+                        .build()) {
 
-        var request = HttpRequest.newBuilder()
-                .uri(URI.create(databaseUrl(dbms)))
-                .header("Accept", "text/html")
-                .build();
-        var response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            var request = HttpRequest.newBuilder()
+                    .uri(URI.create(databaseUrl(dbms)))
+                    .header("Accept", "text/html")
+                    .build();
+            var response = client.send(request, HttpResponse.BodyHandlers.ofString());
 
-        assertThat(response.statusCode()).isEqualTo(200);
-        assertThat(response.body()).isEqualTo("<h1>V2 With New Amazing Features</h1>\n");
-        dbms.shutdown();
+            assertThat(response.statusCode()).isEqualTo(200);
+            assertThat(response.body()).isEqualTo("<h1>V2 With New Amazing Features</h1>\n");
+        }
     }
 
     private String databaseUrl(DatabaseManagementService database) {

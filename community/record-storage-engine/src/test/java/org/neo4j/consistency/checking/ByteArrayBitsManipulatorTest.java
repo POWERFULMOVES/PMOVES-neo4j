@@ -26,14 +26,13 @@ import static org.neo4j.consistency.checking.ByteArrayBitsManipulator.MAX_SLOT_V
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
 
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.internal.batchimport.cache.ByteArray;
 import org.neo4j.internal.batchimport.cache.NumberArrayFactories;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class ByteArrayBitsManipulatorTest {
     @Inject
     protected RandomSupport random;
@@ -43,7 +42,8 @@ class ByteArrayBitsManipulatorTest {
         // given
         ByteArrayBitsManipulator manipulator = new ByteArrayBitsManipulator(MAX_SLOT_BITS, 1);
         long[][] actual = new long[1_000][];
-        try (ByteArray array = NumberArrayFactories.HEAP.newByteArray(actual.length, new byte[MAX_BYTES], INSTANCE)) {
+        try (ByteArray array =
+                NumberArrayFactories.OFF_HEAP.newByteArray(actual.length, new byte[MAX_BYTES], INSTANCE)) {
             // when
             for (int i = 0; i < actual.length; i++) {
                 actual[i] = new long[] {random.nextLong(MAX_SLOT_VALUE + 1), random.nextBoolean() ? -1 : 0};
@@ -61,7 +61,8 @@ class ByteArrayBitsManipulatorTest {
         // given
         ByteArrayBitsManipulator manipulator = new ByteArrayBitsManipulator(MAX_SLOT_BITS, MAX_SLOT_BITS, 1, 1, 1, 1);
         long[][] actual = new long[1_000][];
-        try (ByteArray array = NumberArrayFactories.HEAP.newByteArray(actual.length, new byte[MAX_BYTES], INSTANCE)) {
+        try (ByteArray array =
+                NumberArrayFactories.OFF_HEAP.newByteArray(actual.length, new byte[MAX_BYTES], INSTANCE)) {
             // when
             for (int i = 0; i < actual.length; i++) {
                 actual[i] = new long[] {
@@ -86,7 +87,7 @@ class ByteArrayBitsManipulatorTest {
     void shouldHandleMinusOne() {
         // given
         ByteArrayBitsManipulator manipulator = new ByteArrayBitsManipulator(MAX_SLOT_BITS, 1);
-        try (ByteArray array = NumberArrayFactories.HEAP.newByteArray(2, new byte[MAX_BYTES], INSTANCE)) {
+        try (ByteArray array = NumberArrayFactories.OFF_HEAP.newByteArray(2, new byte[MAX_BYTES], INSTANCE)) {
             // when
             put(manipulator, array, 0, -1, 0);
             put(manipulator, array, 1, -1, -1);

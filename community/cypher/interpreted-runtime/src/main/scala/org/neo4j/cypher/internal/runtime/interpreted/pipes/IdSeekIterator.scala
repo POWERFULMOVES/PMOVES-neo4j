@@ -20,17 +20,17 @@
 package org.neo4j.cypher.internal.runtime.interpreted.pipes
 
 import org.neo4j.cypher.internal.runtime.ClosingLongIterator
+import org.neo4j.cypher.internal.runtime.ClosingRelationshipIterator
 import org.neo4j.cypher.internal.runtime.QueryContext
-import org.neo4j.cypher.internal.runtime.RelationshipIterator
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.NumericHelper
 import org.neo4j.internal.kernel.api.Read
 import org.neo4j.internal.kernel.api.RelationshipScanCursor
 import org.neo4j.kernel.api.StatementConstants
+import org.neo4j.kernel.impl.util.ValueUtils
 import org.neo4j.storageengine.api.RelationshipVisitor
 import org.neo4j.values.AnyValue
 import org.neo4j.values.storable.Values
-
-import java.util.NoSuchElementException
+import org.neo4j.values.virtual.VirtualRelationshipValue
 
 class NodeIdSeekIterator(nodeIds: java.util.Iterator[AnyValue], query: QueryContext) extends ClosingLongIterator {
   private var cachedNode: Long = computeNext()
@@ -70,7 +70,7 @@ class DirectedRelationshipIdSeekIterator(
   relIds: java.util.Iterator[AnyValue],
   read: Read,
   cursor: RelationshipScanCursor
-) extends ClosingLongIterator with RelationshipIterator {
+) extends ClosingRelationshipIterator {
   protected var cachedRelationship: RelationshipState = _
   protected var _next: Long = StatementConstants.NO_SUCH_RELATIONSHIP
   private var startNode = StatementConstants.NO_SUCH_NODE
@@ -93,6 +93,8 @@ class DirectedRelationshipIdSeekIterator(
     true
   }
 
+  def relationship(): VirtualRelationshipValue = ValueUtils.fromRelationshipCursor(cursor)
+
   override def startNodeId(): Long = startNode
 
   override def endNodeId(): Long = endNode
@@ -103,11 +105,16 @@ class DirectedRelationshipIdSeekIterator(
     if (innerHasNext) {
       val result = _next
       storeState()
-      _next = computeNext()
+      setAsFetched()
       result
     } else {
       throw new NoSuchElementException
     }
+  }
+
+  protected def setAsFetched(): Unit = {
+    _next = StatementConstants.NO_SUCH_RELATIONSHIP
+    cachedRelationship = null
   }
 
   protected def storeState(): Unit = {
@@ -166,7 +173,7 @@ class UndirectedRelationshipIdSeekIterator(
         storeState()
         // For self-loops, we don't emit sibling
         emitSibling = startNodeId() != endNodeId()
-        _next = computeNext()
+        setAsFetched()
         lastRel
       }
     } else {

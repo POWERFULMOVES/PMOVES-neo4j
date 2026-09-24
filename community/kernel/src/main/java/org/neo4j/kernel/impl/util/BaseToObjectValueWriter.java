@@ -45,8 +45,10 @@ import org.neo4j.internal.helpers.collection.ReverseArrayIterator;
 import org.neo4j.values.AnyValueWriter;
 import org.neo4j.values.storable.CoordinateReferenceSystem;
 import org.neo4j.values.storable.DurationValue;
+import org.neo4j.values.storable.Float16Format;
 import org.neo4j.values.storable.TextArray;
 import org.neo4j.values.storable.TextValue;
+import org.neo4j.values.storable.Values;
 import org.neo4j.values.virtual.MapValue;
 import org.neo4j.values.virtual.NodeValue;
 import org.neo4j.values.virtual.RelationshipValue;
@@ -202,7 +204,7 @@ public abstract class BaseToObjectValueWriter<E extends Exception> implements An
     public void writePathReference(List<VirtualNodeValue> nodes, List<VirtualRelationshipValue> relationships)
             throws E {
         assert nodes != null;
-        assert nodes.size() > 0;
+        assert !nodes.isEmpty();
         assert relationships != null;
         assert nodes.size() == relationships.size() + 1;
 
@@ -334,6 +336,46 @@ public abstract class BaseToObjectValueWriter<E extends Exception> implements An
     @Override
     public void writeDateTime(ZonedDateTime zonedDateTime) {
         writeValue(zonedDateTime);
+    }
+
+    @Override
+    public void writeInt8Vector(byte[] values) {
+        writeValue(Values.int8Vector(values));
+    }
+
+    @Override
+    public void writeInt16Vector(short[] values) {
+        writeValue(Values.int16Vector(values));
+    }
+
+    @Override
+    public void writeInt32Vector(int[] values) {
+        writeValue(Values.int32Vector(values));
+    }
+
+    @Override
+    public void writeInt64Vector(long[] values) {
+        writeValue(Values.int64Vector(values));
+    }
+
+    @Override
+    public void writeFloat16Vector(Float16Format format, short[] values) {
+        writeValue(Values.float16Vector(format, values));
+    }
+
+    @Override
+    public void writeFloat32Vector(float[] values) {
+        writeValue(Values.float32Vector(values));
+    }
+
+    @Override
+    public void writeFloat64Vector(double[] values) {
+        writeValue(Values.float64Vector(values));
+    }
+
+    @Override
+    public void writeUUID(long msb, long lsb) throws E {
+        writeValue(Values.uuidValue(msb, lsb));
     }
 
     private static class PathProxy implements Path {
@@ -469,7 +511,7 @@ public abstract class BaseToObjectValueWriter<E extends Exception> implements An
         private final Map<String, Object> map;
 
         MapWriter(int size) {
-            this.map = new HashMap<>(size);
+            this.map = HashMap.newHashMap(size);
         }
 
         @Override

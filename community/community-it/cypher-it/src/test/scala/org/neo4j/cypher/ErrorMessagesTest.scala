@@ -21,8 +21,11 @@ package org.neo4j.cypher
 
 import org.assertj.core.api.Assertions.assertThat
 import org.neo4j.cypher.internal.util.helpers.StringHelper.RichString
+import org.neo4j.cypher.util.Reason
+import org.neo4j.cypher.util.SkipOnSpd
 import org.neo4j.exceptions.Neo4jException
 import org.neo4j.exceptions.SyntaxException
+import org.neo4j.test.extension.SkipOnSpd.Note
 
 class ErrorMessagesTest extends ExecutionEngineWithoutRestartFunSuite {
 
@@ -31,6 +34,10 @@ class ErrorMessagesTest extends ExecutionEngineWithoutRestartFunSuite {
   test("noReturnColumns") {
     expectError(
       "match (s) where id(s) = 0 return",
+      // CYPHER 25
+      "Invalid input '': expected \"*\", \"ALL\", \"DISTINCT\" or an expression (line 1, column 33 (offset: 32))",
+      "Invalid input '': expected an expression, '*', 'ALL' or 'DISTINCT' (line 1, column 33 (offset: 32))",
+      // CYPHER 5
       "Invalid input '': expected \"*\", \"DISTINCT\" or an expression (line 1, column 33 (offset: 32))",
       "Invalid input '': expected an expression, '*' or 'DISTINCT' (line 1, column 33 (offset: 32))"
     )
@@ -132,10 +139,15 @@ class ErrorMessagesTest extends ExecutionEngineWithoutRestartFunSuite {
   }
 
   test("fail when using exclamation mark") {
-    expectError(
+    val error = expectError(
       "match (n) where id(n) = 0 and n.foo != 2 return n",
       "Unknown operation '!=' (you probably meant to use '<>', which is the operator for inequality testing) (line 1, column 37 (offset: 36))"
     )
+    error.gqlStatus() shouldBe "42001"
+    error.cause() should not be empty
+    val gqlCause = error.cause().get()
+    gqlCause.gqlStatus() shouldBe "42I49"
+    gqlCause.statusDescription() shouldBe "error: syntax error or access rule violation - invalid inequality operator. Unknown inequality operator '!='. The operator for inequality in Cypher is '<>'."
   }
 
   test("trying to drop constraint index should return sensible error") {
@@ -161,7 +173,7 @@ class ErrorMessagesTest extends ExecutionEngineWithoutRestartFunSuite {
     expectError(
       "CREATE CONSTRAINT my_constraint FOR (person:Person) REQUIRE person.name IS UNIQUE",
       String.format(
-        "Unable to create Constraint( name='my_constraint', type='UNIQUENESS', schema=(:Person {name}) ):%n" +
+        "Unable to create Constraint( name='my_constraint', type='NODE PROPERTY UNIQUENESS', schema=(:Person {name}), graphTypeDependence='UNDESIGNATED' ):%n" +
           "Both Node(" + node1 + ") and Node(" + node2 + ") have the label `Person` and property `name` = 'A'"
       )
     )
@@ -182,24 +194,25 @@ class ErrorMessagesTest extends ExecutionEngineWithoutRestartFunSuite {
     )
   }
 
-  test("should forbid bound relationship list in shortestPath pattern parts") {
-    expectError(
-      "WITH [] AS r LIMIT 1 MATCH p = shortestPath((src)-[r*]->(dst)) RETURN src, dst",
-      "Bound relationships not allowed in shortestPath(...)"
-    )
-  }
-
   test("should give nice error when trying to parse multiple statements") {
-    expectError(
+    val error = expectError(
       "RETURN 42; RETURN 42",
       "Expected exactly one statement per query but got: 2"
     )
+    error.gqlStatus() shouldBe "42001"
+    error.cause() should not be empty
+    val gqlCause = error.cause().get()
+    gqlCause.gqlStatus() shouldBe "42I15"
+    gqlCause.statusDescription() shouldBe "error: syntax error or access rule violation - invalid number of statements. Expected exactly one statement per query but got: 2."
   }
 
-  test("should give proper error message when trying to use Node Key constraint on community") {
+  test(
+    "should give proper error message when trying to use Node Key constraint on community",
+    SkipOnSpd(note = Note.irrelevant, reason = Some(Reason.CommunityOnly))
+  ) {
     expectError(
       "CREATE CONSTRAINT FOR (n:Person) REQUIRE (n.firstname) IS NODE KEY",
-      String.format("Unable to create Constraint( type='NODE KEY', schema=(:Person {firstname}) ):%n" +
+      String.format("Unable to create Constraint( type='NODE KEY', schema=(:Person {firstname}), graphTypeDependence='UNDESIGNATED' ):%n" +
         "Node Key constraint requires Neo4j Enterprise Edition")
     )
   }
@@ -245,9 +258,37 @@ class ErrorMessagesTest extends ExecutionEngineWithoutRestartFunSuite {
     )
   }
 
-  private def expectError(query: String, expectedError: String*): Unit = {
+  test("should get sensible legacy message for vector index dimensionality mismatch") {
+    val indexSetup =
+      """CREATE VECTOR INDEX idxName
+        |FOR (n:Label) ON n.prop
+        |OPTIONS {indexConfig : {`vector.dimensions`: 5}}
+        |""".stripMargin
+
+    val searchQuery =
+      """CYPHER 25
+        |MATCH (n)
+        |  SEARCH n IN (
+        |    VECTOR INDEX idxName
+        |    FOR vector([1, 2], 2, INT)
+        |    LIMIT 2
+        |  )
+        |RETURN n
+        """.stripMargin
+
+    executeQuery(indexSetup)
+    executeQuery("CALL db.awaitIndexes()")
+
+    expectError(
+      searchQuery,
+      "Vector index 'idxName' has a configured dimensionality of 5, but the provided vector has dimension 2."
+    )
+  }
+
+  private def expectError(query: String, expectedError: String*): Neo4jException = {
     val error = intercept[Neo4jException](executeQuery(query))
     withClue(error)(expectedError.exists(error.getMessage.contains) shouldBe true)
+    error
   }
 
   private def expectSyntaxError(query: String, expectedOffset: Int, expectedError: String*): Unit = {

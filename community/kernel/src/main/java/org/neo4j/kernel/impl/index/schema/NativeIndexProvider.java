@@ -23,12 +23,13 @@ import static org.apache.commons.lang3.StringUtils.defaultIfEmpty;
 
 import java.io.IOException;
 import java.nio.file.OpenOption;
-import java.nio.file.Path;
 import org.apache.commons.lang3.StringUtils;
 import org.eclipse.collections.api.set.ImmutableSet;
 import org.neo4j.common.TokenNameLookup;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseInternalSettings;
+import org.neo4j.exceptions.InternalException;
+import org.neo4j.graphdb.WriteOperationsNotAllowedException;
 import org.neo4j.index.internal.gbptree.GBPTree;
 import org.neo4j.index.internal.gbptree.Layout;
 import org.neo4j.index.internal.gbptree.MetadataMismatchException;
@@ -42,6 +43,7 @@ import org.neo4j.io.memory.ByteBufferFactory;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.api.impl.index.SchemaIndexMigrator;
@@ -51,6 +53,7 @@ import org.neo4j.kernel.api.index.IndexPopulator;
 import org.neo4j.kernel.api.index.IndexProvider;
 import org.neo4j.kernel.api.index.MinimalIndexAccessor;
 import org.neo4j.kernel.impl.api.index.IndexSamplingConfig;
+import org.neo4j.logging.LogProvider;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.storageengine.api.StorageEngineFactory;
 import org.neo4j.storageengine.migration.StoreMigrationParticipant;
@@ -69,13 +72,15 @@ abstract class NativeIndexProvider<KEY extends NativeIndexKey<KEY>, LAYOUT exten
     private final Monitor monitor;
     protected final Config config;
     protected final boolean archiveFailedIndex;
+    protected final LogProvider logProvider;
 
     protected NativeIndexProvider(
             DatabaseIndexContext databaseIndexContext,
             IndexProviderDescriptor descriptor,
             Factory directoryStructureFactory,
             RecoveryCleanupWorkCollector recoveryCleanupWorkCollector,
-            Config config) {
+            Config config,
+            LogProvider logProvider) {
         super(KernelVersion.VERSION_RANGE_POINT_TEXT_INDEXES_ARE_INTRODUCED, descriptor, directoryStructureFactory);
         this.databaseIndexContext = databaseIndexContext;
         this.recoveryCleanupWorkCollector = recoveryCleanupWorkCollector;
@@ -83,6 +88,7 @@ abstract class NativeIndexProvider<KEY extends NativeIndexKey<KEY>, LAYOUT exten
                 databaseIndexContext.monitors.newMonitor(IndexProvider.Monitor.class, databaseIndexContext.monitorTag);
         this.config = config;
         this.archiveFailedIndex = config.get(GraphDatabaseInternalSettings.archive_failed_index);
+        this.logProvider = logProvider;
     }
 
     /**
@@ -111,9 +117,10 @@ abstract class NativeIndexProvider<KEY extends NativeIndexKey<KEY>, LAYOUT exten
             TokenNameLookup tokenNameLookup,
             ElementIdMapper elementIdMapper,
             ImmutableSet<OpenOption> openOptions,
-            StorageEngineIndexingBehaviour indexingBehaviour) {
+            StorageEngineIndexingBehaviour indexingBehaviour,
+            IndexPopulator.Configuration configuration) {
         if (databaseIndexContext.readOnlyChecker.isReadOnly()) {
-            throw new UnsupportedOperationException("Can't create populator for read only index");
+            throw WriteOperationsNotAllowedException.noWriteOperationAllowed();
         }
 
         IndexFiles indexFiles = indexFiles(descriptor);
@@ -125,7 +132,8 @@ abstract class NativeIndexProvider<KEY extends NativeIndexKey<KEY>, LAYOUT exten
                 memoryTracker,
                 tokenNameLookup,
                 elementIdMapper,
-                openOptions);
+                openOptions,
+                configuration);
     }
 
     protected abstract IndexPopulator newIndexPopulator(
@@ -136,7 +144,8 @@ abstract class NativeIndexProvider<KEY extends NativeIndexKey<KEY>, LAYOUT exten
             MemoryTracker memoryTracker,
             TokenNameLookup tokenNameLookup,
             ElementIdMapper elementIdMapper,
-            ImmutableSet<OpenOption> openOptions);
+            ImmutableSet<OpenOption> openOptions,
+            IndexPopulator.Configuration configuration);
 
     @Override
     public IndexAccessor getOnlineAccessor(
@@ -152,7 +161,7 @@ abstract class NativeIndexProvider<KEY extends NativeIndexKey<KEY>, LAYOUT exten
                 indexFiles, layout(descriptor), descriptor, tokenNameLookup, elementIdMapper, openOptions, readOnly);
     }
 
-    protected abstract IndexAccessor newIndexAccessor(
+    abstract IndexAccessor newIndexAccessor(
             IndexFiles indexFiles,
             LAYOUT layout,
             IndexDescriptor descriptor,
@@ -173,7 +182,7 @@ abstract class NativeIndexProvider<KEY extends NativeIndexKey<KEY>, LAYOUT exten
                     openOptions);
             return defaultIfEmpty(failureMessage, StringUtils.EMPTY);
         } catch (IOException e) {
-            throw new RuntimeException(e);
+            throw InternalException.internalError("Population Failure", e.getMessage(), e);
         }
     }
 
@@ -201,7 +210,7 @@ abstract class NativeIndexProvider<KEY extends NativeIndexKey<KEY>, LAYOUT exten
             StorageEngineFactory storageEngineFactory,
             CursorContextFactory contextFactory) {
         return new SchemaIndexMigrator(
-                getProviderDescriptor().name() + " indexes",
+                getProviderDescriptor().name(),
                 fs,
                 pageCache,
                 pageCacheTracer,
@@ -210,7 +219,7 @@ abstract class NativeIndexProvider<KEY extends NativeIndexKey<KEY>, LAYOUT exten
                 contextFactory);
     }
 
-    private Path storeFile(IndexDescriptor descriptor) {
+    private StoreFile storeFile(IndexDescriptor descriptor) {
         IndexFiles indexFiles = indexFiles(descriptor);
         return indexFiles.getStoreFile();
     }

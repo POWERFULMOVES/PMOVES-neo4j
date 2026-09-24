@@ -20,7 +20,6 @@
 package org.neo4j.internal.recordstorage;
 
 import static org.neo4j.configuration.GraphDatabaseInternalSettings.additional_lock_verification;
-import static org.neo4j.configuration.GraphDatabaseSettings.db_format;
 
 import org.neo4j.configuration.Config;
 import org.neo4j.kernel.impl.store.NeoStores;
@@ -32,8 +31,7 @@ import org.neo4j.storageengine.api.txstate.ReadableTransactionState;
 public interface LockVerificationFactory {
 
     static LockVerificationFactory select(Config config) {
-        boolean enabled = config.get(additional_lock_verification) && !"multiversion".equals(config.get(db_format));
-        return enabled ? STRICT : NONE;
+        return config.get(additional_lock_verification) ? STRICT : NONE;
     }
 
     LockVerificationFactory STRICT = new StrictLockVerificationFactory();

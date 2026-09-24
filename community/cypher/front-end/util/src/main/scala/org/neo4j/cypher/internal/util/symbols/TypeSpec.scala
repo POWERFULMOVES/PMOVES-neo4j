@@ -43,7 +43,7 @@ object TypeSpec {
     }.getOrElse(CTAny)
   }
 
-  def exact(types: CypherType*): TypeSpec = exact(types)
+  def exact(typ: CypherType): TypeSpec = exact(Some(typ))
 
   def exact[T <: CypherType](iterableOnce: IterableOnce[T]): TypeSpec =
     TypeSpec(iterableOnce.iterator.map(t => TypeRange(t, t)))
@@ -59,6 +59,7 @@ object TypeSpec {
     CTBoolean,
     CTFloat,
     CTInteger,
+    CTUUID,
     CTMap,
     CTNode,
     CTNumber,
@@ -73,13 +74,16 @@ object TypeSpec {
     CTTime,
     CTLocalTime,
     CTLocalDateTime,
-    CTDateTime
+    CTDateTime,
+    CTVector
   )
 
   private def apply(range: TypeRange): TypeSpec = new TypeSpec(Vector(range))
 
-  private def apply(ranges: IterableOnce[TypeRange]): TypeSpec =
+  def apply(ranges: IterableOnce[TypeRange]): TypeSpec =
     new TypeSpec(minimalRanges(ranges))
+
+  def unapply(arg: TypeSpec): Option[Seq[TypeRange]] = Some(arg.ranges)
 
   /**
    * @param ranges a set of TypeRanges
@@ -101,30 +105,30 @@ object TypeSpec {
  * @param ranges A set of TypeRanges, the intersection of which constitutes the entire set of types matched by this specification
  */
 class TypeSpec(val ranges: Seq[TypeRange]) extends Equals {
-  def contains(that: CypherType): Boolean = contains(that, ranges)
+  infix def contains(that: CypherType): Boolean = contains(that, ranges)
   private def contains(that: CypherType, rs: Seq[TypeRange]): Boolean = rs.exists(_ contains that)
 
-  def containsAny(types: CypherType*): Boolean = containsAny(TypeSpec.exact(types))
+  infix def containsAny(types: CypherType*): Boolean = containsAny(TypeSpec.exact(types))
 
-  def containsAny(that: TypeSpec): Boolean = ranges.exists { r1 =>
+  infix def containsAny(that: TypeSpec): Boolean = ranges.exists { r1 =>
     that.ranges.exists(r2 => (r1 constrain r2.lower).isDefined)
   }
 
   /**
    * All of the ranges in the given type spec are contained in this TypeSpec. That is, it is a complete sub-set.
    */
-  def containsAll(that: TypeSpec): Boolean = this.intersect(that) equals that
+  infix def containsAll(that: TypeSpec): Boolean = this.intersect(that) `equals` that
 
-  def union(that: TypeSpec): TypeSpec = TypeSpec(ranges ++ that.ranges)
+  infix def union(that: TypeSpec): TypeSpec = TypeSpec(ranges ++ that.ranges)
   def |(that: TypeSpec): TypeSpec = union(that)
 
-  def intersect(that: TypeSpec): TypeSpec =
+  infix def intersect(that: TypeSpec): TypeSpec =
     TypeSpec(ranges.flatMap { r =>
       that.ranges.flatMap(r intersect)
     })
   def &(that: TypeSpec): TypeSpec = intersect(that)
 
-  def intersectOrCoerce(that: TypeSpec): TypeSpec = {
+  infix def intersectOrCoerce(that: TypeSpec): TypeSpec = {
     val intersection = intersect(that)
     if (intersection.nonEmpty)
       intersection
@@ -132,7 +136,7 @@ class TypeSpec(val ranges: Seq[TypeRange]) extends Equals {
       coercions intersect that
   }
 
-  def coerceOrLeastUpperBound(that: TypeSpec): TypeSpec = {
+  infix def coerceOrLeastUpperBound(that: TypeSpec): TypeSpec = {
     val coerced = coercions intersect that
     if (coerced.nonEmpty)
       coerced
@@ -140,7 +144,7 @@ class TypeSpec(val ranges: Seq[TypeRange]) extends Equals {
       this leastUpperBounds that
   }
 
-  def coerceOrConvert(that: TypeSpec): TypeSpec = {
+  infix def coerceOrConvert(that: TypeSpec): TypeSpec = {
     val coerced = this coerceOrLeastUpperBound that
     if (coerced.equals(that))
       that
@@ -148,11 +152,11 @@ class TypeSpec(val ranges: Seq[TypeRange]) extends Equals {
       this
   }
 
-  def without(aType: CypherType): TypeSpec = TypeSpec(ranges.flatMap(_ without aType))
+  infix def without(aType: CypherType): TypeSpec = TypeSpec(ranges.flatMap(_ without aType))
 
-  def constrain(that: CypherType): TypeSpec = TypeSpec(ranges.flatMap(_ constrain that))
+  infix def constrain(that: CypherType): TypeSpec = TypeSpec(ranges.flatMap(_ constrain that))
 
-  def constrainOrCoerce(that: CypherType): TypeSpec = {
+  infix def constrainOrCoerce(that: CypherType): TypeSpec = {
     val constrained = constrain(that)
     if (constrained.nonEmpty)
       constrained
@@ -160,7 +164,7 @@ class TypeSpec(val ranges: Seq[TypeRange]) extends Equals {
       coercions constrain that
   }
 
-  def leastUpperBounds(that: TypeSpec): TypeSpec =
+  infix def leastUpperBounds(that: TypeSpec): TypeSpec =
     TypeSpec(ranges.flatMap { r =>
       that.ranges.flatMap(r leastUpperBounds)
     })
@@ -192,10 +196,13 @@ class TypeSpec(val ranges: Seq[TypeRange]) extends Equals {
     TypeSpec.exact(simpleCoercions)
   }
 
+  def rewrite(f: CypherType => CypherType): TypeSpec =
+    TypeSpec(ranges.map(_.rewrite(f)))
+
   def isEmpty: Boolean = ranges.isEmpty
   def nonEmpty: Boolean = !isEmpty
 
-  lazy val hasDefiniteSize: Boolean = ranges.forall(_.hasDefiniteSize)
+  def hasDefiniteSize: Boolean = ranges.forall(_.hasDefiniteSize)
 
   def toStream: Stream[CypherType] = toStream(ranges)
 
@@ -250,6 +257,38 @@ class TypeSpec(val ranges: Seq[TypeRange]) extends Equals {
         t => s"List<${format(t)}>"
       )
 
+  def toCypherStrings: IndexedSeq[String] = toCypherStrings(Vector.empty, ranges, identity)
+
+  @tailrec
+  private def toCypherStrings(
+    acc: IndexedSeq[String],
+    rs: Seq[TypeRange],
+    format: String => String
+  ): IndexedSeq[String] =
+    if (rs.isEmpty)
+      acc
+    else if (
+      rs.exists({
+        case TypeRange(_: AnyType, None) => true
+        case _                           => false
+      })
+    )
+      acc :+ format("T")
+    else {
+      val possibleTypes = TypeSpec.simpleTypes.filter(contains(_, rs))
+
+      // Remove more specific type when parentType already exists, except for MAP being parentType to NODE
+      // and RELATIONSHIP, because that is more of an implementation quirk than user knowledge.
+      val simplifiedPossibleTypes =
+        possibleTypes.filterNot(t => possibleTypes.contains(t.parentType) && t.parentType != CTMap)
+
+      toCypherStrings(
+        acc ++ simplifiedPossibleTypes.map(t => format(t.normalizedCypherTypeString())),
+        innerTypeRanges(rs),
+        t => if (t.equals("T")) "LIST" else s"LIST<${format(t)}>"
+      )
+    }
+
   def mkString(sep: String): String =
     mkString("", sep, sep, "")
 
@@ -291,5 +330,16 @@ class TypeSpec(val ranges: Seq[TypeRange]) extends Equals {
     case TypeRange(_: AnyType, Some(u: ListType))  => Some(TypeRange(CTAny, u.innerType))
     case r @ TypeRange(_: AnyType, None)           => Some(r)
     case _                                         => None
+  }
+}
+
+object TypeSpecRange {
+
+  def apply(lower: CypherType, upper: CypherType): TypeSpec =
+    TypeSpec.apply(Seq(TypeRange(lower, upper)))
+
+  def unapply(arg: TypeSpec): Option[(CypherType, CypherType)] = arg match {
+    case TypeSpec(Seq(TypeRange(lower, Some(upper)))) => Some((lower, upper))
+    case _                                            => None
   }
 }

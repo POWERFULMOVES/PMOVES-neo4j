@@ -19,6 +19,7 @@
  */
 package org.neo4j.kernel.impl.index.schema;
 
+import static org.apache.commons.lang3.ArrayUtils.EMPTY_INT_ARRAY;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.neo4j.test.Race.throwing;
 
@@ -26,24 +27,26 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
+import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.kernel.api.index.IndexPopulator;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
+import org.neo4j.storageengine.api.TokenIndexEntryUpdate;
 import org.neo4j.test.Race;
 
 class WorkSyncedIndexPopulatorTest {
 
     @Test
     void callsToDelegatingPopulatorAddShouldNotBeConcurrent() throws Throwable {
-        var populator = new WorkSyncedIndexPopulator(new NotThreadSafePopulator());
+        WorkSyncedIndexPopulator populator = new WorkSyncedIndexPopulator(new NotThreadSafePopulator());
 
-        var race = new Race();
-        race.addContestants(10, throwing(() -> {
-            populator.add(
-                    Collections.<IndexEntryUpdate<?>>singleton(Mockito.mock(IndexEntryUpdate.class)),
-                    CursorContext.NULL_CONTEXT);
-        }));
+        Race race = new Race();
+        race.addContestants(
+                10,
+                throwing(() -> populator.add(
+                        Collections.singleton(TokenIndexEntryUpdate.tokenChange(
+                                0, IndexDescriptor.NO_INDEX, EMPTY_INT_ARRAY, EMPTY_INT_ARRAY)),
+                        CursorContext.NULL_CONTEXT)));
         race.go();
     }
 
@@ -51,7 +54,7 @@ class WorkSyncedIndexPopulatorTest {
         private final AtomicBoolean flag = new AtomicBoolean();
 
         @Override
-        public void add(Collection<? extends IndexEntryUpdate<?>> updates, CursorContext cursorContext) {
+        public void add(Collection<? extends IndexEntryUpdate> updates, CursorContext cursorContext) {
             assertTrue(flag.compareAndSet(false, true), "Only one instance can flip flag at a time");
             assertTrue(flag.compareAndSet(true, false), "Only one instance can flip flag back at a time");
         }

@@ -26,28 +26,23 @@ import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.kernel.api.exceptions.Status;
 
 public class RuntimeUnsupportedException extends Neo4jException {
-    @Deprecated
-    public RuntimeUnsupportedException(String message, Throwable cause) {
-        super(message, cause);
-    }
 
     private RuntimeUnsupportedException(ErrorGqlStatusObject gqlStatusObject, String message, Throwable cause) {
         super(gqlStatusObject, message, cause);
-    }
-
-    @Deprecated
-    public RuntimeUnsupportedException(String message) {
-        super(message);
     }
 
     private RuntimeUnsupportedException(ErrorGqlStatusObject gqlStatusObject, String message) {
         super(gqlStatusObject, message);
     }
 
+    public static RuntimeUnsupportedException wrapError(CantCompileQueryException cause) {
+        return new RuntimeUnsupportedException(cause, cause.getMessage(), cause);
+    }
+
     public static RuntimeUnsupportedException unsupportedRuntimeInThisVersion(String runtime) {
         var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22000)
                 .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N27)
-                        .withParam(GqlParams.StringParam.item, runtime)
+                        .withParam(GqlParams.StringParam.feat, "'%s'".formatted(runtime))
                         .withParam(GqlParams.StringParam.edition, "community edition")
                         .build())
                 .build();

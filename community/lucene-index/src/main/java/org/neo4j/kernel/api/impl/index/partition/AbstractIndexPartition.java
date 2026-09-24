@@ -22,23 +22,23 @@ package org.neo4j.kernel.api.impl.index.partition;
 import java.io.Closeable;
 import java.io.IOException;
 import java.nio.file.Path;
-import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.search.SearcherManager;
-import org.apache.lucene.store.Directory;
 import org.neo4j.function.ThrowingBiConsumer;
 import org.neo4j.graphdb.ResourceIterator;
 import org.neo4j.kernel.api.impl.index.SearcherReference;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDirectory;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneIndexWriter;
 
 /**
  * Represents a single partition of a partitioned lucene index. Each partition is a separate Lucene index.
- * Contains and manages lifecycle of the corresponding {@link Directory}, {@link IndexWriter writer} and
+ * Contains and manages lifecycle of the corresponding {@link LuceneDirectory}, {@link LuceneIndexWriter writer} and
  * {@link SearcherManager}.
  */
 public abstract class AbstractIndexPartition implements Closeable {
-    protected final Directory directory;
+    protected final LuceneDirectory directory;
     protected final Path partitionFolder;
 
-    public AbstractIndexPartition(Path partitionFolder, Directory directory) {
+    public AbstractIndexPartition(Path partitionFolder, LuceneDirectory directory) {
         this.partitionFolder = partitionFolder;
         this.directory = directory;
     }
@@ -47,7 +47,7 @@ public abstract class AbstractIndexPartition implements Closeable {
      * Retrieve index partition directory
      * @return partition directory
      */
-    public Directory getDirectory() {
+    public LuceneDirectory getDirectory() {
         return directory;
     }
 
@@ -55,7 +55,7 @@ public abstract class AbstractIndexPartition implements Closeable {
      * Retrieve index partition writer
      * @return partition writer
      */
-    public abstract IndexWriter getIndexWriter();
+    public abstract LuceneIndexWriter getIndexWriter();
 
     /**
      * Return searcher for requested partition.
@@ -89,6 +89,6 @@ public abstract class AbstractIndexPartition implements Closeable {
      * @param visitor that gets access to the raw directories of the index.
      * @throws IOException on I/O error.
      */
-    public abstract void accessClosedDirectory(ThrowingBiConsumer<Integer, Directory, IOException> visitor)
+    public abstract void accessClosedDirectory(ThrowingBiConsumer<Integer, LuceneDirectory, IOException> visitor)
             throws IOException;
 }

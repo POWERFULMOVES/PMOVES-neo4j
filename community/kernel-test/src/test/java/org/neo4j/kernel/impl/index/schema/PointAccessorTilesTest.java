@@ -28,10 +28,12 @@ import org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector;
 import org.neo4j.internal.schema.AllIndexProviderDescriptors;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexType;
+import org.neo4j.internal.schema.SchemaUserDescription;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.api.index.IndexDirectoryStructure;
 import org.neo4j.kernel.api.schema.index.TestIndexDescriptorFactory;
+import org.neo4j.logging.NullLogProvider;
 
 class PointAccessorTilesTest extends BaseAccessorTilesTest<PointKey> {
     @Override
@@ -46,7 +48,7 @@ class PointAccessorTilesTest extends BaseAccessorTilesTest<PointKey> {
         IndexFiles indexFiles = new IndexFiles(fs, directoryStructure, descriptor.getId());
         PointLayout layout = new PointLayout(indexSettings);
         RecoveryCleanupWorkCollector collector = RecoveryCleanupWorkCollector.ignore();
-        var cacheTracer = PageCacheTracer.NULL;
+        PageCacheTracer cacheTracer = PageCacheTracer.NULL;
         DatabaseIndexContext databaseIndexContext = DatabaseIndexContext.builder(
                         pageCache,
                         fs,
@@ -64,6 +66,8 @@ class PointAccessorTilesTest extends BaseAccessorTilesTest<PointKey> {
                 indexSettings,
                 configuration,
                 Sets.immutable.empty(),
-                false);
+                false,
+                NullLogProvider.getInstance(),
+                SchemaUserDescription.TOKEN_ID_NAME_LOOKUP);
     }
 }

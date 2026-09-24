@@ -23,12 +23,14 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import org.neo4j.configuration.Config;
+import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.configuration.SettingChangeListener;
 import org.neo4j.cypher.internal.CypherDeprecationNotificationsProvider;
 import org.neo4j.cypher.internal.CypherQueryObfuscator;
+import org.neo4j.cypher.internal.notification.InternalNotification;
+import org.neo4j.cypher.internal.preparser.PreParsedQuery;
 import org.neo4j.cypher.internal.util.InputPosition;
-import org.neo4j.cypher.internal.util.InternalNotification;
 import org.neo4j.cypher.internal.util.ObfuscationMetadata;
 import org.neo4j.dbms.database.DatabaseContext;
 import org.neo4j.dbms.database.DatabaseContextProvider;
@@ -37,6 +39,7 @@ import org.neo4j.fabric.transaction.StatementLifecycleTransactionInfo;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.api.query.ExecutingQuery;
+import org.neo4j.kernel.api.query.ExtendedQueryStatistics;
 import org.neo4j.kernel.impl.api.ExecutingQueryFactory;
 import org.neo4j.kernel.impl.query.QueryExecutionMonitor;
 import org.neo4j.lock.LockTracer;
@@ -50,6 +53,9 @@ public class QueryStatementLifecycles {
     private final DatabaseContextProvider<? extends DatabaseContext> databaseContextProvider;
     private final QueryExecutionMonitor dbmsMonitor;
     private final ExecutingQueryFactory executingQueryFactory;
+    private final boolean shardQueryLogEnabled;
+    private final Config config;
+    private final boolean exposeFullyObfuscatedQueryView;
 
     public QueryStatementLifecycles(
             DatabaseContextProvider<? extends DatabaseContext> databaseContextProvider,
@@ -61,6 +67,14 @@ public class QueryStatementLifecycles {
         this.dbmsMonitor = dbmsMonitors.newMonitor(QueryExecutionMonitor.class);
         this.executingQueryFactory =
                 new ExecutingQueryFactory(systemNanoClock, setupCpuClockAtomicReference(config), systemLockTracer);
+        this.shardQueryLogEnabled = config.get(GraphDatabaseInternalSettings.shard_query_log_enabled);
+        this.config = config;
+        this.exposeFullyObfuscatedQueryView =
+                config.get(GraphDatabaseInternalSettings.expose_fully_obfuscated_query_view);
+    }
+
+    private boolean obfuscateLiterals() {
+        return config.get(GraphDatabaseSettings.log_queries_obfuscate_literals);
     }
 
     private static AtomicReference<CpuClock> setupCpuClockAtomicReference(Config config) {
@@ -94,25 +108,90 @@ public class QueryStatementLifecycles {
             executingQuery.onTransactionBound(transactionBinding);
         }
 
-        return new StatementLifecycle(executingQuery);
+        if (!shardQueryLogEnabled
+                && transactionInfo.getSessionDatabaseReference().isShard()) {
+            return new EmptyStatementLifecycle(executingQuery);
+        }
+
+        return new StatementLifecycleImpl(executingQuery);
     }
 
-    public class StatementLifecycle {
+    private static class EmptyStatementLifecycle implements StatementLifecycle {
+
+        private final ExecutingQuery executingQuery;
+
+        private EmptyStatementLifecycle(ExecutingQuery executingQuery) {
+            this.executingQuery = executingQuery;
+        }
+
+        @Override
+        public void startProcessing() {}
+
+        @Override
+        public void donePreParsing(PreParsedQuery preParsedQuery) {}
+
+        @Override
+        public void doneFabricProcessing(FabricPlan plan, int preParserOffset) {}
+
+        @Override
+        public void onObfuscatorReady(ObfuscationMetadata obfuscationMetadata, InputPosition preParserOffset) {}
+
+        @Override
+        public void doneRouterProcessing(
+                ObfuscationMetadata obfuscateMetadata,
+                InputPosition preParserOffset,
+                boolean inCompositeContext,
+                Set<InternalNotification> notifications) {}
+
+        @Override
+        public void startExecution(boolean shouldLogIfSingleQuery) {}
+
+        @Override
+        public void endSuccess() {}
+
+        @Override
+        public void endFailure(Throwable failure) {}
+
+        @Override
+        public void endFailure(String reason, Status status, ErrorGqlStatusObject errorGqlStatusObject) {}
+
+        @Override
+        public ExecutingQuery getMonitoredQuery() {
+            return executingQuery;
+        }
+
+        @Override
+        public QueryExecutionMonitor getChildQueryMonitor() {
+            return QueryExecutionMonitor.NO_OP;
+        }
+    }
+
+    public class StatementLifecycleImpl implements StatementLifecycle {
         private final ExecutingQuery executingQuery;
 
         private QueryExecutionMonitor dbMonitor;
         private MonitoringMode monitoringMode;
 
-        private StatementLifecycle(ExecutingQuery executingQuery) {
+        private StatementLifecycleImpl(ExecutingQuery executingQuery) {
             this.executingQuery = executingQuery;
         }
 
+        @Override
         public void startProcessing() {
             getQueryExecutionMonitor().startProcessing(executingQuery);
         }
 
+        @Override
+        public void donePreParsing(PreParsedQuery preParsedQuery) {
+            executingQuery.onPreparseReady(preParsedQuery.resolvedLanguage());
+        }
+
+        @Override
         public void doneFabricProcessing(FabricPlan plan, int preParserOffset) {
-            executingQuery.onObfuscatorReady(CypherQueryObfuscator.apply(plan.obfuscationMetadata()), preParserOffset);
+            executingQuery.onObfuscatorReady(
+                    CypherQueryObfuscator.apply(
+                            plan.obfuscationMetadata(), obfuscateLiterals(), exposeFullyObfuscatedQueryView),
+                    preParserOffset);
             executingQuery.onFabricDeprecationNotificationsProviderReady(plan.deprecationNotificationsProvider());
 
             if (plan.inCompositeContext()) {
@@ -122,12 +201,23 @@ public class QueryStatementLifecycles {
             }
         }
 
+        @Override
+        public void onObfuscatorReady(ObfuscationMetadata obfuscationMetadata, InputPosition preParserOffset) {
+            executingQuery.onObfuscatorReady(
+                    CypherQueryObfuscator.apply(
+                            obfuscationMetadata, obfuscateLiterals(), exposeFullyObfuscatedQueryView),
+                    preParserOffset.offset());
+        }
+
+        @Override
         public void doneRouterProcessing(
                 ObfuscationMetadata obfuscateMetadata,
                 InputPosition preParserOffset,
                 boolean inCompositeContext,
                 Set<InternalNotification> notifications) {
-            executingQuery.onObfuscatorReady(CypherQueryObfuscator.apply(obfuscateMetadata), preParserOffset.offset());
+            executingQuery.onObfuscatorReady(
+                    CypherQueryObfuscator.apply(obfuscateMetadata, obfuscateLiterals(), exposeFullyObfuscatedQueryView),
+                    preParserOffset.offset());
             executingQuery.onFabricDeprecationNotificationsProviderReady(
                     CypherDeprecationNotificationsProvider.fromJava(preParserOffset, notifications));
 
@@ -138,27 +228,36 @@ public class QueryStatementLifecycles {
             }
         }
 
+        @Override
         public void startExecution(boolean shouldLogIfSingleQuery) {
             monitoringMode.startExecution(shouldLogIfSingleQuery);
         }
 
+        @Override
         public void endSuccess() {
             QueryExecutionMonitor monitor = getQueryExecutionMonitor();
             monitor.beforeEnd(executingQuery, true);
             monitor.endSuccess(executingQuery);
         }
 
+        private QueryExecutionMonitor getQueryExecutionMonitor() {
+            return getDbMonitor().orElse(dbmsMonitor);
+        }
+
+        @Override
         public void endFailure(Throwable failure) {
             QueryExecutionMonitor monitor = getQueryExecutionMonitor();
-            Status status = (failure instanceof Status.HasStatus) ? ((Status.HasStatus) failure).status() : null;
-            ErrorGqlStatusObject errorGqlStatusObject =
-                    (failure instanceof ErrorGqlStatusObject) ? ((ErrorGqlStatusObject) failure) : null;
+            Status status = failure instanceof Status.HasStatus s ? s.status() : null;
+            ErrorGqlStatusObject errorGqlStatusObject = failure instanceof ErrorGqlStatusObject eg ? eg : null;
             monitor.beforeEnd(executingQuery, false);
             monitor.endFailure(executingQuery, failure.getMessage(), status, errorGqlStatusObject);
         }
 
-        private QueryExecutionMonitor getQueryExecutionMonitor() {
-            return getDbMonitor().orElse(dbmsMonitor);
+        @Override
+        public void endFailure(String reason, Status status, ErrorGqlStatusObject errorGqlStatusObject) {
+            QueryExecutionMonitor monitor = getQueryExecutionMonitor();
+            monitor.beforeEnd(executingQuery, false);
+            monitor.endFailure(executingQuery, reason, status, errorGqlStatusObject);
         }
 
         private Optional<QueryExecutionMonitor> getDbMonitor() {
@@ -174,11 +273,13 @@ public class QueryStatementLifecycles {
             return Optional.ofNullable(dbMonitor);
         }
 
+        @Override
         public ExecutingQuery getMonitoredQuery() {
             return executingQuery;
         }
 
-        QueryExecutionMonitor getChildQueryMonitor() {
+        @Override
+        public QueryExecutionMonitor getChildQueryMonitor() {
             return monitoringMode.getChildQueryMonitor();
         }
 
@@ -226,7 +327,8 @@ public class QueryStatementLifecycles {
                 if (!shouldLogIfSingleQuery) {
                     getQueryExecutionMonitor().startExecution(executingQuery);
                     executingQuery.onCompilationCompleted(null, null, null, 0);
-                    executingQuery.onExecutionStarted(HeapHighWaterMarkTracker.NONE);
+                    executingQuery.onExecutionStarted(
+                            HeapHighWaterMarkTracker.NONE, () -> ExtendedQueryStatistics.EMPTY);
                 }
             }
 
@@ -235,5 +337,35 @@ public class QueryStatementLifecycles {
                 return getQueryExecutionMonitor();
             }
         }
+    }
+
+    public interface StatementLifecycle {
+
+        void startProcessing();
+
+        void donePreParsing(PreParsedQuery preParsedQuery);
+
+        void doneFabricProcessing(FabricPlan plan, int preParserOffset);
+
+        // Wire the obfuscator onto the {@link ExecutingQuery} as soon as obfuscation metadata is available.
+        void onObfuscatorReady(ObfuscationMetadata obfuscationMetadata, InputPosition preParserOffset);
+
+        void doneRouterProcessing(
+                ObfuscationMetadata obfuscateMetadata,
+                InputPosition preParserOffset,
+                boolean inCompositeContext,
+                Set<InternalNotification> notifications);
+
+        void startExecution(boolean shouldLogIfSingleQuery);
+
+        void endSuccess();
+
+        void endFailure(Throwable failure);
+
+        void endFailure(String reason, Status status, ErrorGqlStatusObject errorGqlStatusObject);
+
+        ExecutingQuery getMonitoredQuery();
+
+        QueryExecutionMonitor getChildQueryMonitor();
     }
 }

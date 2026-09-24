@@ -20,8 +20,10 @@
 package org.neo4j.kernel.database;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
+import org.neo4j.util.Stringifier;
 
 /**
  * contains normalized catalog entries consisting of an optional composite name (for constituents)
@@ -34,13 +36,13 @@ public class NormalizedCatalogEntry {
     private final String databaseAlias;
 
     public NormalizedCatalogEntry(String compositeDb, String databaseAlias) {
-        this.compositeDb = Optional.of(compositeDb.toLowerCase());
-        this.databaseAlias = databaseAlias.toLowerCase();
+        this.compositeDb = Optional.of(compositeDb.toLowerCase(Locale.ROOT));
+        this.databaseAlias = databaseAlias.toLowerCase(Locale.ROOT);
     }
 
     public NormalizedCatalogEntry(String databaseAlias) {
         this.compositeDb = Optional.empty();
-        this.databaseAlias = databaseAlias.toLowerCase();
+        this.databaseAlias = databaseAlias.toLowerCase(Locale.ROOT);
     }
 
     public static NormalizedCatalogEntry fromList(List<String> nameParts) {
@@ -61,8 +63,13 @@ public class NormalizedCatalogEntry {
         return databaseAlias;
     }
 
+    /**
+     * @return a string representation of the normalized catalog entry, suitable for use in cypher queries. It will be quoted, if necessary.
+     */
     public String stringRepresentation() {
-        return compositeDb.map(s -> s + "." + databaseAlias).orElse(databaseAlias);
+        return compositeDb
+                .map(s -> Stringifier.backtick(s) + "." + Stringifier.backtick(databaseAlias))
+                .orElse(Stringifier.backtick(databaseAlias));
     }
 
     @Override

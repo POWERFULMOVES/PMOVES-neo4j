@@ -21,11 +21,13 @@ package org.neo4j.cypher.internal.compiler.planner.logical.plans.rewriter
 
 import org.neo4j.cypher.internal.compiler.planner.logical.convertToInlinedPredicates
 import org.neo4j.cypher.internal.compiler.planner.logical.idp.extractPredicates
-import org.neo4j.cypher.internal.compiler.planner.logical.idp.extractPredicates.RelationshipPredicates
-import org.neo4j.cypher.internal.compiler.planner.logical.idp.extractQPPPredicates
+import org.neo4j.cypher.internal.compiler.planner.logical.idp.extractQppPredicates
+import org.neo4j.cypher.internal.compiler.planner.logical.idp.extractShortestPathPredicates
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.NodePattern
+import org.neo4j.cypher.internal.expressions.NodeUniquenessPredicate
+import org.neo4j.cypher.internal.expressions.PathLengthQuantifier
 import org.neo4j.cypher.internal.expressions.Property
 import org.neo4j.cypher.internal.expressions.Range
 import org.neo4j.cypher.internal.expressions.RelTypeName
@@ -33,14 +35,13 @@ import org.neo4j.cypher.internal.expressions.RelationshipChain
 import org.neo4j.cypher.internal.expressions.RelationshipPattern
 import org.neo4j.cypher.internal.expressions.RelationshipUniquenessPredicate
 import org.neo4j.cypher.internal.expressions.SemanticDirection
-import org.neo4j.cypher.internal.expressions.SemanticDirection.BOTH
 import org.neo4j.cypher.internal.expressions.ShortestPathsPatternPart
 import org.neo4j.cypher.internal.expressions.UnPositionedVariable.varFor
-import org.neo4j.cypher.internal.expressions.UnsignedDecimalIntegerLiteral
 import org.neo4j.cypher.internal.expressions.VarLengthBound
 import org.neo4j.cypher.internal.ir.PatternRelationship
 import org.neo4j.cypher.internal.ir.QuantifiedPathPattern
 import org.neo4j.cypher.internal.ir.SelectivePathPattern
+import org.neo4j.cypher.internal.ir.SelectivePathPattern.CountInteger
 import org.neo4j.cypher.internal.ir.ShortestRelationshipPattern
 import org.neo4j.cypher.internal.ir.SimplePatternLength
 import org.neo4j.cypher.internal.ir.VarPatternLength
@@ -49,7 +50,6 @@ import org.neo4j.cypher.internal.label_expressions.LabelExpression.disjoinRelTyp
 import org.neo4j.cypher.internal.logical.plans.FindShortestPaths
 import org.neo4j.cypher.internal.logical.plans.FindShortestPaths.AllowSameNode
 import org.neo4j.cypher.internal.logical.plans.StatefulShortestPath
-import org.neo4j.cypher.internal.logical.plans.TraversalMatchMode
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.Solveds
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.cypher.internal.util.InputPosition
@@ -61,122 +61,116 @@ import org.neo4j.cypher.internal.util.topDown
 import scala.collection.Set
 
 /**
- * This rewriter will sometimes transform a Stateful Shortest Path into a findShortestPath.
+ * Re-writes StatefulShortestPath to FindShortestPath where possible, as benchmarks have shown the latter
+ * is faster than StatefulShortestPath.
  *
- * Through benchmarking it has been found that legacy find shortest path is faster than the new Shortest, we therefor
- * rewrite simple Shortest plans into legacy find shortest where possible.
- * To be able to do this we need to follow certain rules:
- * 1.1 Shortest pattern must be just a single var-length relationship
- *  1.2 or a QPP that is equivalent to a var-length relationship,
- * 2.0 start and end nodes must be bound
- * 3.0 predicates needs to be inlineable in a legacy find shortest plan
- * 4.1 Minimum bound is 0 (otherwise the startNode = endNode is not supported)
- *  4.2 OR relationship is directed.
- * 5.0 Minimum bound must be 0 or 1 for QPP
- * 6.0 Selection asks for shortest 1
+ * Re-writes are possible when the following are true:
  *
- * If a Shortest pattern follows these rules we can rewrite it into a legacy shortest path.
+ * Rule 1: Selector is SHORTEST 1 or ALL SHORTEST (or the equivalent)
+ *
+ * Rule 2: Target node of the pattern is bound
+ *
+ * Rule 3: Exactly one selective path pattern
+ *
+ * Rule 4: Predicates must be inlineable into FindShortestPath
+ *
+ * Rule 5: No property access from SPD shard required
+ *
+ * Rule 6: Exactly one relationship pattern
+ *
+ * Rule 7: Minimum length 0 or 1
+ *
+ * Rule 8: Exactly one var-length relationship or one QPP
+ *
+ * Rule 9: No node group variables
  */
 case class StatefulShortestToFindShortestRewriter(
   solveds: Solveds,
   anonymousVariableNameGenerator: AnonymousVariableNameGenerator,
-  isShardedDabase: Boolean = false
+  isShardedDatabase: Boolean = false
 ) extends Rewriter with TopDownMergeableRewriter {
 
   override val innerRewriter: Rewriter = Rewriter.lift {
-    case statefulShortest @ StatefulShortestPath(
-        source,
-        _,
-        targetNode,
-        _,
-        _,
-        _,
-        _,
-        _,
-        _,
-        _,
-        selector,
-        _,
-        _,
-        _,
-        TraversalMatchMode.Trail
-      )
-      // 2.0 start and end nodes are bound and 6.0 selection asks for shortest 1
-      if source.availableSymbols.contains(targetNode) &&
-        selector.k == 1 && statefulShortest.nodeVariableGroupings.isEmpty =>
-      exactlyOne(
-        solveds.get(statefulShortest.id).asSinglePlannerQuery.last.queryGraph.selectivePathPatterns.toSeq.distinct
-      )
-        .filter(_.relationships.size == 1)
-        .flatMap(selectivePathPattern =>
-          findShortestFromVarLengthShortest(selectivePathPattern, statefulShortest) orElse
-            findShortestFromQppShortest(selectivePathPattern, statefulShortest)
-        ).getOrElse(statefulShortest)
+    case RewritableSpp(plan) => plan
   }
 
-  private val instance: Rewriter = topDown(innerRewriter)
+  private object RewritableSpp {
 
-  private def findShortestFromVarLengthShortest(
-    selectivePathPattern: SelectivePathPattern,
-    statefulShortestPath: StatefulShortestPath
-  ): Option[FindShortestPaths] =
-    isVarlengthWithValidLength(selectivePathPattern.asQueryGraph.patternRelationships.toSeq).flatMap(
-      patternRelationship =>
-        sspVarLengthToFindShortest(statefulShortestPath, selectivePathPattern, patternRelationship)
-    )
-
-  /**
-   * This method checks if the VarLengthPattern is able to be used in a findShortestPaths.
-   * - It can only contain one quantified relationship
-   * - It must contain a VarPatternLength with minimum repetition 0 OR be Directed.
-   */
-  private def isVarlengthWithValidLength(patternRelationships: Seq[PatternRelationship])
-    : Option[PatternRelationship] = {
-    exactlyOne(patternRelationships).filter(patternRelationship =>
-      patternRelationship.length match {
-        case VarPatternLength(min, _) =>
-          min == 0 || //    4.1 Minimum bound is 0
-          patternRelationship.dir != BOTH //    4.2 OR relationship is directed.
-        case _ => false
-      }
-    )
-  }
-
-  private def getRange(pr: PatternRelationship): Option[Option[Range]] = {
-    val pos = InputPosition.NONE
-    pr.length match {
-      case SimplePatternLength => None
-      case VarPatternLength(min, max) => Some(Some(Range(
-          Some(UnsignedDecimalIntegerLiteral(min.toString)(pos)),
-          max.map(i => UnsignedDecimalIntegerLiteral(i.toString)(pos))
-        )(pos)))
+    def unapply(plan: AnyRef): Option[FindShortestPaths] = plan match {
+      case ssp: StatefulShortestPath if isRewriteCandidate(ssp) =>
+        for {
+          spp <- singleSelectivePathPatternWithOneRelationship(ssp)
+          rewritten <- rewriteVarLengthSpp(spp, ssp) orElse rewriteQppSpp(spp, ssp)
+        } yield rewritten
+      case _ => None
     }
   }
 
-  /**
-   * This method converts a Stateful Shortest Path containing a VarLengthPattern into a FindShortestPaths plan if applicable.
-   */
+  // Rule 3: Exactly one selective path pattern
+  // Rule 6: Exactly one relationship pattern
+  private def singleSelectivePathPatternWithOneRelationship(ssp: StatefulShortestPath): Option[SelectivePathPattern] =
+    solveds.get(ssp.id).asSinglePlannerQuery.last.queryGraph.selectivePathPatterns.toSeq match {
+      case Seq(spp) if spp.relationships.size == 1 => Some(spp)
+      case _                                       => None
+    }
+
+  private def isRewriteCandidate(ssp: StatefulShortestPath): Boolean =
+    hasBoundTargetEndpoint(ssp) &&
+      asksForShortestPathOrAllShortestPaths(ssp) &&
+      hasNoNodeGroupVariables(ssp)
+
+  // Rule 2: Target node of the pattern is bound
+  private def hasBoundTargetEndpoint(ssp: StatefulShortestPath): Boolean =
+    ssp.source.availableSymbols.contains(ssp.targetNode)
+
+  // Rule 1: Selector is SHORTEST 1 or ALL SHORTEST (or the equivalent)
+  private def asksForShortestPathOrAllShortestPaths(ssp: StatefulShortestPath): Boolean =
+    ssp.selector.k == CountInteger(1)
+
+  // Rule 9: No node group variables
+  private def hasNoNodeGroupVariables(ssp: StatefulShortestPath): Boolean =
+    ssp.nodeVariableGroupings.isEmpty
+
+  private def rewriteVarLengthSpp(
+    spp: SelectivePathPattern,
+    ssp: StatefulShortestPath
+  ): Option[FindShortestPaths] =
+    singleVarLengthRelationshipMinLengthOneOrZero(spp.asQueryGraph.patternRelationships.toSeq)
+      .flatMap(patternRelationship => sspVarLengthToFindShortest(ssp, spp, patternRelationship))
+
+  // Rule 6: Exactly one relationship pattern
+  // Rule 7: Minimum length 0 or 1
+  private def singleVarLengthRelationshipMinLengthOneOrZero(
+    patternRelationships: Seq[PatternRelationship]
+  ): Option[PatternRelationship] = patternRelationships match {
+    case Seq(pr) => pr.length match {
+        case VarPatternLength(0 | 1, _) => Some(pr)
+        case _                          => None
+      }
+    case _ => None
+  }
+
   private def sspVarLengthToFindShortest(
-    statefulShortestPath: StatefulShortestPath,
+    ssp: StatefulShortestPath,
     spp: SelectivePathPattern,
     pr: PatternRelationship
   ): Option[FindShortestPaths] = {
     val (fromNode, toNode) = pr.inOrder
     val shortestPathsPatternPart =
       createShortestPathsPatternPart(
-        getRange(pr),
+        varLengthRange(pr),
         fromNode,
         toNode,
         pr.variable,
         pr.dir,
         pr.types,
-        !statefulShortestPath.selector.isGroup
+        !ssp.selector.isGroup
       )
     val shortestRelPattern = ShortestRelationshipPattern(
-      // We need to create a anonymous variable here since we get an error in runtimes other than interpreted otherwise
+      // Non-Interpreted runtimes require path variables to be named up front
       Some(varFor(anonymousVariableNameGenerator.nextName)),
       pr,
-      !statefulShortestPath.selector.isGroup
+      !ssp.selector.isGroup
     )(shortestPathsPatternPart)
 
     val (nodePredicates, relationshipPredicates, _) = extractPredicates(
@@ -185,81 +179,72 @@ case class StatefulShortestToFindShortestRewriter(
       fromNode,
       toNode,
       targetNodeIsBound = true,
-      // Length here will always be a VarPatternLength otherwise isVarlengthWithValidLength would not return a PatternRelationship.
+      // singleVarLengthRelationshipMinLengthOneOrZero has already guaranteed VarPatternLength here
       pr.length.asInstanceOf[VarPatternLength]
     )
-    // 3.0 predicates needs to be inlineable in a legacy find shortest plan
+
+    val inlineablePredicates = (nodePredicates ++ relationshipPredicates).map(_.predicate)
+
+    // Rule 4: Predicates must be inlineable into FindShortestPath
+    // Rule 5: No property access from SPD shard required
     if (
-      (nodePredicates ++ relationshipPredicates).size == withoutUniqueness(
-        spp.selections.flatPredicates
-      ).size && !requiresPropertyAccessFromShards((nodePredicates ++ relationshipPredicates).map(_.predicate))
+      allSppPredicatesAreInlineable(spp, inlineablePredicates) &&
+      !requiresPropertyAccessFromShards(inlineablePredicates)
     ) {
       Some(FindShortestPaths(
-        statefulShortestPath.source,
+        ssp.source,
         shortestRelPattern,
         nodePredicates.toSeq,
         relationshipPredicates.toSeq,
         Seq.empty,
         withFallBack = false,
-        AllowSameNode
-      )(SameId(statefulShortestPath.id)))
+        AllowSameNode,
+        ssp.pathMode
+      )(SameId(ssp.id)))
     } else {
       None
     }
   }
 
-  private def requiresPropertyAccessFromShards(predicates: Iterable[Expression]): Boolean = {
-    isShardedDabase && predicates.exists(requiresPropertyAccess)
-  }
-
-  private def requiresPropertyAccess(expr: Expression): Boolean =
-    expr.folder.treeExists {
-      case _: Property => true
-    }
-
-  private def getRange(qpp: QuantifiedPathPattern): Option[Some[Range]] = {
+  private def varLengthRange(pr: PatternRelationship): Option[Option[Range]] = {
     val pos = InputPosition.NONE
-    Some(Some(Range(
-      Some(UnsignedDecimalIntegerLiteral(qpp.repetition.min.toString)(pos)),
-      qpp.repetition.max.limit.map(i => UnsignedDecimalIntegerLiteral(i.toString)(pos))
-    )(pos)))
+    pr.length match {
+      case SimplePatternLength => None
+      case VarPatternLength(min, max) => Some(Some(Range(
+          Some(PathLengthQuantifier(min.toString)(pos)),
+          max.map(i => PathLengthQuantifier(i.toString)(pos))
+        )(pos)))
+    }
   }
 
-  /**
-   * 1.2 QPP is equivalent to a var-length relationship
-   * For a qpp to be viable to convert to a varLengthPattern
-   * - It can only contain one quantified relationship
-   * - The minimum repetition must be 0 or 1
-   * - The relationship must be directed OR the minimum repetition must be 0.
-   */
-  private def isValidQpp(qpp: QuantifiedPathPattern): Boolean =
-    qpp.patternRelationships.size == 1 &&
-      qpp.repetition.min < 2 &&
-      (qpp.patternRelationships.exists(_.dir != BOTH) ||
-        qpp.repetition.min == 0)
+  private def rewriteQppSpp(
+    spp: SelectivePathPattern,
+    ssp: StatefulShortestPath
+  ): Option[FindShortestPaths] = {
+    // Rule 7: Minimum length 0 or 1
+    // Rule 8: Exactly one var-length relationship or one QPP
+    spp.pathPattern.allQuantifiedPathPatterns.toSeq match {
+      case Seq(qpp) if hasSingleRelPatternMinLengthOneOrZero(qpp) => sppQppToFindShortest(ssp, spp, qpp)
+      case _                                                      => None
+    }
+  }
 
-  private def findShortestFromQppShortest(
-    selectivePathPattern: SelectivePathPattern,
-    statefulShortestPath: StatefulShortestPath
-  ): Option[FindShortestPaths] =
-    exactlyOne(selectivePathPattern.pathPattern.allQuantifiedPathPatterns.toSeq)
-      .filter(isValidQpp)
-      .flatMap(qpp => sppQppToFindShortest(statefulShortestPath, selectivePathPattern, qpp))
+  private def hasSingleRelPatternMinLengthOneOrZero(qpp: QuantifiedPathPattern): Boolean =
+    qpp.patternRelationships.size == 1 && qpp.repetition.min < 2
 
-  /**
-   * This method converts a StatefulShortestPath containing a Quantified Path Pattern into a findShortest plan if applicable
-   */
   private def sppQppToFindShortest(
-    statefulShortestPath: StatefulShortestPath,
+    ssp: StatefulShortestPath,
     spp: SelectivePathPattern,
     qpp: QuantifiedPathPattern
   ): Option[FindShortestPaths] = {
-    val (nodePredicates, relationshipPredicates) = extractedPredicatesFromQpp(statefulShortestPath, spp, qpp)
+    val qppPredicates = extractedPredicatesFromQpp(ssp, spp, qpp)
+    val inlineablePredicates = qppPredicates.allPredicates
+
+    // Rule 4: Predicates must be inlineable into FindShortestPath
+    // Rule 5: No property access from SPD shard required
     if (
-      nodePredicates.size + relationshipPredicates.size == withoutUniqueness(
-        spp.selections.flatPredicates
-      ).size && qpp.relationshipVariableGroupings.size == 1
-      && !requiresPropertyAccessFromShards(nodePredicates ++ relationshipPredicates.map(_.predicate))
+      allSppPredicatesAreInlineable(spp, inlineablePredicates) &&
+      !requiresPropertyAccessFromShards(inlineablePredicates)
     ) {
       val innerRelationshipVariable = qpp.relationshipVariableGroupings.head.singleton
       convertToInlinedPredicates(
@@ -268,79 +253,121 @@ case class StatefulShortestToFindShortestRewriter(
         innerEndNode = qpp.rightBinding.inner,
         outerEndNode = qpp.rightBinding.outer,
         innerRelationship = innerRelationshipVariable,
-        predicatesToInline = nodePredicates ++ relationshipPredicates.map(rel =>
-          rel.predicate.replaceAllOccurrencesBy(rel.variable, innerRelationshipVariable)
-        ),
+        predicatesToInline = qppPredicates.singletonPredicates.toVector,
         mode = convertToInlinedPredicates.Mode.Shortest(
           predicatesOutsideRepetition =
-            solveds.get(statefulShortestPath.source.id).asSinglePlannerQuery.queryGraph.selections.flatPredicates
+            solveds.get(ssp.source.id).asSinglePlannerQuery.queryGraph.selections.flatPredicates
         ),
         pathDirection = qpp.patternRelationships.head.dir,
         pathRepetition = qpp.repetition,
         anonymousVariableNameGenerator = anonymousVariableNameGenerator
       )
-        .flatMap(inlinedPredicates =>
-          Some(FindShortestPaths(
-            statefulShortestPath.source,
-            shortestRelationshipPattern(statefulShortestPath, qpp),
-            inlinedPredicates.nodePredicates,
-            inlinedPredicates.relationshipPredicates,
+        .map(inlinedPredicates =>
+          FindShortestPaths(
+            ssp.source,
+            shortestRelationshipPattern(ssp, qpp),
+            inlinedPredicates.nodePredicates ++ qppPredicates.nodePredicates,
+            inlinedPredicates.relationshipPredicates ++ qppPredicates.relationshipPredicates,
             Seq.empty,
             withFallBack = false,
-            AllowSameNode
-          )(SameId(statefulShortestPath.id)))
+            AllowSameNode,
+            ssp.pathMode
+          )(SameId(ssp.id))
         )
     } else {
       None
     }
-
   }
 
-  /**
-   * This method collects all predicates that can be inlined into a findShortestPaths plan splitting splitting them between
-   * - Node predicates priorly inlined on the QPP
-   * - Node predicates referencing the nodes in the Stateful Shortest Pattern
-   * - Relationship predicates
-   */
+  // Checks if all predicates in the SPP, minus those that are handled by FindShortestPath itself,
+  // are inlineable into FindShortestPath (which will enforce uniqueness and path length requirements)
+  private def allSppPredicatesAreInlineable(
+    spp: SelectivePathPattern,
+    inlineablePredicates: Iterable[Expression]
+  ): Boolean =
+    withoutPredicatesHandledByFindShortest(spp.selections.flatPredicates).size == inlineablePredicates.size
+
+  private def withoutPredicatesHandledByFindShortest(expressions: Seq[Expression]): Seq[Expression] =
+    expressions.filter {
+      case far: ForAllRepetitions =>
+        far.originalInnerPredicate match {
+          case _: RelationshipUniquenessPredicate => false
+          case _: NodeUniquenessPredicate         => false
+          case _                                  => true
+        }
+      case _: RelationshipUniquenessPredicate => false
+      case _: NodeUniquenessPredicate         => false
+      case _: VarLengthBound                  => false
+      case _                                  => true
+    }
+
+  // Rule 5: No property access from SPD shard required
+  private def requiresPropertyAccessFromShards(predicates: Iterable[Expression]): Boolean =
+    isShardedDatabase && predicates.exists(requiresPropertyAccess)
+
+  private def requiresPropertyAccess(expr: Expression): Boolean =
+    expr.folder.treeExists {
+      case _: Property => true
+    }
+
+  private case class QppPredicates(
+    nodePredicates: extractPredicates.NodePredicates,
+    relationshipPredicates: extractPredicates.RelationshipPredicates,
+    singletonPredicates: Set[Expression]
+  ) {
+
+    def allPredicates: Iterable[Expression] =
+      nodePredicates.view.map(_.predicate) ++
+        relationshipPredicates.view.map(_.predicate) ++
+        singletonPredicates.view
+
+    def size: Int = allPredicates.size
+  }
+
   private def extractedPredicatesFromQpp(
-    statefulShortestPath: StatefulShortestPath,
+    ssp: StatefulShortestPath,
     spp: SelectivePathPattern,
     qpp: QuantifiedPathPattern
-  ): (Seq[Expression], RelationshipPredicates) = {
-    val (innerFrom, innerTo) = (qpp.leftBinding.inner, qpp.rightBinding.inner)
-    val extractedPredicates = extractQPPPredicates(
-      spp.selections.flatPredicates,
+  ): QppPredicates = {
+    val (forAllRepetitions, otherPredicates) =
+      spp.selections.flatPredicatesSet.partition(_.isInstanceOf[ForAllRepetitions])
+
+    // Gets QPP predicates expressed in terms of singleton variables. These will need to be converted into inlineable
+    // predicates later.
+    val singletonPredicates = extractQppPredicates(
+      forAllRepetitions.toVector,
       qpp.variableGroupings,
-      statefulShortestPath.source.availableSymbols
-    ).predicates
-    val symbols =
-      statefulShortestPath.source.availableSymbols + innerFrom + innerTo ++ qpp.relationshipVariableGroupings.headOption
-        .map(_.singleton)
+      ssp.source.availableSymbols,
+      insideRepeat = false,
+      repeatStartNode = None // not needed when insideRepeat = false
+    ).predicates.map(_.extracted)
+      // We drop NodeUniquenessPredicate as that will be enforced by FindShortestPaths.
+      // We don't need to do the same for relationships because as we know there is one relationship
+      // pattern, and so no RelationshipUniquenessPredicate will have been added.
+      .filter {
+        case _: NodeUniquenessPredicate => false
+        case _                          => true
+      }
 
-    val nodePredicates = extractedPredicates
-      .map(_.extracted)
-      .filter(_.dependencies.forall(symbols.contains))
-      .filter(_.dependencies.exists(Set(innerFrom, innerTo).contains))
-
-    val (pathBasedNodePredicates, relationshipPredicates, _) = extractPredicates(
-      extractedPredicates.map(_.original),
-      qpp.relationships.head,
-      innerFrom,
-      innerTo,
-      targetNodeIsBound = true,
-      VarPatternLength(qpp.repetition.min.toInt, qpp.repetition.max.limit.map(_.toInt))
+    // The rest are iterable all(), none(), etc predicates, already in the inlineable form.
+    val (nodePredicates, relPredicates, _) = extractShortestPathPredicates(
+      otherPredicates,
+      qpp.pathVariables.headOption.map(_.variable),
+      qpp.relationshipVariableGroupings.headOption.map(_.group)
     )
 
-    (nodePredicates ++ pathBasedNodePredicates.map(_.predicate), relationshipPredicates)
+    QppPredicates(
+      nodePredicates = nodePredicates,
+      relationshipPredicates = relPredicates,
+      singletonPredicates = singletonPredicates.toSet
+    )
   }
 
-  /**
-   * This method converts a StatefulShortestPath containing a Quantified Path Pattern into a Shortest Relationship Pattern,
-   * changing the juxtaposed nodes into boundary nodes of the SRP and the Relationship to contain the group variable name
-   * so that later filters can point to the relationship.
-   */
+  // Converts a StatefulShortestPath containing a QuantifiedPathPattern into a ShortestRelationshipPattern.
+  // Juxtaposed nodes become boundary nodes, and the relationship uses the group variable name
+  // so filters can reference it.
   private def shortestRelationshipPattern(
-    statefulShortestPath: StatefulShortestPath,
+    ssp: StatefulShortestPath,
     qpp: QuantifiedPathPattern
   ): ShortestRelationshipPattern = {
     val (outerFrom, outerTo) = (qpp.leftBinding.outer, qpp.rightBinding.outer)
@@ -353,38 +380,30 @@ case class StatefulShortestToFindShortestRewriter(
       qpp.relationshipVariableGroupings.head.group,
       qppPatternRelationship.dir,
       qppPatternRelationship.types,
-      !statefulShortestPath.selector.isGroup
+      !ssp.selector.isGroup
     )
     val updatedQppPatternRelationship = qppPatternRelationship.copy(
       boundaryNodes = (outerFrom, outerTo),
-      // This needs to be the group variable since post filters referencing the relationship will reference the group variable
+      // Post filters reference variables in the inner pattern of a QPP as group variables
       variable = qpp.relationshipVariableGroupings.head.group,
       length = varPatternLength
     )
 
     ShortestRelationshipPattern(
-      // We need to create a anonymous variable here since we get an error in runtimes other than interpreted otherwise
+      // Non-Interpreted runtimes require path variables to be named up front
       Some(varFor(anonymousVariableNameGenerator.nextName)),
       updatedQppPatternRelationship,
-      !statefulShortestPath.selector.isGroup
+      !ssp.selector.isGroup
     )(shortestPathsPatternPart)
   }
 
-  private def exactlyOne[A](as: Iterable[A]): Option[A] =
-    if (as.size == 1) as.headOption
-    else None
-
-  private def withoutUniqueness(expressions: Seq[Expression]): Seq[Expression] =
-    expressions.filter {
-      case far: ForAllRepetitions =>
-        far.originalInnerPredicate match {
-          case _: RelationshipUniquenessPredicate => false
-          case _                                  => true
-        }
-      case _: RelationshipUniquenessPredicate => false
-      case _: VarLengthBound                  => false
-      case _                                  => true
-    }
+  private def getRange(qpp: QuantifiedPathPattern): Option[Some[Range]] = {
+    val pos = InputPosition.NONE
+    Some(Some(Range(
+      Some(PathLengthQuantifier(qpp.repetition.min.toString)(pos)),
+      qpp.repetition.max.limit.map(i => PathLengthQuantifier(i.toString)(pos))
+    )(pos)))
+  }
 
   private def createShortestPathsPatternPart(
     length: Option[Option[Range]],
@@ -416,5 +435,8 @@ case class StatefulShortestToFindShortestRewriter(
       single = single
     )(pos)
   }
+
+  private val instance: Rewriter = topDown(innerRewriter)
+
   override def apply(input: AnyRef): AnyRef = instance.apply(input)
 }

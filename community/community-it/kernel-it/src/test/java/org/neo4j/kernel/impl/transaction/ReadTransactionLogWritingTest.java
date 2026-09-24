@@ -35,13 +35,13 @@ import org.neo4j.graphdb.Transaction;
 import org.neo4j.internal.helpers.collection.Iterables;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.kernel.impl.MyRelTypes;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntry;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.storageengine.api.StorageEngineFactory;
 import org.neo4j.test.LogTestUtils.CountingLogHook;
 import org.neo4j.test.extension.ImpermanentDbmsExtension;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.entry.LogEntry;
 
 /**
  * Asserts that pure read operations does not write records to logical or transaction logs.
@@ -104,8 +104,7 @@ class ReadTransactionLogWritingTest {
                             .resolveDependency(StorageEngineFactory.class)
                             .commandReaderFactory());
 
-            long txLogRecordCount =
-                    logFiles.getLogFile().getLogFileInformation().getLastEntryAppendIndex();
+            long txLogRecordCount = logFiles.getLogFile().getLastEntryAppendIndexInLogFiles();
 
             return logicalLogCounter.getCount() + txLogRecordCount;
         } catch (IOException e) {

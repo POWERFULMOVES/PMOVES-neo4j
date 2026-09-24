@@ -24,9 +24,11 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetTime;
 import java.time.ZonedDateTime;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 import org.neo4j.packstream.io.PackstreamBuf;
 import org.neo4j.packstream.io.value.PackstreamValueWriter;
 import org.neo4j.values.storable.CoordinateReferenceSystem;
+import org.neo4j.values.storable.Float16Format;
 import org.neo4j.values.storable.TextArray;
 import org.neo4j.values.storable.TextValue;
 import org.neo4j.values.virtual.MapValue;
@@ -107,5 +109,64 @@ public class PipelineAnyValueWriter extends PackstreamValueWriter {
     @Override
     public void writePath(NodeValue[] nodes, RelationshipValue[] relationships) {
         this.context.writePath(nodes, relationships);
+    }
+
+    @Override
+    public void writeInt8Vector(byte[] values) {
+        this.context.writeVector(values);
+    }
+
+    @Override
+    public void writeInt16Vector(short[] values) {
+        this.context.writeVector(values);
+    }
+
+    @Override
+    public void writeInt32Vector(int[] values) {
+        this.context.writeVector(values);
+    }
+
+    @Override
+    public void writeInt64Vector(long[] values) {
+        this.context.writeVector(values);
+    }
+
+    @Override
+    public void writeFloat16Vector(Float16Format format, short[] values) {
+        this.context.writeFloatingPointVector(format, values);
+    }
+
+    @Override
+    public void writeFloat32Vector(float[] values) {
+        this.context.writeVector(values);
+    }
+
+    @Override
+    public void writeFloat64Vector(double[] values) {
+        this.context.writeVector(values);
+    }
+
+    @Override
+    public void writeUUID(long msb, long lsb) throws RuntimeException {
+        this.context.writeUUID(msb, lsb);
+    }
+
+    @Override
+    public void writeUnsupported(String typeName, String minProtocolVersion, String message) throws RuntimeException {
+        this.context.writeUnsupportedType(typeName, parseProtocolVersion(minProtocolVersion), message);
+    }
+
+    private static ProtocolVersion parseProtocolVersion(String version) {
+        var separator = version.indexOf('.');
+        if (separator < 0) {
+            throw new IllegalArgumentException("Malformed protocol version: " + version);
+        }
+        try {
+            var major = Integer.parseInt(version, 0, separator, 10);
+            var minor = Integer.parseInt(version, separator + 1, version.length(), 10);
+            return new ProtocolVersion(major, minor);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("Malformed protocol version: " + version, e);
+        }
     }
 }

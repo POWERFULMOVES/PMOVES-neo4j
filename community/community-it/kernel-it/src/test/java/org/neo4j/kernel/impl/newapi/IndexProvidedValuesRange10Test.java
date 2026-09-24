@@ -24,12 +24,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.neo4j.graphdb.Label.label;
 import static org.neo4j.internal.kernel.api.IndexQueryConstraints.unorderedValues;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
+import static org.neo4j.values.storable.RandomValues.excluding;
 
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.graphdb.Entity;
 import org.neo4j.graphdb.GraphDatabaseService;
@@ -42,14 +42,15 @@ import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.values.storable.RandomValues;
+import org.neo4j.values.storable.RandomValuesUtils;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.ValueTuple;
 import org.neo4j.values.storable.ValueType;
 import org.neo4j.values.storable.Values;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 abstract class IndexProvidedValuesRange10Test extends KernelAPIReadTestBase<ReadTestSupport> {
     private static final int N_ENTITIES = 10000;
@@ -58,6 +59,7 @@ abstract class IndexProvidedValuesRange10Test extends KernelAPIReadTestBase<Read
     public static final String PRIP = "prip";
     public static final String PROP_INDEX = "propIndex";
     public static final String PROP_PRIP_INDEX = "propPripIndex";
+    private static final ValueType[] SORTABLE_TYPES = RandomValues.excluding(ValueType.STRING, ValueType.STRING_ARRAY);
 
     @Inject
     private RandomSupport randomRule;
@@ -83,17 +85,24 @@ abstract class IndexProvidedValuesRange10Test extends KernelAPIReadTestBase<Read
             tx.schema().awaitIndexesOnline(5, MINUTES);
             tx.commit();
         }
+        final var configuration = RandomValuesUtils.selectStorageEngineDependentConfigurationBuilder(graphDb)
+                .maxVectorNumBytes(RandomValues.MAX_NUM_BYTES_IN_INDEX_KEY / 2 /* Tests assume two keys fit in index */)
+                .build();
+        randomRule.withConfiguration(configuration).reset();
+
+        ValueType[] targetedTypes = SORTABLE_TYPES;
+        if (!configuration.includeVectorTypes()) {
+            targetedTypes = excluding(targetedTypes, RandomValues.IS_VECTOR_TYPE);
+        }
 
         try (Transaction tx = graphDb.beginTx()) {
             RandomValues randomValues = randomRule.randomValues();
 
-            ValueType[] allExceptNonSortable = RandomValues.excluding(ValueType.STRING, ValueType.STRING_ARRAY);
-
             for (int i = 0; i < N_ENTITIES; i++) {
                 var node = getEntityControl().createEntity(tx, TOKEN);
-                Value propValue = randomValues.nextValueOfTypes(allExceptNonSortable);
+                Value propValue = randomValues.nextValueOfTypes(targetedTypes);
                 node.setProperty(PROP, propValue.asObject());
-                Value pripValue = randomValues.nextValueOfTypes(allExceptNonSortable);
+                Value pripValue = randomValues.nextValueOfTypes(targetedTypes);
                 node.setProperty(PRIP, pripValue.asObject());
 
                 singlePropValues.add(propValue);

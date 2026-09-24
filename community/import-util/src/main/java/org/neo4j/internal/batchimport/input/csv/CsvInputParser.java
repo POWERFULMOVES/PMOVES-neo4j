@@ -24,9 +24,11 @@ import static java.lang.String.format;
 import java.io.Closeable;
 import java.io.IOException;
 import java.lang.reflect.Array;
+import org.neo4j.batchimport.api.input.ApplicationMode;
 import org.neo4j.batchimport.api.input.Collector;
 import org.neo4j.batchimport.api.input.IdType;
 import org.neo4j.batchimport.api.input.InputEntityVisitor;
+import org.neo4j.common.EntityType;
 import org.neo4j.csv.reader.CharSeeker;
 import org.neo4j.csv.reader.Extractor;
 import org.neo4j.csv.reader.Extractors;
@@ -45,7 +47,9 @@ public class CsvInputParser implements Closeable {
     private final int delimiter;
     private final Collector badCollector;
     private final Extractor<String> stringExtractor;
-    private final IdValueBuilder idValueBuilder = new IdValueBuilder();
+    private final IdValueBuilder idValueBuilder;
+    private final IdValueBuilder startIdValueBuilder;
+    private final IdValueBuilder endIdValueBuilder;
 
     private long lineNumber;
 
@@ -55,13 +59,30 @@ public class CsvInputParser implements Closeable {
             IdType idType,
             Header header,
             Collector badCollector,
-            Extractors extractors) {
+            Extractors extractors,
+            boolean delimitIds) {
         this.seeker = seeker;
         this.delimiter = delimiter;
         this.idType = idType;
         this.header = header;
         this.badCollector = badCollector;
         this.stringExtractor = extractors.string();
+        this.idValueBuilder = new IdValueBuilder(delimitIds);
+        this.startIdValueBuilder = new IdValueBuilder(delimitIds);
+        this.endIdValueBuilder = new IdValueBuilder(delimitIds);
+    }
+
+    /**
+     * Whether this column's value goes into one of the {@link IdValueBuilder}s.
+     */
+    private boolean isAggregatedIdColumn(Header.Entry entry) {
+        if (idType == IdType.ACTUAL) {
+            return false;
+        }
+        return switch (entry.type()) {
+            case ID, START_ID, END_ID -> true;
+            default -> false;
+        };
     }
 
     boolean next(InputEntityVisitor visitor) throws IOException {
@@ -69,9 +90,13 @@ public class CsvInputParser implements Closeable {
         int i = 0;
         Header.Entry entry = null;
         Header.Entry[] entries = header.entries();
+        EntityType invalidIdEntityType = null;
+        boolean badProperty = false;
         try {
             boolean doContinue = true;
             idValueBuilder.clear();
+            startIdValueBuilder.clear();
+            endIdValueBuilder.clear();
             for (i = 0; i < entries.length && doContinue; i++) {
                 entry = entries[i];
                 if (!seeker.seek(mark, delimiter)) {
@@ -79,7 +104,14 @@ public class CsvInputParser implements Closeable {
                         throw new UnexpectedEndOfInputException("Near " + mark);
                     }
                     // We're just at the end
+                    visitor.flush();
                     return false;
+                }
+
+                // Populate source and line only after reading first field to maximise chances that line is accurate.
+                if (i == 0) {
+                    visitor.sourceDescription(seeker.sourceDescription());
+                    visitor.lineNumber(seeker.lineNumber());
                 }
 
                 if (entry.type() == Type.IGNORE) {
@@ -87,32 +119,77 @@ public class CsvInputParser implements Closeable {
                 }
 
                 var extractor = entry.extractor();
-                Object value = seeker.tryExtract(mark, extractor, entry.optionalParameter());
-                if (extractor.isEmpty(value)) {
+                Object value;
+                try {
+                    value = seeker.tryExtract(mark, extractor, entry.optionalParameter());
+                } catch (NumberFormatException | ArithmeticException e) {
+                    // A value that violates the type its column declares fails extraction with one of these, and is a
+                    // bad entry rather than a fatal error.
+                    if (entry.type() == Type.ID) {
+                        invalidIdEntityType = EntityType.NODE;
+                    } else if (entry.type() == Type.START_ID || entry.type() == Type.END_ID) {
+                        invalidIdEntityType = EntityType.RELATIONSHIP;
+                    }
+                    String rawValue = extractRawValue(entry);
+                    if (invalidIdEntityType != null) {
+                        badCollector.collectInvalidID(
+                                seeker.sourceDescription(), lineNumber, rawValue, invalidIdEntityType);
+                    } else {
+                        badProperty = true;
+                        badCollector.collectBadProperty(seeker.sourceDescription(), lineNumber, entry.name(), rawValue);
+                    }
+                    // Skip rest of the row
+                    doContinue = false;
+                    // Reset values we might have processed already
+                    idValueBuilder.clear();
+                    startIdValueBuilder.clear();
+                    endIdValueBuilder.clear();
                     continue;
+                }
+                if (extractor.isEmpty(value)) {
+                    if (!isAggregatedIdColumn(entry)) {
+                        continue;
+                    }
+                    // An empty id column is still fed to its IdValueBuilder, as a null part, so that an id combined
+                    // from multiple columns keys each part by its position regardless of which parts are empty.
+                    value = null;
                 }
 
                 doContinue = switch (entry.type()) {
-                    case ID -> switch (idType) {
-                        case STRING, INTEGER -> {
-                            idValueBuilder.part(value, entry);
-                            yield true;
-                        }
-                        case ACTUAL -> visitor.id((Long) value);
-                    };
-                    case START_ID -> switch (idType) {
-                        case STRING, INTEGER -> visitor.startId(value, entry.group());
-                        case ACTUAL -> visitor.startId((Long) value);
-                    };
-                    case END_ID -> switch (idType) {
-                        case STRING, INTEGER -> visitor.endId(value, entry.group());
-                        case ACTUAL -> visitor.endId((Long) value);
-                    };
+                    case ID ->
+                        switch (idType) {
+                            case STRING, INTEGER -> {
+                                idValueBuilder.part(value, entry);
+                                yield true;
+                            }
+                            case ACTUAL -> visitor.id((Long) value);
+                        };
+                    case START_ID ->
+                        switch (idType) {
+                            case STRING, INTEGER -> {
+                                startIdValueBuilder.part(value, entry);
+                                yield true;
+                            }
+                            case ACTUAL -> visitor.startId((Long) value);
+                        };
+                    case END_ID ->
+                        switch (idType) {
+                            case STRING, INTEGER -> {
+                                endIdValueBuilder.part(value, entry);
+                                yield true;
+                            }
+                            case ACTUAL -> visitor.endId((Long) value);
+                        };
                     case TYPE -> visitor.type((String) value);
-                    case PROPERTY -> !isEmptyArray(value) && visitor.property(entry.name(), value);
-                    case LABEL -> value.getClass().isArray()
-                            ? visitor.labels((String[]) value)
-                            : visitor.labels(new String[] {(String) value});
+                    case PROPERTY ->
+                        !isEmptyArray(value) && visitor.property(entry.name(), value, entry.isIdentifier());
+                    case REMOVE_PROPERTY -> {
+                        var keys = entry.name() == null ? toStringArray(value) : new String[] {entry.name()};
+                        yield visitor.removedProperties(keys);
+                    }
+                    case LABEL -> visitor.labels(toStringArray(value));
+                    case REMOVE_LABEL -> visitor.removedLabels(toStringArray(value));
+                    case ACTION -> visitor.applicationMode(ApplicationMode.valueOfLenient(value.toString()));
                     default -> throw new IllegalArgumentException(entry.type().toString());
                 };
 
@@ -127,9 +204,15 @@ public class CsvInputParser implements Closeable {
                 doContinue = visitor.id(idValueBuilder.value(), idValueBuilder.group());
                 if (doContinue) {
                     for (var idPropertyValue : idValueBuilder.idPropertyValues()) {
-                        doContinue = visitor.property(idPropertyValue.name(), idPropertyValue.value());
+                        doContinue = visitor.property(idPropertyValue.name(), idPropertyValue.value(), true);
                     }
                 }
+            }
+            if (!startIdValueBuilder.isEmpty()) {
+                doContinue = visitor.startId(startIdValueBuilder.value(), startIdValueBuilder.group());
+            }
+            if (!endIdValueBuilder.isEmpty()) {
+                doContinue = visitor.endId(endIdValueBuilder.value(), endIdValueBuilder.group());
             }
 
             while (!mark.isEndOfLine()) {
@@ -139,12 +222,20 @@ public class CsvInputParser implements Closeable {
                     badCollector.collectExtraColumns(seeker.sourceDescription(), lineNumber, value);
                 }
             }
-            visitor.endOfEntity();
+            if (invalidIdEntityType == null && !badProperty) {
+                visitor.endOfEntity();
+            } else {
+                // The row had a bad entry and was bad-collected: emit no entity, but still return below so the
+                // caller counts it as one processed row (per-row progress reporting, see BatchNodeWorker).
+                visitor.reset();
+            }
             return true;
+        } catch (final InputException e) {
+            throw e;
         } catch (final RuntimeException e) {
             String stringValue = null;
             try {
-                Extractors extractors = new Extractors('?');
+                Extractors extractors = new Extractors();
                 stringValue = seeker.tryExtract(mark, extractors.string(), entry.optionalParameter());
             } catch (Exception e1) { // OK
             }
@@ -159,6 +250,18 @@ public class CsvInputParser implements Closeable {
 
             throw new InputException(message, e);
         }
+    }
+
+    private String extractRawValue(Header.Entry entry) {
+        try {
+            return seeker.tryExtract(mark, stringExtractor, entry.optionalParameter());
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    private String[] toStringArray(Object value) {
+        return value.getClass().isArray() ? (String[]) value : new String[] {(String) value};
     }
 
     private static boolean isEmptyArray(Object value) {

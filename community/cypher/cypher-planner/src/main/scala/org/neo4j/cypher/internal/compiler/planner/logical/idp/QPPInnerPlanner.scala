@@ -21,32 +21,27 @@ package org.neo4j.cypher.internal.compiler.planner.logical.idp
 
 import com.github.benmanes.caffeine.cache.Cache
 import org.neo4j.cypher.internal.cache.CacheSize
-import org.neo4j.cypher.internal.cache.ExecutorBasedCaffeineCacheFactory
+import org.neo4j.cypher.internal.cache.CaffeineCacheFactory
 import org.neo4j.cypher.internal.compiler.planner.logical.LogicalPlanningContext
 import org.neo4j.cypher.internal.compiler.planner.logical.Metrics.LabelInfo
 import org.neo4j.cypher.internal.compiler.planner.logical.idp.CacheBackedQPPInnerPlanner.CacheKeyInner
 import org.neo4j.cypher.internal.compiler.planner.logical.idp.CacheBackedQPPInnerPlanner.CacheKeyOuter
-import org.neo4j.cypher.internal.compiler.planner.logical.idp.extractQPPPredicates.ExtractedPredicates
+import org.neo4j.cypher.internal.compiler.planner.logical.idp.extractQppPredicates.ExtractedPredicates
 import org.neo4j.cypher.internal.compiler.planner.logical.ordering.InterestingOrderConfig
-import org.neo4j.cypher.internal.expressions.Expression
-import org.neo4j.cypher.internal.expressions.IsRepeatTrailUnique
+import org.neo4j.cypher.internal.expressions.Ands
 import org.neo4j.cypher.internal.expressions.LogicalVariable
-import org.neo4j.cypher.internal.expressions.UnPositionedVariable.varFor
-import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.ir.QuantifiedPathPattern
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
-import org.neo4j.cypher.internal.util.InputPosition
-import org.neo4j.cypher.internal.util.NonEmptyList
 
 /**
- * Produces a logical plan for the the inner pattern of a QPP, which is the equivalent of the RHS of the Trail operator.
+ * Produces a logical plan for the inner pattern of a QPP, which is the equivalent of the RHS of the Trail operator.
  * [[QPPInnerPlanner]] has two implementations, where [[CacheBackedQPPInnerPlanner]] simply provides an additional layer
  * of caching on top of the planning capabilities of [[IDPQPPInnerPlanner]].
  */
 trait QPPInnerPlanner {
 
   /**
-   * Takes a QPP pattern, a direction, and inlineable predicates. Depending on the direciton, it produces a LogicalPlan
+   * Takes a QPP pattern, a direction, and inlineable predicates. Depending on the direction, it produces a LogicalPlan
    * with either the leftmost or rightmost node of the inner QPP as argument. The inlineable predicates are pushed down
    * as early as possible.
    *
@@ -62,29 +57,6 @@ trait QPPInnerPlanner {
     extractedPredicates: ExtractedPredicates,
     labelInfoOuter: LabelInfo
   ): LogicalPlan
-
-  /**
-   * Updates the outer portion of a QPP that was previously planned by inserting arguments, and enabling TrailInto
-   * semantics.
-   *
-   * We need to the insert the same arguments in the QPP as we did when originally planning the inner QPP so that
-   * VerifyBestPlan can validate the plan.
-   *
-   * We currently don't have a TrailInto operator that would allow us to create a LogicalPlan when both juxtaposed
-   * nodes of the QPP are bound. Such situations may however occur, and when they occur we need to be careful
-   * that Trail doesn't overwrite the variable that was the previously bound juxtaposed end node. To this end, we update
-   * the QPP to produce an anonymous variable that we can then do a join on (following the Trail operator).
-   *
-   * @param qpp               The QPP pattern to update
-   * @param fromLeft          The QPP node we can use as argument
-   * @param availableSymbols  The previously bound symbols
-   * @return
-   */
-  def updateQpp(
-    qpp: QuantifiedPathPattern,
-    fromLeft: Boolean,
-    availableSymbols: Set[LogicalVariable]
-  ): QuantifiedPathPattern
 }
 
 /**
@@ -116,7 +88,7 @@ class CacheBackedQPPInnerPlanner(planner: => QPPInnerPlanner) extends QPPInnerPl
   ): LogicalPlan = {
     val cacheKeyOuter = CacheKeyOuter(qpp, fromLeft)
     val cacheMaxSize = CacheSize.Static(CACHE_MAX_SIZE)
-    val cache = caches.getOrElse(cacheKeyOuter, ExecutorBasedCaffeineCacheFactory.createCache(cacheMaxSize))
+    val cache = caches.getOrElse(cacheKeyOuter, CaffeineCacheFactory.newSynchronousCache(cacheMaxSize))
     val cacheKeyInner = CacheKeyInner(extractedPredicates.requiredSymbols, labelInfoOuter)
 
     Option(cache.getIfPresent(cacheKeyInner)) match {
@@ -134,14 +106,6 @@ class CacheBackedQPPInnerPlanner(planner: => QPPInnerPlanner) extends QPPInnerPl
         qppInnerPlan
     }
   }
-
-  override def updateQpp(
-    qpp: QuantifiedPathPattern,
-    fromLeft: Boolean,
-    availableSymbols: Set[LogicalVariable]
-  ): QuantifiedPathPattern =
-    planner.updateQpp(qpp, fromLeft, availableSymbols)
-
 }
 
 object CacheBackedQPPInnerPlanner {
@@ -160,9 +124,20 @@ case class IDPQPPInnerPlanner(context: LogicalPlanningContext) extends QPPInnerP
     extractedPredicates: ExtractedPredicates,
     labelInfoOuter: LabelInfo
   ): LogicalPlan = {
+    context.staticComponents.idpLogger.markScope("planQPP") {
+      doPlanQPP(qpp, fromLeft, extractedPredicates, labelInfoOuter)
+    }
+  }
+
+  private def doPlanQPP(
+    qpp: QuantifiedPathPattern,
+    fromLeft: Boolean,
+    extractedPredicates: ExtractedPredicates,
+    labelInfoOuter: LabelInfo
+  ): LogicalPlan = {
     val argumentsIntroducedByExtractedPredicates = extractedPredicates.requiredSymbols
     val additionalArguments = argumentsIntroducedByExtractedPredicates + getQPPStartNode(qpp, fromLeft)
-    val additionalPredicates = extractedPredicates.predicates.map(_.extracted) ++ additionalTrailPredicates(qpp)
+    val additionalPredicates = extractedPredicates.predicates.map(_.extracted).flatMap(Ands.unwrap)
     val qg = qpp.asQueryGraph
       .addArgumentIds(additionalArguments)
       .addPredicates(additionalPredicates: _*)
@@ -208,9 +183,18 @@ case class IDPQPPInnerPlanner(context: LogicalPlanningContext) extends QPPInnerP
     }
 
     val inferredLabelInfo = inferLabelInfoFromJuxtaposedNodes()
-    updatedContext = updatedContext.withModifiedPlannerState(_
-      .withFusedLabelInfo(labelInfoOuter)
-      .withFusedLabelInfo(inferredLabelInfo))
+    updatedContext = updatedContext
+      .withModifiedPlannerState(_
+        .withFusedLabelInfo(labelInfoOuter)
+        .withFusedLabelInfo(inferredLabelInfo))
+      .withModifiedPlannerState { state =>
+        val shouldBeCached = context.settings.remoteBatchPropertiesStrategy.propertiesToFetchBeforeQpp(
+          additionalPredicates,
+          argumentsIntroducedByExtractedPredicates,
+          context.semanticTable
+        )
+        state.copy(previouslyCachedProperties = state.previouslyCachedProperties.union(shouldBeCached))
+      }
 
     // We use InterestingOrderConfig.empty because the order from a RHS of Trail is not propagated anyway
     val plan =
@@ -225,39 +209,5 @@ case class IDPQPPInnerPlanner(context: LogicalPlanningContext) extends QPPInnerP
   private def getQPPStartNode(qpp: QuantifiedPathPattern, fromLeft: Boolean): LogicalVariable = {
     if (fromLeft) qpp.leftBinding.inner
     else qpp.rightBinding.inner
-  }
-
-  private def additionalTrailPredicates(qpp: QuantifiedPathPattern): NonEmptyList[Expression] =
-    qpp.patternRelationships.map(r =>
-      IsRepeatTrailUnique(r.variable.asInstanceOf[Variable])(InputPosition.NONE)
-    )
-
-  override def updateQpp(
-    qpp: QuantifiedPathPattern,
-    fromLeft: Boolean,
-    availableSymbols: Set[LogicalVariable]
-  ): QuantifiedPathPattern = {
-    val endNode = if (fromLeft) qpp.right else qpp.left
-    val overlapping = availableSymbols.contains(endNode)
-    if (overlapping) {
-      updateQppForTrailInto(qpp, fromLeft, context)
-    } else {
-      qpp
-    }
-  }
-
-  private def updateQppForTrailInto(
-    qpp: QuantifiedPathPattern,
-    fromLeft: Boolean,
-    context: LogicalPlanningContext
-  ): QuantifiedPathPattern = {
-    val newVar = varFor(context.staticComponents.anonymousVariableNameGenerator.nextName)
-    val qppWithNewEndBindingOuterName =
-      if (fromLeft) {
-        qpp.copy(rightBinding = qpp.rightBinding.copy(outer = newVar))
-      } else {
-        qpp.copy(leftBinding = qpp.leftBinding.copy(outer = newVar))
-      }
-    qppWithNewEndBindingOuterName
   }
 }

@@ -16,13 +16,14 @@
  */
 package org.neo4j.cypher.internal.frontend.phases
 
-import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
+import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerConfig
 import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerFactory
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.scoping.UpToDateScopes
 import org.neo4j.cypher.internal.rewriting.conditions.AndRewrittenToAnds
-import org.neo4j.cypher.internal.rewriting.conditions.noUnnamedNodesAndRelationships
-import org.neo4j.cypher.internal.rewriting.rewriters.QuantifiedPathPatternNodeInsertRewriter
+import org.neo4j.cypher.internal.rewriting.conditions.NoUnnamedNodesAndRelationships
+import org.neo4j.cypher.internal.rewriting.rewriters.astRewriters.NormalizePredicates
+import org.neo4j.cypher.internal.rewriting.rewriters.astRewriters.QuantifiedPathPatternNodeInsertRewriter
 import org.neo4j.cypher.internal.rewriting.rewriters.computeDependenciesForExpressions.ExpressionsHaveComputedDependencies
-import org.neo4j.cypher.internal.rewriting.rewriters.normalizePredicates
 import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.StepSequencer
 import org.neo4j.cypher.internal.util.StepSequencer.DefaultPostCondition
@@ -32,21 +33,20 @@ case object CopyQuantifiedPathPatternPredicatesToJuxtaposedNodes
 
   override def preConditions: Set[StepSequencer.Condition] = Set(
     ExpressionsHaveComputedDependencies,
-    StatementCondition.wrap(noUnnamedNodesAndRelationships),
+    NoUnnamedNodesAndRelationships,
     QuantifiedPathPatternNodeInsertRewriter.completed,
-    normalizePredicates.completed,
+    NormalizePredicates.completed,
     AndRewrittenToAnds,
     Namespacer.completed
   )
 
   override def invalidatedConditions: Set[StepSequencer.Condition] =
-    Set(ExpressionsHaveComputedDependencies)
+    // copyVariables duplicates a variable declaration, so Namespacer must re-run to disambiguate the copy.
+    Set(ExpressionsHaveComputedDependencies, UpToDateScopes, Namespacer.completed)
 
   def instance(from: BaseState, context: BaseContext): Rewriter =
     CopyQuantifiedPathPatternPredicatesToJuxtaposedNodesRewriter.instance
 
-  override def getTransformer(
-    pushdownPropertyReads: Boolean,
-    semanticFeatures: Seq[SemanticFeature]
-  ): Transformer[BaseContext, BaseState, BaseState] = this
+  override def getTransformer(planPipelineConfig: PlanPipelineTransformerConfig)
+    : Transformer[BaseContext, BaseState, BaseState] = this
 }

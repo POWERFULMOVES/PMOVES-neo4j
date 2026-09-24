@@ -38,6 +38,8 @@ import org.apache.commons.codec.digest.DigestUtils;
 import org.neo4j.io.fs.DefaultFileSystemAbstraction;
 import org.neo4j.io.fs.FileHandle;
 import org.neo4j.io.fs.FileSystemAbstraction;
+import org.neo4j.io.fs.FileSystemUtils;
+import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.util.VisibleForTesting;
 
 /**
@@ -75,6 +77,7 @@ public class TestDirectory {
     private static final DateTimeFormatter DATE_TIME_FORMATTER =
             DateTimeFormatter.ofPattern("dd_HH-mm-ss-SSS").withZone(ZoneOffset.UTC);
     public static final String REGISTER_FILE_NAME = ".register";
+    public static final String TEST_DATA = "test data";
 
     private final FileSystemAbstraction fileSystem;
     private Path testClassBaseFolder;
@@ -185,6 +188,10 @@ public class TestDirectory {
         clean(fileSystem, testClassBaseFolder);
     }
 
+    public String fileContent(Path path) throws IOException {
+        return FileSystemUtils.readString(fileSystem, path, EmptyMemoryTracker.INSTANCE);
+    }
+
     @Override
     public String toString() {
         String testDirectoryName = isInitialised() ? directory.toString() : "<uninitialized>";
@@ -217,6 +224,7 @@ public class TestDirectory {
                         Files.copy(inputStream, path, REPLACE_EXISTING);
                     }
                 }
+                fileSystem.deleteRecursively(directory); // Don't forget to clean up the memory to avoid OOM
             }
         }
     }
@@ -308,7 +316,7 @@ public class TestDirectory {
     }
 
     private static Path testDataDirectoryOf(Class<?> owningTest) {
-        Path testData = locateTarget(owningTest).resolve("test data");
+        Path testData = locateTarget(owningTest).resolve(TEST_DATA);
         return testData.resolve(shorten(owningTest.getName())).toAbsolutePath();
     }
 

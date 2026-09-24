@@ -31,10 +31,19 @@ import static org.neo4j.values.Comparison.UNDEFINED;
 import static org.neo4j.values.storable.DateTimeValue.datetime;
 import static org.neo4j.values.storable.DateValue.date;
 import static org.neo4j.values.storable.DurationValue.duration;
+import static org.neo4j.values.storable.Float16Format.BFLOAT16;
+import static org.neo4j.values.storable.Float16Format.FLOAT16;
 import static org.neo4j.values.storable.LocalDateTimeValue.localDateTime;
 import static org.neo4j.values.storable.LocalTimeValue.localTime;
 import static org.neo4j.values.storable.TimeValue.time;
 import static org.neo4j.values.storable.Values.NO_VALUE;
+import static org.neo4j.values.storable.Values.float16Vector;
+import static org.neo4j.values.storable.Values.float32Vector;
+import static org.neo4j.values.storable.Values.float64Vector;
+import static org.neo4j.values.storable.Values.int16Vector;
+import static org.neo4j.values.storable.Values.int32Vector;
+import static org.neo4j.values.storable.Values.int64Vector;
+import static org.neo4j.values.storable.Values.int8Vector;
 import static org.neo4j.values.storable.Values.intValue;
 import static org.neo4j.values.storable.Values.pointValue;
 import static org.neo4j.values.storable.Values.stringArray;
@@ -59,6 +68,7 @@ import org.junit.jupiter.api.Test;
 import org.neo4j.values.storable.CoordinateReferenceSystem;
 import org.neo4j.values.storable.DurationValue;
 import org.neo4j.values.storable.PointValue;
+import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.Values;
 import org.neo4j.values.virtual.ListValue;
 import org.neo4j.values.virtual.MapValue;
@@ -70,6 +80,12 @@ import org.neo4j.values.virtual.VirtualValueTestUtil;
 class AnyValueComparatorTest {
     private final AnyValueComparator comparator =
             new AnyValueComparator(Values.COMPARATOR, VirtualValueGroup::compareTo);
+
+    private byte[] utf8Str1 = {
+        -17, -80, -72, -16, -91, -107, -81, -16, -105, -73, -83, -16, -93, -89, -86, -16, -95, -103, -87, -16, -82, -86,
+        -101, -16, -91, -128, -109
+    };
+    byte[] utf8Str2 = {-12, -113, -65, -65};
 
     private final Object[] objs = new Object[] {
         // MAP LIKE TYPES
@@ -139,6 +155,80 @@ class AnyValueComparatorTest {
         path(nodes(4L, 5L), relationships(2L)),
         path(nodes(5L, 4L), relationships(2L)),
 
+        // VECTORS
+        int8Vector((byte) 1),
+        int8Vector((byte) 0, (byte) 1),
+        int8Vector((byte) 1, (byte) 2),
+        int8Vector((byte) 2, (byte) 1),
+        int8Vector((byte) 1, (byte) 2, (byte) 0),
+        int8Vector((byte) 1, (byte) 2, (byte) 1),
+        int8Vector((byte) 1, (byte) 3, (byte) 0),
+        int8Vector((byte) 2, (byte) 0, (byte) 1),
+        int16Vector((short) 1),
+        int16Vector((short) 0, (short) 1),
+        int16Vector((short) 1, (short) 2),
+        int16Vector((short) 2, (short) 1),
+        int16Vector((short) 1, (short) 2, (short) 0),
+        int16Vector((short) 1, (short) 2, (short) 1),
+        int16Vector((short) 1, (short) 3, (short) 0),
+        int16Vector((short) 2, (short) 0, (short) 1),
+        int32Vector(1),
+        int32Vector(0, 1),
+        int32Vector(1, 2),
+        int32Vector(2, 1),
+        int32Vector(1, 2, 0),
+        int32Vector(1, 2, 1),
+        int32Vector(1, 3, 0),
+        int32Vector(2, 0, 1),
+        int64Vector(1),
+        int64Vector(0, 1),
+        int64Vector(1, 2),
+        int64Vector(2, 1),
+        int64Vector(1, 2, 0),
+        int64Vector(1, 2, 1),
+        int64Vector(1, 3, 0),
+        int64Vector(2, 0, 1),
+        float16Vector(FLOAT16, FLOAT16.negative(FLOAT16.maxValue())),
+        float16Vector(FLOAT16, FLOAT16.toFloat16(-0.0f)),
+        float16Vector(FLOAT16, FLOAT16.toFloat16(0.0f)),
+        float16Vector(FLOAT16, FLOAT16.minValue()),
+        float16Vector(FLOAT16, FLOAT16.toFloat16(1)),
+        float16Vector(FLOAT16, FLOAT16.maxValue()),
+        float16Vector(BFLOAT16, BFLOAT16.negative(BFLOAT16.maxValue())),
+        float16Vector(BFLOAT16, BFLOAT16.toFloat16(-0.0f)),
+        float16Vector(BFLOAT16, BFLOAT16.toFloat16(0.0f)),
+        float16Vector(BFLOAT16, BFLOAT16.minValue()),
+        float16Vector(BFLOAT16, BFLOAT16.toFloat16(1)),
+        float16Vector(BFLOAT16, BFLOAT16.maxValue()),
+        float32Vector(-Float.MAX_VALUE),
+        float32Vector(-Float.MIN_VALUE),
+        float32Vector(-0.0f),
+        float32Vector(0.0f),
+        float32Vector(Float.MIN_VALUE),
+        float32Vector(1),
+        float32Vector(Float.MAX_VALUE),
+        float32Vector(0, 1),
+        float32Vector(1, 2),
+        float32Vector(2, 1),
+        float32Vector(1, 2, 0),
+        float32Vector(1, 2, 1),
+        float32Vector(1, 3, 0),
+        float32Vector(2, 0, 1),
+        float64Vector(-Double.MAX_VALUE),
+        float64Vector(-Double.MIN_VALUE),
+        float64Vector(-0.0),
+        float64Vector(0.0),
+        float64Vector(Double.MIN_VALUE),
+        float64Vector(1),
+        float64Vector(Double.MAX_VALUE),
+        float64Vector(0, 1),
+        float64Vector(1, 2),
+        float64Vector(2, 1),
+        float64Vector(1, 2, 0),
+        float64Vector(1, 2, 1),
+        float64Vector(1, 3, 0),
+        float64Vector(2, 0, 1),
+
         // SCALARS
         pointValue(CoordinateReferenceSystem.CARTESIAN, 1.0, 1.0),
         datetime(2018, 2, 2, 0, 0, 0, 0, "+00:00"),
@@ -189,6 +279,27 @@ class AnyValueComparatorTest {
                 }
             }
         }
+    }
+
+    // NOTE: These values are not added to the `Object[] objs`, since
+    // there is inconsistent ordering between UTF8StringValue and CharValue.
+    // This is a different issue, that was decided not to fix in the past.
+    @Test
+    void shouldOrderUTF8StringValuesCorrectlyAmongstThemselves() {
+        Value val1 = Values.utf8Value(utf8Str1);
+        Value val2 = Values.utf8Value(utf8Str2);
+
+        int cmpVal = signum(compare(comparator, val1, val2));
+        assertThat(cmpVal).isEqualTo(-1);
+    }
+
+    @Test
+    void shouldOrderUTF8StringArrayValuesCorrectlyAmongstThemselves() {
+        Value val1 = Values.stringArray(Values.utf8Value(utf8Str1));
+        Value val2 = Values.stringArray(Values.utf8Value(utf8Str2));
+
+        int cmpVal = signum(compare(comparator, val1, val2));
+        assertThat(cmpVal).isEqualTo(-1);
     }
 
     @Test
@@ -325,6 +436,25 @@ class AnyValueComparatorTest {
         assertTernaryCompare(duration, duration(0, 0, 0, 0), EQUAL);
         assertTernaryCompare(duration, duration(1, 0, 0, 0), UNDEFINED);
         assertTernaryCompare(duration, localTime(0, 0, 0, 1), UNDEFINED);
+    }
+
+    @Test
+    void equalVectorsShouldBeEqualAccordingToTernaryComparison() {
+        assertTernaryCompare(int8Vector((byte) 1, (byte) 2, (byte) 3), int8Vector((byte) 1, (byte) 2, (byte) 3), EQUAL);
+        assertTernaryCompare(
+                int16Vector((short) 1, (short) 2, (short) 3), int16Vector((short) 1, (short) 2, (short) 3), EQUAL);
+        assertTernaryCompare(int32Vector(1, 2, 3), int32Vector(1, 2, 3), EQUAL);
+        assertTernaryCompare(int64Vector(1, 2, 3), int64Vector(1, 2, 3), EQUAL);
+        assertTernaryCompare(float32Vector(1, 2, 3), float32Vector(1, 2, 3), EQUAL);
+        assertTernaryCompare(float64Vector(1, 2, 3), float64Vector(1, 2, 3), EQUAL);
+    }
+
+    @Test
+    void nonEqualVectorsShouldBeUndefinedAccordingToTernaryComparison() {
+        assertTernaryCompare(int8Vector((byte) 1, (byte) 2), int8Vector((byte) 1), UNDEFINED);
+        assertTernaryCompare(int8Vector((byte) 1), int16Vector((short) 1), UNDEFINED);
+        assertTernaryCompare(int32Vector(1, 2), int32Vector(2, 1), UNDEFINED);
+        assertTernaryCompare(int64Vector(1), float64Vector(1), UNDEFINED);
     }
 
     private void assertTernaryCompare(AnyValue a, AnyValue b, Comparison expected) {

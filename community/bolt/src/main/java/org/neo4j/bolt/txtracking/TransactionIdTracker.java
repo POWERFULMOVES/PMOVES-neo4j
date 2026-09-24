@@ -19,12 +19,11 @@
  */
 package org.neo4j.bolt.txtracking;
 
-import static org.neo4j.kernel.api.exceptions.Status.Database.DatabaseNotFound;
-import static org.neo4j.kernel.api.exceptions.Status.General.DatabaseUnavailable;
 import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_ID;
 
 import java.time.Duration;
 import java.util.concurrent.locks.LockSupport;
+import org.neo4j.common.SystemLastTransactionIdProvider;
 import org.neo4j.dbms.api.DatabaseManagementService;
 import org.neo4j.dbms.api.DatabaseNotFoundException;
 import org.neo4j.kernel.database.AbstractDatabase;
@@ -68,7 +67,7 @@ public class TransactionIdTracker {
      * @return id of the Newest Encountered Transaction (NET).
      */
     public long newestTransactionId(NamedDatabaseId namedDatabaseId) {
-        var db = database(namedDatabaseId);
+        var db = lookupDatabase(lookupDatabaseApi(namedDatabaseId));
         try {
             // return the "last committed" because it is the newest id
             // "last closed" will return the last gap-free id, potentially for some old transaction because there might
@@ -76,7 +75,7 @@ public class TransactionIdTracker {
             // "last reconciled" might also return an id lower than the ID of the just committed transaction
             return transactionIdStore(db).getLastCommittedTransactionId();
         } catch (RuntimeException e) {
-            throw databaseUnavailable(db, e);
+            throw databaseUnavailable(namedDatabaseId, e);
         }
     }
 
@@ -103,7 +102,7 @@ public class TransactionIdTracker {
      * @param timeout maximum duration to wait for OAT to be applied
      */
     public void awaitUpToDate(NamedDatabaseId namedDatabaseId, long oldestAcceptableTxId, Duration timeout) {
-        var db = database(namedDatabaseId);
+        var db = lookupDatabase(lookupDatabaseApi(namedDatabaseId));
 
         if (oldestAcceptableTxId <= BASE_TX_ID) {
             return;
@@ -115,7 +114,7 @@ public class TransactionIdTracker {
             boolean waited = false;
             do {
                 if (isNotAvailable(db)) {
-                    throw databaseUnavailable(db);
+                    throw databaseUnavailable(namedDatabaseId);
                 }
                 lastTransactionId = currentTransactionId(db);
                 if (oldestAcceptableTxId <= lastTransactionId) {
@@ -134,7 +133,7 @@ public class TransactionIdTracker {
             throw unreachableDatabaseVersion(db, lastTransactionId, oldestAcceptableTxId);
         } catch (RuntimeException e) {
             if (isNotAvailable(db)) {
-                throw databaseUnavailable(db, e);
+                throw databaseUnavailable(namedDatabaseId, e);
             }
             throw TransactionIdTrackerException.unreachableDatabaseVersion(
                     db, lastTransactionId, oldestAcceptableTxId, e);
@@ -147,10 +146,19 @@ public class TransactionIdTracker {
     }
 
     private static long currentTransactionId(AbstractDatabase db) {
+        // special handling for system database as for that the simple fact that a transaction is applied to the store
+        // might not be enough, we might need to ensure that certain caches are cleared or refreshed
+        if (db.isSystem()) {
+            var systemLastTransactionIdProvider =
+                    db.getDependencyResolver().resolveOptionalDependency(SystemLastTransactionIdProvider.class);
+            if (systemLastTransactionIdProvider.isPresent()) {
+                return systemLastTransactionIdProvider.get().lastTransactionId();
+            }
+        }
         // await for the last closed transaction id to to have at least the expected value
         // it has to be "last closed" and not "last committed" because all transactions before the expected one should
         // also be committed
-        return transactionIdStore(db).getLastClosedTransactionId();
+        return transactionIdStore(db).getHighestGapFreeClosedTransactionId();
     }
 
     private static TransactionIdStore transactionIdStore(AbstractDatabase db) {
@@ -160,17 +168,26 @@ public class TransactionIdTracker {
         return db.getDependencyResolver().resolveDependency(TransactionIdStore.class);
     }
 
-    private AbstractDatabase database(NamedDatabaseId namedDatabaseId) {
+    private GraphDatabaseAPI lookupDatabaseApi(NamedDatabaseId namedDatabaseId) {
         try {
-            var dbApi = (GraphDatabaseAPI) managementService.database(namedDatabaseId.name());
-            var db = dbApi.getDependencyResolver().resolveDependency(AbstractDatabase.class);
-            if (isNotAvailable(db)) {
-                throw databaseUnavailable(db);
-            }
-            return db;
+            return (GraphDatabaseAPI) managementService.database(namedDatabaseId.name());
         } catch (DatabaseNotFoundException e) {
-            throw databaseNotFound(namedDatabaseId);
+            throw namedDatabaseId.isSystemDatabase()
+                    ? databaseUnavailable(namedDatabaseId)
+                    : databaseNotFound(namedDatabaseId);
         }
+    }
+
+    private static AbstractDatabase lookupDatabase(GraphDatabaseAPI dbApi) {
+        var dependencyResolver = dbApi.getDependencyResolver();
+        if (dependencyResolver == null || !dependencyResolver.containsDependency(AbstractDatabase.class)) {
+            throw databaseUnavailable(dbApi.databaseId());
+        }
+        var db = dependencyResolver.resolveDependency(AbstractDatabase.class);
+        if (isNotAvailable(db)) {
+            throw databaseUnavailable(dbApi.databaseId());
+        }
+        return db;
     }
 
     private static boolean isNotAvailable(AbstractDatabase db) {
@@ -178,17 +195,15 @@ public class TransactionIdTracker {
     }
 
     private static TransactionIdTrackerException databaseNotFound(NamedDatabaseId namedDatabaseId) {
-        return new TransactionIdTrackerException(
-                DatabaseNotFound, "Database '" + namedDatabaseId.name() + "' does not exist");
+        return TransactionIdTrackerException.databaseNotFound(namedDatabaseId.name());
     }
 
-    private static TransactionIdTrackerException databaseUnavailable(AbstractDatabase db) {
-        return databaseUnavailable(db, null);
+    private static TransactionIdTrackerException databaseUnavailable(NamedDatabaseId namedDatabaseId) {
+        return databaseUnavailable(namedDatabaseId, null);
     }
 
-    private static TransactionIdTrackerException databaseUnavailable(AbstractDatabase db, Throwable cause) {
-        return new TransactionIdTrackerException(
-                DatabaseUnavailable, "Database '" + db.getNamedDatabaseId().name() + "' unavailable", cause);
+    private static TransactionIdTrackerException databaseUnavailable(NamedDatabaseId namedDatabaseId, Throwable cause) {
+        return TransactionIdTrackerException.databaseUnavailable(namedDatabaseId.name(), cause);
     }
 
     private static TransactionIdTrackerException unreachableDatabaseVersion(

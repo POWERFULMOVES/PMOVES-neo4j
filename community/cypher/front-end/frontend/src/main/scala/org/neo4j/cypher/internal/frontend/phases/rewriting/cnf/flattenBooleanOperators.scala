@@ -24,7 +24,6 @@ import org.neo4j.cypher.internal.frontend.phases.BaseContext
 import org.neo4j.cypher.internal.frontend.phases.BaseState
 import org.neo4j.cypher.internal.rewriting.conditions.AndRewrittenToAnds
 import org.neo4j.cypher.internal.rewriting.conditions.OrRewrittenToOrs
-import org.neo4j.cypher.internal.rewriting.conditions.SemanticInfoAvailable
 import org.neo4j.cypher.internal.util.CancellationChecker
 import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.StepSequencer
@@ -33,7 +32,7 @@ import org.neo4j.cypher.internal.util.collection.immutable.ListSet
 import org.neo4j.cypher.internal.util.helpers.fixedPoint
 import org.neo4j.cypher.internal.util.inSequence
 
-case object flattenBooleanOperators extends CnfPhase {
+case object flattenBooleanOperators extends CnfPhaseRewriter {
 
   private val firstStep: Rewriter = Rewriter.lift {
     case p @ And(lhs, rhs) => Ands(ListSet(lhs, rhs))(p.position)
@@ -41,14 +40,8 @@ case object flattenBooleanOperators extends CnfPhase {
   }
 
   private val secondStep: Rewriter = Rewriter.lift {
-    case p @ Ands(exprs) => Ands(exprs.flatMap {
-        case Ands(inner) => inner
-        case x           => Set(x)
-      })(p.position)
-    case p @ Ors(exprs) => Ors(exprs.flatMap {
-        case Ors(inner) => inner
-        case x          => Set(x)
-      })(p.position)
+    case p @ Ands(exprs) => Ands(exprs.flatMap(Ands.unwrap))(p.position)
+    case p @ Ors(exprs)  => Ors(exprs.flatMap(Ors.unwrap))(p.position)
   }
 
   def instance(cancellationChecker: CancellationChecker): Rewriter = inSequence(cancellationChecker)(
@@ -62,8 +55,6 @@ case object flattenBooleanOperators extends CnfPhase {
     AndRewrittenToAnds,
     OrRewrittenToOrs
   )
-
-  override def invalidatedConditions: Set[StepSequencer.Condition] = SemanticInfoAvailable
 
   override def instance(from: BaseState, context: BaseContext): Rewriter = instance(context.cancellationChecker)
 

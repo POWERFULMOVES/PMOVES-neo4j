@@ -21,72 +21,33 @@ package org.neo4j.queryapi.tx;
 
 import static org.assertj.core.api.Assertions.fail;
 import static org.neo4j.kernel.api.exceptions.Status.Transaction.TransactionAccessedConcurrently;
-import static org.neo4j.queryapi.QueryApiTestUtil.resolveDependency;
-import static org.neo4j.queryapi.QueryApiTestUtil.setupLogging;
-import static org.neo4j.queryapi.QueryApiTestUtil.sleepProcedure;
 import static org.neo4j.queryapi.QueryResponseAssertions.assertThat;
 
 import java.io.IOException;
-import java.util.EnumSet;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import org.assertj.core.api.Assertions;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.neo4j.configuration.connectors.BoltConnector;
-import org.neo4j.configuration.connectors.BoltConnectorInternalSettings;
-import org.neo4j.configuration.connectors.ConnectorPortRegister;
-import org.neo4j.configuration.connectors.ConnectorType;
-import org.neo4j.configuration.connectors.HttpConnector;
-import org.neo4j.configuration.helpers.SocketAddress;
-import org.neo4j.dbms.api.DatabaseManagementService;
-import org.neo4j.internal.kernel.api.exceptions.ProcedureException;
 import org.neo4j.kernel.api.exceptions.Status;
-import org.neo4j.kernel.api.procedure.GlobalProcedures;
-import org.neo4j.queryapi.QueryApiTestUtil;
-import org.neo4j.queryapi.testclient.QueryAPITestClient;
-import org.neo4j.queryapi.testclient.QueryApiTestClientException;
-import org.neo4j.queryapi.testclient.QueryRequest;
-import org.neo4j.server.configuration.ConfigurableServerModules;
-import org.neo4j.server.configuration.ServerSettings;
+import org.neo4j.queryapi.test.annotation.QueryAPITestExtension;
+import org.neo4j.queryapi.test.procedure.SleepQueryApiTestProcedure;
+import org.neo4j.queryapi.test.testclient.QueryAPITestClient;
+import org.neo4j.queryapi.test.testclient.QueryApiTestClientException;
+import org.neo4j.queryapi.test.testclient.QueryRequest;
 import org.neo4j.server.queryapi.tx.TransactionManager;
-import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 
-public class QueryResourceTxErrorIT {
+@QueryAPITestExtension(sleepProcedureEnabled = true)
+class QueryResourceTxErrorIT {
 
-    private static QueryAPITestClient testClient;
-    private static DatabaseManagementService dbms;
-    private static TransactionManager txManager;
+    private final QueryAPITestClient testClient;
+    private final TransactionManager txManager;
 
-    @BeforeAll
-    static void beforeAll() throws ProcedureException {
-        setupLogging();
-        var builder = new TestDatabaseManagementServiceBuilder();
-        dbms = builder.setConfig(HttpConnector.enabled, true)
-                .setConfig(HttpConnector.listen_address, new SocketAddress("localhost", 0))
-                .setConfig(
-                        BoltConnectorInternalSettings.local_channel_address,
-                        QueryResourceTxErrorIT.class.getSimpleName())
-                .setConfig(BoltConnector.enabled, true)
-                .setConfig(BoltConnectorInternalSettings.enable_local_connector, true)
-                .setConfig(ServerSettings.http_enabled_modules, EnumSet.allOf(ConfigurableServerModules.class))
-                .impermanent()
-                .build();
-
-        resolveDependency(dbms, GlobalProcedures.class).register(sleepProcedure());
-        txManager = resolveDependency(dbms, TransactionManager.class);
-        var portRegister = QueryApiTestUtil.resolveDependency(dbms, ConnectorPortRegister.class);
-        String queryEndpoint =
-                "http://" + portRegister.getLocalAddress(ConnectorType.HTTP) + "/db/{databaseName}/query/v2";
-        testClient = new QueryAPITestClient(queryEndpoint);
-    }
-
-    @AfterAll
-    static void afterAll() {
-        dbms.shutdown();
+    QueryResourceTxErrorIT(QueryAPITestClient testClient, TransactionManager txManager) {
+        this.testClient = testClient;
+        this.txManager = txManager;
     }
 
     @BeforeEach
@@ -127,7 +88,7 @@ public class QueryResourceTxErrorIT {
     }
 
     @Test
-    void shouldHandleDatabaseNotFound() throws IOException, InterruptedException {
+    void shouldHandleDatabaseNotFound() throws IOException, InterruptedException, QueryApiTestClientException {
         var begin = testClient.beginTx(null, "doesnotexist");
         assertThat(begin).wasDatabaseNotFound();
     }
@@ -148,7 +109,7 @@ public class QueryResourceTxErrorIT {
                 .statement("CALL() { CREATE (t:Test) } IN TRANSACTIONS OF 1 ROWS")
                 .build());
 
-        assertThat(res).hasErrorStatus(500, Status.Transaction.TransactionStartFailed);
+        assertThat(res).hasErrorStatus(400, Status.Transaction.TransactionStartFailed);
         assertThat(res).hasNoTransaction();
     }
 
@@ -176,36 +137,41 @@ public class QueryResourceTxErrorIT {
     }
 
     @Test
-    void shouldNotAllowConcurrentTxAccess() throws IOException, InterruptedException, QueryApiTestClientException {
+    void shouldNotAllowConcurrentTxAccess(SleepQueryApiTestProcedure.Controller sleepProcedureController)
+            throws IOException, InterruptedException, QueryApiTestClientException {
         var res = testClient.beginTx();
         var latch = new CountDownLatch(1);
 
-        Executors.newSingleThreadExecutor().submit(() -> {
-            try {
-                testClient.runInTx(
-                        QueryRequest.newBuilder()
-                                .statement("CALL queryAPI.nightnight(5000)")
-                                .build(),
-                        res.body().txId());
-                latch.countDown();
-            } catch (IOException | InterruptedException | QueryApiTestClientException ignored) {
-                fail("Error starting long running transaction");
-            }
-        });
+        try (var executorService = Executors.newSingleThreadExecutor()) {
+            executorService.submit(() -> {
+                try {
+                    testClient.runInTx(
+                            QueryRequest.newBuilder()
+                                    .statement("CALL queryAPI.nightnight(5000)")
+                                    .build(),
+                            res.body().txId());
+                    latch.countDown();
+                } catch (IOException | InterruptedException | QueryApiTestClientException ignored) {
+                    fail("Error starting long running transaction");
+                }
+            });
 
-        Thread.sleep(500);
+            Assertions.assertThat(sleepProcedureController.awaitProcedureStarts(5, TimeUnit.SECONDS))
+                    .as("long running query should have started executing inside the transaction")
+                    .isTrue();
 
-        var concurrent = testClient.runInTx(res.body().txId());
-        assertThat(concurrent).hasErrorStatus(400, TransactionAccessedConcurrently);
+            var concurrent = testClient.runInTx(res.body().txId());
+            assertThat(concurrent).hasErrorStatus(400, TransactionAccessedConcurrently);
 
-        // wait for tx to free up
-        latch.await();
+            // wait for tx to free up
+            latch.await();
 
-        var accessReq = testClient.commitTx(
-                QueryRequest.newBuilder().statement("RETURN 1").build(),
-                res.body().txId());
-        assertThat(accessReq).wasSuccessful();
-        assertThat(accessReq).hasNoTransaction();
+            var accessReq = testClient.commitTx(
+                    QueryRequest.newBuilder().statement("RETURN 1").build(),
+                    res.body().txId());
+            assertThat(accessReq).wasSuccessful();
+            assertThat(accessReq).hasNoTransaction();
+        }
     }
 
     @Test

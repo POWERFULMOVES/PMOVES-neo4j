@@ -19,7 +19,6 @@
  */
 package org.neo4j.router.impl.query;
 
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -34,14 +33,21 @@ import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseInternalSettings;
-import org.neo4j.cypher.internal.QueryOptions;
+import org.neo4j.configuration.GraphDatabaseSettings;
+import org.neo4j.configuration.helpers.QueryLanguageConverter;
+import org.neo4j.cypher.internal.CypherVersion;
+import org.neo4j.cypher.internal.DefaultQueryLanguageScope;
 import org.neo4j.cypher.internal.config.CypherConfiguration;
+import org.neo4j.cypher.internal.options.CypherDerivedQueryOptions;
 import org.neo4j.cypher.internal.options.CypherQueryOptions;
+import org.neo4j.cypher.internal.preparser.QueryOptions;
 import org.neo4j.cypher.internal.util.CancellationChecker;
 import org.neo4j.cypher.internal.util.InputPosition;
 import org.neo4j.cypher.internal.util.ObfuscationMetadata;
 import org.neo4j.fabric.executor.Location;
 import org.neo4j.fabric.executor.QueryStatementLifecycles;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.kernel.database.DatabaseReference;
 import org.neo4j.kernel.database.DatabaseReferenceImpl;
 import org.neo4j.kernel.database.NormalizedDatabaseName;
@@ -60,6 +66,8 @@ import scala.collection.immutable.HashSet;
 class ConstituentTransactionFactoryImplTest {
     private final String NL = System.lineSeparator();
     private final String validTargetDatabase = "target";
+    private final CypherVersion systemDefaultLanguage =
+            QueryLanguageConverter.toInternal(GraphDatabaseSettings.default_language.defaultValue());
 
     @Test
     void testWithoutPreParserOptions() throws QueryExecutionKernelException {
@@ -115,14 +123,24 @@ class ConstituentTransactionFactoryImplTest {
     }
 
     @Test
-    void testWhenTargetDatabaseIsNotAConstituentOfSessionDatabase() throws QueryExecutionKernelException {
+    void testWhenTargetDatabaseIsNotAConstituentOfSessionDatabase() {
         CypherQueryOptions queryOptions = CypherQueryOptions.defaultOptions();
         DatabaseTransaction innerTransaction = mock(DatabaseTransaction.class);
         var constituentTransactionFactory = getConstituentTransactionFactory(queryOptions, innerTransaction);
 
-        assertThatThrownBy(() -> constituentTransactionFactory.transactionFor(getTargetDatabase("invalid")))
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(
+                        () -> constituentTransactionFactory.transactionFor(getTargetDatabase("invalid")))
                 .hasMessage(
-                        "When connected to a composite database, access is allowed only to its constituents. Attempted to access 'invalid' while connected to 'composite'");
+                        "When connected to a composite database, access is allowed only to its constituents. Attempted to access 'invalid' while connected to 'composite'")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_42001)
+                .hasStatusDescription("error: syntax error or access rule violation - invalid syntax")
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_42N05)
+                .hasStatusDescription(
+                        "error: syntax error or access rule violation - unsupported access of standard database. "
+                                + "Failed to access database identified by `invalid` while connected to composite session database `composite`. "
+                                + "Connect to `invalid` directly or create an alias in the composite database.");
+        ;
     }
 
     private DatabaseReference getTargetDatabase(String name) {
@@ -136,12 +154,16 @@ class ConstituentTransactionFactoryImplTest {
 
     private ConstituentTransactionFactory getConstituentTransactionFactory(
             CypherQueryOptions cypherQueryOptions, DatabaseTransaction innerTransaction) {
+        CypherDerivedQueryOptions derivedQueryOptions = CypherQueryOptions.derivedOptions(
+                cypherQueryOptions, CypherConfiguration.fromConfig(Config.defaults()));
         LocationService locationService = (databaseReference) -> mock(Location.Local.class);
         TransactionInfo transactionInfo = mock(TransactionInfo.class);
+        when(transactionInfo.defaultQueryLanguageScope()).thenReturn(mock(DefaultQueryLanguageScope.class));
         RouterTransactionContext context = mock(RouterTransactionContext.class);
         when(context.transactionInfo()).thenReturn(transactionInfo);
         when(context.locationService()).thenReturn(locationService);
         when(context.transactionFor(any(), any())).thenReturn(innerTransaction);
+        when(context.sessionTransaction()).thenReturn(mock(DatabaseTransaction.class));
 
         var sessionDatabase = mock(DatabaseReferenceImpl.Composite.class);
         when(sessionDatabase.getConstituentByName(any())).thenReturn(Optional.empty());
@@ -151,10 +173,12 @@ class ConstituentTransactionFactoryImplTest {
         when(context.sessionDatabaseReference()).thenReturn(sessionDatabase);
 
         QueryProcessor queryProcessor = mock(QueryProcessor.class);
-        QueryOptions queryOptions = QueryOptions.apply(InputPosition.NONE(), cypherQueryOptions, false, false);
+        QueryOptions queryOptions = QueryOptions.apply(
+                InputPosition.NONE(), cypherQueryOptions, derivedQueryOptions, false, false, systemDefaultLanguage);
         StatementType statementType = StatementType.of(StatementType.Query());
         QueryProcessor.ProcessedQueryInfo processedQueryInfo = mock(QueryProcessor.ProcessedQueryInfo.class);
-        when(queryProcessor.processQuery(any(), any(), any(), any(), any())).thenReturn(processedQueryInfo);
+        when(queryProcessor.processQuery(any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(processedQueryInfo);
         when(processedQueryInfo.obfuscationMetadata()).thenReturn(Optional.of(ObfuscationMetadata.empty()));
         when(processedQueryInfo.queryOptions()).thenReturn(queryOptions);
         when(processedQueryInfo.statementType()).thenReturn(statementType);

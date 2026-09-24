@@ -21,7 +21,8 @@ package org.neo4j.io.pagecache.tracing;
 
 import java.io.IOException;
 import java.nio.file.Path;
-import org.neo4j.io.pagecache.PageSwapper;
+import org.neo4j.io.async.AsyncBlockAccessor;
+import org.neo4j.io.pagecache.impl.muninn.swapper.PageSwapper;
 
 public class DummyPageSwapper implements PageSwapper {
     protected final String filename;
@@ -44,11 +45,6 @@ public class DummyPageSwapper implements PageSwapper {
     }
 
     @Override
-    public long read(long filePageId, long bufferAddress, int bufferLength) throws IOException {
-        return bufferLength;
-    }
-
-    @Override
     public long write(long filePageId, long bufferAddress) throws IOException {
         return filePageSize;
     }
@@ -57,6 +53,9 @@ public class DummyPageSwapper implements PageSwapper {
     public long write(long filePageId, long bufferAddress, int bufferLength) {
         return bufferAddress;
     }
+
+    @Override
+    public void asyncWrite(AsyncBlockAccessor accessor, long pageRef, long filePageId, long bufferAddress) {}
 
     @Override
     public void evicted(long pageRef, long filePageId) {}
@@ -115,8 +114,18 @@ public class DummyPageSwapper implements PageSwapper {
     }
 
     @Override
-    public long write(
-            long startFilePageId, long[] bufferAddresses, int[] bufferLengths, int length, int totalAffectedPages) {
+    public long write(long startFilePageId, long[] bufferAddresses, int[] bufferLengths, int length) {
         return 0;
     }
+
+    @Override
+    public void asyncWrite(
+            AsyncBlockAccessor accessor,
+            long startFilePageId,
+            long[] bufferAddresses,
+            int[] bufferLengths,
+            int length,
+            long[] pageRefs,
+            long[] flushStamps,
+            int pagesToFlush) {}
 }

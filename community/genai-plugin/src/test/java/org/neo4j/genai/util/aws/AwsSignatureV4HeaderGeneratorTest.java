@@ -27,6 +27,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.stream.Stream;
+import org.eclipse.collections.api.block.predicate.Predicate2;
 import org.eclipse.collections.api.multimap.Multimap;
 import org.eclipse.collections.impl.factory.Multimaps;
 import org.junit.jupiter.api.Nested;
@@ -120,8 +121,7 @@ class AwsSignatureV4HeaderGeneratorTest {
             final var datetime = "19700101T000000Z";
             final var scope = "19700101/fake-region/bedrock/aws4_request";
 
-            final var request =
-                    """
+            final var request = """
                     POST
                     /path/to/resource
                     exists=&param=other&param=value
@@ -130,8 +130,7 @@ class AwsSignatureV4HeaderGeneratorTest {
 
                     content-type;host
                     973153f86ec2da1748e63f0cf85b89835b42f8ee8018c549868a1308a19f6ca3""";
-            final var hashedRequestPrefix =
-                    """
+            final var hashedRequestPrefix = """
                     AWS4-HMAC-SHA256
                     19700101T000000Z
                     19700101/fake-region/bedrock/aws4_request
@@ -171,7 +170,10 @@ class AwsSignatureV4HeaderGeneratorTest {
         final var accessKeyId = "AKIAXZRNW77LNNSMHOZL";
         final var secretAccessKey = "Uua4JdR5DlCIfHMtOG4OXItTfbR03Gxcy3lmqj0a";
 
-        final var expectedHeaders = Multimaps.mutable.list.withAll(requestProperties);
+        final var expectedHeaders = Multimaps.mutable
+                .list
+                .withAll(requestProperties)
+                .rejectKeysValues((Predicate2<String, String>) (argument1, argument2) -> "Host".equals(argument1));
         expectedHeaders.put("X-Amz-Date", "20231121T164121Z");
         expectedHeaders.put("X-Amz-Content-Sha256", "e3279a0a20442f4d6519874f10dd8af7eab838b7503b11265859b02629651cd5");
         expectedHeaders.put(

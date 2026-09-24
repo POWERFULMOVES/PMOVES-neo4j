@@ -20,24 +20,31 @@
 package org.neo4j.kernel.database;
 
 import static java.lang.String.format;
-import static org.neo4j.configuration.GraphDatabaseSettings.db_format;
+import static org.apache.commons.lang3.ArrayUtils.EMPTY_LONG_ARRAY;
+import static org.neo4j.configuration.GraphDatabaseSettings.memory_transaction_database_max_size;
 import static org.neo4j.function.Predicates.alwaysTrue;
 import static org.neo4j.function.ThrowingAction.executeAll;
 import static org.neo4j.internal.helpers.collection.Iterators.asList;
 import static org.neo4j.internal.id.BufferingIdGeneratorFactory.PAGED_ID_BUFFER_FILE_NAME;
 import static org.neo4j.internal.schema.IndexType.LOOKUP;
 import static org.neo4j.kernel.extension.ExtensionFailureStrategies.fail;
-import static org.neo4j.kernel.impl.transaction.log.TransactionAppenderFactory.createTransactionAppender;
+import static org.neo4j.kernel.recovery.IncompleteTransactionAction.APPLY;
+import static org.neo4j.kernel.recovery.IncompleteTransactionAction.ROLLBACK;
 import static org.neo4j.kernel.recovery.Recovery.context;
 import static org.neo4j.kernel.recovery.Recovery.validateStoreId;
 import static org.neo4j.scheduler.Group.INDEX_CLEANUP;
 import static org.neo4j.scheduler.Group.INDEX_CLEANUP_WORK;
+import static org.neo4j.scheduler.Group.STORAGE_MAINTENANCE;
+import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_ID;
+import static org.neo4j.wal.TransactionAppenderFactory.createTransactionAppender;
+import static org.neo4j.wal.entry.LogFormat.pickLogFormatOnUpgrade;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -46,6 +53,7 @@ import java.util.function.Predicate;
 import java.util.function.Supplier;
 import org.neo4j.collection.Dependencies;
 import org.neo4j.common.EntityType;
+import org.neo4j.common.Subject;
 import org.neo4j.common.TokenNameLookup;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.DatabaseConfig;
@@ -61,6 +69,7 @@ import org.neo4j.function.Suppliers;
 import org.neo4j.graphdb.ResourceIterator;
 import org.neo4j.index.internal.gbptree.GroupingRecoveryCleanupWorkCollector;
 import org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector;
+import org.neo4j.internal.helpers.collection.Iterables;
 import org.neo4j.internal.id.IdController;
 import org.neo4j.internal.id.IdGeneratorFactory;
 import org.neo4j.internal.kernel.api.IndexMonitor;
@@ -69,7 +78,6 @@ import org.neo4j.internal.kernel.api.security.LoginContext;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexPrototype;
 import org.neo4j.internal.schema.SchemaDescriptors;
-import org.neo4j.internal.schema.SchemaNameUtil;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.fs.FileSystemUtils;
 import org.neo4j.io.fs.watcher.DatabaseLayoutWatcher;
@@ -77,27 +85,30 @@ import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.pagecache.IOController;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.PagedFile;
+import org.neo4j.io.pagecache.context.ClusterHorizonTracker;
+import org.neo4j.io.pagecache.context.ClusterHorizonTracker.ClusterHorizonTrackerImpl;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
-import org.neo4j.io.pagecache.context.OldestTransactionIdFactory;
+import org.neo4j.io.pagecache.context.OldestVisibilityHorizonFactory;
 import org.neo4j.io.pagecache.context.TransactionIdSnapshot;
 import org.neo4j.io.pagecache.context.TransactionIdSnapshotFactory;
 import org.neo4j.io.pagecache.impl.muninn.VersionStorage;
 import org.neo4j.io.pagecache.prefetch.PagePrefetcher;
 import org.neo4j.kernel.BinarySupportedKernelVersions;
+import org.neo4j.kernel.DatabaseCreationOptions;
+import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.KernelVersionProvider;
 import org.neo4j.kernel.api.Kernel;
 import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.api.database.transaction.TransactionLogServiceImpl;
-import org.neo4j.kernel.api.impl.fulltext.DefaultFulltextAdapter;
-import org.neo4j.kernel.api.impl.fulltext.FulltextIndexProvider;
 import org.neo4j.kernel.api.procedure.GlobalProcedures;
 import org.neo4j.kernel.availability.AvailabilityGuard;
-import org.neo4j.kernel.availability.DatabaseAvailability;
 import org.neo4j.kernel.availability.DatabaseAvailabilityGuard;
+import org.neo4j.kernel.availability.MvccIncompleteTransactionAvailabilityService;
 import org.neo4j.kernel.diagnostics.providers.DbmsDiagnosticsManager;
 import org.neo4j.kernel.extension.DatabaseExtensions;
 import org.neo4j.kernel.extension.ExtensionFactory;
 import org.neo4j.kernel.extension.context.DatabaseExtensionContext;
+import org.neo4j.kernel.impl.api.ChunkedTransactionTracker;
 import org.neo4j.kernel.impl.api.CommandCommitListeners;
 import org.neo4j.kernel.impl.api.DatabaseSchemaState;
 import org.neo4j.kernel.impl.api.ExternalIdReuseConditionProvider;
@@ -105,9 +116,9 @@ import org.neo4j.kernel.impl.api.KernelImpl;
 import org.neo4j.kernel.impl.api.KernelTransactions;
 import org.neo4j.kernel.impl.api.KernelTransactionsFactory;
 import org.neo4j.kernel.impl.api.LeaseService;
+import org.neo4j.kernel.impl.api.RaftUpgradeBarrier;
 import org.neo4j.kernel.impl.api.TransactionCommitProcess;
 import org.neo4j.kernel.impl.api.TransactionIdSequence;
-import org.neo4j.kernel.impl.api.TransactionRegistry;
 import org.neo4j.kernel.impl.api.TransactionVisibilityProvider;
 import org.neo4j.kernel.impl.api.TransactionalProcessFactory;
 import org.neo4j.kernel.impl.api.TransactionsFactory;
@@ -119,6 +130,7 @@ import org.neo4j.kernel.impl.api.state.ConstraintIndexCreator;
 import org.neo4j.kernel.impl.api.transaction.monitor.KernelTransactionMonitor;
 import org.neo4j.kernel.impl.api.transaction.monitor.TransactionMonitorScheduler;
 import org.neo4j.kernel.impl.api.txid.IdStoreTransactionIdGenerator;
+import org.neo4j.kernel.impl.api.txid.TransactionIdGenerator;
 import org.neo4j.kernel.impl.constraints.ConstraintSemantics;
 import org.neo4j.kernel.impl.factory.AccessCapabilityFactory;
 import org.neo4j.kernel.impl.factory.DbmsInfo;
@@ -135,33 +147,14 @@ import org.neo4j.kernel.impl.query.QueryEngineProvider;
 import org.neo4j.kernel.impl.query.QueryExecutionEngine;
 import org.neo4j.kernel.impl.query.TransactionExecutionMonitor;
 import org.neo4j.kernel.impl.store.StoreFileListing;
-import org.neo4j.kernel.impl.storemigration.StoreMigrator;
+import org.neo4j.kernel.impl.store.segment.SegmentMetadataService;
+import org.neo4j.kernel.impl.store.segment.SegmentTrackingFactory;
+import org.neo4j.kernel.impl.storemigration.StoreVersionStateChecker;
 import org.neo4j.kernel.impl.storemigration.UnableToMigrateException;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
-import org.neo4j.kernel.impl.transaction.log.LoggingLogFileMonitor;
-import org.neo4j.kernel.impl.transaction.log.LogicalTransactionStore;
-import org.neo4j.kernel.impl.transaction.log.PhysicalLogicalTransactionStore;
-import org.neo4j.kernel.impl.transaction.log.TransactionCommitmentFactory;
-import org.neo4j.kernel.impl.transaction.log.TransactionMetadataCache;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointScheduler;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointThreshold;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointerImpl;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckpointerLifecycle;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.StoreCopyCheckPointMutex;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
-import org.neo4j.kernel.impl.transaction.log.files.LogFilesBuilder;
-import org.neo4j.kernel.impl.transaction.log.files.checkpoint.DetachedLogTailScanner;
-import org.neo4j.kernel.impl.transaction.log.pruning.LogPruneStrategyFactory;
-import org.neo4j.kernel.impl.transaction.log.pruning.LogPruning;
-import org.neo4j.kernel.impl.transaction.log.pruning.LogPruningImpl;
-import org.neo4j.kernel.impl.transaction.log.reverse.ReverseTransactionCursorLoggingMonitor;
-import org.neo4j.kernel.impl.transaction.log.reverse.ReversedSingleFileCommandBatchCursor;
 import org.neo4j.kernel.impl.transaction.state.StaticIndexProviderMapFactory;
 import org.neo4j.kernel.impl.transaction.state.storeview.FullScanStoreView;
 import org.neo4j.kernel.impl.transaction.state.storeview.IndexStoreViewFactory;
 import org.neo4j.kernel.impl.transaction.stats.DatabaseTransactionStats;
-import org.neo4j.kernel.impl.util.collection.CollectionsFactorySupplier;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.kernel.internal.event.DatabaseTransactionEventListeners;
 import org.neo4j.kernel.internal.event.GlobalTransactionEventListeners;
@@ -172,7 +165,7 @@ import org.neo4j.kernel.lifecycle.Lifecycle;
 import org.neo4j.kernel.recovery.LogTailExtractor;
 import org.neo4j.kernel.recovery.LoggingLogTailScannerMonitor;
 import org.neo4j.kernel.recovery.Recovery;
-import org.neo4j.kernel.recovery.RecoveryPredicate;
+import org.neo4j.kernel.recovery.RecoveryResult;
 import org.neo4j.kernel.recovery.RecoveryStartupChecker;
 import org.neo4j.lock.LockService;
 import org.neo4j.lock.ReentrantLockService;
@@ -180,18 +173,22 @@ import org.neo4j.logging.InternalLogProvider;
 import org.neo4j.logging.internal.DatabaseLogProvider;
 import org.neo4j.logging.internal.DatabaseLogService;
 import org.neo4j.memory.GlobalMemoryGroupTracker;
+import org.neo4j.memory.LocalMemoryTracker;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.memory.ScopedMemoryPool;
 import org.neo4j.monitoring.Monitors;
 import org.neo4j.resources.CpuClock;
 import org.neo4j.scheduler.JobScheduler;
+import org.neo4j.storageengine.OperationMode;
+import org.neo4j.storageengine.VectorStoreCreator;
 import org.neo4j.storageengine.api.CommandReaderFactory;
 import org.neo4j.storageengine.api.DeprecatedFormatWarning;
-import org.neo4j.storageengine.api.MetadataProvider;
+import org.neo4j.storageengine.api.Leases;
+import org.neo4j.storageengine.api.LogMetadataProvider;
+import org.neo4j.storageengine.api.ReadableStorageEngine;
 import org.neo4j.storageengine.api.StorageEngine;
 import org.neo4j.storageengine.api.StorageEngineFactory;
 import org.neo4j.storageengine.api.StorageReader;
-import org.neo4j.storageengine.api.StoreFileMetadata;
 import org.neo4j.storageengine.api.StoreId;
 import org.neo4j.storageengine.api.TransactionIdStore;
 import org.neo4j.storageengine.api.enrichment.ApplyEnrichmentStrategy;
@@ -199,17 +196,46 @@ import org.neo4j.time.SystemNanoClock;
 import org.neo4j.token.TokenHolders;
 import org.neo4j.values.DefaultElementIdMapperV1;
 import org.neo4j.values.ElementIdMapper;
+import org.neo4j.wal.CompleteCommandBatch;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.LogTailMetadata;
+import org.neo4j.wal.LoggingLogFileMonitor;
+import org.neo4j.wal.LogicalTransactionStore;
+import org.neo4j.wal.PhysicalLogicalTransactionStore;
+import org.neo4j.wal.RecoveryOutcome;
+import org.neo4j.wal.TransactionCommitmentFactory;
+import org.neo4j.wal.TransactionMetadataCache;
+import org.neo4j.wal.checkpoint.CheckPointScheduler;
+import org.neo4j.wal.checkpoint.CheckPointThreshold;
+import org.neo4j.wal.checkpoint.CheckPointerImpl;
+import org.neo4j.wal.checkpoint.CheckpointerLifecycle;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
+import org.neo4j.wal.checkpoint.StoreCopyCheckPointMutex;
+import org.neo4j.wal.entry.LogFormat;
+import org.neo4j.wal.files.LogFilesBuilder;
+import org.neo4j.wal.files.RangeLogVersionVisitor;
+import org.neo4j.wal.files.checkpoint.DetachedLogTailScanner;
+import org.neo4j.wal.pruning.CheckpointOnlyLogPruning;
+import org.neo4j.wal.pruning.LogPruneStrategyFactory;
+import org.neo4j.wal.pruning.LogPruning;
+import org.neo4j.wal.pruning.LogPruningImpl;
+import org.neo4j.wal.reverse.ReverseTransactionCursorLoggingMonitor;
+import org.neo4j.wal.reverse.ReversedSingleFileCommandBatchCursor;
 
 public class Database extends AbstractDatabase {
     private static final String STORE_ID_VALIDATOR_TAG = "storeIdValidator";
+    private static final String ID_CACHE_CLUSTER_CLEANUP_TAG = "idCacheClusterCleanup";
 
     private final ServerIdentity serverIdentity;
     private final PageCache globalPageCache;
 
     private final TokenHolders tokenHolders;
     private final GlobalTransactionEventListeners transactionEventListeners;
-    private final IdGeneratorFactory idGeneratorFactory;
-    private final LockService lockService;
+    private final CursorContextFactorySupplier cursorContextFactorySupplier;
+    private IdGeneratorFactory idGeneratorFactory;
+    private final IdContextFactory idContextFactory;
+    private final IdGeneratorSettings idGeneratorSettings;
+    private LockService lockService;
     private final FileSystemAbstraction fs;
     private final DatabaseTransactionStats transactionStats;
     private final DatabaseIndexStats indexStats;
@@ -218,7 +244,6 @@ public class Database extends AbstractDatabase {
     private final GlobalProcedures globalProcedures;
     private final IOControllerService ioControllerService;
     private final StoreCopyCheckPointMutex storeCopyCheckPointMutex;
-    private final CollectionsFactorySupplier collectionsFactorySupplier;
     private final DatabaseTracers tracers;
     private final AccessCapabilityFactory accessCapabilityFactory;
     private final LeaseService leaseService;
@@ -226,14 +251,15 @@ public class Database extends AbstractDatabase {
     private final StorageEngineFactorySupplier storageEngineFactorySupplier;
     private final KernelTransactionsFactory kernelTransactionsFactory;
     private final PagePrefetcher pagePrefetcher;
+    private final DatabaseCreationOptions databaseCreationOptions;
+    private final LogPruneStrategyFactory logPruneStrategyFactory;
 
     private TransactionIdSequence transactionIdSequence;
     private IndexProviderMap indexProviderMap;
     private final DatabaseReadOnlyChecker readOnlyDatabaseChecker;
-    private final IdController idController;
+    private IdController idController;
     private final DbmsInfo dbmsInfo;
     private final HostedOnMode mode;
-    private MetadataCache metadataCache;
     private StorageEngineFactory storageEngineFactory;
     private LockManager databaseLockManager;
     private DatabaseLayout databaseLayout;
@@ -246,24 +272,36 @@ public class Database extends AbstractDatabase {
     private DatabasePageCache databasePageCache;
     private CheckpointerLifecycle checkpointerLifecycle;
     private ScopedMemoryPool otherDatabasePool;
+    private ScopedMemoryPool transactionsDatabasePool;
     private final GraphDatabaseFacade databaseFacade;
     private final FileLockerService fileLockerService;
     private final KernelTransactionFactory kernelTransactionFactory;
     private final DatabaseStartupController startupController;
     private final GlobalMemoryGroupTracker transactionsMemoryPool;
     private final GlobalMemoryGroupTracker otherMemoryPool;
-    private final CursorContextFactory cursorContextFactory;
+    private CursorContextFactory cursorContextFactory;
     private final VersionStorageFactory versionStorageFactory;
     private final CommandCommitListeners commandCommitListeners;
+    private final VectorStoreCreator vectorStoreCreator;
     private MemoryTracker otherDatabaseMemoryTracker;
     private RecoveryCleanupWorkCollector recoveryCleanupWorkCollector;
-    private DatabaseAvailability databaseAvailability;
     private DatabaseTransactionEventListeners databaseTransactionEventListeners;
     private IOController ioController;
     private ElementIdMapper elementIdMapper;
     private boolean storageExists;
     private TransactionCommitmentFactory commitmentFactory;
     private VersionStorage versionStorage;
+    private LeaseMonitor leaseMonitor;
+    private final ChunkedTransactionTracker chunkedTransactionTracker;
+    private MultiVersionDatabaseRollbackService multiVersionDatabaseRollbackService;
+    // Real only for the raft-triggered upgrade NO_OP otherwise. Assigned in  specificInit()
+    private RaftUpgradeBarrier raftUpgradeBarrier = RaftUpgradeBarrier.NO_OP;
+    private volatile RecoveryPredicateSupplier recoveryPredicate = RecoveryPredicateSupplier.ALL;
+    private final boolean raftTriggersUpgrade;
+    private SegmentTrackingFactory segmentTrackingFactory;
+    private final AtomicBoolean mvccRollbackDone = new AtomicBoolean(false);
+    private final boolean mergedLogs;
+    private ClusterHorizonTracker clusterHorizonTracker;
 
     public Database(DatabaseCreationContext context) {
         super(
@@ -271,15 +309,17 @@ public class Database extends AbstractDatabase {
                 context.getNamedDatabaseId(),
                 context.getDatabaseConfig(),
                 context.getDatabaseEventListeners(),
-                context.getMonitors(),
+                context.getDatabaseMonitorsFactory(),
                 context.getDatabaseLogService(),
                 context.getScheduler(),
                 context.getDatabaseAvailabilityGuardFactory(),
                 context.getDatabaseHealthFactory(),
-                context.getClock());
+                context.getClock(),
+                context.getExceptionHandlerService());
         this.serverIdentity = context.getServerIdentity();
         this.databaseLayout = context.getDatabaseLayout();
-        this.idGeneratorFactory = context.getIdGeneratorFactory();
+        this.idContextFactory = context.idContextFactory();
+        this.idGeneratorSettings = context.idGeneratorSettings();
         this.transactionsMemoryPool = context.getTransactionsMemoryPool();
         this.otherMemoryPool = context.getOtherMemoryPool();
         this.storeCopyCheckPointMutex = context.getStoreCopyCheckPointMutex();
@@ -292,24 +332,16 @@ public class Database extends AbstractDatabase {
         this.globalProcedures = context.getGlobalProcedures();
         this.ioControllerService = context.getIoControllerService();
         this.accessCapabilityFactory = context.getAccessCapabilityFactory();
-
-        this.idController = context.getIdController();
         this.dbmsInfo = context.getDbmsInfo();
         this.mode = context.getMode();
-        this.cursorContextFactory = context.getContextFactory();
+        this.cursorContextFactorySupplier = context.getCursorContextFactorySupplier();
         this.versionStorageFactory = context.getVersionStorageFactory();
         this.extensionFactories = context.getExtensionFactories();
         this.watcherServiceFactory = context.getWatcherServiceFactory();
         this.engineProvider = context.getEngineProvider();
-        this.lockService = createLockService(databaseConfig);
         this.commitProcessFactory = context.getCommitProcessFactory();
         this.globalPageCache = context.getPageCache();
-        this.collectionsFactorySupplier = context.getCollectionsFactorySupplier();
         this.storageEngineFactorySupplier = context.getStorageEngineFactorySupplier();
-        TransactionsFactory transactionsFactory = context.getTransactionsFactory();
-        this.databaseFacade = new GraphDatabaseFacade(
-                this, databaseConfig, dbmsInfo, mode, transactionsFactory.mode(), databaseAvailabilityGuard);
-        this.kernelTransactionFactory = new FacadeKernelTransactionFactory(databaseConfig, databaseFacade);
         this.tracers = context.getTracers();
         this.fileLockerService = context.getFileLockerService();
         this.leaseService = context.getLeaseService();
@@ -317,8 +349,25 @@ public class Database extends AbstractDatabase {
         this.readOnlyDatabaseChecker = context.getDbmsReadOnlyChecker().forDatabase(namedDatabaseId);
         this.externalIdReuseConditionProvider = context.externalIdReuseConditionProvider();
         this.commandCommitListeners = context.getCommandCommitListeners();
+        TransactionsFactory transactionsFactory = context.getTransactionsFactory();
         this.kernelTransactionsFactory = transactionsFactory.kernelTransactionsFactory();
         this.pagePrefetcher = context.getPagePrefetcher();
+        this.vectorStoreCreator = context.getVectorStoreCreator();
+        this.databaseCreationOptions = context.getDatabaseCreationOptions();
+        this.logPruneStrategyFactory = context.logPruneStrategyFactory();
+        this.chunkedTransactionTracker = new ChunkedTransactionTracker();
+        this.raftTriggersUpgrade = context.raftTriggersUpgrade();
+        this.mergedLogs = context.mergedLogs();
+        this.databaseFacade = new GraphDatabaseFacade(
+                this,
+                databaseConfig,
+                dbmsInfo,
+                mode,
+                transactionsFactory.mode(),
+                databaseAvailabilityGuard,
+                clock,
+                this::isCurrentStoreMultiVersioned);
+        this.kernelTransactionFactory = new FacadeKernelTransactionFactory(databaseConfig, databaseFacade);
     }
 
     /**
@@ -328,10 +377,12 @@ public class Database extends AbstractDatabase {
     @Override
     protected void specificInit() throws IOException {
         this.storageEngineFactory = storageEngineFactorySupplier.create();
-        var storageLockManager = storageEngineFactory.createLockManager(databaseConfig, this.clock);
-        this.databaseLockManager = isNotMultiVersioned(databaseConfig)
-                ? storageLockManager
-                : new MultiVersionLockManager(storageLockManager);
+        boolean multiVersioned = storageEngineFactory.multiVersioned();
+        this.cursorContextFactory = cursorContextFactorySupplier.create(multiVersioned);
+        var storageLockManager = storageEngineFactory.createLockManager(databaseConfig, this.clock, transactionStats);
+        this.databaseLockManager =
+                multiVersioned ? new MultiVersionLockManager(storageLockManager) : storageLockManager;
+        this.lockService = createLockService(storageEngineFactory);
         this.databaseLayout = storageEngineFactory.formatSpecificDatabaseLayout(databaseLayout);
         new DatabaseDirectoriesCreator(fs, databaseLayout).createDirectories();
         ioController = ioControllerService.createIOController(databaseConfig, clock);
@@ -344,17 +395,36 @@ public class Database extends AbstractDatabase {
                 databaseDependencies,
                 tracers,
                 databaseLayout,
-                databaseConfig);
-        databasePageCache = new DatabasePageCache(globalPageCache, ioController, versionStorage, databaseConfig);
+                databaseConfig,
+                multiVersioned);
 
-        life.add(versionStorage);
+        this.segmentTrackingFactory = life.add(new SegmentTrackingFactory(
+                storageEngineFactory,
+                fs,
+                globalPageCache,
+                databaseLayout,
+                cursorContextFactory,
+                databaseConfig,
+                readOnlyDatabaseChecker,
+                databaseHealth,
+                internalLog));
+        databasePageCache = new DatabasePageCache(
+                globalPageCache, ioController, versionStorage, segmentTrackingFactory.segmentTracker(), databaseConfig);
+        DatabaseIdContext databaseIdContext = idContextFactory.createIdContext(
+                namedDatabaseId, cursorContextFactory, databaseConfig, idGeneratorSettings, multiVersioned);
+        this.idController = databaseIdContext.getIdController();
+        this.idGeneratorFactory = databaseIdContext.getIdGeneratorFactory();
+        this.leaseMonitor = getMonitors().newMonitor(LeaseMonitor.class);
         life.add(onShutdown(() -> databaseLockManager.close()));
         life.add(new LockerLifecycleAdapter(fileLockerService.createDatabaseLocker(fs, databaseLayout)));
         life.add(databaseConfig);
 
-        databaseAvailability = new DatabaseAvailability(
-                databaseAvailabilityGuard, transactionStats, clock, getAwaitActiveTransactionDeadlineMillis());
-
+        this.clusterHorizonTracker = mode == HostedOnMode.SINGLE || !storageEngineFactory.multiVersioned()
+                ? ClusterHorizonTracker.NO_OP
+                : new ClusterHorizonTrackerImpl();
+        databaseDependencies.satisfyDependency(clusterHorizonTracker);
+        databaseDependencies.satisfyDependencies(chunkedTransactionTracker);
+        databaseDependencies.satisfyDependency(databaseCreationOptions);
         databaseDependencies.satisfyDependency(ioController);
         databaseDependencies.satisfyDependency(transactionIdSequence);
         databaseDependencies.satisfyDependency(readOnlyDatabaseChecker);
@@ -369,7 +439,9 @@ public class Database extends AbstractDatabase {
         databaseDependencies.satisfyDependency(transactionStats);
         databaseDependencies.satisfyDependency(indexStats);
         databaseDependencies.satisfyDependency(databaseLockManager);
-        databaseDependencies.satisfyDependency(databaseAvailability);
+        raftUpgradeBarrier = RaftUpgradeBarrier.create(raftTriggersUpgrade);
+        databaseDependencies.satisfyDependency(raftUpgradeBarrier);
+        mvccRollbackDone.set(false);
         databaseDependencies.satisfyDependency(idGeneratorFactory);
         databaseDependencies.satisfyDependency(idController);
         databaseDependencies.satisfyDependency(lockService);
@@ -378,7 +450,7 @@ public class Database extends AbstractDatabase {
         databaseDependencies.satisfyDependency(tracers.getDatabaseTracer());
         databaseDependencies.satisfyDependency(tracers.getPageCacheTracer());
         databaseDependencies.satisfyDependency(storageEngineFactory);
-        databaseDependencies.satisfyDependencies(mode);
+        databaseDependencies.satisfyDependencyIfAbsent(mode);
         databaseDependencies.satisfyDependencies(commandCommitListeners);
 
         recoveryCleanupWorkCollector = life.add(new GroupingRecoveryCleanupWorkCollector(
@@ -391,10 +463,14 @@ public class Database extends AbstractDatabase {
         otherDatabaseMemoryTracker = otherDatabasePool.getPoolMemoryTracker();
         databaseDependencies.satisfyDependency(new DatabaseMemoryTrackers(otherDatabaseMemoryTracker));
 
-        life.add(onShutdown(versionStorage::close));
+        transactionsDatabasePool = createTransactionsDatabasePool();
+        life.add(onShutdown(() -> transactionsDatabasePool.close()));
+        databaseConfig.addListener(
+                memory_transaction_database_max_size, (before, after) -> transactionsDatabasePool.setSize(after));
+
         life.add(new PageCacheLifecycle(databasePageCache));
+        life.add(versionStorage);
         life.add(initializeExtensions(databaseDependencies));
-        life.add(initializeIndexProviderMap(databaseDependencies));
 
         DatabaseLayoutWatcher watcherService = watcherServiceFactory.apply(databaseLayout);
         life.add(watcherService);
@@ -402,16 +478,16 @@ public class Database extends AbstractDatabase {
 
         // The CatalogManager has to update the dependency on TransactionIdStore when the system database is started
         // Note: CatalogManager does not exist in community edition if we use the new query router stack
-        if (this.isSystem() && databaseDependencies.containsDependency(AbstractCatalogManager.class)) {
-            var catalogManager = databaseDependencies.resolveDependency(AbstractCatalogManager.class);
-            life.add(catalogManager);
+        if (this.isSystem()) {
+            var optionalCatalogManager = databaseDependencies.resolveOptionalDependency(AbstractCatalogManager.class);
+            optionalCatalogManager.ifPresent(c -> life.add(c));
         }
     }
 
     /**
      * Start the database and make it ready for transaction processing.
      * A database will automatically recover itself, if necessary, when started.
-     * If the store files are obsolete (older than oldest supported version), then start will throw an exception.
+     * If the store files are obsolete (older than the oldest supported version), then start will throw an exception.
      */
     @Override
     protected void specificStart() throws IOException {
@@ -424,17 +500,19 @@ public class Database extends AbstractDatabase {
         databaseMonitors.addMonitorListener(indexStats);
 
         // Upgrade the store before we begin
-        upgradeStore(databaseConfig, databasePageCache, otherDatabaseMemoryTracker);
+        checkVersionSupportedAndNoBlockingInterruptedMigration(
+                databaseConfig, databasePageCache, otherDatabaseMemoryTracker);
 
         // Check the tail of transaction logs and validate version
-        LogTailMetadata tailMetadata = getLogTail();
+        LogFiles logFiles = getLogFiles(RecoveryOutcome.EMPTY_OUTCOME);
+        LogTailMetadata tailMetadata = logFiles.getTailMetadata();
         long lastClosedTxId = tailMetadata.getLastCommittedTransaction().id();
         initialiseContextFactory(() -> new TransactionIdSnapshot(lastClosedTxId), () -> lastClosedTxId);
 
         storageExists = storageEngineFactory.storageExists(fs, databaseLayout);
         validateStoreAndTxLogs(tailMetadata, cursorContextFactory, storageExists);
 
-        if (Recovery.performRecovery(context(
+        RecoveryResult recoveryResult = Recovery.performRecovery(context(
                         fs,
                         globalPageCache,
                         tracers,
@@ -444,19 +522,46 @@ public class Database extends AbstractDatabase {
                         ioController,
                         internalLogProvider,
                         tailMetadata)
-                .recoveryPredicate(RecoveryPredicate.ALL)
+                .recoveryPredicate(recoveryPredicate.get())
                 .monitors(databaseMonitors)
                 .extensionFactories(extensionFactories)
+                .rollbackRegistry(chunkedTransactionTracker)
+                .incompleteTransactionAction(HostedOnMode.SINGLE == mode ? ROLLBACK : APPLY)
                 .startupChecker(new RecoveryStartupChecker(startupController, namedDatabaseId))
-                .clock(clock))) {
+                .clock(clock));
+        if (recoveryResult.recoveryPerformed()) {
             // recovery replayed logs and wrote some checkpoints as result we need to rescan log tail to get the
             // latest info
-            tailMetadata = getLogTail();
-            long recoveredTxId = tailMetadata.getLastCommittedTransaction().id();
-            initialiseContextFactory(() -> new TransactionIdSnapshot(recoveredTxId), () -> recoveredTxId);
+            logFiles = getLogFiles(recoveryResult.outcome());
+            tailMetadata = logFiles.getTailMetadata();
+
+            RecoveryOutcome recoveryOutcome = recoveryResult.outcome();
+            long recoveredTxId;
+            long[] notClosedTransactionIds;
+            long highestEverObserved;
+            if (recoveryOutcome.isEmpty()) {
+                notClosedTransactionIds = EMPTY_LONG_ARRAY;
+                recoveredTxId = tailMetadata.getLastCommittedTransaction().id();
+                highestEverObserved = recoveredTxId;
+            } else {
+                recoveredTxId = recoveryOutcome.lastClosedGapFree().number();
+                notClosedTransactionIds = recoveryOutcome.notClosedTransactionIds();
+                highestEverObserved =
+                        recoveryOutcome.lastCommittingTransactionId().id();
+            }
+            initialiseContextFactory(
+                    () -> new TransactionIdSnapshot(recoveredTxId, highestEverObserved, notClosedTransactionIds),
+                    () -> recoveredTxId);
         }
 
-        metadataCache = databaseDependencies.satisfyDependency(new MetadataCache(tailMetadata));
+        LogMetadataProvider logMetadataProvider =
+                databaseDependencies.satisfyDependency(logFiles.logMetadataProvider());
+        internalLog.info("Current KernelVersion=" + logMetadataProvider.kernelVersion() + ", LogFormat= "
+                + logMetadataProvider.getCurrentLogFormat());
+
+        // Creating the IndexProviderMap resolves the KernelVersionProvider from the dependencies
+        // so it has to happen here at the earliest.
+        life.add(initializeIndexProviderMap(databaseDependencies));
 
         // Build all modules and their services
         DatabaseSchemaState databaseSchemaState = new DatabaseSchemaState(internalLogProvider);
@@ -466,7 +571,7 @@ public class Database extends AbstractDatabase {
                 databaseLayout.file(PAGED_ID_BUFFER_FILE_NAME),
                 databaseConfig,
                 () -> kernelModule.kernelTransactions().get(),
-                () -> kernelModule.transactionMonitor().oldestObservableHorizon(),
+                new IdControllerVisibilityBoundary(),
                 s -> kernelModule.kernelTransactions().eligibleForFreeing(s),
                 otherDatabaseMemoryTracker,
                 readOnlyDatabaseChecker);
@@ -484,37 +589,52 @@ public class Database extends AbstractDatabase {
                 lockService,
                 idGeneratorFactory,
                 databaseHealth,
+                scheduler,
                 internalLogProvider,
                 userLogProvider,
                 recoveryCleanupWorkCollector,
-                tailMetadata,
-                metadataCache,
+                logMetadataProvider,
                 otherDatabaseMemoryTracker,
                 cursorContextFactory,
                 tracers.getPageCacheTracer(),
                 versionStorage,
-                pagePrefetcher);
-
-        var metadataProvider = databaseDependencies.satisfyDependency(storageEngine.metadataProvider());
+                pagePrefetcher,
+                databaseDependencies,
+                exceptionHandlerService,
+                OperationMode.DEFAULT,
+                vectorStoreCreator,
+                databaseCreationOptions,
+                mode == HostedOnMode.RAFT || mode == HostedOnMode.REPLICA);
+        // Satisfy the StoreIdProvider needed by logFiles. Logfiles doesn't need it until started by lifecycle.
+        databaseDependencies.satisfyDependency(storageEngine.metadataProvider());
 
         initialiseContextFactory(
-                getTransactionIdSnapshotFactory(databaseConfig, metadataProvider),
-                getOldestTransactionIdFactory(databaseConfig, () -> kernelModule));
+                getTransactionIdSnapshotFactory(storageEngineFactory, logMetadataProvider),
+                getOldestVisibilityHorizonFactory(storageEngineFactory, () -> kernelModule));
         elementIdMapper = new DefaultElementIdMapperV1(namedDatabaseId);
 
-        // Recreate the logFiles after storage engine to get access to dependencies
-        var logFiles = getLogFiles();
-
         life.add(storageEngine);
-        life.add(storageEngine.schemaAndTokensLifecycle());
+        life.add(storageEngine.schemaAndTokensLifecycle(
+                databaseConfig.get(GraphDatabaseInternalSettings.ignore_corrupt_schema)));
         life.add(logFiles);
+        LogFiles logfilesForLambda = logFiles;
+        life.add(onStart(() -> {
+            long lowestLogVersion =
+                    logfilesForLambda.getLogFile().getLogRangeInfo().lowestVersion();
+            if (lowestLogVersion != RangeLogVersionVisitor.UNKNOWN) {
+                var header = logfilesForLambda.getLogFile().extractHeader(lowestLogVersion);
+                if (header != null) {
+                    logMetadataProvider.setLowestAvailableCommittedTransactionId(header.getLastAppendIndex() + 1);
+                }
+            }
+        }));
 
         // Token indexes
-        FullScanStoreView fullScanStoreView =
-                new FullScanStoreView(lockService, storageEngine, databaseConfig, scheduler);
         var indexStoreViewLocks = storageEngine.indexingBehaviour().requireCoordinationLocks()
                 ? lockService
                 : LockService.NO_LOCK_SERVICE;
+        FullScanStoreView fullScanStoreView =
+                new FullScanStoreView(indexStoreViewLocks, storageEngine, databaseConfig, scheduler);
         IndexStoreViewFactory indexStoreViewFactory = new IndexStoreViewFactory(
                 databaseConfig,
                 storageEngine,
@@ -541,45 +661,51 @@ public class Database extends AbstractDatabase {
                 indexStoreViewFactory,
                 indexStatisticsStore,
                 otherDatabaseMemoryTracker,
-                metadataCache);
+                logMetadataProvider);
 
         databaseDependencies.satisfyDependency(storageEngine.countsAccessor());
 
         CheckPointerImpl.ForceOperation forceOperation =
                 new DefaultForceOperation(indexingService, storageEngine, databasePageCache);
+        var segmentMetadataService =
+                segmentTrackingFactory.createSegmentMetadataService(getStoreId(), otherDatabaseMemoryTracker);
+        databaseDependencies.satisfyDependency(segmentMetadataService);
         DatabaseTransactionLogModule transactionLogModule = buildTransactionLogs(
                 logFiles,
                 databaseConfig,
                 internalLogProvider,
                 scheduler,
                 forceOperation,
-                metadataProvider,
+                logMetadataProvider,
                 databaseMonitors,
                 databaseDependencies,
                 cursorContextFactory,
-                storageEngineFactory.commandReaderFactory());
-        commitmentFactory = new TransactionCommitmentFactory(metadataProvider);
+                storageEngineFactory.commandReaderFactory(),
+                otherDatabaseMemoryTracker,
+                segmentMetadataService);
+        commitmentFactory = new TransactionCommitmentFactory(logMetadataProvider);
 
         databaseTransactionEventListeners =
                 new DatabaseTransactionEventListeners(databaseFacade, transactionEventListeners, namedDatabaseId);
         life.add(databaseTransactionEventListeners);
+        life.add(idController);
         final DatabaseKernelModule kernelModule = buildKernel(
                 logFiles,
                 transactionLogModule,
                 indexingService,
                 databaseSchemaState,
                 storageEngine,
-                metadataProvider,
-                metadataCache,
+                logMetadataProvider,
                 databaseAvailabilityGuard,
                 clock,
                 indexStatisticsStore,
                 leaseService,
-                cursorContextFactory);
+                cursorContextFactory,
+                raftUpgradeBarrier);
 
+        life.add(kernelModule.kernelAPI());
         kernelModule.satisfyDependencies(databaseDependencies);
 
-        // Do these assignments last so that we can ensure no cyclical dependencies exist
         this.kernelModule = kernelModule;
 
         databaseDependencies.satisfyDependency(commitmentFactory);
@@ -596,24 +722,50 @@ public class Database extends AbstractDatabase {
         var providerSpi = QueryEngineProvider.spi(
                 internalLogProvider, databaseMonitors, scheduler, life, getKernel(), databaseConfig);
         this.executionEngine = QueryEngineProvider.initialize(
-                databaseDependencies, databaseFacade, engineProvider, isSystem(), providerSpi);
+                databaseDependencies,
+                databaseFacade,
+                engineProvider,
+                isSystem(),
+                providerSpi,
+                storageEngineFactory.multiVersioned());
 
-        this.checkpointerLifecycle = new CheckpointerLifecycle(transactionLogModule.checkPointer(), databaseHealth);
+        this.checkpointerLifecycle = new CheckpointerLifecycle(
+                transactionLogModule.checkPointer(), databaseHealth, logPruneStrategyFactory.skipOnShutdown());
+        this.multiVersionDatabaseRollbackService = new MultiVersionDatabaseRollbackService(
+                kernelModule.kernelTransactions(),
+                internalLog,
+                tracers,
+                databaseAvailabilityGuard,
+                leaseService,
+                chunkedTransactionTracker,
+                readOnlyDatabaseChecker,
+                databaseHealth,
+                kernelModule.getTransactionCommitProcess(),
+                transactionIdSequence,
+                clock,
+                otherDatabaseMemoryTracker);
+        databaseDependencies.satisfyDependency(multiVersionDatabaseRollbackService);
 
-        life.add(idController);
-        life.add(onStart(this::registerUpgradeListener));
-        life.add(databaseHealth);
-        life.add(databaseAvailabilityGuard);
-        life.add(databaseAvailability);
-        life.setLast(checkpointerLifecycle);
+        var rollBackAvailabilityService =
+                new MvccIncompleteTransactionAvailabilityService(databaseAvailabilityGuard, chunkedTransactionTracker);
+        databaseDependencies.satisfyDependency(rollBackAvailabilityService);
+        life.add(rollBackAvailabilityService);
         life.add(onStop(() -> {
             this.executionEngine.clearQueryCaches();
             this.executionEngine.close();
         }));
+        life.add(onStart(() -> registerUpgradeListener(logMetadataProvider)));
+        life.add(databaseHealth);
+
+        life.setLast(new DatabaseLifeShutdownCoordinator(
+                databaseAvailabilityGuard,
+                kernelModule.kernelTransactions(),
+                checkpointerLifecycle,
+                multiVersionDatabaseRollbackService));
 
         databaseDependencies.resolveDependency(DbmsDiagnosticsManager.class).dumpDatabaseDiagnostics(this);
 
-        String format = storageEngine.retrieveStoreId().getFormatName();
+        String format = storageEngine.metadataProvider().getStoreId().getFormatName();
         if (storageEngineFactory.isDeprecated(format)) {
             internalLog.warn(DeprecatedFormatWarning.getFormatWarning(databaseLayout.getDatabaseName(), format));
         }
@@ -629,27 +781,61 @@ public class Database extends AbstractDatabase {
         // no specific actions
     }
 
+    private boolean isCurrentStoreMultiVersioned() {
+        var sef = storageEngineFactory;
+        return sef != null && sef.multiVersioned();
+    }
+
     private void initialiseContextFactory(
             TransactionIdSnapshotFactory transactionIdSnapshotFactory,
-            OldestTransactionIdFactory oldestTransactionIdFactory) {
-        cursorContextFactory.init(transactionIdSnapshotFactory, oldestTransactionIdFactory);
+            OldestVisibilityHorizonFactory oldestVisibilityHorizonFactory) {
+        cursorContextFactory.init(transactionIdSnapshotFactory, oldestVisibilityHorizonFactory);
     }
 
     @Override
     protected void postStartupInit() throws Exception {
         if (!storageExists) {
-            if (databaseConfig.get(GraphDatabaseInternalSettings.skip_default_indexes_on_creation)) {
+            createTokenIndexes();
+            return;
+        }
+        if (checkIfTokenIndexesMissing()) {
+            var txIdStore = databaseDependencies.resolveDependency(TransactionIdStore.class);
+            long lastCommittedTxId = txIdStore.getLastCommittedTransactionId();
+
+            if (lastCommittedTxId > BASE_TX_ID || mode != HostedOnMode.SINGLE) {
+                internalLog.warn("No token lookup indexes found. Token lookup indexes improve the performance of "
+                        + "Cypher queries and the population of other indexes. Not having these indexes may lead to "
+                        + "severe performance degradation.");
                 return;
             }
-            try (var tx = kernelModule
-                    .kernelAPI()
-                    .beginTransaction(KernelTransaction.Type.IMPLICIT, LoginContext.AUTH_DISABLED)) {
-                createLookupIndex(tx, EntityType.NODE);
-                createLookupIndex(tx, EntityType.RELATIONSHIP);
-                tx.commit();
-            }
-            checkpointAfterStartupInit();
+            internalLog.info("Previous database creation looks incomplete. Creating the missing token lookup indexes to"
+                    + " complete database creation.");
+            createTokenIndexes();
         }
+    }
+
+    public void setRecoveryPredicate(RecoveryPredicateSupplier recoveryPredicate) {
+        this.recoveryPredicate = recoveryPredicate;
+    }
+
+    private void createTokenIndexes() throws KernelException, IOException {
+        try (var tx = kernelModule
+                .kernelAPI()
+                .beginTransaction(KernelTransaction.Type.IMPLICIT, LoginContext.AUTH_DISABLED)) {
+            createLookupIndex(tx, EntityType.NODE);
+            createLookupIndex(tx, EntityType.RELATIONSHIP);
+            tx.commit();
+        }
+        checkpointAfterStartupInit();
+    }
+
+    private boolean checkIfTokenIndexesMissing() {
+        return Iterables.count(
+                        getDependencyResolver()
+                                .resolveDependency(IndexingService.class)
+                                .getIndexProxies(),
+                        proxy -> proxy.getDescriptor().getIndexType() == LOOKUP)
+                == 0;
     }
 
     private void checkpointAfterStartupInit() throws IOException {
@@ -659,25 +845,14 @@ public class Database extends AbstractDatabase {
 
     private void createLookupIndex(KernelTransaction tx, EntityType entityType) throws KernelException {
         var descriptor = SchemaDescriptors.forAnyEntityTokens(entityType);
-
-        IndexPrototype prototype = IndexPrototype.forSchema(descriptor)
-                .withIndexType(LOOKUP)
-                .withIndexProvider(indexProviderMap.getTokenIndexProvider().getProviderDescriptor());
-        prototype = prototype.withName(SchemaNameUtil.generateName(prototype));
-
+        IndexPrototype prototype = IndexPrototype.forSchema(descriptor).withIndexType(LOOKUP);
         tx.schemaWrite().indexCreate(prototype);
     }
 
-    private LogTailMetadata getLogTail() throws IOException {
-        return getLogFiles().getTailMetadata();
-    }
-
-    private LogFiles getLogFiles() throws IOException {
-        return LogFilesBuilder.builder(
-                        databaseLayout,
-                        fs,
-                        new DbmsRuntimeFallbackKernelVersionProvider(
-                                databaseDependencies, databaseLayout.getDatabaseName(), databaseConfig))
+    private LogFiles getLogFiles(RecoveryOutcome recoveryOutcome) throws IOException {
+        DbmsRuntimeFallbackKernelVersionProvider kernelVersionProvider = new DbmsRuntimeFallbackKernelVersionProvider(
+                databaseDependencies, databaseLayout.getDatabaseName(), databaseConfig);
+        return LogFilesBuilder.writeableBuilder(databaseLayout, fs, kernelVersionProvider, kernelVersionProvider)
                 .withConfig(databaseConfig)
                 .withDependencies(databaseDependencies)
                 .withLogProvider(internalLogProvider)
@@ -686,21 +861,37 @@ public class Database extends AbstractDatabase {
                 .withMonitors(databaseMonitors)
                 .withClock(clock)
                 .withStorageEngineFactory(storageEngineFactory)
+                .withRecoveryOutcome(recoveryOutcome)
+                .withTailReadingMaxPosition(recoveryPredicate.get().maxPosition())
                 .build();
     }
 
-    private void registerUpgradeListener() {
+    private void registerUpgradeListener(LogMetadataProvider logMetadataProvider) {
+        if (raftTriggersUpgrade) {
+            internalLog.info(
+                    "Using raft controlled version upgrade mechanism rather than DatabaseUpgradeTransactionHandler");
+            return;
+        }
         DatabaseUpgradeTransactionHandler handler = new DatabaseUpgradeTransactionHandler(
                 globalDependencies.resolveDependency(DbmsRuntimeVersionProvider.class),
-                metadataCache,
+                logMetadataProvider,
+                logMetadataProvider,
                 databaseTransactionEventListeners,
                 UpgradeLocker.DEFAULT,
                 internalLogProvider,
                 databaseConfig,
-                kernelModule.kernelAPI());
+                kernelModule.kernelAPI(),
+                kernelModule.kernelTransactions(),
+                storageEngineFactory.multiVersioned());
 
-        handler.registerUpgradeListener((fromKernelVersion, toKernelVersion, tx) ->
-                tx.upgrade().upgradeKernel(new Upgrade.KernelUpgrade(fromKernelVersion, toKernelVersion)));
+        handler.registerUpgradeListener((fromKernelVersion, toKernelVersion, tx, currentLogFormat) -> {
+            tx.upgrade()
+                    .upgradeKernel(new Upgrade.KernelUpgrade(
+                            fromKernelVersion,
+                            toKernelVersion,
+                            pickLogFormatOnUpgrade(
+                                    fromKernelVersion, toKernelVersion, databaseConfig, currentLogFormat)));
+        });
     }
 
     private void validateStoreAndTxLogs(
@@ -715,7 +906,7 @@ public class Database extends AbstractDatabase {
     private void validateLogsAndStoreAbsence(LogTailMetadata logTail) {
         if (!logTail.logsMissing()) {
             throw new RuntimeException(format(
-                    "Fail to start '%s' since transaction logs were found, while database " + "files are missing.",
+                    "Fail to start '%s' since transaction logs were found, while database files are missing.",
                     namedDatabaseId));
         }
     }
@@ -747,6 +938,7 @@ public class Database extends AbstractDatabase {
         var indexProviderMap = StaticIndexProviderMapFactory.create(
                 indexProvidersLife,
                 databaseConfig,
+                dependencies.resolveDependency(KernelVersionProvider.class),
                 databasePageCache,
                 fs,
                 databaseLogService,
@@ -762,21 +954,14 @@ public class Database extends AbstractDatabase {
                 dependencies);
         this.indexProviderMap = indexProvidersLife.add(indexProviderMap);
         dependencies.satisfyDependency(this.indexProviderMap);
-        // fulltextadapter for FulltextProcedures
-        dependencies.satisfyDependency(
-                new DefaultFulltextAdapter((FulltextIndexProvider) this.indexProviderMap.getFulltextProvider()));
         indexProvidersLife.init();
         return indexProvidersLife;
     }
 
-    /**
-     * A database can be upgraded <em>after</em> it has been {@link #init() initialized},
-     * and <em>before</em> it is {@link #start() started}.
-     */
-    private void upgradeStore(
+    private void checkVersionSupportedAndNoBlockingInterruptedMigration(
             DatabaseConfig databaseConfig, DatabasePageCache databasePageCache, MemoryTracker memoryTracker)
             throws IOException {
-        IndexProviderMap indexProviderMap = databaseDependencies.resolveDependency(IndexProviderMap.class);
+
         var logTailSupplier = Suppliers.lazySingleton(() -> {
             try {
                 return new LogTailExtractor(fs, databaseConfig, storageEngineFactory, tracers)
@@ -786,23 +971,20 @@ public class Database extends AbstractDatabase {
                                 new DbmsRuntimeFallbackKernelVersionProvider(
                                         databaseDependencies, databaseLayout.getDatabaseName(), databaseConfig));
             } catch (Exception e) {
-                throw new UnableToMigrateException("Fail to load log tail during upgrade.", e);
+                throw new UnableToMigrateException("Fail to load log tail during upgrade check.", e);
             }
         });
-        var storeMigrator = new StoreMigrator(
+
+        StoreVersionStateChecker.checkVersionSupportedAndNoBlockingInterruptedMigration(
                 fs,
                 databaseConfig,
                 databaseLogService,
                 databasePageCache,
                 tracers,
-                scheduler,
                 databaseLayout,
                 storageEngineFactory,
-                storageEngineFactory,
-                indexProviderMap,
                 memoryTracker,
                 logTailSupplier);
-        storeMigrator.upgradeIfNeeded();
     }
 
     /**
@@ -895,45 +1077,70 @@ public class Database extends AbstractDatabase {
 
     private DatabaseTransactionLogModule buildTransactionLogs(
             LogFiles logFiles,
-            Config config,
+            DatabaseConfig databaseConfig,
             InternalLogProvider logProvider,
             JobScheduler scheduler,
             CheckPointerImpl.ForceOperation forceOperation,
-            MetadataProvider metadataProvider,
+            LogMetadataProvider logMetadataProvider,
             Monitors monitors,
             Dependencies databaseDependencies,
             CursorContextFactory cursorContextFactory,
-            CommandReaderFactory commandReaderFactory) {
+            CommandReaderFactory commandReaderFactory,
+            MemoryTracker memoryTracker,
+            SegmentMetadataService segmentMetadataService) {
         TransactionMetadataCache transactionMetadataCache = new TransactionMetadataCache();
         databaseDependencies.satisfyDependencies(transactionMetadataCache);
 
+        BinarySupportedKernelVersions binarySupportedKernelVersions =
+                databaseDependencies.resolveDependency(BinarySupportedKernelVersions.class);
         Lock pruneLock = new ReentrantLock();
-        final LogPruning logPruning =
-                new LogPruningImpl(fs, logFiles, logProvider, new LogPruneStrategyFactory(), clock, config, pruneLock);
+        final LogPruning logPruning = mergedLogs && (mode == HostedOnMode.RAFT || mode == HostedOnMode.REPLICA)
+                ? new CheckpointOnlyLogPruning(fs, logFiles, logProvider, databaseConfig, pruneLock)
+                : new LogPruningImpl(
+                        fs,
+                        logFiles,
+                        logProvider,
+                        logPruneStrategyFactory,
+                        clock,
+                        databaseConfig,
+                        pruneLock,
+                        logMetadataProvider,
+                        commandReaderFactory,
+                        binarySupportedKernelVersions,
+                        memoryTracker);
 
         var transactionAppender = createTransactionAppender(
                 logFiles,
-                metadataProvider,
-                metadataProvider,
-                config,
+                logMetadataProvider,
+                logMetadataProvider,
+                databaseConfig,
                 databaseHealth,
                 scheduler,
                 logProvider,
-                transactionMetadataCache);
+                transactionMetadataCache,
+                namedDatabaseId.name(),
+                storageEngineFactory.multiVersioned(),
+                mergedLogs && (mode == HostedOnMode.RAFT || mode == HostedOnMode.REPLICA));
         life.add(transactionAppender);
 
         final LogicalTransactionStore logicalTransactionStore = new PhysicalLogicalTransactionStore(
-                logFiles, transactionMetadataCache, commandReaderFactory, monitors, true, config);
+                logFiles,
+                transactionMetadataCache,
+                commandReaderFactory,
+                monitors,
+                true,
+                databaseConfig,
+                memoryTracker);
 
-        CheckPointThreshold threshold = CheckPointThreshold.createThreshold(config, clock, logPruning, logProvider);
+        CheckPointThreshold threshold =
+                CheckPointThreshold.createThreshold(databaseConfig, clock, logPruning, logProvider, mergedLogs);
 
-        var checkpointAppender = logFiles.getCheckpointFile().getCheckpointAppender();
         final CheckPointerImpl checkPointer = new CheckPointerImpl(
-                metadataProvider,
+                logMetadataProvider,
                 threshold,
                 forceOperation,
                 logPruning,
-                checkpointAppender,
+                logFiles.getCheckpointFile(),
                 databaseHealth,
                 logProvider,
                 tracers,
@@ -941,7 +1148,9 @@ public class Database extends AbstractDatabase {
                 cursorContextFactory,
                 clock,
                 ioController,
-                metadataCache);
+                memoryTracker,
+                segmentMetadataService,
+                databaseConfig);
 
         long recurringPeriod = threshold.checkFrequencyMillis();
         CheckPointScheduler checkPointScheduler = new CheckPointScheduler(
@@ -951,7 +1160,7 @@ public class Database extends AbstractDatabase {
         life.add(checkPointScheduler);
 
         TransactionLogServiceImpl transactionLogService = new TransactionLogServiceImpl(
-                metadataProvider,
+                logMetadataProvider,
                 logFiles,
                 logicalTransactionStore,
                 pruneLock,
@@ -959,12 +1168,16 @@ public class Database extends AbstractDatabase {
                 logProvider,
                 checkPointer,
                 commandReaderFactory,
-                databaseDependencies.resolveDependency(BinarySupportedKernelVersions.class));
+                binarySupportedKernelVersions);
         databaseDependencies.satisfyDependencies(
-                checkPointer, logFiles, logicalTransactionStore, transactionAppender, transactionLogService);
+                checkPointer,
+                logFiles,
+                logicalTransactionStore,
+                transactionAppender,
+                transactionLogService,
+                logPruning);
 
-        return new DatabaseTransactionLogModule(
-                checkPointer, transactionAppender, transactionMetadataCache, logicalTransactionStore);
+        return new DatabaseTransactionLogModule(checkPointer, transactionAppender, logicalTransactionStore);
     }
 
     private DatabaseKernelModule buildKernel(
@@ -973,13 +1186,13 @@ public class Database extends AbstractDatabase {
             IndexingService indexingService,
             DatabaseSchemaState databaseSchemaState,
             StorageEngine storageEngine,
-            TransactionIdStore transactionIdStore,
-            KernelVersionProvider kernelVersionProvider,
+            LogMetadataProvider logMetadataProvider,
             AvailabilityGuard databaseAvailabilityGuard,
             SystemNanoClock clock,
             IndexStatisticsStore indexStatisticsStore,
             LeaseService leaseService,
-            CursorContextFactory cursorContextFactory) {
+            CursorContextFactory cursorContextFactory,
+            RaftUpgradeBarrier raftUpgradeBarrier) {
         AtomicReference<CpuClock> cpuClockRef = setupCpuClockAtomicReference();
 
         TransactionCommitProcess transactionCommitProcess = commitProcessFactory.create(
@@ -988,7 +1201,8 @@ public class Database extends AbstractDatabase {
                 readOnlyDatabaseChecker,
                 databaseConfig.get(GraphDatabaseInternalSettings.out_of_disk_space_protection),
                 commandCommitListeners,
-                !isSystem() && databaseConfig.get(GraphDatabaseInternalSettings.prefetch_on_commit));
+                !isSystem() && databaseConfig.get(GraphDatabaseInternalSettings.prefetch_on_commit),
+                internalLogProvider);
         var rollbackProcess =
                 commitProcessFactory.createRollbackProcess(storageEngine, logsModule.getLogicalTransactionStore());
         databaseDependencies.satisfyDependency(rollbackProcess);
@@ -1005,7 +1219,9 @@ public class Database extends AbstractDatabase {
 
         TransactionExecutionMonitor transactionExecutionMonitor =
                 getMonitors().newMonitor(TransactionExecutionMonitor.class);
-        var transactionIdGenerator = new IdStoreTransactionIdGenerator(transactionIdStore);
+        var transactionIdGenerator = mergedLogs && (mode == HostedOnMode.RAFT || mode == HostedOnMode.REPLICA)
+                ? TransactionIdGenerator.EXTERNAL_ID
+                : new IdStoreTransactionIdGenerator(logMetadataProvider);
         databaseDependencies.satisfyDependency(transactionIdGenerator);
 
         if (!databaseDependencies.containsDependency(ApplyEnrichmentStrategy.class)) {
@@ -1013,7 +1229,7 @@ public class Database extends AbstractDatabase {
             databaseDependencies.satisfyDependency(ApplyEnrichmentStrategy.NO_ENRICHMENT);
         }
 
-        KernelTransactions kernelTransactions = life.add(kernelTransactionsFactory.create(
+        KernelTransactions kernelTransactions = kernelTransactionsFactory.create(
                 databaseConfig,
                 databaseLockManager,
                 constraintIndexCreator,
@@ -1025,14 +1241,13 @@ public class Database extends AbstractDatabase {
                 storageEngine,
                 globalProcedures,
                 globalDependencies.resolveDependency(DbmsRuntimeVersionProvider.class),
-                transactionIdStore,
-                kernelVersionProvider,
+                logMetadataProvider,
+                logMetadataProvider,
                 serverIdentity,
                 clock,
                 cpuClockRef,
                 accessCapabilityFactory,
                 cursorContextFactory,
-                collectionsFactorySupplier,
                 constraintSemantics,
                 databaseSchemaState,
                 tokenHolders,
@@ -1043,19 +1258,23 @@ public class Database extends AbstractDatabase {
                 databaseDependencies,
                 tracers,
                 leaseService,
-                transactionsMemoryPool,
+                transactionsDatabasePool,
                 readOnlyDatabaseChecker,
                 transactionExecutionMonitor,
-                externalIdReuseConditionProvider.get(transactionIdStore, clock),
+                externalIdReuseConditionProvider.get(logMetadataProvider, clock),
                 commitmentFactory,
                 transactionIdSequence,
                 transactionIdGenerator,
                 databaseHealth,
                 transactionValidatorFactory,
+                exceptionHandlerService,
                 internalLogProvider,
-                mode));
+                mode,
+                databaseMonitors,
+                raftUpgradeBarrier);
 
-        var transactionMonitor = buildTransactionMonitor(kernelTransactions, transactionIdStore, databaseConfig);
+        var transactionMonitor =
+                buildTransactionMonitor(kernelTransactions, logMetadataProvider, databaseConfig, indexingService);
 
         KernelImpl kernel = new KernelImpl(
                 kernelTransactions,
@@ -1066,10 +1285,8 @@ public class Database extends AbstractDatabase {
                 storageEngine,
                 transactionExecutionMonitor);
 
-        life.add(kernel);
-
         final StoreFileListing fileListing =
-                new StoreFileListing(databaseLayout, logFiles, indexingService, storageEngine);
+                new StoreFileListing(databaseLayout, fs, logFiles, indexingService, storageEngine);
         databaseDependencies.satisfyDependency(fileListing);
 
         return new DatabaseKernelModule(
@@ -1082,9 +1299,20 @@ public class Database extends AbstractDatabase {
     }
 
     private KernelTransactionMonitor buildTransactionMonitor(
-            KernelTransactions kernelTransactions, TransactionIdStore transactionIdStore, Config config) {
-        var kernelTransactionMonitor =
-                new KernelTransactionMonitor(kernelTransactions, transactionIdStore, config, clock, databaseLogService);
+            KernelTransactions kernelTransactions,
+            TransactionIdStore transactionIdStore,
+            Config config,
+            IndexingService indexingService) {
+        var kernelTransactionMonitor = new KernelTransactionMonitor(
+                kernelTransactions,
+                transactionIdStore,
+                config,
+                clock,
+                databaseLogService,
+                indexingService,
+                databaseHealth,
+                storageEngineFactory.multiVersioned(),
+                clusterHorizonTracker);
         databaseDependencies.satisfyDependency(kernelTransactionMonitor);
         TransactionMonitorScheduler transactionMonitorScheduler = new TransactionMonitorScheduler(
                 kernelTransactionMonitor,
@@ -1132,11 +1360,6 @@ public class Database extends AbstractDatabase {
     }
 
     @Override
-    protected TransactionRegistry transactionRegistry() {
-        return kernelModule.kernelTransactions();
-    }
-
-    @Override
     public Config getConfig() {
         return databaseConfig;
     }
@@ -1153,7 +1376,7 @@ public class Database extends AbstractDatabase {
 
     @Override
     public StoreId getStoreId() {
-        return storageEngine.retrieveStoreId();
+        return storageEngine.metadataProvider().getStoreId();
     }
 
     @Override
@@ -1172,7 +1395,7 @@ public class Database extends AbstractDatabase {
     }
 
     @Override
-    public ResourceIterator<StoreFileMetadata> listStoreFiles(boolean includeLogs) throws IOException {
+    public ResourceIterator<Path> listStoreFiles(boolean includeLogs) throws IOException {
         StoreFileListing.Builder fileListingBuilder = getStoreFileListing().builder();
         fileListingBuilder.excludeIdFiles();
         if (!includeLogs) {
@@ -1216,14 +1439,18 @@ public class Database extends AbstractDatabase {
         return tracers;
     }
 
-    @Override
-    public MemoryTracker getOtherDatabaseMemoryTracker() {
-        return otherDatabaseMemoryTracker;
+    public MemoryTracker createLocalTransactionsMemoryTracker() {
+        return new LocalMemoryTracker(transactionsDatabasePool);
     }
 
     @Override
     public StorageEngineFactory getStorageEngineFactory() {
         return storageEngineFactory;
+    }
+
+    @Override
+    public StorageEngine getStorageEngine() {
+        return storageEngine;
     }
 
     @Override
@@ -1237,6 +1464,11 @@ public class Database extends AbstractDatabase {
     }
 
     @Override
+    public ChunkedTransactionTracker getChunkedTransactionTracker() {
+        return chunkedTransactionTracker;
+    }
+
+    @Override
     public ElementIdMapper getElementIdMapper() {
         return elementIdMapper;
     }
@@ -1245,19 +1477,96 @@ public class Database extends AbstractDatabase {
         return storageEngine.estimateAvailableReservedSpace();
     }
 
+    /**
+     * Called when a new lease is acquired in a cluster.
+     * This method must not perform any actions that can block for a long time. Any long-running
+     * actions must be run in other threads. Any transactions created as a result of a call to
+     * this method that fail to replicate should not be retried immediately. Instead, they should
+     * be retried on the next leaseholder after this method is called again on that next leaseholder.
+     * @param leaseId The ID of the newly acquired lease.
+     */
+    public void newLeaseAcquired(int leaseId, boolean iAmLeaseOwner) {
+        try (var cursorContext = cursorContextFactory.create(ID_CACHE_CLUSTER_CLEANUP_TAG)) {
+            idGeneratorFactory.clearCache(iAmLeaseOwner, cursorContext);
+        }
+
+        if (iAmLeaseOwner) {
+            leaseMonitor.newLeaseAcquired(leaseId);
+            if (!storageEngineFactory.multiVersioned()) {
+                mvccRollbackDone.set(true);
+                return;
+            }
+            scheduler.schedule(STORAGE_MAINTENANCE, () -> {
+                if (multiVersionDatabaseRollbackService.postLeaseSwitchTransactionCleanup(leaseId)) {
+                    mvccRollbackDone.set(true);
+                }
+            });
+        } else {
+            mvccRollbackDone.set(false);
+        }
+    }
+
+    public CompleteCommandBatch createUpgradeCommandBatch(KernelVersion to, int leaseId) {
+        LogMetadataProvider logMetadataProvider = databaseDependencies.resolveDependency(LogMetadataProvider.class);
+        KernelVersion from = logMetadataProvider.kernelVersion();
+        LogFormat logFormatTo =
+                pickLogFormatOnUpgrade(from, to, databaseConfig, logMetadataProvider.getCurrentLogFormat());
+        long now = clock.millis();
+        return new CompleteCommandBatch(
+                List.of(storageEngine.createUpgradeCommand(from, to, logFormatTo)),
+                TransactionIdStore.UNKNOWN_CONSENSUS_INDEX,
+                now,
+                logMetadataProvider.getLastCommittedTransactionId(),
+                now,
+                leaseId,
+                Leases.NO_LEASES, // Skipped for now since not using this upgrade for SPD yet
+                from,
+                Subject.AUTH_DISABLED);
+    }
+
+    /**
+     * Takes the exclusive side of the {@link RaftUpgradeBarrier} ahead of replicating a kernel version upgrade.
+     * Blocks new version captures and waits for in-flight ones to drain. Must be paired with
+     * {@link #unlockAfterRaftUpgrade()} on the same thread. The lock acquisition is not time bounded
+     * but may be held off while MVCC rollbacks are pending, or due to interruption
+     * @return true if we have acquired the lock. Can return false if MVCC rollback still pending, or
+     * we are interrupted. The lock is not held if this returns false
+     */
+    public boolean lockForRaftUpgrade() {
+        if (!mvccRollbackDone.get()) {
+            // Wait for MVCC lease change rollbacks to clear on old versions before trying upgrade
+            return false;
+        }
+        try {
+            raftUpgradeBarrier.lockForUpgrade();
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    /**
+     * Releases the exclusive side of the {@link RaftUpgradeBarrier} taken by {@link #lockForRaftUpgrade()}.
+     */
+    public void unlockAfterRaftUpgrade() {
+        raftUpgradeBarrier.unlockAfterUpgrade();
+    }
+
+    /**
+     * Switches the RaftUpgradeBarrier to NO-OP versions
+     */
+    public void raftUpgradeNotRequired() {
+        raftUpgradeBarrier.upgradeLockNotRequired();
+    }
+
     private void prepareStop(Predicate<PagedFile> deleteFilePredicate) {
         databasePageCache.listExistingMappings().stream()
                 .filter(deleteFilePredicate)
                 .forEach(file -> file.setDeleteOnClose(true));
     }
 
-    private long getAwaitActiveTransactionDeadlineMillis() {
-        return databaseConfig
-                .get(GraphDatabaseSettings.shutdown_transaction_end_timeout)
-                .toMillis();
-    }
-
-    public static Iterable<IndexDescriptor> initialSchemaRulesLoader(StorageEngine storageEngine) {
+    public static Iterable<IndexDescriptor> initialSchemaRulesLoader(ReadableStorageEngine storageEngine) {
         return () -> {
             try (StorageReader reader = storageEngine.newReader()) {
                 return asList(reader.indexesGetAll()).iterator();
@@ -1283,42 +1592,62 @@ public class Database extends AbstractDatabase {
         }
     }
 
-    private static LockService createLockService(DatabaseConfig databaseConfig) {
-        return isNotMultiVersioned(databaseConfig) ? new ReentrantLockService() : LockService.NO_LOCK_SERVICE;
+    private static LockService createLockService(StorageEngineFactory storageEngineFactory) {
+        return storageEngineFactory.multiVersioned() ? LockService.NO_LOCK_SERVICE : new ReentrantLockService();
     }
 
     private static TransactionIdSnapshotFactory getTransactionIdSnapshotFactory(
-            DatabaseConfig databaseConfig, MetadataProvider metadataProvider) {
-        return isNotMultiVersioned(databaseConfig)
-                ? (() -> new TransactionIdSnapshot(metadataProvider.getLastClosedTransactionId()))
-                : metadataProvider::getClosedTransactionSnapshot;
+            StorageEngineFactory storageEngineFactory, LogMetadataProvider metadataProvider) {
+        return storageEngineFactory.multiVersioned()
+                ? metadataProvider::getClosedTransactionSnapshot
+                : (() -> new TransactionIdSnapshot(metadataProvider.getHighestGapFreeClosedTransactionId()));
     }
 
-    private static OldestTransactionIdFactory getOldestTransactionIdFactory(
-            DatabaseConfig databaseConfig, Supplier<DatabaseKernelModule> kernelModule) {
-        return isNotMultiVersioned(databaseConfig)
-                ? OldestTransactionIdFactory.EMPTY_OLDEST_ID_FACTORY
-                : (() -> kernelModule.get().transactionMonitor().oldestVisibleClosedTransactionId());
+    private static OldestVisibilityHorizonFactory getOldestVisibilityHorizonFactory(
+            StorageEngineFactory storageEngineFactory, Supplier<DatabaseKernelModule> kernelModule) {
+        return storageEngineFactory.multiVersioned()
+                ? (() -> kernelModule.get().transactionMonitor().oldestVisibilityHorizon())
+                : OldestVisibilityHorizonFactory.EMPTY_OLDEST_HORIZON_FACTORY;
     }
 
-    private static boolean isNotMultiVersioned(DatabaseConfig databaseConfig) {
-        return !"multiversion".equals(databaseConfig.get(db_format));
+    private ScopedMemoryPool createTransactionsDatabasePool() {
+        return isSystem()
+                ? transactionsMemoryPool.newSystemDatabasePool(
+                        namedDatabaseId.name(),
+                        databaseConfig.get(memory_transaction_database_max_size),
+                        memory_transaction_database_max_size.name())
+                : transactionsMemoryPool.newDatabasePool(
+                        namedDatabaseId.name(),
+                        databaseConfig.get(memory_transaction_database_max_size),
+                        memory_transaction_database_max_size.name());
     }
 
     private class KernelTransactionVisibilityProvider implements TransactionVisibilityProvider {
         @Override
-        public long oldestVisibleClosedTransactionId() {
-            return kernelModule.transactionMonitor().oldestVisibleClosedTransactionId();
+        public long oldestVisibilityHorizon() {
+            return kernelModule.transactionMonitor().oldestVisibilityHorizon();
         }
 
         @Override
-        public long oldestObservableHorizon() {
-            return kernelModule.transactionMonitor().oldestObservableHorizon();
+        public long oldestCleanupHorizon() {
+            return kernelModule.transactionMonitor().oldestCleanupHorizon();
         }
 
         @Override
         public long youngestObservableHorizon() {
             return kernelModule.transactionMonitor().youngestObservableHorizon();
+        }
+    }
+
+    private class IdControllerVisibilityBoundary implements IdController.VisibilityHorizonVisibilityBoundary {
+        @Override
+        public long oldestCleanupHorizon() {
+            return kernelModule.transactionMonitor().oldestCleanupHorizon();
+        }
+
+        @Override
+        public long oldestVisibilityHorizon() {
+            return kernelModule.transactionMonitor().oldestVisibilityHorizon();
         }
     }
 }

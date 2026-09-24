@@ -63,11 +63,22 @@ public interface Read {
      * together with node ids for index queries. The constraints must be satisfiable given the capabilities of the index.
      * @param query Combination of {@link PropertyIndexQuery index queries} to run against referenced index.
      */
+    default void nodeIndexSeek(
+            QueryContext queryContext,
+            IndexReadSession index,
+            NodeValueIndexCursor cursor,
+            IndexQueryConstraints constraints,
+            PropertyIndexQuery... query)
+            throws KernelException {
+        nodeIndexSeek(queryContext, index, cursor, constraints, true, query);
+    }
+
     void nodeIndexSeek(
             QueryContext queryContext,
             IndexReadSession index,
             NodeValueIndexCursor cursor,
             IndexQueryConstraints constraints,
+            boolean includeChangesFromThisTransaction,
             PropertyIndexQuery... query)
             throws KernelException;
 
@@ -93,11 +104,22 @@ public interface Read {
      * together with relationship ids for index queries. The constraints must be satisfiable given the capabilities of the index.
      * @param query Combination of {@link PropertyIndexQuery index queries} to run against referenced index.
      */
+    default void relationshipIndexSeek(
+            QueryContext queryContext,
+            IndexReadSession index,
+            RelationshipValueIndexCursor cursor,
+            IndexQueryConstraints constraints,
+            PropertyIndexQuery... query)
+            throws KernelException {
+        relationshipIndexSeek(queryContext, index, cursor, constraints, true, query);
+    }
+
     void relationshipIndexSeek(
             QueryContext queryContext,
             IndexReadSession index,
             RelationshipValueIndexCursor cursor,
             IndexQueryConstraints constraints,
+            boolean includeChangesFromThisTransaction,
             PropertyIndexQuery... query)
             throws KernelException;
 
@@ -117,38 +139,34 @@ public interface Read {
 
     /**
      * Returns node id of node found in the unique index, or -1 if no node was found.
-     *
+     * <p>
      * Note that this is a very special method and should be use with caution. It has special locking semantics in
      * order to facilitate unique creation of nodes. If a node is found; a shared lock for the index entry will be
      * held whereas if no node is found we will hold onto an exclusive lock until the close of the transaction.
      *
-     * Note: This method does not take an IndexReadSession, as it has to acquire a new index session internally to
-     * ensure node uniqueness.
-     *
-     * @param index {@link IndexDescriptor} for the index to query.
+     * @param index {@link IndexReadSession} for the index to query.
      * @param cursor cursor to use for performing the index seek
      * @param predicates Combination of {@link PropertyIndexQuery.ExactPredicate index queries} to run against referenced index.
      */
     long lockingNodeUniqueIndexSeek(
-            IndexDescriptor index, NodeValueIndexCursor cursor, PropertyIndexQuery.ExactPredicate... predicates)
+            IndexReadSession index, NodeValueIndexCursor cursor, PropertyIndexQuery.ExactPredicate... predicates)
             throws KernelException;
 
     /**
      * Returns relationship id of relationship found in the unique index, or -1 if no relationship was found.
-     *
+     * <p>
      * Note that this is a very special method and should be use with caution. It has special locking semantics in
      * order to facilitate unique creation of relationships. If a relationship is found; a shared lock for the index entry will be
      * held whereas if no relationship is found we will hold onto an exclusive lock until the close of the transaction.
      *
-     * Note: This method does not take an IndexReadSession, as it has to acquire a new index session internally to
-     * ensure relationship uniqueness.
-     *
-     * @param index {@link IndexDescriptor} for the index to query.
+     * @param index {@link IndexReadSession} for the index to query.
      * @param cursor cursor to use for performing the index seek
      * @param predicates Combination of {@link PropertyIndexQuery.ExactPredicate index queries} to run against referenced index.
      */
     long lockingRelationshipUniqueIndexSeek(
-            IndexDescriptor index, RelationshipValueIndexCursor cursor, PropertyIndexQuery.ExactPredicate... predicates)
+            IndexReadSession index,
+            RelationshipValueIndexCursor cursor,
+            PropertyIndexQuery.ExactPredicate... predicates)
             throws KernelException;
 
     /**
@@ -159,7 +177,16 @@ public interface Read {
      * @param constraints The requested constraints on the query result, such as the {@link IndexOrder}, or whether the index should fetch property values
      * together with node ids for index queries. The constraints must be satisfiable given the capabilities of the index.
      */
-    void nodeIndexScan(IndexReadSession index, NodeValueIndexCursor cursor, IndexQueryConstraints constraints)
+    default void nodeIndexScan(IndexReadSession index, NodeValueIndexCursor cursor, IndexQueryConstraints constraints)
+            throws KernelException {
+        nodeIndexScan(index, cursor, constraints, true);
+    }
+
+    void nodeIndexScan(
+            IndexReadSession index,
+            NodeValueIndexCursor cursor,
+            IndexQueryConstraints constraints,
+            boolean includeChangesFromThisTransaction)
             throws KernelException;
 
     /**
@@ -179,8 +206,17 @@ public interface Read {
      * @param constraints The requested constraints on the query result, such as the {@link IndexOrder}, or whether the index should fetch property values
      * together with relationship ids for index queries. The constraints must be satisfiable given the capabilities of the index.
      */
-    void relationshipIndexScan(
+    default void relationshipIndexScan(
             IndexReadSession index, RelationshipValueIndexCursor cursor, IndexQueryConstraints constraints)
+            throws KernelException {
+        relationshipIndexScan(index, cursor, constraints, true);
+    }
+
+    void relationshipIndexScan(
+            IndexReadSession index,
+            RelationshipValueIndexCursor cursor,
+            IndexQueryConstraints constraints,
+            boolean includeChangesFromThisTransaction)
             throws KernelException;
 
     /**
@@ -244,12 +280,23 @@ public interface Read {
      *                    The constraints must be satisfiable given the capabilities of the index.
      * @param query the query to run against index
      */
-    void nodeLabelScan(
+    default void nodeLabelScan(
             TokenReadSession session,
             NodeLabelIndexCursor cursor,
             IndexQueryConstraints constraints,
             TokenPredicate query,
             CursorContext cursorContext)
+            throws KernelException {
+        nodeLabelIndexScan(session, cursor, constraints, query, cursorContext, true);
+    }
+
+    void nodeLabelIndexScan(
+            TokenReadSession session,
+            NodeLabelIndexCursor cursor,
+            IndexQueryConstraints constraints,
+            TokenPredicate query,
+            CursorContext cursorContext,
+            boolean includeChangesFromThisTransaction)
             throws KernelException;
 
     /**
@@ -257,7 +304,11 @@ public interface Read {
      *
      * @param cursor Cursor to initialize for scanning.
      */
-    void allNodesScan(NodeCursor cursor);
+    default void allNodesScan(NodeCursor cursor) {
+        allNodesScan(cursor, true);
+    }
+
+    void allNodesScan(NodeCursor cursor, boolean includeChangesFromThisTransaction);
 
     /**
      * Scan all nodes in partitions.
@@ -271,8 +322,8 @@ public interface Read {
 
     /**
      * @param reference a reference from {@link NodeCursor#nodeReference()}, {@link
-     * RelationshipDataAccessor#sourceNodeReference()},
-     * {@link RelationshipDataAccessor#targetNodeReference()}, {@link NodeIndexCursor#nodeReference()},
+     * RelationshipCursor#sourceNodeReference()},
+     * {@link RelationshipCursor#targetNodeReference()}, {@link NodeIndexCursor#nodeReference()},
      * {@link RelationshipIndexCursor#sourceNodeReference()}, or {@link RelationshipIndexCursor#targetNodeReference()}.
      * @param cursor the cursor to use for consuming the results.
      */
@@ -388,7 +439,7 @@ public interface Read {
 
     /**
      * @param reference
-     *         a reference from {@link RelationshipDataAccessor#relationshipReference()}.
+     *         a reference from {@link RelationshipCursor#relationshipReference()}.
      * @param cursor
      *         the cursor to use for consuming the results.
      */
@@ -418,7 +469,11 @@ public interface Read {
      */
     boolean relationshipExists(long reference);
 
-    void allRelationshipsScan(RelationshipScanCursor cursor);
+    default void allRelationshipsScan(RelationshipScanCursor cursor) {
+        allRelationshipsScan(cursor, true);
+    }
+
+    void allRelationshipsScan(RelationshipScanCursor cursor, boolean includeChangesFromThisTransaction);
 
     /**
      * Scan all relationships in partitions.
@@ -485,12 +540,23 @@ public interface Read {
      *                    The constraints must be satisfiable given the capabilities of the index.
      * @param query the query to run against index
      */
-    void relationshipTypeScan(
+    default void relationshipTypeScan(
             TokenReadSession session,
             RelationshipTypeIndexCursor cursor,
             IndexQueryConstraints constraints,
             TokenPredicate query,
             CursorContext cursorContext)
+            throws KernelException {
+        relationshipTypeIndexScan(session, cursor, constraints, query, cursorContext, true);
+    }
+
+    void relationshipTypeIndexScan(
+            TokenReadSession session,
+            RelationshipTypeIndexCursor cursor,
+            IndexQueryConstraints constraints,
+            TokenPredicate query,
+            CursorContext cursorContext,
+            boolean includeChangesFromThisTransaction)
             throws KernelException;
 
     /**
@@ -519,33 +585,14 @@ public interface Read {
     void nodeProperties(long nodeReference, Reference reference, PropertySelection selection, PropertyCursor cursor);
 
     /**
-     * <strong>NOTE</strong> ALWAYS use relationshipProperties(relationshipReference,startNodeReference,type,reference,
-     * selection,cursor) instead for performance reasons.
      * @param relationshipReference the owner of the properties.
-     * @param startNodeReference    start node of the owner of the properties
-     * @param reference             a reference from {@link RelationshipDataAccessor#propertiesReference()}.
-     * @param selection             the filter to restrict which properties to read
-     * @param cursor                the cursor used to read the properties
-     */
-    // Used by GDS - removed in 2025.10
-    void relationshipProperties(
-            long relationshipReference,
-            long startNodeReference,
-            Reference reference,
-            PropertySelection selection,
-            PropertyCursor cursor);
-
-    /**
-     * @param relationshipReference the owner of the properties.
-     * @param startNodeReference    start node of the owner of the properties
      * @param type                  the type of the relationship
-     * @param reference             a reference from {@link RelationshipDataAccessor#propertiesReference()}.
+     * @param reference             a reference from {@link RelationshipCursor#propertiesReference()}.
      * @param selection             the filter to restrict which properties to read
      * @param cursor                the cursor used to read the properties
      */
     void relationshipProperties(
             long relationshipReference,
-            long startNodeReference,
             int type,
             Reference reference,
             PropertySelection selection,

@@ -20,18 +20,19 @@
 package org.neo4j.procedure.impl;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.neo4j.internal.kernel.api.procs.FieldSignature.outputField;
 import static org.neo4j.internal.kernel.api.procs.Neo4jTypes.NTString;
 
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.internal.kernel.api.exceptions.ProcedureException;
 import org.neo4j.internal.kernel.api.procs.FieldSignature;
 
-@SuppressWarnings("WeakerAccess")
-public class ProcedureOutputSignatureCompilerTest {
+class ProcedureOutputSignatureCompilerTest {
     public static class SingleStringFieldRecord {
         public String name;
 
@@ -104,28 +105,29 @@ public class ProcedureOutputSignatureCompilerTest {
 
     @Test
     void shouldGiveHelpfulErrorOnUnmappable() {
-        ProcedureException exception = assertThrows(ProcedureException.class, () -> signatures(UnmappableRecord.class));
-        assertThat(exception.getMessage())
-                .startsWith(
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> signatures(UnmappableRecord.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessageStartingWith(
                         "Field `wat` in record `UnmappableRecord` cannot be converted to a Neo4j type: "
-                                + "Don't know how to map `org.neo4j.procedure.impl.ProcedureOutputSignatureCompilerTest$UnmappableRecord`");
+                                + "Don't know how to map `org.neo4j.procedure.impl.ProcedureOutputSignatureCompilerTest$UnmappableRecord`")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22NB8)
+                .hasStatusDescription(
+                        "error: data exception - invalid Neo4j type. 'UnmappableRecord' is not a recognized Neo4j type.");
     }
 
     @Test
     void shouldGiveHelpfulErrorOnPrivateField() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> signatures(RecordWithPrivateField.class));
-        assertThat(exception.getMessage())
-                .startsWith(
+        assertThatThrownBy(() -> signatures(RecordWithPrivateField.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessageStartingWith(
                         "Field `wat` in record `RecordWithPrivateField` cannot be accessed. Please ensure the field is marked as `public`.");
     }
 
     @Test
     void shouldGiveHelpfulErrorOnMapWithNonStringKeyMap() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> signatures(RecordWithNonStringKeyMap.class));
-        assertThat(exception.getMessage())
-                .isEqualTo(
+        assertThatThrownBy(() -> signatures(RecordWithNonStringKeyMap.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(
                         "Field `wat` in record `RecordWithNonStringKeyMap` cannot be converted "
                                 + "to a Neo4j type: Maps are required to have `String` keys - but this map "
                                 + "has `org.neo4j.procedure.impl.ProcedureOutputSignatureCompilerTest$RecordWithNonStringKeyMap` keys.");
@@ -138,9 +140,9 @@ public class ProcedureOutputSignatureCompilerTest {
         //            Drawback of that is that it'd cause cognitive dissonance, it's not obvious what's a record
         //            and what is a primitive value..
 
-        ProcedureException exception = assertThrows(ProcedureException.class, () -> signatures(Long.class));
-        assertThat(exception.getMessage())
-                .isEqualTo(
+        assertThatThrownBy(() -> signatures(Long.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(
                         String.format("Procedures must return a Stream of records, where a record is a concrete class%n"
                                 + "that you define, with public non-final fields defining the fields in the record.%n"
                                 + "If you''d like your procedure to return `Long`, you could define a record class like:%n"

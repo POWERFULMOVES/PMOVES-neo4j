@@ -19,78 +19,46 @@
  */
 package org.neo4j.queryapi.tx;
 
-import static org.neo4j.queryapi.QueryApiTestUtil.resolveDependency;
-import static org.neo4j.queryapi.QueryApiTestUtil.setupLogging;
-import static org.neo4j.queryapi.QueryApiTestUtil.sleepProcedure;
 import static org.neo4j.queryapi.QueryResponseAssertions.assertThat;
+import static org.neo4j.queryapi.test.QueryApiTestUtil.resolveDependency;
 
 import java.io.IOException;
-import java.util.EnumSet;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
 import org.assertj.core.api.Assertions;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.neo4j.configuration.connectors.BoltConnector;
-import org.neo4j.configuration.connectors.BoltConnectorInternalSettings;
-import org.neo4j.configuration.connectors.ConnectorPortRegister;
-import org.neo4j.configuration.connectors.ConnectorType;
-import org.neo4j.configuration.connectors.HttpConnector;
-import org.neo4j.configuration.helpers.SocketAddress;
+import org.neo4j.configuration.Config;
+import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.dbms.api.DatabaseManagementService;
 import org.neo4j.fabric.bolt.QueryRouterBookmark;
 import org.neo4j.fabric.bookmark.BookmarkFormat;
-import org.neo4j.internal.kernel.api.exceptions.ProcedureException;
 import org.neo4j.kernel.api.exceptions.Status;
-import org.neo4j.kernel.api.procedure.GlobalProcedures;
 import org.neo4j.kernel.database.Database;
 import org.neo4j.notifications.NotificationCodeWithDescription;
-import org.neo4j.queryapi.QueryApiTestUtil;
-import org.neo4j.queryapi.testclient.QueryAPITestClient;
-import org.neo4j.queryapi.testclient.QueryApiTestClientException;
-import org.neo4j.queryapi.testclient.QueryRequest;
-import org.neo4j.server.configuration.ConfigurableServerModules;
-import org.neo4j.server.configuration.ServerSettings;
+import org.neo4j.queryapi.test.QueryApiTestUtil;
+import org.neo4j.queryapi.test.annotation.QueryAPITestExtension;
+import org.neo4j.queryapi.test.testclient.QueryAPITestClient;
+import org.neo4j.queryapi.test.testclient.QueryApiTestClientException;
+import org.neo4j.queryapi.test.testclient.QueryRequest;
 import org.neo4j.server.queryapi.request.AccessMode;
 import org.neo4j.server.queryapi.tx.TransactionManager;
-import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 
-public class QueryResourceTxConfigIT {
+@QueryAPITestExtension(bookmarkReadyTimeoutInSeconds = 1)
+class QueryResourceTxConfigIT {
 
-    private static QueryAPITestClient testClient;
-    private static DatabaseManagementService dbms;
-    private static TransactionManager txManager;
+    private final QueryAPITestClient testClient;
+    private final DatabaseManagementService dbms;
+    private final TransactionManager txManager;
 
-    @BeforeAll
-    static void beforeAll() throws ProcedureException {
-        setupLogging();
-        var builder = new TestDatabaseManagementServiceBuilder();
-        dbms = builder.setConfig(HttpConnector.enabled, true)
-                .setConfig(HttpConnector.listen_address, new SocketAddress("localhost", 0))
-                .setConfig(
-                        BoltConnectorInternalSettings.local_channel_address,
-                        QueryResourceTxConfigIT.class.getSimpleName())
-                .setConfig(BoltConnector.enabled, true)
-                .setConfig(BoltConnectorInternalSettings.enable_local_connector, true)
-                .setConfig(ServerSettings.http_enabled_modules, EnumSet.allOf(ConfigurableServerModules.class))
-                .impermanent()
-                .build();
-
-        resolveDependency(dbms, GlobalProcedures.class).register(sleepProcedure());
-        txManager = resolveDependency(dbms, TransactionManager.class);
-        var portRegister = QueryApiTestUtil.resolveDependency(dbms, ConnectorPortRegister.class);
-        String queryEndpoint =
-                "http://" + portRegister.getLocalAddress(ConnectorType.HTTP) + "/db/{databaseName}/query/v2";
-        testClient = new QueryAPITestClient(queryEndpoint);
-    }
-
-    @AfterAll
-    static void afterAll() {
-        dbms.shutdown();
+    QueryResourceTxConfigIT(
+            QueryAPITestClient testClient, DatabaseManagementService dbms, TransactionManager txManager) {
+        this.testClient = testClient;
+        this.dbms = dbms;
+        this.txManager = txManager;
     }
 
     @BeforeEach
@@ -195,55 +163,68 @@ public class QueryResourceTxConfigIT {
     @Test
     void shouldTimeoutWaitingForUnreachableBookmark()
             throws IOException, InterruptedException, QueryApiTestClientException {
-        var expectedBookmark = BookmarkFormat.serialize(new QueryRouterBookmark(
-                List.of(new QueryRouterBookmark.InternalGraphState(
-                        QueryApiTestUtil.resolveDependency(dbms, Database.class)
-                                .getNamedDatabaseId()
-                                .databaseId()
-                                .uuid(),
-                        QueryApiTestUtil.getLastClosedTransactionId(dbms) + 1)),
-                List.of()));
+        Config config = resolveDependency(dbms, Config.class);
+        try {
+            config.setDynamic(GraphDatabaseSettings.bookmark_ready_timeout, Duration.ofSeconds(1), "test");
+            var expectedBookmark = BookmarkFormat.serialize(new QueryRouterBookmark(
+                    List.of(new QueryRouterBookmark.InternalGraphState(
+                            QueryApiTestUtil.resolveDependency(dbms, Database.class)
+                                    .getNamedDatabaseId()
+                                    .databaseId()
+                                    .uuid(),
+                            QueryApiTestUtil.getLastClosedTransactionId(dbms) + 1)),
+                    List.of()));
 
-        var res = testClient.beginTx(QueryRequest.newBuilder()
-                .statement("CREATE (n)")
-                .bookmarks(List.of(expectedBookmark))
-                .build());
+            var res = testClient.beginTx(QueryRequest.newBuilder()
+                    .statement("CREATE (n)")
+                    .bookmarks(List.of(expectedBookmark))
+                    .build());
 
-        assertThat(res).hasErrorStatus(400, Status.Transaction.BookmarkTimeout);
+            assertThat(res).hasErrorStatus(400, Status.Transaction.BookmarkTimeout);
+        } finally {
+            config.setDynamic(GraphDatabaseSettings.bookmark_ready_timeout, null, "test");
+        }
     }
 
     @Test
     void shouldWaitForUpdatedBookmark() throws IOException, InterruptedException, QueryApiTestClientException {
-        var lastTxId = QueryApiTestUtil.getLastClosedTransactionId(dbms);
-        var nextTxId = lastTxId + 1;
-        var expectedBookmark = BookmarkFormat.serialize(new QueryRouterBookmark(
-                List.of(new QueryRouterBookmark.InternalGraphState(
-                        QueryApiTestUtil.resolveDependency(dbms, Database.class)
-                                .getNamedDatabaseId()
-                                .databaseId()
-                                .uuid(),
-                        nextTxId)),
-                List.of()));
+        Config config = resolveDependency(dbms, Config.class);
+        try {
+            config.setDynamic(GraphDatabaseSettings.bookmark_ready_timeout, Duration.ofSeconds(1), "test");
+            var lastTxId = QueryApiTestUtil.getLastClosedTransactionId(dbms);
+            var nextTxId = lastTxId + 1;
+            var expectedBookmark = BookmarkFormat.serialize(new QueryRouterBookmark(
+                    List.of(new QueryRouterBookmark.InternalGraphState(
+                            QueryApiTestUtil.resolveDependency(dbms, Database.class)
+                                    .getNamedDatabaseId()
+                                    .databaseId()
+                                    .uuid(),
+                            nextTxId)),
+                    List.of()));
 
-        var res = testClient.beginTx(QueryRequest.newBuilder()
-                .statement("CREATE (n)")
-                .bookmarks(List.of(expectedBookmark))
-                .build());
+            var res = testClient.beginTx(QueryRequest.newBuilder()
+                    .statement("CREATE (n)")
+                    .bookmarks(List.of(expectedBookmark))
+                    .build());
 
-        assertThat(res).hasErrorStatus(400, Status.Transaction.BookmarkTimeout);
+            assertThat(res).hasErrorStatus(400, Status.Transaction.BookmarkTimeout);
 
-        // move the bookmark forward one tx
-        testClient.autoCommit(QueryRequest.newBuilder().statement("CREATE (n)").build());
+            // move the bookmark forward one tx
+            testClient.autoCommit(
+                    QueryRequest.newBuilder().statement("CREATE (n)").build());
 
-        var working = testClient.beginTx(QueryRequest.newBuilder()
-                .statement("CREATE (n)")
-                .bookmarks(List.of(expectedBookmark))
-                .build());
-        assertThat(working).wasSuccessful();
+            var working = testClient.beginTx(QueryRequest.newBuilder()
+                    .statement("CREATE (n)")
+                    .bookmarks(List.of(expectedBookmark))
+                    .build());
+            assertThat(working).wasSuccessful();
 
-        var commit = testClient.commitTx(working.body().txId());
-        assertThat(commit).wasSuccessful();
-        Assertions.assertThat(commit.body().bookmarks()).isNotEqualTo(List.of(expectedBookmark));
+            var commit = testClient.commitTx(working.body().txId());
+            assertThat(commit).wasSuccessful();
+            Assertions.assertThat(commit.body().bookmarks()).isNotEqualTo(List.of(expectedBookmark));
+        } finally {
+            config.setDynamic(GraphDatabaseSettings.bookmark_ready_timeout, null, "test");
+        }
     }
 
     @Test

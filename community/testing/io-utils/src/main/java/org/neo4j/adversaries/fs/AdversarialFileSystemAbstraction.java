@@ -30,6 +30,7 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.NotDirectoryException;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Set;
 import java.util.function.Predicate;
 import org.neo4j.adversaries.Adversary;
@@ -76,9 +77,15 @@ public class AdversarialFileSystemAbstraction implements FileSystemAbstraction {
     }
 
     @Override
-    public OutputStream openAsOutputStream(Path fileName, boolean append) throws IOException {
+    public OutputStream openAsOutputStream(Path fileName, boolean append, int bufferSize) throws IOException {
         adversary.injectFailure(NoSuchFileException.class, SecurityException.class);
-        return new AdversarialOutputStream(delegate.openAsOutputStream(fileName, append), adversary);
+        return new AdversarialOutputStream(delegate.openAsOutputStream(fileName, append, bufferSize), adversary);
+    }
+
+    @Override
+    public OutputStream openAsOutputStream(Path fileName, Set<OpenOption> options, int bufferSize) throws IOException {
+        adversary.injectFailure(NoSuchFileException.class, SecurityException.class);
+        return new AdversarialOutputStream(delegate.openAsOutputStream(fileName, options, bufferSize), adversary);
     }
 
     @Override
@@ -254,6 +261,16 @@ public class AdversarialFileSystemAbstraction implements FileSystemAbstraction {
     public Path createTempDirectory(Path dir, String prefix) throws IOException {
         adversary.injectFailure(IOException.class, SecurityException.class);
         return delegate.createTempDirectory(dir, prefix);
+    }
+
+    @Override
+    public List<Path> matchFiles(Path dir, PatternStyle patternStyle, String pattern) throws IOException {
+        return delegate.matchFiles(dir, patternStyle, pattern);
+    }
+
+    @Override
+    public boolean supportsDirectoryChannel(Path directory) {
+        return delegate.supportsDirectoryChannel(directory);
     }
 
     @Override

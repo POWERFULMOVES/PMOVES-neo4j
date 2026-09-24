@@ -25,12 +25,13 @@ import org.neo4j.cypher.internal.AdministrationCommandRuntime.Show.showString
 import org.neo4j.cypher.internal.AdministrationCommandRuntime.checkNamespaceExists
 import org.neo4j.cypher.internal.AdministrationCommandRuntime.getDatabaseNameFields
 import org.neo4j.cypher.internal.AdministrationCommandRuntime.getNameFields
-import org.neo4j.cypher.internal.AdministrationCommandRuntime.userLabel
-import org.neo4j.cypher.internal.AdministrationCommandRuntime.userNamePropKey
+import org.neo4j.cypher.internal.AdministrationCommandRuntime.getParameterName
+import org.neo4j.cypher.internal.AdministrationCommandRuntimeContext
 import org.neo4j.cypher.internal.ExecutionEngine
 import org.neo4j.cypher.internal.ExecutionPlan
 import org.neo4j.cypher.internal.ast.DatabaseName
 import org.neo4j.cypher.internal.expressions.Parameter
+import org.neo4j.cypher.internal.logical.plans.AuthRuleEntity
 import org.neo4j.cypher.internal.logical.plans.RBACEntity
 import org.neo4j.cypher.internal.logical.plans.RoleEntity
 import org.neo4j.cypher.internal.logical.plans.UserEntity
@@ -38,10 +39,18 @@ import org.neo4j.cypher.internal.procs.ParameterTransformer
 import org.neo4j.cypher.internal.procs.QueryHandler
 import org.neo4j.cypher.internal.procs.ThrowException
 import org.neo4j.cypher.internal.procs.UpdatingSystemCommandExecutionPlan
-import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DATABASE_NAME
-import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DATABASE_NAME_LABEL_DESCRIPTION
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.AUTH_RULE
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.AUTH_RULE_NAME_PROPERTY
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.ROLE
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.ROLE_NAME_PROPERTY
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_NAME_PROPERTY
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.DATABASE_NAME
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.DATABASE_NAME_LABEL_DESCRIPTION
 import org.neo4j.exceptions.DatabaseAdministrationOnFollowerException
+import org.neo4j.exceptions.InternalException
 import org.neo4j.exceptions.InvalidArgumentException
+import org.neo4j.gqlstatus.PrivilegeGqlCodeEntity
 import org.neo4j.internal.kernel.api.security.SecurityAuthorizationHandler
 import org.neo4j.kernel.api.exceptions.Status
 import org.neo4j.kernel.api.exceptions.Status.HasStatus
@@ -62,9 +71,10 @@ case class EnsureNodeExistsExecutionPlanner(
     action: String,
     sourcePlan: Option[ExecutionPlan]
   ): ExecutionPlan = {
-    val (label, namePropKey) = entity match {
-      case UserEntity => (userLabel, userNamePropKey)
-      case RoleEntity => ("Role", "name")
+    val (label, namePropKey, gqlEntity) = entity match {
+      case UserEntity     => (USER, USER_NAME_PROPERTY, PrivilegeGqlCodeEntity.USER)
+      case RoleEntity     => (ROLE, ROLE_NAME_PROPERTY, PrivilegeGqlCodeEntity.ROLE)
+      case AuthRuleEntity => (AUTH_RULE, AUTH_RULE_NAME_PROPERTY, PrivilegeGqlCodeEntity.AUTHRULE)
     }
     val nameFields = getNameFields("name", name, valueMapper = valueMapper)
     UpdatingSystemCommandExecutionPlan(
@@ -75,18 +85,19 @@ case class EnsureNodeExistsExecutionPlanner(
          |${extraFilter("node")}
          |RETURN node""".stripMargin,
       VirtualValues.map(Array(nameFields.nameKey), Array(nameFields.nameValue)),
-      queryHandler(command, action, labelDescription, name),
+      queryHandler(command, action, labelDescription, name, getParameterName(name), gqlEntity),
       sourcePlan,
       parameterTransformer = ParameterTransformer().convert(nameFields.nameConverter)
     )
   }
 
-  def planEnsureDatabaseNodeExists(
+  def planEnsureDatabaseNameNodeExists(
     command: String,
     aliasName: DatabaseName,
     extraFilter: String => String,
     action: String,
-    sourcePlan: Option[ExecutionPlan]
+    sourcePlan: Option[ExecutionPlan],
+    context: AdministrationCommandRuntimeContext
   ): ExecutionPlan = {
     val aliasNameFields =
       getDatabaseNameFields("aliasName", aliasName)
@@ -95,26 +106,45 @@ case class EnsureNodeExistsExecutionPlanner(
       "EnsureNodeExists",
       normalExecutionEngine,
       securityAuthorizationHandler,
-      s"""MATCH (node:$DATABASE_NAME ${aliasNameFields.asNodeFilter})
+      s"""MATCH (node:$DATABASE_NAME ${aliasNameFields.asNodeFilter(context.runtimeContext.cypherVersion)})
          |${extraFilter("node")}
          |RETURN node""".stripMargin,
       VirtualValues.map(aliasNameFields.keys, aliasNameFields.values),
-      queryHandler(command, action, DATABASE_NAME_LABEL_DESCRIPTION, aliasName),
+      queryHandler(
+        command,
+        action,
+        DATABASE_NAME_LABEL_DESCRIPTION,
+        aliasName,
+        getParameterName(aliasName.asLegacyName),
+        PrivilegeGqlCodeEntity.DATABASE_ALIAS
+      ),
       sourcePlan,
       parameterTransformer = ParameterTransformer().convert(aliasNameFields.nameConverter).validate(
-        checkNamespaceExists(aliasNameFields)
+        checkNamespaceExists(aliasNameFields, context)
       )
     )
 
   }
 
-  private def queryHandler[T](command: String, action: String, labelDescription: String, value: T)(implicit
-    show: Show[T]) = {
+  private def queryHandler[T](
+    command: String,
+    action: String,
+    labelDescription: String,
+    value: T,
+    paramName: Option[String],
+    entity: PrivilegeGqlCodeEntity
+  )(implicit show: Show[T]) = {
     QueryHandler
       .handleNoResult(p =>
-        Some(ThrowException(new InvalidArgumentException(
-          s"Failed to $action the specified ${labelDescription.toLowerCase} '${show(value, p)}': $labelDescription does not exist."
-        )))
+        Some(ThrowException(
+          InvalidArgumentException.failedActionEntityNotFound(
+            // e.g. "drop the specified Role 'myRole'"
+            s"$action the specified ${labelDescription.toLowerCase} '${show(value, p)}'",
+            entity,
+            show(value, p),
+            paramName.orNull
+          )
+        ))
       )
       .handleError {
         case (error: HasStatus, p) if error.status() == Status.Cluster.NotALeader =>
@@ -123,7 +153,8 @@ case class EnsureNodeExistsExecutionPlanner(
             s"Failed to $action the specified ${labelDescription.toLowerCase} '${show(value, p)}'",
             error
           )
-        case (error, p) => new IllegalStateException(
+        case (error, p) => InternalException.internalError(
+            this.getClass.getSimpleName,
             s"Failed to $action the specified ${labelDescription.toLowerCase} '${show(value, p)}'.",
             error
           ) // should not get here but need a default case

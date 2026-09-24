@@ -42,6 +42,8 @@ public interface GBPTreeVisitor<ROOT_KEY, DATA_KEY, DATA_VALUE> extends IdProvid
 
     void value(ValueHolder<DATA_VALUE> value);
 
+    void valueVersion(long version);
+
     void child(long child);
 
     void position(int i);
@@ -61,6 +63,10 @@ public interface GBPTreeVisitor<ROOT_KEY, DATA_KEY, DATA_VALUE> extends IdProvid
     void historyEnd();
 
     void historicalValue(long version, ValueHolder<DATA_VALUE> value);
+
+    default boolean visitDataLayer() {
+        return true;
+    }
 
     class Adaptor<ROOT_KEY, DATA_KEY, DATA_VALUE> implements GBPTreeVisitor<ROOT_KEY, DATA_KEY, DATA_VALUE> {
         @Override
@@ -89,6 +95,9 @@ public interface GBPTreeVisitor<ROOT_KEY, DATA_KEY, DATA_VALUE> extends IdProvid
 
         @Override
         public void value(ValueHolder<DATA_VALUE> value) {}
+
+        @Override
+        public void valueVersion(long version) {}
 
         @Override
         public void child(long child) {}

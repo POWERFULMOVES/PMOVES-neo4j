@@ -17,7 +17,7 @@
 package org.neo4j.cypher.internal.ast.factory.expression
 
 import org.neo4j.cypher.internal.ast.Statements
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
+import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
 import org.neo4j.cypher.internal.ast.test.util.AstParsingTestBase
 import org.neo4j.cypher.internal.expressions.Expression
 
@@ -63,21 +63,22 @@ class ConcatenationParserTest extends AstParsingTestBase {
   }
 
   test("RETURN a ||") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '': expected \"+\" or \"-\"")
-      case _ => _.withSyntaxError(
-          """Invalid input '': expected an expression (line 1, column 12 (offset: 11))
-            |"RETURN a ||"
-            |            ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '': expected an expression (line 1, column 12 (offset: 11))
+        |"RETURN a ||"
+        |            ^""".stripMargin
+    )
   }
 
   test("RETURN || b") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '||': expected \"*\", \"DISTINCT\" or an expression")
-      case _ => _.withSyntaxError(
+    parsesIn[Statements] {
+      case Cypher5 => _.withSyntaxError(
           """Invalid input '||': expected an expression, '*' or 'DISTINCT' (line 1, column 8 (offset: 7))
+            |"RETURN || b"
+            |        ^""".stripMargin
+        )
+      case _ => _.withSyntaxError(
+          """Invalid input '||': expected an expression, '*', 'ALL' or 'DISTINCT' (line 1, column 8 (offset: 7))
             |"RETURN || b"
             |        ^""".stripMargin
         )
@@ -85,24 +86,18 @@ class ConcatenationParserTest extends AstParsingTestBase {
   }
 
   test("RETURN a ||| b") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '|': expected \"+\" or \"-\"")
-      case _ => _.withSyntaxError(
-          """Invalid input '|': expected an expression (line 1, column 12 (offset: 11))
-            |"RETURN a ||| b"
-            |            ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '|': expected an expression (line 1, column 12 (offset: 11))
+        |"RETURN a ||| b"
+        |            ^""".stripMargin
+    )
   }
 
   test("RETURN a || || b") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '||': expected \"+\" or \"-\"")
-      case _ => _.withSyntaxError(
-          """Invalid input '||': expected an expression (line 1, column 13 (offset: 12))
-            |"RETURN a || || b"
-            |             ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '||': expected an expression (line 1, column 13 (offset: 12))
+        |"RETURN a || || b"
+        |             ^""".stripMargin
+    )
   }
 }

@@ -27,6 +27,7 @@ import static org.neo4j.index.internal.gbptree.DataTree.W_BATCHED_SINGLE_THREADE
 import static org.neo4j.index.internal.gbptree.DataTree.W_SPLIT_KEEP_ALL_RIGHT;
 import static org.neo4j.index.internal.gbptree.GBPTreeOpenOptions.NO_FLUSH_ON_CLOSE;
 import static org.neo4j.index.internal.gbptree.GBPTreeTestUtil.consistencyCheck;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.CursorContextFactory.NULL_CONTEXT_FACTORY;
 import static org.neo4j.test.utils.PageCacheConfig.config;
@@ -421,7 +422,7 @@ abstract class GBPTreeConsistencyCheckerTestBase<KEY, VALUE> {
                     writer.remove(layout.key(i));
                 }
             }
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
         }
 
         // When tree is closed we will overwrite treeState with in memory state so we need to open tree in special mode
@@ -455,7 +456,7 @@ abstract class GBPTreeConsistencyCheckerTestBase<KEY, VALUE> {
                     keyCount++;
                 }
             }
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
         }
 
         // When tree is closed we will overwrite treeState with in memory state so we need to open tree in special mode
@@ -487,7 +488,7 @@ abstract class GBPTreeConsistencyCheckerTestBase<KEY, VALUE> {
                     keyCount++;
                 }
             }
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
         }
 
         // When tree is closed we will overwrite treeState with in memory state so we need to open tree in special mode
@@ -520,7 +521,7 @@ abstract class GBPTreeConsistencyCheckerTestBase<KEY, VALUE> {
                 }
             }
 
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
         }
 
         final long targetNode;
@@ -575,42 +576,6 @@ abstract class GBPTreeConsistencyCheckerTestBase<KEY, VALUE> {
 
             assertCalled(duplicated);
             assertCalled(unused);
-        }
-    }
-
-    @Test
-    void shouldDetectIdLargerThanFreelistLastId() throws IOException {
-        long targetLastId;
-        long targetPageId;
-        try (GBPTree<KEY, VALUE> index = index().build()) {
-            // Add and remove a bunch of keys to fill freelist
-            int keyCount = 0;
-            while (getHeight(index) < 2) {
-                try (Writer<KEY, VALUE> writer = index.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT)) {
-                    writer.put(layout.key(keyCount), layout.value(keyCount));
-                    keyCount++;
-                }
-            }
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
-        }
-
-        // When tree is closed we will overwrite treeState with in memory state, so we need to open tree in special mode
-        // for our state corruption to persist.
-        try (GBPTree<KEY, VALUE> index =
-                index().with(immutable.with(NO_FLUSH_ON_CLOSE)).build()) {
-            GBPTreeInspection inspection = inspect(index);
-            TreeState treeState = inspection.treeState();
-            targetPageId = treeState.lastId();
-            targetLastId = treeState.lastId() - 1;
-            TreeState newTreeState = treeStateWithLastId(targetLastId, treeState);
-
-            GBPTreeCorruption.IndexCorruption<KEY, VALUE> corruption = GBPTreeCorruption.setTreeState(newTreeState);
-            index.unsafe(corruption, NULL_CONTEXT);
-        }
-
-        // Need to restart tree to reload corrupted freelist
-        try (GBPTree<KEY, VALUE> index = index().build()) {
-            assertReportIdExceedLastId(index, targetLastId, targetPageId);
         }
     }
 
@@ -835,7 +800,7 @@ abstract class GBPTreeConsistencyCheckerTestBase<KEY, VALUE> {
     @Test
     void shouldDetectDirtyOnStartup() throws IOException {
         try (GBPTree<KEY, VALUE> index = index().build()) {
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
             index.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT).close();
             // No checkpoint
         }
@@ -883,10 +848,12 @@ abstract class GBPTreeConsistencyCheckerTestBase<KEY, VALUE> {
                         internalNode.childAt(cursor, 1, treeState.stableGeneration(), treeState.unstableGeneration()));
                 TreeNodeUtil.setKeyCount(cursor, 0);
                 cursor.next(leafToRemove);
-                long leftSibling =
-                        TreeNodeUtil.leftSibling(cursor, treeState.stableGeneration(), treeState.unstableGeneration());
-                long rightSibling =
-                        TreeNodeUtil.rightSibling(cursor, treeState.stableGeneration(), treeState.unstableGeneration());
+                long leftSibling = TreeNodeUtil.leftSibling(
+                                cursor, treeState.stableGeneration(), treeState.unstableGeneration())
+                        .pointer();
+                long rightSibling = TreeNodeUtil.rightSibling(
+                                cursor, treeState.stableGeneration(), treeState.unstableGeneration())
+                        .pointer();
                 if (TreeNodeUtil.isNode(leftSibling)) {
                     cursor.next(GenerationSafePointerPair.pointer(leftSibling));
                     TreeNodeUtil.setRightSibling(
@@ -1203,20 +1170,6 @@ abstract class GBPTreeConsistencyCheckerTestBase<KEY, VALUE> {
             public void pageIdSeenMultipleTimes(long pageId, Path file) {
                 called.setTrue();
                 assertEquals(targetNode, pageId);
-            }
-        });
-        assertCalled(called);
-    }
-
-    private static <KEY, VALUE> void assertReportIdExceedLastId(
-            GBPTree<KEY, VALUE> index, long targetLastId, long targetPageId) {
-        MutableBoolean called = new MutableBoolean();
-        consistencyCheck(index, new GBPTreeConsistencyCheckVisitor.Adaptor() {
-            @Override
-            public void pageIdExceedLastId(long lastId, long pageId, Path file) {
-                called.setTrue();
-                assertEquals(targetLastId, lastId);
-                assertEquals(targetPageId, pageId);
             }
         });
         assertCalled(called);

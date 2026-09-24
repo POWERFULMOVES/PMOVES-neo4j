@@ -28,6 +28,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ForkJoinTask;
 import java.util.concurrent.FutureTask;
@@ -115,6 +116,10 @@ interface ExecutorServiceFactory {
             return new ThreadPoolExecutor(
                     0, threadCount, 60L, TimeUnit.SECONDS, new SynchronousQueue<>(), factory, policy);
         };
+    }
+
+    static ExecutorServiceFactory newVirtualThreadPerTask() {
+        return (group, factory, threadCount) -> Executors.newThreadPerTaskExecutor(factory);
     }
 
     abstract class ExecutorServiceAdapter extends AbstractExecutorService {

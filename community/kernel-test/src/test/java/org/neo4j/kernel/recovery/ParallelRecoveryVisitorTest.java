@@ -25,13 +25,15 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.neo4j.common.Subject.AUTH_DISABLED;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
 import static org.neo4j.io.pagecache.tracing.PageCacheTracer.NULL;
-import static org.neo4j.kernel.impl.transaction.log.LogPosition.UNSPECIFIED;
-import static org.neo4j.kernel.impl.transaction.log.entry.LogEntryFactory.newCommitEntry;
-import static org.neo4j.kernel.impl.transaction.log.entry.LogEntryFactory.newStartEntry;
 import static org.neo4j.storageengine.api.TransactionApplicationMode.RECOVERY;
+import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_CHECKSUM;
 import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_CONSENSUS_INDEX;
+import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_TX_SEQUENCE_NUMBER;
 import static org.neo4j.test.LatestVersions.LATEST_KERNEL_VERSION;
+import static org.neo4j.wal.entry.LogEntryFactory.newCommitEntry;
+import static org.neo4j.wal.entry.LogEntryFactory.newStartEntry;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -43,6 +45,7 @@ import org.neo4j.configuration.Config;
 import org.neo4j.counts.CountsStore;
 import org.neo4j.internal.diagnostics.DiagnosticsLogger;
 import org.neo4j.internal.schema.StorageEngineIndexingBehaviour;
+import org.neo4j.io.async.AsyncBlockAccessor;
 import org.neo4j.io.fs.WritableChannel;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
@@ -50,12 +53,8 @@ import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
 import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.impl.store.stats.StoreEntityCounters;
 import org.neo4j.kernel.impl.transaction.CompleteBatchRepresentation;
-import org.neo4j.kernel.impl.transaction.log.CompleteCommandBatch;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntryCommit;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntryStart;
 import org.neo4j.kernel.lifecycle.Lifecycle;
 import org.neo4j.kernel.lifecycle.LifecycleAdapter;
-import org.neo4j.lock.LockGroup;
 import org.neo4j.lock.LockService;
 import org.neo4j.lock.LockTracer;
 import org.neo4j.lock.LockType;
@@ -64,17 +63,18 @@ import org.neo4j.logging.InternalLog;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.storageengine.api.CommandBatch;
 import org.neo4j.storageengine.api.CommandCreationContext;
+import org.neo4j.storageengine.api.CommandReaderFactory;
 import org.neo4j.storageengine.api.IndexUpdateListener;
-import org.neo4j.storageengine.api.InternalErrorTracer;
+import org.neo4j.storageengine.api.Leases;
+import org.neo4j.storageengine.api.LogMetadataProvider;
 import org.neo4j.storageengine.api.MetadataProvider;
 import org.neo4j.storageengine.api.StorageCommand;
 import org.neo4j.storageengine.api.StorageEngine;
-import org.neo4j.storageengine.api.StorageEngineCostCharacteristics;
+import org.neo4j.storageengine.api.StorageEngineCharacteristics;
 import org.neo4j.storageengine.api.StorageEngineTransaction;
+import org.neo4j.storageengine.api.StorageFileSelection;
 import org.neo4j.storageengine.api.StorageLocks;
 import org.neo4j.storageengine.api.StorageReader;
-import org.neo4j.storageengine.api.StoreFileMetadata;
-import org.neo4j.storageengine.api.StoreId;
 import org.neo4j.storageengine.api.TransactionApplicationMode;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.storageengine.api.enrichment.Enrichment;
@@ -84,6 +84,10 @@ import org.neo4j.storageengine.api.txstate.TxStateVisitor.Decorator;
 import org.neo4j.storageengine.api.txstate.validation.TransactionValidatorFactory;
 import org.neo4j.test.Barrier;
 import org.neo4j.test.OtherThreadExecutor;
+import org.neo4j.wal.CompleteCommandBatch;
+import org.neo4j.wal.entry.LogEntryCommit;
+import org.neo4j.wal.entry.LogEntryStart;
+import org.neo4j.wal.entry.LogFormat;
 
 class ParallelRecoveryVisitorTest {
     private final CursorContextFactory contextFactory = new CursorContextFactory(NULL, EMPTY_CONTEXT_SUPPLIER);
@@ -94,14 +98,16 @@ class ParallelRecoveryVisitorTest {
         Barrier.Control barrier = new Barrier.Control();
         RecoveryControllableStorageEngine storageEngine = new RecoveryControllableStorageEngine() {
             @Override
-            public void apply(StorageEngineTransaction batch, TransactionApplicationMode mode) throws Exception {
+            public void apply(
+                    StorageEngineTransaction batch, TransactionApplicationMode mode, MemoryTracker memoryTracker)
+                    throws Exception {
                 long txId = idOf(batch.commandBatch());
                 if (txId == 2) {
                     barrier.reached();
                 } else if (txId == 3) {
                     barrier.awaitUninterruptibly();
                 }
-                super.apply(batch, mode);
+                super.apply(batch, mode, memoryTracker);
                 if (txId == 3) {
                     barrier.release();
                 }
@@ -125,13 +131,15 @@ class ParallelRecoveryVisitorTest {
         // given
         RecoveryControllableStorageEngine storageEngine = new RecoveryControllableStorageEngine() {
             @Override
-            public void apply(StorageEngineTransaction batch, TransactionApplicationMode mode) throws Exception {
+            public void apply(
+                    StorageEngineTransaction batch, TransactionApplicationMode mode, MemoryTracker memoryTracker)
+                    throws Exception {
                 if (idOf(batch.commandBatch()) == 2) {
                     // Just make it very likely that, if the locking wouldn't work as expected, then the test will fail,
                     // but the test will not be flaky if the visitor works as expected.
                     Thread.sleep(50);
                 }
-                super.apply(batch, mode);
+                super.apply(batch, mode, memoryTracker);
             }
         };
 
@@ -154,23 +162,22 @@ class ParallelRecoveryVisitorTest {
         RecoveryControllableStorageEngine storageEngine = new RecoveryControllableStorageEngine() {
             @Override
             public void lockRecoveryCommands(
-                    CommandBatch commands,
-                    LockService lockService,
-                    LockGroup lockGroup,
-                    TransactionApplicationMode mode) {
+                    CommandBatch commands, LockService.Client lockService, TransactionApplicationMode mode) {
                 if (idOf(commands) == 5) {
                     barrier.release();
                 }
-                super.lockRecoveryCommands(commands, lockService, lockGroup, RECOVERY);
+                super.lockRecoveryCommands(commands, lockService, RECOVERY);
             }
 
             @Override
-            public void apply(StorageEngineTransaction batch, TransactionApplicationMode mode) throws Exception {
+            public void apply(
+                    StorageEngineTransaction batch, TransactionApplicationMode mode, MemoryTracker memoryTracker)
+                    throws Exception {
                 long txId = idOf(batch.commandBatch());
                 if (txId > 2) {
                     barrier.awaitUninterruptibly();
                 }
-                super.apply(batch, mode);
+                super.apply(batch, mode, memoryTracker);
                 if (txId == 2) {
                     barrier.reached();
                 }
@@ -199,8 +206,10 @@ class ParallelRecoveryVisitorTest {
         String failure = "Deliberate failure applying transaction";
         RecoveryControllableStorageEngine storageEngine = new RecoveryControllableStorageEngine() {
             @Override
-            public void apply(StorageEngineTransaction batch, TransactionApplicationMode mode) throws Exception {
-                super.apply(batch, mode);
+            public void apply(
+                    StorageEngineTransaction batch, TransactionApplicationMode mode, MemoryTracker memoryTracker)
+                    throws Exception {
+                super.apply(batch, mode, memoryTracker);
                 throw new Exception(failure);
             }
         };
@@ -227,8 +236,10 @@ class ParallelRecoveryVisitorTest {
         String failure = "Deliberate failure applying transaction";
         RecoveryControllableStorageEngine storageEngine = new RecoveryControllableStorageEngine() {
             @Override
-            public void apply(StorageEngineTransaction batch, TransactionApplicationMode mode) throws Exception {
-                super.apply(batch, mode);
+            public void apply(
+                    StorageEngineTransaction batch, TransactionApplicationMode mode, MemoryTracker memoryTracker)
+                    throws Exception {
+                super.apply(batch, mode, memoryTracker);
                 throw new Exception(failure);
             }
         };
@@ -248,18 +259,17 @@ class ParallelRecoveryVisitorTest {
         var storageEngine = new RecoveryControllableStorageEngine() {
             @Override
             public void lockRecoveryCommands(
-                    CommandBatch commands,
-                    LockService lockService,
-                    LockGroup lockGroup,
-                    TransactionApplicationMode mode) {
+                    CommandBatch commands, LockService.Client lockService, TransactionApplicationMode mode) {
                 assertThat(Thread.currentThread()).isNotEqualTo(mainRecoveryThread);
-                super.lockRecoveryCommands(commands, lockService, lockGroup, mode);
+                super.lockRecoveryCommands(commands, lockService, mode);
             }
 
             @Override
-            public void apply(StorageEngineTransaction batch, TransactionApplicationMode mode) throws Exception {
+            public void apply(
+                    StorageEngineTransaction batch, TransactionApplicationMode mode, MemoryTracker memoryTracker)
+                    throws Exception {
                 assertThat(Thread.currentThread()).isNotEqualTo(mainRecoveryThread);
-                super.apply(batch, mode);
+                super.apply(batch, mode, memoryTracker);
                 latch.await();
             }
         };
@@ -286,18 +296,17 @@ class ParallelRecoveryVisitorTest {
         var storageEngine = new RecoveryControllableStorageEngine() {
             @Override
             public void lockRecoveryCommands(
-                    CommandBatch commands,
-                    LockService lockService,
-                    LockGroup lockGroup,
-                    TransactionApplicationMode mode) {
+                    CommandBatch commands, LockService.Client lockService, TransactionApplicationMode mode) {
                 assertThat(Thread.currentThread()).isNotEqualTo(mainRecoveryThread);
-                super.lockRecoveryCommands(commands, lockService, lockGroup, mode);
+                super.lockRecoveryCommands(commands, lockService, mode);
             }
 
             @Override
-            public void apply(StorageEngineTransaction batch, TransactionApplicationMode mode) throws Exception {
+            public void apply(
+                    StorageEngineTransaction batch, TransactionApplicationMode mode, MemoryTracker memoryTracker)
+                    throws Exception {
                 assertThat(Thread.currentThread()).isNotEqualTo(mainRecoveryThread);
-                super.apply(batch, mode);
+                super.apply(batch, mode, memoryTracker);
                 Thread.sleep(1);
             }
         };
@@ -312,11 +321,12 @@ class ParallelRecoveryVisitorTest {
 
     private CompleteBatchRepresentation tx(long txId, List<StorageCommand> commands) {
         commands.forEach(cmd -> ((RecoveryTestBaseCommand) cmd).txId = txId);
-        LogEntryStart startEntry = newStartEntry(LATEST_KERNEL_VERSION, 0, 0, 0, 0, EMPTY_BYTE_ARRAY, UNSPECIFIED);
+        LogEntryStart startEntry =
+                newStartEntry(LATEST_KERNEL_VERSION, 0, 0, 0, UNKNOWN_TX_SEQUENCE_NUMBER, 0, EMPTY_BYTE_ARRAY);
         CommandBatch txRepresentation = new CompleteCommandBatch(
-                commands, UNKNOWN_CONSENSUS_INDEX, 0, 0, 0, 0, LATEST_KERNEL_VERSION, AUTH_DISABLED);
-        LogEntryCommit commitEntry = newCommitEntry(LATEST_KERNEL_VERSION, txId, 0, 0);
-        return new CompleteBatchRepresentation(startEntry, txRepresentation, commitEntry);
+                commands, UNKNOWN_CONSENSUS_INDEX, 0, 0, 0, 0, Leases.NO_LEASES, LATEST_KERNEL_VERSION, AUTH_DISABLED);
+        LogEntryCommit commitEntry = newCommitEntry(LATEST_KERNEL_VERSION, txId, 0, BASE_TX_CHECKSUM + 1);
+        return new CompleteBatchRepresentation(startEntry, txRepresentation, commitEntry, BASE_TX_CHECKSUM);
     }
 
     private List<StorageCommand> commandsRelatedToNode(long nodeId) {
@@ -343,7 +353,7 @@ class ParallelRecoveryVisitorTest {
             return LATEST_KERNEL_VERSION;
         }
 
-        abstract void lock(LockService lockService, LockGroup lockGroup);
+        abstract void lock(LockService.Client lockService);
     }
 
     private static class CommandRelatedToNode extends RecoveryTestBaseCommand {
@@ -354,8 +364,8 @@ class ParallelRecoveryVisitorTest {
         }
 
         @Override
-        void lock(LockService lockService, LockGroup lockGroup) {
-            lockGroup.add(lockService.acquireNodeLock(nodeId, LockType.EXCLUSIVE));
+        void lock(LockService.Client lockService) {
+            lockService.acquireNodeLock(nodeId, LockType.EXCLUSIVE);
         }
     }
 
@@ -364,17 +374,28 @@ class ParallelRecoveryVisitorTest {
         private final long[] applyOrder = new long[100];
         private final AtomicInteger lockOrderCursor = new AtomicInteger();
         private final AtomicInteger applyOrderCursor = new AtomicInteger();
-        private final StorageEngineCostCharacteristics costCharacteristics = () -> false;
+        private final StorageEngineCharacteristics characteristics = new StorageEngineCharacteristics() {
+            @Override
+            public boolean hasPropertyColocation() {
+                return false;
+            }
+
+            @Override
+            public boolean supportsFastExpandInto() {
+                return false;
+            }
+        };
 
         @Override
         public void lockRecoveryCommands(
-                CommandBatch commands, LockService lockService, LockGroup lockGroup, TransactionApplicationMode mode) {
-            commands.forEach(cmd -> ((RecoveryTestBaseCommand) cmd).lock(lockService, lockGroup));
+                CommandBatch commands, LockService.Client lockService, TransactionApplicationMode mode) {
+            commands.forEach(cmd -> ((RecoveryTestBaseCommand) cmd).lock(lockService));
             lockOrder[lockOrderCursor.getAndIncrement()] = idOf(commands);
         }
 
         @Override
-        public void apply(StorageEngineTransaction batch, TransactionApplicationMode mode) throws Exception {
+        public void apply(StorageEngineTransaction batch, TransactionApplicationMode mode, MemoryTracker memoryTracker)
+                throws Exception {
             applyOrder[applyOrderCursor.getAndIncrement()] = idOf(batch.commandBatch());
         }
 
@@ -408,7 +429,7 @@ class ParallelRecoveryVisitorTest {
         }
 
         @Override
-        public CommandCreationContext newCommandCreationContext(boolean multiVersioned) {
+        public CommandCreationContext newCommandCreationContext(boolean multiVersioned, MemoryTracker memoryTracker) {
             throw new UnsupportedOperationException();
         }
 
@@ -446,12 +467,19 @@ class ParallelRecoveryVisitorTest {
         }
 
         @Override
+        public StorageCommand.VersionUpgradeCommand createUpgradeCommand(
+                KernelVersion from, KernelVersion to, LogFormat logFormatTo) {
+            throw new UnsupportedOperationException("Not needed for this test");
+        }
+
+        @Override
         public EnrichmentCommand createEnrichmentCommand(KernelVersion kernelVersion, Enrichment enrichment) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public void checkpoint(DatabaseFlushEvent flushEvent, CursorContext cursorTracer) {
+        public void checkpoint(
+                DatabaseFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorTracer) {
             throw new UnsupportedOperationException();
         }
 
@@ -461,27 +489,22 @@ class ParallelRecoveryVisitorTest {
         }
 
         @Override
-        public void listStorageFiles(Collection<StoreFileMetadata> atomic, Collection<StoreFileMetadata> replayable) {
+        public Collection<Path> listStorageFiles(StorageFileSelection selection) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public void listIdFiles(Collection<StoreFileMetadata> target) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public StoreId retrieveStoreId() {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public Lifecycle schemaAndTokensLifecycle() {
+        public Lifecycle schemaAndTokensLifecycle(boolean ignoreUnreadable) {
             throw new UnsupportedOperationException();
         }
 
         @Override
         public MetadataProvider metadataProvider() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public LogMetadataProvider logMetadataProvider() {
             throw new UnsupportedOperationException();
         }
 
@@ -501,11 +524,6 @@ class ParallelRecoveryVisitorTest {
         }
 
         @Override
-        public InternalErrorTracer internalErrorTracer() {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
         public void preAllocateStoreFilesForCommands(StorageEngineTransaction batch, TransactionApplicationMode mode) {}
 
         @Override
@@ -520,8 +538,13 @@ class ParallelRecoveryVisitorTest {
         }
 
         @Override
-        public StorageEngineCostCharacteristics costCharacteristics() {
-            return costCharacteristics;
+        public StorageEngineCharacteristics characteristics() {
+            return characteristics;
+        }
+
+        @Override
+        public CommandReaderFactory commandReaderFactory() {
+            throw new UnsupportedOperationException();
         }
     }
 }

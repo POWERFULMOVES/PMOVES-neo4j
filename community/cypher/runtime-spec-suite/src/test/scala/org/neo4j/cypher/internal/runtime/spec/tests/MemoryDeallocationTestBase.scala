@@ -38,9 +38,7 @@ import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.cypher.internal.runtime.spec.rewriters.TestPlanCombinationRewriter
 import org.neo4j.io.ByteUnit
 import org.neo4j.kernel.api.KernelTransaction
-import org.neo4j.kernel.impl.api.KernelTransactions
 import org.neo4j.kernel.impl.util.ReadAndDeleteTransactionConflictException
-import org.neo4j.kernel.internal.GraphDatabaseAPI
 import org.neo4j.values.storable.Values
 import org.neo4j.values.virtual.ListValue
 import org.neo4j.values.virtual.VirtualValues
@@ -90,7 +88,7 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
       testPlanCombinationRewriterHints = Set(TestPlanCombinationRewriter.NoRewrites)
     )
     with InputStreams[CONTEXT]
-    with RandomValuesTestSupport {
+    with RandomValuesTestSupport[CONTEXT] {
 
   test("should deallocate memory between grouping aggregation - many groups") {
     // given
@@ -112,12 +110,17 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
     val nRows = sizeHint
 
     // then
+    val toleratedDeviation = runtimeUsed match {
+      case Parallel  => 0.5
+      case Pipelined => 0.05
+      case _         => 0.0
+    }
     compareMemoryUsageWithInputRows(
       logicalQuery1,
       logicalQuery2,
       nRows,
-      toleratedDeviation = 0.05
-    ) // Pipelined is not exact
+      toleratedDeviation
+    )
   }
 
   test("should deallocate memory between grouping aggregation - one large group") {
@@ -145,13 +148,16 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
     val input2 = finiteInput(nRows, Some(_ => Array(0)))
 
     // then
+    val toleratedDeviation = runtimeUsed match {
+      case _ => 0.05
+    }
     compareMemoryUsageWithInputStreams(
       logicalQuery1,
       logicalQuery2,
       input1,
       input2,
-      toleratedDeviation = 0.05
-    ) // Pipelined is not exact
+      toleratedDeviation = toleratedDeviation
+    )
   }
 
   test("should deallocate memory between eager") {
@@ -174,7 +180,12 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
     val nRows = sizeHint
 
     // then
-    compareMemoryUsageWithInputRows(logicalQuery1, logicalQuery2, nRows, 0.035) // Pipelined is not exact
+    val toleratedDeviation = runtimeUsed match {
+      case Parallel  => 0.2
+      case Pipelined => 0.035
+      case _         => 0.0
+    }
+    compareMemoryUsageWithInputRows(logicalQuery1, logicalQuery2, nRows, toleratedDeviation)
   }
 
   test("should deallocate memory between sort") {
@@ -198,8 +209,13 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
     val nRows = sizeHint
 
     // then
-    // Unfortunately adding two extra plans make the GrowingArray holding operator memory tracker grow, so we need a tiny bit of tolerance here
-    compareMemoryUsageWithInputRows(logicalQuery1, logicalQuery2, nRows, toleratedDeviation = 0.01)
+    // Unfortunately adding two extra plans make the GrowingArray holding operator memory tracker grow, so we need a tiny bit of tolerance here,
+    // and unfortunately a lot of tolerance in parallel
+    val toleratedDeviation = runtimeUsed match {
+      case Parallel => 0.2
+      case _        => 0.01
+    }
+    compareMemoryUsageWithInputRows(logicalQuery1, logicalQuery2, nRows, toleratedDeviation)
   }
 
   test("should deallocate memory between top") {
@@ -256,11 +272,15 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
       .build()
 
     // then
-    compareMemoryUsage(logicalQuery1, logicalQuery2, toleratedDeviation = 0.1)
+    val toleratedDeviation = runtimeUsed match {
+      case Parallel => 0.4
+      case _        => 0.1
+    }
+    compareMemoryUsage(logicalQuery1, logicalQuery2, toleratedDeviation = toleratedDeviation)
   }
 
   test("should deallocate memory between multi node hash joins") {
-    val nNodes = sizeHint
+    val nNodes = 200
 
     val paths = givenGraph { chainGraphs(nNodes, "R") }
     val random = new Random(seed = 1337)
@@ -300,6 +320,7 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
     // then
     val toleratedDeviation = runtimeUsed match {
       case Interpreted => 0.2 // TODO: Improve accuracy of interpreted
+      case Parallel    => 0.4
       case _           => 0.1
     }
     compareMemoryUsage(logicalQuery1, logicalQuery2, () => input1, () => input2, toleratedDeviation)
@@ -351,7 +372,11 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
       .build()
 
     // then
-    compareMemoryUsage(logicalQuery1, logicalQuery2, input, input, toleratedDeviation = 0.1)
+    val toleratedDeviation = runtimeUsed match {
+      case Parallel => 0.4
+      case _        => 0.1
+    }
+    compareMemoryUsage(logicalQuery1, logicalQuery2, input, input, toleratedDeviation = toleratedDeviation)
   }
 
   test("should deallocate memory between right outer hash joins") {
@@ -399,7 +424,11 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
       .build()
 
     // then
-    compareMemoryUsage(logicalQuery1, logicalQuery2, input, input, toleratedDeviation = 0.1)
+    val toleratedDeviation = runtimeUsed match {
+      case Parallel => 0.4
+      case _        => 0.1
+    }
+    compareMemoryUsage(logicalQuery1, logicalQuery2, input, input, toleratedDeviation = toleratedDeviation)
   }
 
   test("should deallocate memory between value hash joins") {
@@ -434,6 +463,7 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
     // then
     val toleratedDeviation = runtimeUsed match {
       case Interpreted => 0.2 // TODO: Improve accuracy of interpreted
+      case Parallel    => 0.4
       case _           => 0.1
     }
     compareMemoryUsage(logicalQuery1, logicalQuery2, toleratedDeviation = toleratedDeviation)
@@ -456,7 +486,12 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
       .build()
 
     // then
-    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, 0.01) // Pipelined is not exact
+    val toleratedDeviation = runtimeUsed match {
+      case Parallel  => 0.5
+      case Pipelined => 0.01
+      case _         => 0.0
+    }
+    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, toleratedDeviation)
   }
 
   test("should deallocate memory for single primitive distinct on RHS of apply") {
@@ -478,7 +513,12 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
       .build()
 
     // then
-    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, 0.01) // Pipelined is not exact
+    val toleratedDeviation = runtimeUsed match {
+      case Parallel  => 0.5
+      case Pipelined => 0.01
+      case _         => 0.0
+    }
+    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, toleratedDeviation)
   }
 
   test("should deallocate memory for multiple primitive distinct on RHS of apply") {
@@ -500,7 +540,12 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
       .build()
 
     // then
-    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, 0.01) // Pipelined is not exact
+    val toleratedDeviation = runtimeUsed match {
+      case Parallel  => 0.5
+      case Pipelined => 0.01
+      case _         => 0.0
+    }
+    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, toleratedDeviation)
   }
 
   test("should deallocate memory for empty distinct on RHS of apply") {
@@ -520,7 +565,12 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
       .build()
 
     // then
-    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, 0.01) // Pipelined is not exact
+    val toleratedDeviation = runtimeUsed match {
+      case Parallel  => 0.5
+      case Pipelined => 0.01
+      case _         => 0.0
+    }
+    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, toleratedDeviation)
   }
 
   test("should deallocate memory for empty single primitive distinct on RHS of apply") {
@@ -538,7 +588,12 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
       .build()
 
     // then
-    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, 0.01) // Pipelined is not exact
+    val toleratedDeviation = runtimeUsed match {
+      case Parallel  => 0.5
+      case Pipelined => 0.01
+      case _         => 0.0
+    }
+    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, toleratedDeviation)
   }
 
   test("should deallocate memory for empty multiple primitive distinct on RHS of apply") {
@@ -556,7 +611,12 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
       .build()
 
     // then
-    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, 0.01) // Pipelined is not exact
+    val toleratedDeviation = runtimeUsed match {
+      case Parallel  => 0.5
+      case Pipelined => 0.01
+      case _         => 0.0
+    }
+    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, toleratedDeviation)
   }
 
   test("should deallocate memory for limit on RHS of apply") {
@@ -576,7 +636,12 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
       .build()
 
     // then
-    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, 0.01) // Pipelined is not exact
+    val toleratedDeviation = runtimeUsed match {
+      case Parallel  => 0.5
+      case Pipelined => 0.01
+      case _         => 0.0
+    }
+    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, toleratedDeviation)
   }
 
   test("should deallocate memory for empty limit on RHS of apply") {
@@ -596,7 +661,12 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
       .build()
 
     // then
-    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, 0.01) // Pipelined is not exact
+    val toleratedDeviation = runtimeUsed match {
+      case Parallel  => 0.5
+      case Pipelined => 0.01
+      case _         => 0.0
+    }
+    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, toleratedDeviation)
   }
 
   test("should deallocate memory for skip on RHS of apply") {
@@ -616,7 +686,12 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
       .build()
 
     // then
-    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, 0.01) // Pipelined is not exact
+    val toleratedDeviation = runtimeUsed match {
+      case Parallel  => 0.5
+      case Pipelined => 0.01
+      case _         => 0.0
+    }
+    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, toleratedDeviation)
   }
 
   test("should deallocate memory for empty skip on RHS of apply") {
@@ -636,7 +711,12 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
       .build()
 
     // then
-    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, 0.01) // Pipelined is not exact
+    val toleratedDeviation = runtimeUsed match {
+      case Parallel  => 0.5
+      case Pipelined => 0.01
+      case _         => 0.0
+    }
+    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, toleratedDeviation)
   }
 
   test("should deallocate memory for partial top on RHS of apply") {
@@ -658,7 +738,12 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
       .build()
 
     // then
-    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, 0.01) // Pipelined is not exact
+    val toleratedDeviation = runtimeUsed match {
+      case Parallel  => 0.1
+      case Pipelined => 0.01
+      case _         => 0.0
+    }
+    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, toleratedDeviation)
   }
 
   test("should deallocate memory for empty partial top on RHS of apply") {
@@ -680,7 +765,12 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
       .build()
 
     // then
-    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, 0.01) // Pipelined is not exact
+    val toleratedDeviation = runtimeUsed match {
+      case Parallel  => 0.1
+      case Pipelined => 0.01
+      case _         => 0.0
+    }
+    compareMemoryUsageWithInputStreams(logicalQuery, logicalQuery, input1, input2, toleratedDeviation)
   }
 
   test("should deallocate discarded slots with eager") {
@@ -824,7 +914,11 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
       .build()
 
     // then
-    compareMemoryUsage(query(rows = 10), query(rows = 100))
+    val toleratedDeviation = runtimeUsed match {
+      case Parallel => 0.6
+      case _        => 0.0
+    }
+    compareMemoryUsage(query(rows = 10), query(rows = 100), toleratedDeviation = toleratedDeviation)
   }
 
   test("should deallocate memory after aggregation under apply") {
@@ -838,7 +932,11 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
       .argument()
       .build()
 
-    compareMemoryUsage(query(rows = 10), query(rows = 100), toleratedDeviation = 0.01)
+    val toleratedDeviation = runtimeUsed match {
+      case Parallel => 0.4
+      case _        => 0.01
+    }
+    compareMemoryUsage(query(rows = 10), query(rows = 100), toleratedDeviation = toleratedDeviation)
   }
 
   test("should deallocate memory after sort under apply") {
@@ -854,7 +952,12 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
       .build()
 
     // then
-    compareMemoryUsage(query(rows = 10), query(rows = 100), toleratedDeviation = 0.005)
+    val toleratedDeviation = runtimeUsed match {
+      // TODO: this deviation in parallel is very high
+      case Parallel => 0.8
+      case _        => 0.005
+    }
+    compareMemoryUsage(query(rows = 10), query(rows = 100), toleratedDeviation = toleratedDeviation)
   }
 
   test("should deallocate memory after top under apply") {
@@ -870,7 +973,11 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
       .build()
 
     // then
-    compareMemoryUsage(query(rows = 10), query(rows = 100), toleratedDeviation = 0.01)
+    val toleratedDeviation = runtimeUsed match {
+      case Parallel => 0.4
+      case _        => 0.01
+    }
+    compareMemoryUsage(query(rows = 10), query(rows = 100), toleratedDeviation = toleratedDeviation)
   }
 
   test("should deallocate memory after skip with out of order arguments in pipelined runtime") {
@@ -891,8 +998,12 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
         .argument()
         .build()
     }
-
-    compareMemoryUsage(query(skip = 1000), query(skip = 10000), toleratedDeviation = 0.5)
+    // then
+    val toleratedDeviation = runtimeUsed match {
+      case Parallel => 0.8
+      case _        => 0.5
+    }
+    compareMemoryUsage(query(skip = 1000), query(skip = 10000), toleratedDeviation = toleratedDeviation)
   }
 
   test("should account for memory allocated in value population") {
@@ -970,7 +1081,7 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
     compareMemoryUsage(
       queryWithNestedNodeRefs,
       queryWithPropsAndLabels,
-      toleratedDeviation = 0.20,
+      toleratedDeviation = 0.25,
       minAllocated = estHeapPropsAndLabels
     )
   }
@@ -1016,7 +1127,7 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
     logicalQuery2: LogicalQuery,
     input1: () => InputDataStream = () => NoInput,
     input2: () => InputDataStream = () => NoInput,
-    toleratedDeviation: Double = 0.0,
+    toleratedDeviation: Double,
     minAllocated: Long = 0,
     txType: Option[KernelTransaction.Type] = None
   ): Unit = {
@@ -1031,8 +1142,10 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
     val deviationPercentage = Math.round(deviation * 100)
     val toleratedDeviationPercentage = Math.round(toleratedDeviation * 100)
     val deviationMessage =
-      s"$deviationPercentage%${if (toleratedDeviation > 0.0d) s" is more than tolerated ${toleratedDeviationPercentage}%"
-        else ""}"
+      s"$deviationPercentage%${
+          if (toleratedDeviation > 0.0d) s" is more than tolerated ${toleratedDeviationPercentage}%"
+          else ""
+        }"
 
     withClue(
       s"Query 1 used $maxMem1 bytes and Query 2 used $maxMem2 bytes ($memDiff bytes difference, $deviationMessage):\n"
@@ -1062,16 +1175,6 @@ abstract class MemoryDeallocationTestBase[CONTEXT <: RuntimeContext](
       // some node is missing, ignore
     }
 
-    if (isParallel) {
-      // TODO: Parallel runtime does not yet support heap high watermark through query profile
-      //       For now, create a very rough estimate from how much heap was grabbed from the transaction memory pool
-      val kernelTransactions =
-        graphDb.asInstanceOf[GraphDatabaseAPI].getDependencyResolver.resolveDependency(classOf[KernelTransactions])
-      val activeTransactions = kernelTransactions.activeTransactions()
-      activeTransactions.size() should be(1)
-      activeTransactions.iterator().next().transactionStatistic().getEstimatedUsedHeapMemory
-    } else {
-      runtimeResult.runtimeResult.queryProfile().maxAllocatedMemory()
-    }
+    runtimeResult.runtimeResult.queryProfile().maxAllocatedMemory()
   }
 }

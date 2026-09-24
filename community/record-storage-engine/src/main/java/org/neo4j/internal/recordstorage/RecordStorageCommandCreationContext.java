@@ -25,9 +25,8 @@ import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import org.neo4j.common.TokenNameLookup;
 import org.neo4j.configuration.Config;
+import org.neo4j.internal.id.IdSequenceProvider;
 import org.neo4j.internal.recordstorage.RecordAccess.LoadMonitor;
-import org.neo4j.internal.recordstorage.id.BatchedTransactionIdSequenceProvider;
-import org.neo4j.internal.recordstorage.id.IdSequenceProvider;
 import org.neo4j.internal.recordstorage.id.TransactionIdSequenceProvider;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.kernel.KernelVersion;
@@ -50,7 +49,7 @@ import org.neo4j.storageengine.api.cursor.StoreCursors;
 class RecordStorageCommandCreationContext implements CommandCreationContext {
     private final NeoStores neoStores;
     private final Config config;
-    private final boolean multiVersioned;
+    private final String format;
     private final TokenNameLookup tokenNameLookup;
     private final InternalLogProvider logProvider;
     private final int denseNodeThreshold;
@@ -64,7 +63,7 @@ class RecordStorageCommandCreationContext implements CommandCreationContext {
     private StoreCursors storeCursors;
     private ResourceLocker locks;
     private final DynamicAllocatorProvider dynamicAllocatorProvider;
-    private final IdSequenceProvider transactionSequenceProvider;
+    private final IdSequenceProvider idSequenceProvider;
 
     RecordStorageCommandCreationContext(
             NeoStores neoStores,
@@ -72,15 +71,15 @@ class RecordStorageCommandCreationContext implements CommandCreationContext {
             InternalLogProvider logProvider,
             int denseNodeThreshold,
             Config config,
-            boolean multiVersioned) {
+            String format) {
         this.tokenNameLookup = tokenNameLookup;
         this.logProvider = logProvider;
         this.denseNodeThreshold = denseNodeThreshold;
         this.neoStores = neoStores;
         this.config = config;
-        this.multiVersioned = multiVersioned;
-        this.transactionSequenceProvider = createIdSequenceProvider(neoStores, multiVersioned);
-        this.dynamicAllocatorProvider = new TransactionDynamicAllocatorProvider(neoStores, transactionSequenceProvider);
+        this.format = format;
+        this.idSequenceProvider = createIdSequenceProvider(neoStores);
+        this.dynamicAllocatorProvider = new TransactionDynamicAllocatorProvider(neoStores, idSequenceProvider);
     }
 
     @Override
@@ -105,17 +104,18 @@ class RecordStorageCommandCreationContext implements CommandCreationContext {
                 dynamicAllocatorProvider.allocator(StoreType.PROPERTY_STRING),
                 dynamicAllocatorProvider.allocator(StoreType.PROPERTY_ARRAY),
                 propertyTraverser,
-                transactionSequenceProvider,
-                cursorContext);
+                idSequenceProvider,
+                cursorContext,
+                format);
     }
 
     @Override
     public boolean resetIds() {
-        return multiVersioned && transactionSequenceProvider.reset();
+        return false;
     }
 
     private long nextId(StoreType storeType) {
-        return transactionSequenceProvider.getIdSequence(storeType).nextId(cursorContext);
+        return idSequenceProvider.getIdSequence(storeType).nextId(cursorContext);
     }
 
     ResourceLocker getLocks() {
@@ -159,7 +159,7 @@ class RecordStorageCommandCreationContext implements CommandCreationContext {
 
     @Override
     public void close() {
-        transactionSequenceProvider.release(cursorContext);
+        idSequenceProvider.release(cursorContext);
     }
 
     TransactionRecordState createTransactionRecordState(
@@ -169,17 +169,14 @@ class RecordStorageCommandCreationContext implements CommandCreationContext {
             MemoryTracker memoryTracker,
             LoadMonitor monitor) {
         RecordChangeSet recordChangeSet = new RecordChangeSet(loaders, memoryTracker, monitor, storeCursors);
-        var relationshipLocker =
-                multiVersioned ? new MultiversionResourceLocker(locks, neoStores.getRelationshipStore()) : locks;
         RelationshipModifier relationshipModifier = new RelationshipModifier(
                 relationshipGroupGetter,
                 propertyDeleter,
                 denseNodeThreshold,
-                relationshipLocker,
+                locks,
                 lockTracer,
                 cursorContext,
-                memoryTracker,
-                multiVersioned);
+                memoryTracker);
         return new TransactionRecordState(
                 kernelVersionProvider,
                 recordChangeSet,
@@ -194,7 +191,7 @@ class RecordStorageCommandCreationContext implements CommandCreationContext {
                 memoryTracker,
                 commandSerialization,
                 dynamicAllocatorProvider,
-                transactionSequenceProvider);
+                idSequenceProvider);
     }
 
     @Override
@@ -205,13 +202,12 @@ class RecordStorageCommandCreationContext implements CommandCreationContext {
     private static class TransactionDynamicAllocatorProvider implements DynamicAllocatorProvider {
         private final StandardDynamicRecordAllocator[] dynamicAllocators =
                 new StandardDynamicRecordAllocator[StoreType.STORE_TYPES.length];
-        private final IdSequenceProvider transactionSequenceProvider;
+        private final IdSequenceProvider idSequenceProvider;
         private final NeoStores neoStores;
 
-        public TransactionDynamicAllocatorProvider(
-                NeoStores neoStores, IdSequenceProvider transactionSequenceProvider) {
+        public TransactionDynamicAllocatorProvider(NeoStores neoStores, IdSequenceProvider idSequenceProvider) {
             this.neoStores = neoStores;
-            this.transactionSequenceProvider = transactionSequenceProvider;
+            this.idSequenceProvider = idSequenceProvider;
         }
 
         @Override
@@ -222,17 +218,14 @@ class RecordStorageCommandCreationContext implements CommandCreationContext {
             }
 
             var newAllocator = new StandardDynamicRecordAllocator(
-                    cursorContext ->
-                            transactionSequenceProvider.getIdSequence(type).nextId(cursorContext),
+                    cursorContext -> idSequenceProvider.getIdSequence(type).nextId(cursorContext),
                     neoStores.getRecordStore(type).getRecordDataSize());
             dynamicAllocators[type.ordinal()] = newAllocator;
             return newAllocator;
         }
     }
 
-    private static IdSequenceProvider createIdSequenceProvider(NeoStores neoStores, boolean multiVersioned) {
-        return multiVersioned
-                ? new BatchedTransactionIdSequenceProvider(neoStores)
-                : new TransactionIdSequenceProvider(neoStores);
+    private static IdSequenceProvider createIdSequenceProvider(NeoStores neoStores) {
+        return new TransactionIdSequenceProvider(neoStores);
     }
 }

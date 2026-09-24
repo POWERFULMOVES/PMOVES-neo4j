@@ -32,6 +32,10 @@ import java.util.function.Function;
 
 public class AssertableLogProvider extends AbstractLogProvider<InternalLog> {
     private final boolean debugEnabled;
+    private final boolean warnEnabled;
+    private final boolean infoEnabled;
+    private final boolean errorEnabled;
+
     private final Queue<LogCall> logCalls = new LinkedBlockingQueue<>();
 
     public AssertableLogProvider() {
@@ -39,7 +43,21 @@ public class AssertableLogProvider extends AbstractLogProvider<InternalLog> {
     }
 
     public AssertableLogProvider(boolean debugEnabled) {
+        this(debugEnabled, false, false, false);
+    }
+
+    public AssertableLogProvider(boolean debugEnabled, boolean warnEnabled, boolean infoEnabled, boolean errorEnabled) {
         this.debugEnabled = debugEnabled;
+
+        if (debugEnabled) {
+            this.warnEnabled = true;
+            this.infoEnabled = true;
+            this.errorEnabled = true;
+        } else {
+            this.warnEnabled = warnEnabled;
+            this.infoEnabled = infoEnabled;
+            this.errorEnabled = errorEnabled;
+        }
     }
 
     public void print(PrintStream out) {
@@ -165,6 +183,21 @@ public class AssertableLogProvider extends AbstractLogProvider<InternalLog> {
         }
 
         @Override
+        public boolean isWarnEnabled() {
+            return warnEnabled;
+        }
+
+        @Override
+        public boolean isInfoEnabled() {
+            return infoEnabled;
+        }
+
+        @Override
+        public boolean isErrorEnabled() {
+            return errorEnabled;
+        }
+
+        @Override
         public void debug(String message) {
             logCalls.add(new LogCall(context, Level.DEBUG, message, null, null));
         }
@@ -226,42 +259,24 @@ public class AssertableLogProvider extends AbstractLogProvider<InternalLog> {
 
         @Override
         public void debug(Neo4jLogMessage message) {
-            logCalls.add(new LogCall(context, Level.DEBUG, message.getFormattedMessage(), null, null));
-        }
-
-        @Override
-        public void debug(Neo4jMessageSupplier supplier) {
-            logCalls.add(new LogCall(context, Level.DEBUG, supplier.get().getFormattedMessage(), null, null));
+            logCalls.add(
+                    new LogCall(context, Level.DEBUG, message.getFormattedMessage(), null, message.getThrowable()));
         }
 
         @Override
         public void info(Neo4jLogMessage message) {
-            logCalls.add(new LogCall(context, Level.INFO, message.getFormattedMessage(), null, null));
-        }
-
-        @Override
-        public void info(Neo4jMessageSupplier supplier) {
-            logCalls.add(new LogCall(context, Level.INFO, supplier.get().getFormattedMessage(), null, null));
+            logCalls.add(new LogCall(context, Level.INFO, message.getFormattedMessage(), null, message.getThrowable()));
         }
 
         @Override
         public void warn(Neo4jLogMessage message) {
-            logCalls.add(new LogCall(context, Level.WARN, message.getFormattedMessage(), null, null));
-        }
-
-        @Override
-        public void warn(Neo4jMessageSupplier supplier) {
-            logCalls.add(new LogCall(context, Level.WARN, supplier.get().getFormattedMessage(), null, null));
+            logCalls.add(new LogCall(context, Level.WARN, message.getFormattedMessage(), null, message.getThrowable()));
         }
 
         @Override
         public void error(Neo4jLogMessage message) {
-            logCalls.add(new LogCall(context, Level.ERROR, message.getFormattedMessage(), null, null));
-        }
-
-        @Override
-        public void error(Neo4jMessageSupplier supplier) {
-            logCalls.add(new LogCall(context, Level.ERROR, supplier.get().getFormattedMessage(), null, null));
+            logCalls.add(
+                    new LogCall(context, Level.ERROR, message.getFormattedMessage(), null, message.getThrowable()));
         }
 
         @Override
@@ -289,6 +304,10 @@ public class AssertableLogProvider extends AbstractLogProvider<InternalLog> {
 
     public String serialize() {
         return serialize0(logCalls.iterator(), LogCall::toLogLikeString);
+    }
+
+    public Iterator<String> logLines() {
+        return logCalls.stream().map(LogCall::toLogLikeString).iterator();
     }
 
     private static String serialize0(Iterator<LogCall> events, Function<LogCall, String> serializer) {

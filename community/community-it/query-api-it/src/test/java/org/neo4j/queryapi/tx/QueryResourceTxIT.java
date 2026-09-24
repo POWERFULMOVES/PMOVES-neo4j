@@ -19,75 +19,43 @@
  */
 package org.neo4j.queryapi.tx;
 
-import static org.neo4j.queryapi.QueryApiTestUtil.resolveDependency;
-import static org.neo4j.queryapi.QueryApiTestUtil.setupLogging;
-import static org.neo4j.queryapi.QueryApiTestUtil.sleepProcedure;
+import static java.lang.String.format;
 import static org.neo4j.queryapi.QueryResponseAssertions.assertThat;
 
 import java.io.IOException;
-import java.util.EnumSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
 import org.assertj.core.api.Assertions;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
-import org.neo4j.configuration.connectors.BoltConnector;
-import org.neo4j.configuration.connectors.BoltConnectorInternalSettings;
-import org.neo4j.configuration.connectors.ConnectorPortRegister;
-import org.neo4j.configuration.connectors.ConnectorType;
-import org.neo4j.configuration.connectors.HttpConnector;
-import org.neo4j.configuration.helpers.SocketAddress;
-import org.neo4j.dbms.api.DatabaseManagementService;
-import org.neo4j.internal.kernel.api.exceptions.ProcedureException;
 import org.neo4j.kernel.api.exceptions.Status;
-import org.neo4j.kernel.api.procedure.GlobalProcedures;
-import org.neo4j.queryapi.QueryApiTestUtil;
-import org.neo4j.queryapi.testclient.QueryAPITestClient;
-import org.neo4j.queryapi.testclient.QueryApiTestClientException;
-import org.neo4j.queryapi.testclient.QueryContentType;
-import org.neo4j.queryapi.testclient.QueryRequest;
-import org.neo4j.server.configuration.ConfigurableServerModules;
+import org.neo4j.queryapi.QueryResponseAssertions;
+import org.neo4j.queryapi.test.annotation.QueryAPITestExtension;
+import org.neo4j.queryapi.test.testclient.QueryAPITestClient;
+import org.neo4j.queryapi.test.testclient.QueryApiTestClientException;
+import org.neo4j.queryapi.test.testclient.QueryContentType;
+import org.neo4j.queryapi.test.testclient.QueryRequest;
 import org.neo4j.server.configuration.ServerSettings;
 import org.neo4j.server.queryapi.tx.TransactionManager;
-import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 
-public class QueryResourceTxIT {
+@QueryAPITestExtension
+class QueryResourceTxIT {
 
-    private static QueryAPITestClient testClient;
-    private static DatabaseManagementService dbms;
-    private static TransactionManager txManager;
-    private static String queryEndpoint;
+    private final QueryAPITestClient testClient;
 
-    @BeforeAll
-    static void beforeAll() throws ProcedureException {
-        setupLogging();
-        var builder = new TestDatabaseManagementServiceBuilder();
-        dbms = builder.setConfig(HttpConnector.enabled, true)
-                .setConfig(HttpConnector.listen_address, new SocketAddress("localhost", 0))
-                .setConfig(BoltConnectorInternalSettings.local_channel_address, QueryResourceTxIT.class.getSimpleName())
-                .setConfig(BoltConnector.enabled, true)
-                .setConfig(BoltConnectorInternalSettings.enable_local_connector, true)
-                .setConfig(ServerSettings.http_enabled_modules, EnumSet.allOf(ConfigurableServerModules.class))
-                .impermanent()
-                .build();
+    private final TransactionManager txManager;
+    private final String queryEndpoint;
 
-        resolveDependency(dbms, GlobalProcedures.class).register(sleepProcedure());
-        txManager = resolveDependency(dbms, TransactionManager.class);
-        var portRegister = QueryApiTestUtil.resolveDependency(dbms, ConnectorPortRegister.class);
-        queryEndpoint = "http://" + portRegister.getLocalAddress(ConnectorType.HTTP) + "/db/{databaseName}/query/v2";
-        testClient = new QueryAPITestClient(queryEndpoint);
-    }
-
-    @AfterAll
-    static void afterAll() {
-        dbms.shutdown();
+    QueryResourceTxIT(QueryAPITestClient testClient, TransactionManager txManager) {
+        this.testClient = testClient;
+        this.txManager = txManager;
+        this.queryEndpoint = testClient.getEndpoint();
     }
 
     @BeforeEach
@@ -108,6 +76,7 @@ public class QueryResourceTxIT {
         assertThat(startTx).wasSuccessful();
         assertThat(startTx).hasRecord();
         assertThat(startTx).hasTransaction();
+        assertThat(startTx).hasTimers();
         testClient.commitTx(startTx.body().txId());
     }
 
@@ -117,6 +86,7 @@ public class QueryResourceTxIT {
 
         assertThat(startTx).wasSuccessful();
         assertThat(startTx).hasTransaction();
+        assertThat(startTx).hasNoTimers();
         testClient.commitTx(startTx.body().txId());
     }
 
@@ -130,6 +100,7 @@ public class QueryResourceTxIT {
         assertThat(res).wasSuccessful();
         assertThat(res).hasRecord();
         assertThat(res).hasTransaction();
+        assertThat(res).hasTimers();
         testClient.commitTx(res.body().txId());
     }
 
@@ -162,7 +133,24 @@ public class QueryResourceTxIT {
         assertThat(continueTx).wasSuccessful();
         assertThat(continueTx).hasRecord();
         assertThat(continueTx).hasTransaction();
+        assertThat(continueTx).hasTimers();
         testClient.commitTx(continueTx.body().txId());
+    }
+
+    @Test
+    void shouldContinueTxWithCreateNode() throws IOException, InterruptedException, QueryApiTestClientException {
+        var nodeCount = currentNodeCount("ContinueNode");
+        var res = testClient.beginTx();
+        var continueTx = testClient.runInTx(
+                QueryRequest.newBuilder().statement("CREATE (n:ContinueNode)").build(),
+                res.body().txId());
+
+        assertThat(continueTx).wasSuccessful();
+        assertThat(continueTx).hasTransaction();
+        assertThat(continueTx).hasTimers();
+        Assertions.assertThat(currentNodeCount("ContinueNode")).isEqualTo(nodeCount);
+        testClient.commitTx(continueTx.body().txId());
+        Assertions.assertThat(currentNodeCount("ContinueNode")).isEqualTo(nodeCount + 1);
     }
 
     @Test
@@ -173,6 +161,7 @@ public class QueryResourceTxIT {
 
         assertThat(continueTx).wasSuccessful();
         assertThat(continueTx).hasTransaction();
+        assertThat(continueTx).hasNoTimers();
         testClient.commitTx(continueTx.body().txId());
     }
 
@@ -211,6 +200,7 @@ public class QueryResourceTxIT {
         assertThat(commit).wasSuccessful();
         assertThat(commit).hasNoTransaction();
         assertThat(commit).hasBookmark();
+        assertThat(commit).hasTimers();
 
         // verify node created
         var newNodeCheck = testClient.autoCommit(QueryRequest.newBuilder()
@@ -227,6 +217,7 @@ public class QueryResourceTxIT {
 
         assertThat(commitRes).wasSuccessful();
         assertThat(commitRes).hasBookmark();
+        assertThat(commitRes).hasNoTimers();
         assertThat(commitRes).hasNoTransaction();
 
         // verify node created
@@ -278,13 +269,18 @@ public class QueryResourceTxIT {
 
     @Test
     void shouldRollbackTx() throws IOException, InterruptedException, QueryApiTestClientException {
-        var res = testClient.beginTx();
+        var nodeCount = currentNodeCount("QueryAPIRollbackNode");
+
+        var res = testClient.beginTx(QueryRequest.newBuilder()
+                .statement("CREATE (n:QueryAPIRollbackNode)")
+                .build());
         var rollback = testClient.rollbackTx(res.body().txId());
 
         Assertions.assertThat(rollback.statusCode()).isEqualTo(200);
 
         var shouldNotBeAvailable = testClient.commitTx(res.body().txId());
         assertThat(shouldNotBeAvailable).wasNotFound();
+        Assertions.assertThat(currentNodeCount("QueryAPIRollbackNode")).isEqualTo(nodeCount);
     }
 
     void shouldHandleRollbackError() {
@@ -375,11 +371,55 @@ public class QueryResourceTxIT {
     void shouldHaveExpectedTransactionIdLength() throws IOException, InterruptedException, QueryApiTestClientException {
         var res = testClient.beginTx();
         assertThat(res).hasTransaction();
-        Assertions.assertThat(res.body().txId().length()).isEqualTo(4);
+        Assertions.assertThat(res.body().txId()).hasSize(ServerSettings.transaction_id_length.defaultValue());
         testClient.commitTx(res.body().txId());
+    }
+
+    @ParameterizedTest
+    @MethodSource("queryRequestElements")
+    void shouldHandleRequestFieldsInAnyOrder(List<String> elements)
+            throws IOException, InterruptedException, QueryApiTestClientException {
+        var response = testClient.sendRawBeginTx("{ %s }".formatted(String.join(",", elements)));
+
+        QueryResponseAssertions.assertThat(response).wasSuccessful();
+
+        testClient.rollbackTx(response.body().txId());
+    }
+
+    private int currentNodeCount(String label) throws IOException, InterruptedException {
+        return testClient
+                .autoCommit(QueryRequest.newBuilder()
+                        .statement(format("MATCH (n:%s) RETURN count(n)", label))
+                        .build())
+                .body()
+                .data()
+                .get("values")
+                .get(0)
+                .get(0)
+                .asInt();
     }
 
     public static Stream<Arguments> typedMimes() {
         return Stream.of(QueryContentType.TYPED, QueryContentType.TYPED_V1_0).map(Arguments::of);
+    }
+
+    static Stream<Arguments> queryRequestElements() {
+        var includeCounters = """
+                "includeCounters": true""";
+        var parameters = """
+                    "parameters": {
+                      "value": 1
+                    }\
+                """;
+        var statement = """
+                "statement": "RETURN $value AS one\"""";
+        return Stream.of(
+                        List.of(includeCounters, parameters, statement),
+                        List.of(includeCounters, statement, parameters),
+                        List.of(statement, includeCounters, parameters),
+                        List.of(statement, parameters, includeCounters),
+                        List.of(parameters, statement, includeCounters),
+                        List.of(parameters, includeCounters, statement))
+                .map(Arguments::of);
     }
 }

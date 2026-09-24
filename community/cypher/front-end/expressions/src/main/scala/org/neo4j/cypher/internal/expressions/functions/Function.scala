@@ -16,14 +16,16 @@
  */
 package org.neo4j.cypher.internal.expressions.functions
 
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
-import org.neo4j.cypher.internal.expressions.FunctionName
 import org.neo4j.cypher.internal.expressions.FunctionTypeSignature
-import org.neo4j.cypher.internal.expressions.Namespace
-import org.neo4j.cypher.internal.expressions.TypeSignatures
+import org.neo4j.cypher.internal.expressions.FunctionTypeSignatures
 import org.neo4j.cypher.internal.expressions.functions
+import org.neo4j.cypher.internal.util.FunctionName
 import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.cypher.internal.util.Namespace
+import org.neo4j.cypher.internal.util.helpers.LazyVal
 
 import java.util.Locale
 
@@ -39,7 +41,11 @@ object Category extends Enumeration {
   val STRING = "String"
   val SPATIAL = "Spatial"
   val GRAPH = "Graph"
+  val UUID = "UUID"
   val VECTOR = "Vector"
+  val SECURITY = "Security"
+  val LOCAL = "Local"
+  val PATH = "Path"
 }
 
 object Function {
@@ -47,22 +53,36 @@ object Function {
   private val knownFunctions: Seq[Function] = Vector(
     Abs,
     Acos,
+    AllReduce,
     Asin,
     Atan,
     Atan2,
     Avg,
     BTrim,
+    Cardinality,
     Ceil,
-    CharLength,
+    Ceiling,
     CharacterLength,
+    CharLength,
     Coalesce,
+    CollDistinct,
     Collect,
-    Ceil,
+    CollectList,
+    CollFlatten,
+    CollIndexOf,
+    CollInsert,
+    CollMax,
+    CollMin,
+    CollRemove,
+    CollSort,
     Cos,
+    Cosh,
     Cot,
+    Coth,
     Count,
     Degrees,
     Distance,
+    DurationBetween,
     E,
     ElementId,
     EndNode,
@@ -70,6 +90,7 @@ object Function {
     Exp,
     File,
     Floor,
+    Format,
     GraphByName,
     GraphByElementId,
     Haversin,
@@ -81,7 +102,11 @@ object Function {
     Last,
     Left,
     Length,
+    PathLength,
     Linenumber,
+    Ln,
+    LocalDateTime,
+    LocalTime,
     Log,
     Log10,
     Lower,
@@ -93,9 +118,12 @@ object Function {
     NullIf,
     Pi,
     PercentileCont,
+    PercentileContAlias,
     PercentileDisc,
+    PercentileDiscAlias,
     Percentiles,
     Point,
+    Properties,
     Keys,
     Radians,
     Rand,
@@ -110,16 +138,23 @@ object Function {
     RTrim,
     Sign,
     Sin,
+    Sinh,
     Size,
     Sqrt,
     Split,
     StartNode,
     StdDev,
     StdDevP,
+    StdDevPop,
+    StdDevSamp,
+    StringIndexOf,
+    StringJoin,
+    StringRegexReplace,
     Substring,
     Sum,
     Tail,
     Tan,
+    Tanh,
     ToBoolean,
     ToBooleanList,
     ToBooleanOrNull,
@@ -135,20 +170,62 @@ object Function {
     ToStringOrNull,
     ToUpper,
     Timestamp,
-    Properties,
     Trim,
     Type,
     Upper,
+    UUIDConstructor,
+    UUIDLeastSignificantBits,
+    UUIDMostSignificantBits,
     ValueType,
-    WithinBBox,
+    VectorDimensionCount,
+    VectorDistance,
+    VectorNorm,
+    VectorValueConstructor,
     VectorSimilarityEuclidean,
-    VectorSimilarityCosine
+    VectorSimilarityCosine,
+    WithinBBox,
+    ZonedDateTime,
+    ZonedTime
   )
 
-  lazy val lookup: Map[String, Function] = knownFunctions.map { f => (f.name.toLowerCase(Locale.ROOT), f) }.toMap
+  def lookup: Map[String, Function] = lazyLookup.value
 
-  lazy val functionInfo: List[FunctionTypeSignature] = {
+  private val lazyLookup: LazyVal[Map[String, Function]] = LazyVal {
+    knownFunctions.map { f => (f.name.toLowerCase(Locale.ROOT), f) }.toMap
+  }
+
+  def scopedLookup(scope: CypherVersion): Map[String, Function] =
+    knownFunctions.filter(_.signatures.exists(_.scopes.contains(scope))).map { f =>
+      (f.name.toLowerCase(Locale.ROOT), f)
+    }.toMap
+
+  def functionInfo: List[FunctionTypeSignature] = lazyFunctionInfo.value
+
+  private val lazyFunctionInfo: LazyVal[List[FunctionTypeSignature]] = LazyVal {
     lookup.values.flatMap {
+      (f: Function) =>
+        f.signatures.flatMap {
+          case signature: FunctionTypeSignature if !signature.internal && signature.semanticFeature.isEmpty =>
+            Some(signature)
+          case _ => None
+        }
+    }.toList
+  }
+
+  // Only use this if there are known functions under flags, otherwise use the lazy one above
+  def functionInfoWithFeatureFlags(flags: Set[String]): List[FunctionTypeSignature] = {
+    lookup.values.flatMap {
+      (f: Function) =>
+        f.signatures.flatMap {
+          case signature @ FunctionTypeSignature(_, _, _, _, _, _, _, _, _, false, semanticFeature, _, _, _, _)
+            if semanticFeature.isEmpty || semanticFeature.exists(flags.contains) => Some(signature)
+          case _ => None
+        }
+    }.toList
+  }
+
+  def scopedFunctionInfo(scope: CypherVersion): List[FunctionTypeSignature] = {
+    scopedLookup(scope).values.flatMap {
       (f: Function) =>
         f.signatures.flatMap {
           case signature: FunctionTypeSignature if !signature.internal => Some(signature)
@@ -173,7 +250,7 @@ object DeterministicFunction {
   def isFunctionDeterministic(f: Function): Boolean = f != Rand && f != RandomUUID && f != UnresolvedFunction
 }
 
-abstract class Function extends FunctionWithName with TypeSignatures {
+abstract class Function extends FunctionWithName with FunctionTypeSignatures {
 
   def asFunctionName(implicit position: InputPosition): FunctionName = {
     val names = name.split("\\.")
@@ -203,7 +280,7 @@ abstract class Function extends FunctionWithName with TypeSignatures {
     val namespace = function.namespace
     val functionName = function.name
     arg match {
-      case FunctionInvocation(FunctionName(ns, fn), _, args, _, _)
+      case FunctionInvocation(FunctionName(ns, fn), _, args, _, _, _, _)
         if functionName.equalsIgnoreCase(fn) && ns == namespace =>
         Some(args.head)
       case _ =>

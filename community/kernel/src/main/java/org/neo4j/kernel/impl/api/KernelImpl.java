@@ -67,7 +67,6 @@ public class KernelImpl extends LifecycleAdapter implements Kernel {
     private final GlobalProcedures globalProcedures;
     private final Config config;
     private final DefaultThreadSafeCursors cursors;
-    private volatile boolean isRunning;
 
     public KernelImpl(
             KernelTransactions transactions,
@@ -101,10 +100,6 @@ public class KernelImpl extends LifecycleAdapter implements Kernel {
     public KernelTransaction beginTransaction(
             KernelTransaction.Type type, LoginContext loginContext, ClientConnectionInfo connectionInfo)
             throws TransactionFailureException {
-        if (!isRunning) {
-            throw new IllegalStateException("Kernel is not running, so it is not possible to use it");
-        }
-
         return beginTransaction(
                 type,
                 loginContext,
@@ -130,7 +125,8 @@ public class KernelImpl extends LifecycleAdapter implements Kernel {
             ClientConnectionInfo connectionInfo,
             TransactionTimeout timeout)
             throws TransactionFailureException {
-        panic.assertNoPanic(TransactionFailureException.class);
+        panic.assertNoPanic((msg, cause) ->
+                TransactionFailureException.internalError(this.getClass().getSimpleName(), msg, cause));
         KernelTransaction transaction = transactions.newInstance(type, loginContext, connectionInfo, timeout);
         transactionMonitor.transactionStarted();
         transactionExecutionMonitor.start(transaction);
@@ -150,20 +146,6 @@ public class KernelImpl extends LifecycleAdapter implements Kernel {
     @Override
     public void registerUserAggregationFunction(CallableUserAggregationFunction function) throws ProcedureException {
         globalProcedures.register(function);
-    }
-
-    @Override
-    public void start() {
-        isRunning = true;
-    }
-
-    @Override
-    public void stop() {
-        if (!isRunning) {
-            throw new IllegalStateException("Kernel is not running, so it is not possible to stop it");
-        }
-
-        isRunning = false;
     }
 
     @Override

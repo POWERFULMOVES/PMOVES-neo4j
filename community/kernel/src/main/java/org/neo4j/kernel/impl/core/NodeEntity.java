@@ -30,8 +30,6 @@ import static org.neo4j.values.storable.Values.NO_VALUE;
 import java.util.Map;
 import org.neo4j.common.EntityType;
 import org.neo4j.exceptions.KernelException;
-import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
-import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.graphdb.ConstraintViolationException;
 import org.neo4j.graphdb.Direction;
 import org.neo4j.graphdb.Label;
@@ -41,7 +39,6 @@ import org.neo4j.graphdb.Relationship;
 import org.neo4j.graphdb.RelationshipType;
 import org.neo4j.graphdb.ResourceIterable;
 import org.neo4j.graphdb.ResourceIterator;
-import org.neo4j.graphdb.TransactionFailureException;
 import org.neo4j.internal.helpers.collection.AbstractResourceIterable;
 import org.neo4j.internal.kernel.api.NodeCursor;
 import org.neo4j.internal.kernel.api.RelationshipTraversalCursor;
@@ -53,7 +50,6 @@ import org.neo4j.internal.kernel.api.exceptions.schema.IllegalTokenNameException
 import org.neo4j.internal.kernel.api.exceptions.schema.TokenCapacityExceededKernelException;
 import org.neo4j.internal.kernel.api.helpers.RelationshipFactory;
 import org.neo4j.kernel.api.KernelTransaction;
-import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.impl.coreapi.InternalTransaction;
 import org.neo4j.token.api.TokenConstants;
 import org.neo4j.values.storable.Values;
@@ -160,24 +156,17 @@ public class NodeEntity extends AbstractNodeEntity implements RelationshipFactor
         } catch (TokenCapacityExceededKernelException e) {
             throw new ConstraintViolationException(e.getMessage(), e);
         } catch (KernelException e) {
-            throw mapStatusException("Unknown error trying to create property key token", e.status(), e);
+            throw mapStatusException(
+                    "Unknown error trying to create property key token",
+                    e.status(),
+                    e,
+                    internalTransaction.exceptionHandlerService());
         }
 
         try {
             transaction.dataWrite().nodeSetProperty(nodeId, propertyKeyId, Values.of(value, false));
         } catch (ConstraintValidationException e) {
             throw new ConstraintViolationException(e.getUserMessage(transaction.tokenRead()), e);
-        } catch (IllegalArgumentException e) {
-            try {
-                transaction.rollback();
-            } catch (org.neo4j.internal.kernel.api.exceptions.TransactionFailureException ex) {
-                ex.addSuppressed(e);
-                var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_40N01)
-                        .build();
-                throw new TransactionFailureException(
-                        gql, "Fail to rollback transaction.", ex, Status.Transaction.TransactionRollbackFailed);
-            }
-            throw e;
         } catch (EntityNotFoundException e) {
             throw new NotFoundException(e);
         } catch (KernelException e) {
@@ -282,7 +271,11 @@ public class NodeEntity extends AbstractNodeEntity implements RelationshipFactor
         } catch (TokenCapacityExceededKernelException e) {
             throw new ConstraintViolationException(e.getMessage(), e);
         } catch (KernelException e) {
-            throw mapStatusException("Unknown error trying to create relationship type token", e.status(), e);
+            throw mapStatusException(
+                    "Unknown error trying to create relationship type token",
+                    e.status(),
+                    e,
+                    internalTransaction.exceptionHandlerService());
         }
 
         try {
@@ -309,7 +302,11 @@ public class NodeEntity extends AbstractNodeEntity implements RelationshipFactor
         } catch (TokenCapacityExceededKernelException e) {
             throw new ConstraintViolationException(e.getMessage(), e);
         } catch (KernelException e) {
-            throw mapStatusException("Unknown error trying to create label token", e.status(), e);
+            throw mapStatusException(
+                    "Unknown error trying to create label token",
+                    e.status(),
+                    e,
+                    internalTransaction.exceptionHandlerService());
         }
 
         try {
@@ -446,7 +443,8 @@ public class NodeEntity extends AbstractNodeEntity implements RelationshipFactor
     private void singleNode(KernelTransaction transaction, NodeCursor nodes) {
         transaction.dataRead().singleNode(nodeId, nodes);
         if (!nodes.next()) {
-            throw new NotFoundException(new EntityNotFoundException(EntityType.NODE, getElementId()));
+            throw new NotFoundException(EntityNotFoundException.internalError(
+                    this.getClass().getSimpleName(), EntityType.NODE, getElementId()));
         }
     }
 

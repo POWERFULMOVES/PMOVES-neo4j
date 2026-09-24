@@ -139,8 +139,7 @@ class InteractiveShellRunnerTest {
         verify(cmdExecuter, times(3)).lastNeo4jErrorCode();
         verifyNoMoreInteractions(cmdExecuter);
 
-        assertThat(out.toString())
-                .isEqualTo("myusername@mydb> good1;\r\nmyusername@mydb> good2;\r\nmyusername@mydb> \r\n");
+        assertThat(out).hasToString("myusername@mydb> good1;\r\nmyusername@mydb> good2;\r\nmyusername@mydb> \r\n");
     }
 
     @Test
@@ -158,7 +157,8 @@ class InteractiveShellRunnerTest {
         verify(cmdExecuter, times(6)).lastNeo4jErrorCode();
         verifyNoMoreInteractions(cmdExecuter);
 
-        verify(printer, times(2)).printError(badLineError);
+        verify(printer, times(1)).printError(badLineError, "bad1");
+        verify(printer, times(1)).printError(badLineError, "bad2");
     }
 
     @Test
@@ -179,7 +179,7 @@ class InteractiveShellRunnerTest {
         verify(cmdExecuter, times(4)).lastNeo4jErrorCode();
         verifyNoMoreInteractions(cmdExecuter);
 
-        verify(printer).printError(badLineError);
+        verify(printer).printError(badLineError, "bad1");
     }
 
     @Test
@@ -197,8 +197,10 @@ class InteractiveShellRunnerTest {
 
         List<String> history = Files.readAllLines(historyFile);
 
-        assertThat(history).zipSatisfy(Arrays.asList(commands), (entry, cmd) -> assertThat(entry)
-                .endsWith(":" + cmd));
+        assertThat(history)
+                .zipSatisfy(
+                        Arrays.asList(commands),
+                        (entry, cmd) -> assertThat(entry).endsWith(":" + cmd));
         assertThat(historian.getHistory()).containsExactly(commands);
     }
 
@@ -267,8 +269,8 @@ class InteractiveShellRunnerTest {
         runner.runUntilEnd();
 
         // when
-        assertThat(out.toString())
-                .isEqualTo(
+        assertThat(out)
+                .hasToString(
                         "myusername@mydb>     \r\nmyusername@mydb>    \r\nmyusername@mydb> bla bla;\r\nmyusername@mydb> \r\n");
     }
 
@@ -281,7 +283,7 @@ class InteractiveShellRunnerTest {
         runner.runUntilEnd();
 
         // when
-        assertThat(out.toString()).isEqualTo("Disconnected> bla bla;\r\nDisconnected> \r\n");
+        assertThat(out).hasToString("Disconnected> bla bla;\r\nDisconnected> \r\n");
     }
 
     @Test
@@ -297,7 +299,7 @@ class InteractiveShellRunnerTest {
 
         // then
         String wantedPrompt = "myusername@foo> return 1;\r\n";
-        assertThat(out.toString()).isEqualTo(wantedPrompt);
+        assertThat(out).hasToString(wantedPrompt);
     }
 
     @Test
@@ -312,7 +314,7 @@ class InteractiveShellRunnerTest {
         runner.runUntilEnd();
 
         // then
-        assertThat(out.toString()).isEqualTo("myusername@foo> return 1;\r\n");
+        assertThat(out).hasToString("myusername@foo> return 1;\r\n");
     }
 
     @Test
@@ -327,7 +329,7 @@ class InteractiveShellRunnerTest {
         runner.runUntilEnd();
 
         // then
-        assertThat(out.toString()).isEqualTo("myusername@<default_database>> return 1;\r\n");
+        assertThat(out).hasToString("myusername@<default_database>> return 1;\r\n");
     }
 
     @Test
@@ -342,7 +344,7 @@ class InteractiveShellRunnerTest {
         runner.runUntilEnd();
 
         // then
-        assertThat(out.toString()).isEqualTo("myusername@<default_database>> return 1;\r\n");
+        assertThat(out).hasToString("myusername@<default_database>> return 1;\r\n");
     }
 
     @Test
@@ -359,16 +361,20 @@ class InteractiveShellRunnerTest {
 
         assertThat(exitCode).isEqualTo(EXIT_SUCCESS);
 
-        var expected = "myusername@TheLongestDbNameEverCreatedInAllOfHistoryAndTheUniversePlusSome\n" + "> match\n"
-                + "  (n)\n"
-                + "  where n.id = 1\n"
-                + "  \n"
-                + "  ;\n"
-                + "myusername@TheLongestDbNameEverCreatedInAllOfHistoryAndTheUniversePlusSome\n"
-                + "> return 1;\n"
-                + "myusername@TheLongestDbNameEverCreatedInAllOfHistoryAndTheUniversePlusSome\n"
-                + "> \n";
-        assertThat(out.toString().replace("\r", "")).isEqualTo(expected);
+        var expected = """
+            myusername@TheLongestDbNameEverCreatedInAllOfHistoryAndTheUniversePlusSome
+            > match
+              (n)
+              where n.id = 1
+
+              ;
+            myusername@TheLongestDbNameEverCreatedInAllOfHistoryAndTheUniversePlusSome
+            > return 1;
+            myusername@TheLongestDbNameEverCreatedInAllOfHistoryAndTheUniversePlusSome
+            >
+            """;
+
+        assertThat(out.toString().replace("\r", "").stripIndent()).isEqualTo(expected);
     }
 
     @Test
@@ -382,7 +388,7 @@ class InteractiveShellRunnerTest {
         var expected = "myusername@mydb#    \r\n" + "myusername@mydb#    \r\n"
                 + "myusername@mydb# bla bla;\r\n"
                 + "myusername@mydb# \r\n";
-        assertThat(out.toString()).isEqualTo(expected);
+        assertThat(out).hasToString(expected);
     }
 
     @Test
@@ -394,7 +400,7 @@ class InteractiveShellRunnerTest {
         runner.runUntilEnd();
 
         // when
-        assertThat(out.toString()).isEqualTo("myusername(emil)@mydb> return 40;\r\nmyusername(emil)@mydb> \r\n");
+        assertThat(out).hasToString("myusername(emil)@mydb> return 40;\r\nmyusername(emil)@mydb> \r\n");
     }
 
     @Test
@@ -420,9 +426,7 @@ class InteractiveShellRunnerTest {
 
         // then
 
-        verify(printer)
-                .printIfVerbose(
-                        """
+        verify(printer).printIfVerbose("""
                             Connected to Neo4j at [1mneo4j://localhost:7687[22m as user [1mmyusername[22m.
                             Type [1m:help[22m for a list of available commands or [1m:exit[22m to exit the shell.
                             Note that Cypher queries must end with a [1msemicolon.[22;0m""");
@@ -525,7 +529,8 @@ class InteractiveShellRunnerTest {
 
         final PrettyPrinter mockedPrettyPrinter = mock(PrettyPrinter.class);
 
-        Printer printer = new AnsiPrinter(Format.VERBOSE, new PrintStream(output), new PrintStream(error));
+        Printer printer =
+                new AnsiPrinter(Format.VERBOSE, ErrorFormat.DEFAULT, new PrintStream(output), new PrintStream(error));
 
         CompletionEngine mockedCompletionEngine = mock(CompletionEngine.class);
         var dbInfo = new StubDbInfo(mock(ParameterService.class), false);

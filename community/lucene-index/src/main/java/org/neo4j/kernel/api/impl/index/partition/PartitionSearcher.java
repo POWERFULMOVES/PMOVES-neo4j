@@ -20,31 +20,28 @@
 package org.neo4j.kernel.api.impl.index.partition;
 
 import java.io.IOException;
-import org.apache.lucene.search.IndexSearcher;
-import org.apache.lucene.search.ReferenceManager;
 import org.neo4j.kernel.api.impl.index.SearcherReference;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneIndexSearcher;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneSearcherManager;
 
 /**
- * Container for {@link IndexSearcher} of the particular {@link AbstractIndexPartition partition}.
- * Manages lifecycle of the underlying {@link IndexSearcher searcher}.
+ * Container for {@link LuceneIndexSearcher} of the particular {@link AbstractIndexPartition partition}.
+ * Manages lifecycle of the underlying {@link LuceneIndexSearcher searcher}.
  */
 public class PartitionSearcher implements SearcherReference {
-    private Neo4jIndexSearcher indexSearcher;
-    private ReferenceManager<IndexSearcher> referenceManager;
+    private final LuceneIndexSearcher indexSearcher;
 
-    public PartitionSearcher(ReferenceManager<IndexSearcher> referenceManager) throws IOException {
-        this.referenceManager = referenceManager;
-        this.indexSearcher = (Neo4jIndexSearcher) referenceManager.acquire();
-        this.indexSearcher.setQueryCache(null);
+    public PartitionSearcher(LuceneSearcherManager searcherManager) throws IOException {
+        this.indexSearcher = searcherManager.acquire();
     }
 
     @Override
-    public Neo4jIndexSearcher getIndexSearcher() {
+    public LuceneIndexSearcher getIndexSearcher() {
         return indexSearcher;
     }
 
     @Override
     public void close() throws IOException {
-        referenceManager.release(indexSearcher);
+        indexSearcher.close();
     }
 }

@@ -30,22 +30,26 @@ import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Expres
 import org.neo4j.cypher.internal.util.attribution.Id
 
 case class NodeIndexSeekPipe(
-  ident: String,
+  node: String,
   label: LabelToken,
   properties: Array[IndexedProperty],
   queryIndexId: Int,
   valueExpr: QueryExpression[Expression],
   indexMode: IndexSeekMode,
-  indexOrder: IndexOrder
-)(val id: Id = Id.INVALID_ID) extends Pipe with EntityIndexSeeker with IndexPipeWithValues {
+  indexOrder: IndexOrder,
+  includeChangesFromThisTransaction: Boolean
+)(val id: Id = Id.INVALID_ID) extends Pipe with IndexPipeWithValues {
 
-  override val propertyIds: Array[Int] = properties.map(_.propertyKeyToken.nameId.id)
+  override val ident: Option[String] = Some(node)
+  private val propertyIds: Array[Int] = properties.map(_.propertyKeyToken.nameId.id)
 
   override val indexPropertyIndices: Array[Int] = properties.indices.filter(properties(_).shouldGetValue).toArray
 
   override val indexCachedProperties: Array[CachedProperty] =
-    indexPropertyIndices.map(offset => properties(offset).asCachedProperty(ident))
+    indexPropertyIndices.map(offset => properties(offset).asCachedProperty(node))
   private val needsValues: Boolean = indexPropertyIndices.nonEmpty
+
+  private val entityIndexSeeker: EntityIndexSeeker = new EntityIndexSeeker(indexMode, valueExpr, propertyIds)
 
   protected def internalCreateResults(state: QueryState): ClosingIterator[CypherRow] = {
     val index = state.queryIndexes(queryIndexId)
@@ -54,7 +58,7 @@ case class NodeIndexSeekPipe(
       state,
       state.query,
       baseContext,
-      indexSeek(state, index, needsValues, indexOrder, baseContext)
+      entityIndexSeeker.indexSeek(state, index, needsValues, indexOrder, baseContext, includeChangesFromThisTransaction)
     )
   }
 

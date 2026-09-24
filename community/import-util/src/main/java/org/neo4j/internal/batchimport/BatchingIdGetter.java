@@ -68,4 +68,10 @@ public class BatchingIdGetter implements IdSequence {
             }
         }
     }
+
+    public void markIdAsDeleted(long id, CursorContext cursorContext) {
+        try (var marker = source.transactionalMarker(cursorContext)) {
+            marker.markDeleted(id);
+        }
+    }
 }

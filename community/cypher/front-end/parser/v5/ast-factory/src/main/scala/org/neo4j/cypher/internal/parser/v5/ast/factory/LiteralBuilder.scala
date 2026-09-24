@@ -25,13 +25,13 @@ import org.neo4j.cypher.internal.expressions.Infinity
 import org.neo4j.cypher.internal.expressions.ListLiteral
 import org.neo4j.cypher.internal.expressions.NaN
 import org.neo4j.cypher.internal.expressions.Null
+import org.neo4j.cypher.internal.expressions.ObfuscatedLiteral
 import org.neo4j.cypher.internal.expressions.SignedDecimalIntegerLiteral
 import org.neo4j.cypher.internal.expressions.SignedHexIntegerLiteral
 import org.neo4j.cypher.internal.expressions.SignedOctalIntegerLiteral
 import org.neo4j.cypher.internal.expressions.StringLiteral
 import org.neo4j.cypher.internal.expressions.True
 import org.neo4j.cypher.internal.parser.AstRuleCtx
-import org.neo4j.cypher.internal.parser.CypherErrorStrategy
 import org.neo4j.cypher.internal.parser.ast.util.Util.astSeq
 import org.neo4j.cypher.internal.parser.ast.util.Util.lastChild
 import org.neo4j.cypher.internal.parser.ast.util.Util.pos
@@ -50,11 +50,11 @@ trait LiteralBuilder extends Cypher5ParserListener {
     ctx.ast = ctx.children.get(0) match {
       case rule: AstRuleCtx => rule.ast
       case token: TerminalNode => token.getSymbol.getType match {
-          case Cypher5Parser.TRUE                         => True()(pos(ctx))
-          case Cypher5Parser.FALSE                        => False()(pos(ctx))
-          case Cypher5Parser.INF | Cypher5Parser.INFINITY => Infinity()(pos(ctx))
-          case Cypher5Parser.NAN                          => NaN()(pos(ctx))
-          case Cypher5Parser.NULL                         => Null()(pos(ctx))
+          case Cypher5Parser.TRUE                         => True()(rangePos(ctx))
+          case Cypher5Parser.FALSE                        => False()(rangePos(ctx))
+          case Cypher5Parser.INF | Cypher5Parser.INFINITY => Infinity()(rangePos(ctx))
+          case Cypher5Parser.NAN                          => NaN()(rangePos(ctx))
+          case Cypher5Parser.NULL                         => Null()(rangePos(ctx))
         }
       case other => throw new IllegalStateException(s"Unexpected child $other")
     }
@@ -62,10 +62,10 @@ trait LiteralBuilder extends Cypher5ParserListener {
 
   final override def exitNumberLiteral(ctx: Cypher5Parser.NumberLiteralContext): Unit = {
     ctx.ast = lastChild[TerminalNode](ctx).getSymbol.getType match {
-      case Cypher5Parser.UNSIGNED_DECIMAL_INTEGER => SignedDecimalIntegerLiteral(ctx.getText)(pos(ctx))
-      case Cypher5Parser.DECIMAL_DOUBLE           => DecimalDoubleLiteral(ctx.getText)(pos(ctx))
-      case Cypher5Parser.UNSIGNED_HEX_INTEGER     => SignedHexIntegerLiteral(ctx.getText)(pos(ctx))
-      case Cypher5Parser.UNSIGNED_OCTAL_INTEGER   => SignedOctalIntegerLiteral(ctx.getText)(pos(ctx))
+      case Cypher5Parser.UNSIGNED_DECIMAL_INTEGER => SignedDecimalIntegerLiteral(ctx.getText)(rangePos(ctx))
+      case Cypher5Parser.DECIMAL_DOUBLE           => DecimalDoubleLiteral(ctx.getText)(rangePos(ctx))
+      case Cypher5Parser.UNSIGNED_HEX_INTEGER     => SignedHexIntegerLiteral(ctx.getText)(rangePos(ctx))
+      case Cypher5Parser.UNSIGNED_OCTAL_INTEGER   => SignedOctalIntegerLiteral(ctx.getText)(rangePos(ctx))
     }
   }
 
@@ -73,9 +73,9 @@ trait LiteralBuilder extends Cypher5ParserListener {
     ctx: Cypher5Parser.SignedIntegerLiteralContext
   ): Unit = {
     ctx.ast = if (ctx.MINUS() != null) {
-      SignedDecimalIntegerLiteral("-" + ctx.UNSIGNED_DECIMAL_INTEGER().getText)(pos(ctx))
+      SignedDecimalIntegerLiteral("-" + ctx.UNSIGNED_DECIMAL_INTEGER().getText)(rangePos(ctx))
     } else {
-      SignedDecimalIntegerLiteral(ctx.UNSIGNED_DECIMAL_INTEGER().getText)(pos(ctx))
+      SignedDecimalIntegerLiteral(ctx.UNSIGNED_DECIMAL_INTEGER().getText)(rangePos(ctx))
     }
   }
 
@@ -94,6 +94,10 @@ trait LiteralBuilder extends Cypher5ParserListener {
   override def exitStringLiteral(ctx: Cypher5Parser.StringLiteralContext): Unit = {
     val text = ctx.start.getInputStream.getText(new Interval(ctx.start.getStartIndex + 1, ctx.stop.getStopIndex - 1))
     ctx.ast = StringLiteral(cypherStringToString(text, pos(ctx), exceptionFactory))(rangePos(ctx))
+  }
+
+  override def exitObfuscatedLiteral(ctx: Cypher5Parser.ObfuscatedLiteralContext): Unit = {
+    ctx.ast = ObfuscatedLiteral()(rangePos(ctx))
   }
 }
 
@@ -119,7 +123,7 @@ object LiteralBuilder {
       var builder: java.lang.StringBuilder = null
       while (pos != -1) {
         if (pos == length - 1)
-          throw exceptionFactory.syntaxException(CypherErrorStrategy.quoteMismatchErrorMessage, p)
+          throw exceptionFactory.stringLiteralWithInvalidQuotes(p)
         val replacement: Char = input.charAt(pos + 1) match {
           case 't'  => '\t'
           case 'b'  => '\b'

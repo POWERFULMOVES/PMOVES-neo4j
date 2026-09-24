@@ -28,29 +28,30 @@ import org.neo4j.cypher.internal.expressions.AllIterablePredicate
 import org.neo4j.cypher.internal.expressions.CachedProperty
 import org.neo4j.cypher.internal.expressions.FilterScope
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
-import org.neo4j.cypher.internal.expressions.FunctionName
 import org.neo4j.cypher.internal.expressions.HasLabelsOrTypes
 import org.neo4j.cypher.internal.expressions.LabelOrRelTypeName
 import org.neo4j.cypher.internal.expressions.NODE_TYPE
-import org.neo4j.cypher.internal.expressions.Namespace
 import org.neo4j.cypher.internal.expressions.NotEquals
-import org.neo4j.cypher.internal.expressions.ProcedureName
-import org.neo4j.cypher.internal.expressions.ProcedureOutput
 import org.neo4j.cypher.internal.expressions.Property
 import org.neo4j.cypher.internal.expressions.PropertyKeyName
 import org.neo4j.cypher.internal.expressions.SignedDecimalIntegerLiteral
+import org.neo4j.cypher.internal.runtime.ast.RuntimeConstant
+import org.neo4j.cypher.internal.util.FunctionName
+import org.neo4j.cypher.internal.util.Namespace
+import org.neo4j.cypher.internal.util.ProcedureName
+import org.neo4j.cypher.internal.util.ProcedureOutput
 import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 import org.neo4j.cypher.internal.util.test_helpers.TestName
 
 class ParserTest extends CypherFunSuite with TestName with AstConstructionTestSupport {
 
   test("a AS b") {
-    Parser.parseProjections(testName) should be(Map("b" -> varFor("a")))
+    Parser.Latest.parseProjections(testName) should be(Map("b" -> varFor("a")))
   }
 
   // Finds cached property
   test("cache[n.prop] AS b") {
-    Parser.parseProjections(testName) should be(Map("b" -> CachedProperty(
+    Parser.Latest.parseProjections(testName) should be(Map("b" -> CachedProperty(
       varFor("n"),
       varFor("n"),
       PropertyKeyName("prop")(pos),
@@ -59,7 +60,7 @@ class ParserTest extends CypherFunSuite with TestName with AstConstructionTestSu
   }
 
   test("b.foo + 5 AS abc09") {
-    Parser.parseProjections(testName) should be(Map("abc09" -> Add(
+    Parser.Latest.parseProjections(testName) should be(Map("abc09" -> Add(
       Property(varFor("b"), PropertyKeyName("foo")(pos))(pos),
       SignedDecimalIntegerLiteral("5")(pos)
     )(pos)))
@@ -67,25 +68,25 @@ class ParserTest extends CypherFunSuite with TestName with AstConstructionTestSu
 
   // Finds nested cached property
   test("cache[b.foo] + 5 AS abc09") {
-    Parser.parseProjections(testName) should be(Map("abc09" -> Add(
+    Parser.Latest.parseProjections(testName) should be(Map("abc09" -> Add(
       CachedProperty(varFor("b"), varFor("b"), PropertyKeyName("foo")(pos), NODE_TYPE)(pos),
       SignedDecimalIntegerLiteral("5")(pos)
     )(pos)))
   }
 
   test("n:Label") {
-    Parser.parseExpression(testName) should be(HasLabelsOrTypes(
+    Parser.Latest.parseExpression(testName) should be(HasLabelsOrTypes(
       varFor("n"),
       Seq(LabelOrRelTypeName("Label")(pos))
     )(pos))
   }
 
   test("`  n@31`") {
-    Parser.parseExpression(testName) should be(varFor("  n@31"))
+    Parser.Latest.parseExpression(testName) should be(varFor("  n@31"))
   }
 
   test("All(rel in relationships(path) WHERE id(rel) <> 5)") {
-    Parser.parseExpression(testName) should be(
+    Parser.Latest.parseExpression(testName) should be(
       AllIterablePredicate(
         FilterScope(
           varFor("rel"),
@@ -107,17 +108,32 @@ class ParserTest extends CypherFunSuite with TestName with AstConstructionTestSu
     )
   }
 
+  test("RuntimeConstant(v, 5)") {
+    Parser.Latest.parseExpression(testName) should be(
+      RuntimeConstant(varFor("v"), SignedDecimalIntegerLiteral("5")(pos))
+    )
+  }
+
+  test("RuntimeConstant(v, datetime($p))") {
+    Parser.Latest.parseExpression(testName) match {
+      case RuntimeConstant(variable, inner: FunctionInvocation) =>
+        variable shouldBe varFor("v")
+        inner.functionName.name shouldBe "datetime"
+      case other => fail(s"unexpected parse result: $other")
+    }
+  }
+
   test("CALL") {
     val expected = UnresolvedCall(
-      Namespace(List("db", "my"))(pos),
-      ProcedureName("proc")(pos),
+      ProcedureName(Namespace(List("db", "my"))(pos), "proc")(pos),
       Some(Seq(SignedDecimalIntegerLiteral("1")(pos))),
       Some(ProcedureResult(IndexedSeq(
         ProcedureResultItem(None, varFor("foo"))(pos),
         ProcedureResultItem(ProcedureOutput("bar")(pos), varFor("boo"))(pos)
-      ))(pos))
+      ))(pos)),
+      isStandalone = false
     )(pos)
 
-    Parser.parseProcedureCall("db.my.proc(1) YIELD foo, bar AS boo") should be(expected)
+    Parser.Latest.parseProcedureCall("db.my.proc(1) YIELD foo, bar AS boo") should be(expected)
   }
 }

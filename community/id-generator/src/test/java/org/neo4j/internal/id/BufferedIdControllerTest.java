@@ -20,8 +20,8 @@
 package org.neo4j.internal.id;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.eclipse.collections.impl.factory.Sets.immutable;
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
 import static org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker.writable;
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
@@ -44,6 +44,7 @@ import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.fs.ReadAheadChannel;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.lifecycle.LifeSupport;
@@ -100,10 +101,20 @@ class BufferedIdControllerTest {
                 NullLogService.getInstance());
         controller.initialize(
                 filesystem,
-                testDirectory.file("buffer"),
+                new StoreFile(testDirectory.file("buffer")),
                 globalConfig,
                 () -> new IdController.TransactionSnapshot(10, 0, 0),
-                () -> 9,
+                new IdController.VisibilityHorizonVisibilityBoundary() {
+                    @Override
+                    public long oldestCleanupHorizon() {
+                        return 9;
+                    }
+
+                    @Override
+                    public long oldestVisibilityHorizon() {
+                        return 9;
+                    }
+                },
                 s -> true,
                 EmptyMemoryTracker.INSTANCE,
                 writable());
@@ -115,7 +126,7 @@ class BufferedIdControllerTest {
     void shouldStopWhenNotStarted() throws IOException {
         setUp(new CursorContextFactory(PageCacheTracer.NULL, EMPTY_CONTEXT_SUPPLIER), fs, null);
 
-        assertDoesNotThrow(controller::stop);
+        assertThatCode(controller::stop).doesNotThrowAnyException();
     }
 
     @Test
@@ -126,7 +137,7 @@ class BufferedIdControllerTest {
 
         try (var idGenerator = idGeneratorFactory.create(
                 pageCache,
-                testDirectory.file("foo"),
+                new StoreFile(testDirectory.file("foo")),
                 TestIdType.TEST,
                 100L,
                 true,
@@ -148,14 +159,14 @@ class BufferedIdControllerTest {
 
             controller.maintenance();
 
-            assertThat(pageCacheTracer.pins() - initialPins).isEqualTo(1);
-            assertThat(pageCacheTracer.unpins() - initialUnpins).isEqualTo(1);
-            assertThat(pageCacheTracer.hits() - initialHits).isEqualTo(1);
+            assertThat(pageCacheTracer.pins() - initialPins).isEqualTo(2);
+            assertThat(pageCacheTracer.unpins() - initialUnpins).isEqualTo(2);
+            assertThat(pageCacheTracer.hits() - initialHits).isEqualTo(2);
         }
     }
 
     @RepeatedTest(10)
-    void concurrentMaintanenceAndClose() throws Throwable {
+    void concurrentMaintenanceAndClose() throws Throwable {
         var race = new Race();
         var pageCacheTracer = new DefaultPageCacheTracer();
         var contextFactory = new CursorContextFactory(pageCacheTracer, EMPTY_CONTEXT_SUPPLIER);
@@ -163,7 +174,7 @@ class BufferedIdControllerTest {
         life.start();
         try (var idGenerator = idGeneratorFactory.create(
                 pageCache,
-                testDirectory.file("foo"),
+                new StoreFile(testDirectory.file("foo")),
                 TestIdType.TEST,
                 100L,
                 true,
@@ -195,14 +206,14 @@ class BufferedIdControllerTest {
     }
 
     @Test
-    void maintanenceAfterClose() throws Throwable {
+    void maintenanceAfterClose() throws Throwable {
         var pageCacheTracer = new DefaultPageCacheTracer();
         var contextFactory = new CursorContextFactory(pageCacheTracer, EMPTY_CONTEXT_SUPPLIER);
         setUp(contextFactory, fs, null);
         life.start();
         try (var idGenerator = idGeneratorFactory.create(
                 pageCache,
-                testDirectory.file("foo"),
+                new StoreFile(testDirectory.file("foo")),
                 TestIdType.TEST,
                 100L,
                 true,
@@ -227,7 +238,7 @@ class BufferedIdControllerTest {
     }
 
     @Test
-    void maintanenceWithAdversary() throws Throwable {
+    void maintenanceWithAdversary() throws Throwable {
         var adversary = new MethodGuardedAdversary(
                 new CountingAdversary(1, false),
                 DiskBufferedIds.class.getDeclaredMethod(
@@ -239,7 +250,7 @@ class BufferedIdControllerTest {
         life.start();
         try (var idGenerator = idGeneratorFactory.create(
                 pageCache,
-                testDirectory.file("foo"),
+                new StoreFile(testDirectory.file("foo")),
                 TestIdType.TEST,
                 100L,
                 true,
@@ -279,7 +290,7 @@ class BufferedIdControllerTest {
         setUp(CursorContextFactory.NULL_CONTEXT_FACTORY, fs, monitor);
         try (var idGenerator = idGeneratorFactory.create(
                 pageCache,
-                testDirectory.file("foo"),
+                new StoreFile(testDirectory.file("foo")),
                 TestIdType.TEST,
                 0,
                 false,

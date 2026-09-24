@@ -28,6 +28,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
@@ -35,28 +36,32 @@ import java.util.function.LongSupplier;
 import java.util.stream.Collectors;
 import org.eclipse.collections.impl.factory.Sets;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.gis.spatial.index.curves.StandardConfiguration;
 import org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector;
+import org.neo4j.internal.helpers.collection.BoundedIterable;
 import org.neo4j.internal.schema.IndexType;
+import org.neo4j.internal.schema.SchemaUserDescription;
 import org.neo4j.io.memory.ByteBufferFactory;
 import org.neo4j.io.pagecache.context.CursorContext;
+import org.neo4j.kernel.api.index.IndexPopulator;
 import org.neo4j.kernel.impl.api.index.PhaseTracker;
 import org.neo4j.kernel.impl.index.schema.config.IndexSpecificSpaceFillingCurveSettings;
+import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.MemoryTracker;
-import org.neo4j.storageengine.api.IndexEntryUpdate;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.values.storable.CoordinateReferenceSystem;
+import org.neo4j.values.storable.RandomValues;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.ValueCategory;
 import org.neo4j.values.storable.ValueType;
 import org.neo4j.values.storable.Values;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 public class PointBlockBasedIndexPopulatorTest extends BlockBasedIndexPopulatorTest<PointKey> {
     private static final StandardConfiguration CONFIGURATION = new StandardConfiguration();
     private static final Config CONFIG = Config.defaults(GraphDatabaseInternalSettings.index_populator_merge_factor, 2);
@@ -64,7 +69,7 @@ public class PointBlockBasedIndexPopulatorTest extends BlockBasedIndexPopulatorT
             IndexSpecificSpaceFillingCurveSettings.fromConfig(CONFIG);
     private static final PointLayout LAYOUT = new PointLayout(SPATIAL_SETTINGS);
     private static final Set<ValueType> UNSUPPORTED_TYPES =
-            Collections.unmodifiableSet(Arrays.stream(ValueType.values())
+            Collections.unmodifiableSet(Arrays.stream(ValueType.ALL_TYPES)
                     .filter(type -> type.valueGroup.category() != ValueCategory.GEOMETRY)
                     .collect(Collectors.toCollection(() -> EnumSet.noneOf(ValueType.class))));
 
@@ -78,9 +83,12 @@ public class PointBlockBasedIndexPopulatorTest extends BlockBasedIndexPopulatorT
 
     @Override
     PointBlockBasedIndexPopulator instantiatePopulator(
-            BlockBasedIndexPopulator.Monitor monitor, ByteBufferFactory bufferFactory, MemoryTracker memoryTracker)
+            BlockBasedIndexPopulator.Monitor monitor,
+            ByteBufferFactory bufferFactory,
+            MemoryTracker memoryTracker,
+            IndexPopulator.Configuration configuration)
             throws IOException {
-        final var populator = new PointBlockBasedIndexPopulator(
+        PointBlockBasedIndexPopulator populator = new PointBlockBasedIndexPopulator(
                 databaseIndexContext,
                 indexFiles,
                 LAYOUT,
@@ -92,7 +100,10 @@ public class PointBlockBasedIndexPopulatorTest extends BlockBasedIndexPopulatorT
                 CONFIG,
                 memoryTracker,
                 monitor,
-                Sets.immutable.empty());
+                Sets.immutable.empty(),
+                NullLogProvider.getInstance(),
+                SchemaUserDescription.TOKEN_ID_NAME_LOOKUP,
+                IndexPopulator.DEFAULT_CONFIGURATION);
         populator.create();
         return populator;
     }
@@ -110,21 +121,21 @@ public class PointBlockBasedIndexPopulatorTest extends BlockBasedIndexPopulatorT
     @Test
     final void shouldIgnoreAddedUnsupportedValueTypes() throws Exception {
         // given  the population of an empty index
-        try (var accessor = pointAccessor();
-                var reader = accessor.newAllEntriesValueReader(NULL_CONTEXT)) {
+        try (PointIndexAccessor accessor = pointAccessor();
+                BoundedIterable<Long> reader = accessor.newAllEntriesValueReader(NULL_CONTEXT)) {
             assertThat(reader.iterator()).isExhausted();
         }
-        final var populator = instantiatePopulator(NO_MONITOR);
+        BlockBasedIndexPopulator<PointKey> populator = instantiatePopulator(NO_MONITOR);
         assertThat(populator.indexConfig()).isEqualTo(spatialSettingsAsMap(SPATIAL_SETTINGS));
 
         try {
-            final var idGen = idGenerator();
-            final var randomValues = random.randomValues();
+            LongSupplier idGen = idGenerator();
+            RandomValues randomValues = random.randomValues();
 
             // when   processing unsupported value types
-            final var updates = UNSUPPORTED_TYPES.stream()
+            List<EagerValueIndexEntryUpdate> updates = UNSUPPORTED_TYPES.stream()
                     .map(randomValues::nextValueOfType)
-                    .map(value -> IndexEntryUpdate.add(idGen.getAsLong(), INDEX_DESCRIPTOR, value))
+                    .map(value -> EagerValueIndexEntryUpdate.add(idGen.getAsLong(), INDEX_DESCRIPTOR, value))
                     .toList();
 
             populator.add(updates, CursorContext.NULL_CONTEXT);
@@ -133,8 +144,8 @@ public class PointBlockBasedIndexPopulatorTest extends BlockBasedIndexPopulatorT
             populator.close(true, CursorContext.NULL_CONTEXT);
         }
 
-        try (var accessor = pointAccessor();
-                var reader = accessor.newAllEntriesValueReader(NULL_CONTEXT)) {
+        try (PointIndexAccessor accessor = pointAccessor();
+                BoundedIterable<Long> reader = accessor.newAllEntriesValueReader(NULL_CONTEXT)) {
             // then   updates should not have been indexed
             assertThat(reader.iterator()).isExhausted();
         }
@@ -151,7 +162,7 @@ public class PointBlockBasedIndexPopulatorTest extends BlockBasedIndexPopulatorT
     }
 
     private PointIndexAccessor pointAccessor() {
-        final var cleanup = RecoveryCleanupWorkCollector.immediate();
+        RecoveryCleanupWorkCollector cleanup = RecoveryCleanupWorkCollector.immediate();
         return new PointIndexAccessor(
                 databaseIndexContext,
                 indexFiles,
@@ -161,6 +172,8 @@ public class PointBlockBasedIndexPopulatorTest extends BlockBasedIndexPopulatorT
                 SPATIAL_SETTINGS,
                 CONFIGURATION,
                 Sets.immutable.empty(),
-                false);
+                false,
+                NullLogProvider.getInstance(),
+                SchemaUserDescription.TOKEN_ID_NAME_LOOKUP);
     }
 }

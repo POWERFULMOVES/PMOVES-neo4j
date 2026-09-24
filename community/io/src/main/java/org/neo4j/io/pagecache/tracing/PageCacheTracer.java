@@ -19,9 +19,13 @@
  */
 package org.neo4j.io.pagecache.tracing;
 
-import org.neo4j.io.pagecache.PageSwapper;
+import java.nio.file.Path;
 import org.neo4j.io.pagecache.PagedFile;
+import org.neo4j.io.pagecache.impl.muninn.swapper.PageSwapper;
 import org.neo4j.io.pagecache.monitoring.PageCacheCounters;
+import org.neo4j.io.pagecache.tracing.FileFlushEvent.FileFlushEventProvider;
+import org.neo4j.io.pagecache.tracing.async.AsyncEvictionCompletion;
+import org.neo4j.io.pagecache.tracing.async.AsyncEvictionFailure;
 import org.neo4j.io.pagecache.tracing.cursor.PageCursorTracer;
 
 /**
@@ -29,7 +33,7 @@ import org.neo4j.io.pagecache.tracing.cursor.PageCursorTracer;
  * whole page cache is doing. Implementations of this interface should be as
  * efficient as possible, lest they severely slow down the page cache.
  */
-public interface PageCacheTracer extends PageCacheCounters {
+public interface PageCacheTracer extends PageCacheCounters, FileFlushEventProvider {
     /**
      * A PageCacheTracer that does nothing other than return the NULL variants of the companion interfaces.
      */
@@ -58,6 +62,16 @@ public interface PageCacheTracer extends PageCacheCounters {
         @Override
         public EvictionRunEvent beginEviction() {
             return EvictionRunEvent.NULL;
+        }
+
+        @Override
+        public AsyncEvictionCompletion asyncEvictionCompletion() {
+            return AsyncEvictionCompletion.NULL;
+        }
+
+        @Override
+        public AsyncEvictionFailure asyncEvictionFailure() {
+            return AsyncEvictionFailure.NULL;
         }
 
         @Override
@@ -231,6 +245,21 @@ public interface PageCacheTracer extends PageCacheCounters {
         }
 
         @Override
+        public long asyncIoSubmitted() {
+            return 0;
+        }
+
+        @Override
+        public long asyncIoCompleted() {
+            return 0;
+        }
+
+        @Override
+        public long asyncIoFailed() {
+            return 0;
+        }
+
+        @Override
         public void pins(long pins) {}
 
         @Override
@@ -256,6 +285,15 @@ public interface PageCacheTracer extends PageCacheCounters {
 
         @Override
         public void noPinFaults(long faults) {}
+
+        @Override
+        public void asyncIoSubmitted(long asyncIoSubmitted) {}
+
+        @Override
+        public void asyncIoCompleted(long asyncIoCompleted) {}
+
+        @Override
+        public void asyncIoFailed(long asyncIoFailed) {}
 
         @Override
         public void bytesRead(long bytesRead) {}
@@ -356,14 +394,14 @@ public interface PageCacheTracer extends PageCacheCounters {
     EvictionRunEvent beginEviction();
 
     /**
-     * A PagedFile wants to flush all its bound pages.
+     * Successfully completed async page eviction event.
      */
-    FileFlushEvent beginFileFlush(PageSwapper swapper);
+    AsyncEvictionCompletion asyncEvictionCompletion();
 
     /**
-     * The PageCache wants to flush file bound pages.
+     * Async page eviction failure event.
      */
-    FileFlushEvent beginFileFlush();
+    AsyncEvictionFailure asyncEvictionFailure();
 
     /**
      * Start database flush event
@@ -455,6 +493,21 @@ public interface PageCacheTracer extends PageCacheCounters {
     void evictionExceptions(long evictionExceptions);
 
     /**
+     * Report number of async io submitted
+     */
+    void asyncIoSubmitted(long asyncIoSubmitted);
+
+    /**
+     * Report number of async io completed
+     */
+    void asyncIoCompleted(long asyncIoCompleted);
+
+    /**
+     * Report number of async io failed
+     */
+    void asyncIoFailed(long asyncIoFailed);
+
+    /**
      * Report number of bytes written
      * @param bytesWritten number of written bytes
      */
@@ -540,4 +593,32 @@ public interface PageCacheTracer extends PageCacheCounters {
      * called during page file unmap for testing purposes
      */
     default void beforePageExclusiveLock() {}
+
+    /**
+     * New segment of segmented store is created
+     */
+    default SegmentEvent createSegment(Path basePath, int segmentIndex) {
+        return SegmentEvent.NULL;
+    }
+
+    /**
+     * An existing segment file opened.
+     */
+    default SegmentEvent loadSegment(Path basePath, int segmentIndex) {
+        return SegmentEvent.NULL;
+    }
+
+    /**
+     * Unload segment of segmented store.
+     */
+    default SegmentEvent unloadSegment(Path basePath, int segmentIndex) {
+        return SegmentEvent.NULL;
+    }
+
+    /**
+     * Delete segment of segment store.
+     */
+    default SegmentEvent deleteSegment(Path basePath, int segmentIndex) {
+        return SegmentEvent.NULL;
+    }
 }

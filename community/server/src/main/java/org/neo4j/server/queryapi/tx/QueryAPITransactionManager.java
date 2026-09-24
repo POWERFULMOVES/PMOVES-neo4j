@@ -34,12 +34,15 @@ import org.neo4j.driver.TransactionConfig;
 import org.neo4j.driver.internal.InternalSession;
 import org.neo4j.scheduler.Group;
 import org.neo4j.scheduler.JobScheduler;
+import org.neo4j.server.queryapi.exception.TransactionConcurrentAccessException;
+import org.neo4j.server.queryapi.exception.TransactionIdCollisionException;
+import org.neo4j.server.queryapi.exception.TransactionNotFoundException;
 import org.neo4j.server.queryapi.metrics.QueryAPIMetricsMonitor;
 import org.neo4j.util.VisibleForTesting;
 
 public class QueryAPITransactionManager implements TransactionManager {
 
-    private final Map<String, Transaction> transactions = new ConcurrentHashMap<>();
+    private final Map<String, InternalTransaction> transactions = new ConcurrentHashMap<>();
     private final Duration timeout;
     private final QueryAPIMetricsMonitor monitor;
 
@@ -100,7 +103,7 @@ public class QueryAPITransactionManager implements TransactionManager {
                     tx.release();
                 }
             } else {
-                throw new TransactionConcurrentAccessException("Transaction was accessed concurrently");
+                throw new TransactionConcurrentAccessException();
             }
         }
         throw new TransactionNotFoundException(transactionId);
@@ -130,8 +133,9 @@ public class QueryAPITransactionManager implements TransactionManager {
     @Override
     public void beginTimeoutJob() {
         var timeoutFrom = Instant.now();
-
-        for (Map.Entry<String, Transaction> tx : transactions.entrySet()) {
+        var it = transactions.entrySet().iterator();
+        while (it.hasNext()) {
+            var tx = it.next();
             if (tx.getValue().tryAcquire()) {
                 if (timeoutFrom.compareTo(tx.getValue().expiresAt()) > 0) {
                     removeTransaction(tx.getKey());
@@ -150,7 +154,9 @@ public class QueryAPITransactionManager implements TransactionManager {
     @Override
     @VisibleForTesting
     public void removeAllTransactions() {
-        for (Map.Entry<String, Transaction> tx : transactions.entrySet()) {
+        var it = transactions.entrySet().iterator();
+        while (it.hasNext()) {
+            var tx = it.next();
             removeTransaction(tx.getKey());
         }
     }

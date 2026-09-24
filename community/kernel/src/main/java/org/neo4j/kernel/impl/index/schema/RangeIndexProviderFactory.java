@@ -33,8 +33,10 @@ import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.KernelVersionProvider;
 import org.neo4j.kernel.api.index.IndexDirectoryStructure;
-import org.neo4j.logging.InternalLog;
+import org.neo4j.logging.InternalLogProvider;
+import org.neo4j.logging.LogProvider;
 import org.neo4j.monitoring.Monitors;
 import org.neo4j.scheduler.JobScheduler;
 import org.neo4j.token.TokenHolders;
@@ -58,10 +60,11 @@ public class RangeIndexProviderFactory extends AbstractIndexProviderFactory<Rang
             Monitors monitors,
             String monitorTag,
             Config config,
+            KernelVersionProvider kernelVersionProvider,
             DatabaseReadOnlyChecker readOnlyChecker,
             RecoveryCleanupWorkCollector recoveryCleanupWorkCollector,
             DatabaseLayout databaseLayout,
-            InternalLog log,
+            InternalLogProvider logProvider,
             TokenHolders tokenHolders,
             JobScheduler scheduler,
             CursorContextFactory contextFactory,
@@ -76,6 +79,7 @@ public class RangeIndexProviderFactory extends AbstractIndexProviderFactory<Rang
                 config,
                 readOnlyChecker,
                 recoveryCleanupWorkCollector,
+                logProvider,
                 contextFactory,
                 pageCacheTracer,
                 databaseLayout.getDatabaseName(),
@@ -92,6 +96,7 @@ public class RangeIndexProviderFactory extends AbstractIndexProviderFactory<Rang
             Config config,
             DatabaseReadOnlyChecker readOnlyChecker,
             RecoveryCleanupWorkCollector recoveryCleanupWorkCollector,
+            LogProvider logProvider,
             CursorContextFactory contextFactory,
             PageCacheTracer pageCacheTracer,
             String databaseName,
@@ -104,6 +109,7 @@ public class RangeIndexProviderFactory extends AbstractIndexProviderFactory<Rang
                 .withReadOnlyChecker(readOnlyChecker)
                 .withDependencyResolver(dependencyResolver)
                 .build();
-        return new RangeIndexProvider(databaseIndexContext, directoryStructure, recoveryCleanupWorkCollector, config);
+        return new RangeIndexProvider(
+                databaseIndexContext, directoryStructure, recoveryCleanupWorkCollector, config, logProvider);
     }
 }

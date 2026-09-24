@@ -20,15 +20,23 @@
 package org.neo4j.cli;
 
 import static java.lang.String.format;
+import static org.neo4j.configuration.GraphDatabaseSettings.logs_directory;
 
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import org.eclipse.collections.impl.set.mutable.MutableSetFactoryImpl;
+import org.neo4j.cloud.storage.SharedStorageSettingsDeclaration;
+import org.neo4j.cloud.storage.StoragePath;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.configuration.connectors.BoltConnector;
@@ -37,6 +45,13 @@ import org.neo4j.configuration.connectors.HttpsConnector;
 import org.neo4j.configuration.helpers.DatabaseNamePattern;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.Neo4jLayout;
+import org.neo4j.kernel.api.exceptions.ConsoleFriendlyException;
+import org.neo4j.kernel.diagnostics.providers.SystemDiagnostics;
+import org.neo4j.kernel.internal.Version;
+import org.neo4j.logging.Level;
+import org.neo4j.logging.log4j.LogConfig;
+import org.neo4j.logging.log4j.Neo4jLoggerContext;
+import org.neo4j.time.Stopwatch;
 import picocli.CommandLine;
 
 /**
@@ -58,6 +73,10 @@ public abstract class AbstractAdminCommand extends AbstractCommand {
 
     public static final String COMMAND_CONFIG_FILE_NAME_PATTERN = "neo4j-admin-%s.conf";
     public static final String ADMIN_CONFIG_FILE_NAME = "neo4j-admin.conf";
+    public static final String CRASH_INFO_TIMEOUT = "NEO4J_ADMIN_CRASH_INFO_DUMP_TIMEOUT_SECONDS";
+    private static final DateTimeFormatter SPACELESS_DATE_FORMATTER =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd.HH.mm.ss").withZone(ZoneId.systemDefault());
+    private static final String EXCEPTION_FILE_NAME_TEMPLATE = "neo4j-admin-exception-trace-%s.log";
 
     @CommandLine.Option(
             names = "--additional-config",
@@ -107,7 +126,6 @@ public abstract class AbstractAdminCommand extends AbstractCommand {
         return commandConfigs;
     }
 
-    @SuppressWarnings("resource")
     private boolean configFileExists(Path path) {
         return ctx.fs().fileExists(path) && !ctx.fs().isDirectory(path);
     }
@@ -126,15 +144,23 @@ public abstract class AbstractAdminCommand extends AbstractCommand {
      * All children of this abstract command, should use this method when building its configuration.
      */
     protected Config.Builder createPrefilledConfigBuilder() {
+        return createPrefilledConfigBuilder(null);
+    }
+
+    /**
+     * Creates a configuration builder with the logic common to all admin commands applied to it.
+     */
+    protected Config.Builder createPrefilledConfigBuilder(Path storageTempPath) {
         List<Path> commandConfigs = getCommandConfigs();
-        Collections.reverse(commandConfigs);
         var configBuilder = Config.newBuilder().fromFileNoThrow(ctx.confDir().resolve(Config.DEFAULT_CONFIG_FILE_NAME));
-        commandConfigs.forEach(configBuilder::fromFileNoThrow);
+        commandConfigs.reversed().forEach(configBuilder::fromFileNoThrow);
         configBuilder.commandExpansion(allowCommandExpansion).set(GraphDatabaseSettings.neo4j_home, ctx.homeDir());
         configBuilder.set(BoltConnector.enabled, Boolean.FALSE);
         configBuilder.set(HttpConnector.enabled, Boolean.FALSE);
         configBuilder.set(HttpsConnector.enabled, Boolean.FALSE);
-
+        if (storageTempPath != null) {
+            configBuilder.set(SharedStorageSettingsDeclaration.temp_chunk_path, storageTempPath);
+        }
         return configBuilder;
     }
 
@@ -144,6 +170,16 @@ public abstract class AbstractAdminCommand extends AbstractCommand {
         } catch (IOException e) {
             throw new CommandFailedException(format("Path '%s' does not exist.", p), e);
         }
+    }
+
+    protected Path normalizeAndValidateIfStoragePathDirectory(Path path) throws CommandFailedException {
+        final var normalized = path.normalize();
+        if (normalized instanceof StoragePath storagePath && !storagePath.isDirectory()) {
+            throw new CommandFailedException("The path '%s' is not a directory - please add a terminal '/' to your path"
+                    .formatted(storagePath.toUri()));
+        }
+
+        return normalized;
     }
 
     protected static Set<String> getDbNames(Config config, FileSystemAbstraction fs, DatabaseNamePattern database)
@@ -171,6 +207,74 @@ public abstract class AbstractAdminCommand extends AbstractCommand {
                         "Pattern '" + database.getDatabaseName() + "' did not match any database");
             }
             return dbNames;
+        }
+    }
+
+    // hook the raw execute to log info
+    @Override
+    protected void wrappedExecute() throws Exception {
+        Stopwatch start = Stopwatch.start();
+        try {
+            execute();
+        } catch (Throwable ex) {
+            logCrashInformation(ex, start.elapsed());
+            throw ex;
+        }
+    }
+
+    @SuppressWarnings("resource")
+    protected void println(String message) {
+        ctx.out().println(message);
+    }
+
+    @SuppressWarnings("resource")
+    protected void printf(String message, Object... args) {
+        ctx.out().printf(message, args);
+    }
+
+    private void logCrashInformation(Throwable ex, Duration elapsed) {
+        try {
+            int timeout = Integer.parseInt(System.getenv().getOrDefault(CRASH_INFO_TIMEOUT, "3"));
+            if (!verbose && elapsed.toMillis() < TimeUnit.SECONDS.toMillis(timeout)) {
+                return;
+            }
+            var config = createPrefilledConfigBuilder().build();
+            var exceptionFile = config.get(logs_directory)
+                    .resolve(format(EXCEPTION_FILE_NAME_TEMPLATE, SPACELESS_DATE_FORMATTER.format(Instant.now())));
+            ctx.fs().mkdirs(exceptionFile.getParent());
+            try (Neo4jLoggerContext exceptionLoggerCtx =
+                    LogConfig.createTemporaryLoggerToSingleFile(ctx.fs(), exceptionFile, Level.INFO, false)) {
+                var exceptionLogger = exceptionLoggerCtx.getLogger(getClass());
+                exceptionLogger.info("This file is to aid Neo4j support.");
+                // log exception early in case there are issues with any of the extra info
+                exceptionLogger.error("Fatal exception thrown", ex);
+                if (ConsoleFriendlyException.willPrettyPrint(ex)) {
+                    ((ConsoleFriendlyException) ex)
+                            .addSupplementaryMessage(format(
+                                    "Full exception details written to: %s%nPlease provide this file if requesting neo4j support",
+                                    exceptionFile));
+                } else {
+                    ctx.err().println("Full exception details written to: " + exceptionFile);
+                    ctx.err().println("Please provide this file if requesting neo4j support");
+                }
+                // Dump everything that might be useful later into the file
+                var runtime = ManagementFactory.getRuntimeMXBean();
+                exceptionLogger.info("Process Started at: " + Instant.ofEpochMilli(runtime.getStartTime()));
+                var originalArgs = String.join(
+                        " ", spec.root().commandLine().getParseResult().originalArgs());
+                exceptionLogger.info("CommandLine: " + originalArgs);
+                exceptionLogger.info("neo4j version: " + Version.getNeo4jVersion());
+                SystemDiagnostics.JAVA_VIRTUAL_MACHINE.dump(exceptionLogger::info);
+                SystemDiagnostics.CLASSPATH.dump(exceptionLogger::info);
+                SystemDiagnostics.OPERATING_SYSTEM.dump(exceptionLogger::info);
+                SystemDiagnostics.SYSTEM_MEMORY.dump(exceptionLogger::info);
+                SystemDiagnostics.JAVA_MEMORY.dump(exceptionLogger::info);
+                exceptionLogger.info("Configuration files used (ordered by priority):");
+                configFiles().forEach(file -> exceptionLogger.info(file.toAbsolutePath()));
+            }
+        } catch (Throwable e) {
+            // suppress any errors trying to write diagnostics
+            ex.addSuppressed(e);
         }
     }
 }

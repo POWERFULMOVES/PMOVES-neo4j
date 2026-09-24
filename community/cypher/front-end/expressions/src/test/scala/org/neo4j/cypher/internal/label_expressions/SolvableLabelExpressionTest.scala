@@ -156,6 +156,18 @@ class SolvableLabelExpressionTest extends AnyFunSuite with Matchers with CypherS
     }
   }
 
+  test("(x OR y) AND NOT x AND NOT y has no solutions") {
+    forAll(gen2LabelExpressions) { case (x, y) =>
+      (x.or(y)).and(x.not).and(y.not).solutions shouldBe empty
+    }
+  }
+
+  test("NOT x AND NOT y AND (x OR y) has no solutions") {
+    forAll(gen2LabelExpressions) { case (x, y) =>
+      x.not.and(y.not).and(x.or(y)).solutions shouldBe empty
+    }
+  }
+
   // Additional XOR equivalences:
 
   test("x XOR y = (x OR y) AND NOT (x AND y)") {
@@ -205,7 +217,7 @@ class SolvableLabelExpressionTest extends AnyFunSuite with Matchers with CypherS
   def allSolutionsForLabels(allLabels: Set[String]): Set[NodeLabels] =
     allLabels
       .subsets
-      .map(KnownLabels)
+      .map(KnownLabels.apply)
       .toSet[NodeLabels]
       .incl(SomeUnknownLabels)
 }

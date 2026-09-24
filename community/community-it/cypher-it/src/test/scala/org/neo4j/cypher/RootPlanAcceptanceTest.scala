@@ -19,12 +19,13 @@
  */
 package org.neo4j.cypher
 
-import org.neo4j.cypher.internal.InterpretedRuntimeName
-import org.neo4j.cypher.internal.RuntimeName
-import org.neo4j.cypher.internal.SlottedRuntimeName
 import org.neo4j.cypher.internal.frontend.PlannerName
 import org.neo4j.cypher.internal.planner.spi.CostBasedPlannerName
+import org.neo4j.cypher.util.Reason
+import org.neo4j.cypher.util.SkipOnSpd
 import org.neo4j.graphdb.ExecutionPlanDescription
+import org.neo4j.kernel.api.query.RuntimeName
+import org.neo4j.test.extension.SkipOnSpd.Note
 
 class RootPlanAcceptanceTest extends ExecutionEngineFunSuite {
 
@@ -33,9 +34,16 @@ class RootPlanAcceptanceTest extends ExecutionEngineFunSuite {
       .shouldHavePlanner(CostBasedPlannerName.default)
   }
 
-  test("slotted should be default runtime") {
+  test(
+    "slotted should be default runtime",
+    SkipOnSpd(
+      note = Note.irrelevant,
+      reason = Some(Reason.CommunityOnly),
+      details = "SPD is enterprise and would therefor have pipelined as default runtime"
+    )
+  ) {
     givenQuery("match (n) return n")
-      .shouldHaveRuntime(SlottedRuntimeName)
+      .shouldHaveRuntime(RuntimeName.SLOTTED)
   }
 
   test("AllNodesScan should be the only child of the plan") {
@@ -52,7 +60,7 @@ class RootPlanAcceptanceTest extends ExecutionEngineFunSuite {
 
   test("DbHits should contain proper values in interpreted runtime") {
     val description = givenQuery("match (n) return n")
-      .withRuntime(InterpretedRuntimeName)
+      .withRuntime(RuntimeName.INTERPRETED)
       .planDescription
     val children = description.getChildren
     children should have size 1
@@ -62,7 +70,7 @@ class RootPlanAcceptanceTest extends ExecutionEngineFunSuite {
 
   test("Rows should be properly formatted in interpreted runtime") {
     givenQuery("match (n) return n")
-      .withRuntime(InterpretedRuntimeName)
+      .withRuntime(RuntimeName.INTERPRETED)
       .planDescription.getArguments.get("Rows") should equal(0)
   }
 
@@ -93,7 +101,7 @@ class RootPlanAcceptanceTest extends ExecutionEngineFunSuite {
 
     def shouldHaveRuntime(runtime: RuntimeName): TestQuery = {
       planDescription.getArguments.get("runtime") should equal(s"${runtime.toTextOutput}")
-      planDescription.getArguments.get("runtime-impl") should equal(s"${runtime.name}")
+      planDescription.getArguments.get("runtime-impl") should equal(s"${runtime.toTextOutput}")
       this
     }
 

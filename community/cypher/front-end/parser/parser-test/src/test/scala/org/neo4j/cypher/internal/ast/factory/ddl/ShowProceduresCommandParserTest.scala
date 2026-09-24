@@ -25,10 +25,11 @@ import org.neo4j.cypher.internal.ast.Statements
 import org.neo4j.cypher.internal.ast.User
 import org.neo4j.cypher.internal.ast.Where
 import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
 import org.neo4j.cypher.internal.expressions.AllIterablePredicate
 import org.neo4j.cypher.internal.expressions.Equals
 import org.neo4j.cypher.internal.expressions.StringLiteral
+import org.neo4j.cypher.internal.expressions.True
+import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.symbols.IntegerType
 
 /* Tests for listing procedures */
@@ -36,52 +37,66 @@ class ShowProceduresCommandParserTest extends AdministrationAndSchemaCommandPars
 
   Seq("PROCEDURE", "PROCEDURES").foreach { procKeyword =>
     test(s"SHOW $procKeyword") {
-      assertAst(singleQuery(ShowProceduresClause(None, None, List.empty, yieldAll = false)(defaultPos)))
+      assertAst(singleQuery(ShowProceduresClause(None, None, List.empty, yieldAll = false, None)(defaultPos)))
     }
 
     test(s"SHOW $procKeyword EXECUTABLE") {
       assertAst(
-        singleQuery(ShowProceduresClause(Some(CurrentUser), None, List.empty, yieldAll = false)(defaultPos))
+        singleQuery(ShowProceduresClause(Some(CurrentUser), None, List.empty, yieldAll = false, None)(defaultPos))
       )
     }
 
     test(s"SHOW $procKeyword EXECUTABLE BY CURRENT USER") {
       assertAst(
-        singleQuery(ShowProceduresClause(Some(CurrentUser), None, List.empty, yieldAll = false)(defaultPos))
+        singleQuery(ShowProceduresClause(Some(CurrentUser), None, List.empty, yieldAll = false, None)(defaultPos))
       )
     }
 
     test(s"SHOW $procKeyword EXECUTABLE BY user") {
       assertAst(
-        singleQuery(ShowProceduresClause(Some(User("user")), None, List.empty, yieldAll = false)(defaultPos))
+        singleQuery(ShowProceduresClause(Some(User("user")(pos)), None, List.empty, yieldAll = false, None)(defaultPos))
       )
     }
 
     test(s"SHOW $procKeyword EXECUTABLE BY CURRENT") {
       assertAst(
-        singleQuery(ShowProceduresClause(Some(User("CURRENT")), None, List.empty, yieldAll = false)(defaultPos))
+        singleQuery(ShowProceduresClause(
+          Some(User("CURRENT")(pos)),
+          None,
+          List.empty,
+          yieldAll = false,
+          None
+        )(defaultPos))
       )
     }
 
     test(s"SHOW $procKeyword EXECUTABLE BY SHOW") {
       assertAst(
-        singleQuery(ShowProceduresClause(Some(User("SHOW")), None, List.empty, yieldAll = false)(defaultPos))
+        singleQuery(ShowProceduresClause(Some(User("SHOW")(pos)), None, List.empty, yieldAll = false, None)(defaultPos))
       )
     }
 
     test(s"SHOW $procKeyword EXECUTABLE BY TERMINATE") {
       assertAst(
-        singleQuery(ShowProceduresClause(Some(User("TERMINATE")), None, List.empty, yieldAll = false)(defaultPos))
+        singleQuery(ShowProceduresClause(
+          Some(User("TERMINATE")(pos)),
+          None,
+          List.empty,
+          yieldAll = false,
+          None
+        )(defaultPos))
       )
     }
 
     test(s"USE db SHOW $procKeyword") {
-      assertAst(SingleQuery(
-        List(
-          use(List("db")),
-          ShowProceduresClause(None, None, List.empty, yieldAll = false)((1, 8, 7))
-        )
-      )((1, 8, 7)))
+      assertAstVersionBased(cypher5 =>
+        SingleQuery(
+          List(
+            use(List("db"), !cypher5),
+            ShowProceduresClause(None, None, List.empty, yieldAll = false, None)((1, 8, 7))
+          )
+        )((1, 8, 7))
+      )
     }
 
   }
@@ -98,7 +113,8 @@ class ShowProceduresCommandParserTest extends AdministrationAndSchemaCommandPars
         )((1, 27, 26))
       )((1, 16, 15))),
       List.empty,
-      yieldAll = false
+      yieldAll = false,
+      None
     )(defaultPos)))
   }
 
@@ -108,54 +124,69 @@ class ShowProceduresCommandParserTest extends AdministrationAndSchemaCommandPars
         None,
         None,
         List(commandResultItem("description")),
-        yieldAll = false
-      )(defaultPos),
-      withFromYield(
-        returnAllItems((1, 23, 22)).withDefaultOrderOnColumns(List("description"))
-      )
+        yieldAll = false,
+        Some(withFromYield(
+          returnAllItems((1, 23, 22)).withDefaultOrderOnColumns(List("description"))
+        ))
+      )(defaultPos)
     ))
   }
 
   test("SHOW PROCEDURES EXECUTABLE BY user YIELD *") {
-    assertAst(singleQuery(
-      ShowProceduresClause(Some(User("user")), None, List.empty, yieldAll = true)(defaultPos),
-      withFromYield(returnAllItems)
-    ))
+    assertAst(
+      singleQuery(
+        ShowProceduresClause(
+          Some(User("user")(pos)),
+          None,
+          List.empty,
+          yieldAll = true,
+          Some(withFromYield(returnAllItems))
+        )(defaultPos)
+      )
+    )
   }
 
   test("SHOW PROCEDURES YIELD * ORDER BY name SKIP 2 LIMIT 5") {
     assertAst(singleQuery(
-      ShowProceduresClause(None, None, List.empty, yieldAll = true)(defaultPos),
-      withFromYield(
-        returnAllItems((1, 25, 24)),
-        Some(OrderBy(Seq(
-          AscSortItem(varFor("name", (1, 34, 33)))((1, 34, 33))
-        ))((1, 25, 24))),
-        Some(skip(2, (1, 39, 38))),
-        Some(limit(5, (1, 46, 45)))
-      )
+      ShowProceduresClause(
+        None,
+        None,
+        List.empty,
+        yieldAll = true,
+        Some(withFromYield(
+          returnAllItems((1, 25, 24)),
+          Some(OrderBy(Seq(
+            AscSortItem(varFor("name", (1, 34, 33)))((1, 34, 33))
+          ))((1, 25, 24))),
+          Some(skip(2, (1, 39, 38))),
+          Some(limit(5, (1, 46, 45)))
+        ))
+      )(defaultPos)
     ))
   }
 
   test("USE db SHOW PROCEDURES YIELD name, description AS pp WHERE pp < 50.0 RETURN name") {
-    assertAst(
-      singleQuery(
-        use(List.apply("db")),
-        ShowProceduresClause(
-          None,
-          None,
-          List(
-            commandResultItem("name"),
-            commandResultItem("description", Some("pp"))
-          ),
-          yieldAll = false
-        )(pos),
-        withFromYield(
-          returnAllItems.withDefaultOrderOnColumns(List("name", "pp")),
-          where = Some(where(lessThan(varFor("pp"), literalFloat(50.0))))
+    assertAstVersionBased(
+      cypher5 =>
+        singleQuery(
+          use(List.apply("db"), !cypher5),
+          ShowProceduresClause(
+            None,
+            None,
+            List(
+              commandResultItem("name"),
+              commandResultItem("description", Some("pp"))
+            ),
+            yieldAll = false,
+            Some(
+              withFromYield(
+                returnAllItems.withDefaultOrderOnColumns(List("name", "pp")),
+                where = Some(where(lessThan(varFor("pp"), literalFloat(50.0))))
+              )
+            )
+          )(pos),
+          return_(variableReturnItem("name"))
         ),
-        return_(variableReturnItem("name"))
-      ),
       comparePosition = false
     )
   }
@@ -163,27 +194,30 @@ class ShowProceduresCommandParserTest extends AdministrationAndSchemaCommandPars
   test(
     "USE db SHOW PROCEDURES EXECUTABLE YIELD name, description AS pp ORDER BY pp SKIP 2 LIMIT 5 WHERE pp < 50.0 RETURN name"
   ) {
-    assertAst(
-      singleQuery(
-        use(List("db")),
-        ShowProceduresClause(
-          Some(CurrentUser),
-          None,
-          List(
-            commandResultItem("name"),
-            commandResultItem("description", Some("pp"))
-          ),
-          yieldAll = false
-        )(pos),
-        withFromYield(
-          returnAllItems.withDefaultOrderOnColumns(List("name", "pp")),
-          Some(orderBy(sortItem(varFor("pp")))),
-          Some(skip(2)),
-          Some(limit(5)),
-          Some(where(lessThan(varFor("pp"), literalFloat(50.0))))
+    assertAstVersionBased(
+      cypher5 =>
+        singleQuery(
+          use(List("db"), !cypher5),
+          ShowProceduresClause(
+            Some(CurrentUser),
+            None,
+            List(
+              commandResultItem("name"),
+              commandResultItem("description", Some("pp"))
+            ),
+            yieldAll = false,
+            Some(
+              withFromYield(
+                returnAllItems.withDefaultOrderOnColumns(List("name", "pp")),
+                Some(orderBy(sortItem(varFor("pp")))),
+                Some(skip(2)),
+                Some(limit(5)),
+                Some(where(lessThan(varFor("pp"), literalFloat(50.0))))
+              )
+            )
+          )(pos),
+          return_(variableReturnItem("name"))
         ),
-        return_(variableReturnItem("name"))
-      ),
       comparePosition = false
     )
   }
@@ -191,27 +225,30 @@ class ShowProceduresCommandParserTest extends AdministrationAndSchemaCommandPars
   test(
     "USE db SHOW PROCEDURES EXECUTABLE YIELD name, description AS pp ORDER BY pp OFFSET 2 LIMIT 5 WHERE pp < 50.0 RETURN name"
   ) {
-    assertAst(
-      singleQuery(
-        use(List("db")),
-        ShowProceduresClause(
-          Some(CurrentUser),
-          None,
-          List(
-            commandResultItem("name"),
-            commandResultItem("description", Some("pp"))
-          ),
-          yieldAll = false
-        )(pos),
-        withFromYield(
-          returnAllItems.withDefaultOrderOnColumns(List("name", "pp")),
-          Some(orderBy(sortItem(varFor("pp")))),
-          Some(skip(2)),
-          Some(limit(5)),
-          Some(where(lessThan(varFor("pp"), literalFloat(50.0))))
+    assertAstVersionBased(
+      cypher5 =>
+        singleQuery(
+          use(List("db"), !cypher5),
+          ShowProceduresClause(
+            Some(CurrentUser),
+            None,
+            List(
+              commandResultItem("name"),
+              commandResultItem("description", Some("pp"))
+            ),
+            yieldAll = false,
+            Some(
+              withFromYield(
+                returnAllItems.withDefaultOrderOnColumns(List("name", "pp")),
+                Some(orderBy(sortItem(varFor("pp")))),
+                Some(skip(2)),
+                Some(limit(5)),
+                Some(where(lessThan(varFor("pp"), literalFloat(50.0))))
+              )
+            )
+          )(pos),
+          return_(variableReturnItem("name"))
         ),
-        return_(variableReturnItem("name"))
-      ),
       comparePosition = false
     )
   }
@@ -226,9 +263,9 @@ class ShowProceduresCommandParserTest extends AdministrationAndSchemaCommandPars
             commandResultItem("name", Some("PROCEDURE")),
             commandResultItem("mode", Some("OUTPUT"))
           ),
-          yieldAll = false
-        )(pos),
-        withFromYield(returnAllItems.withDefaultOrderOnColumns(List("PROCEDURE", "OUTPUT")))
+          yieldAll = false,
+          Some(withFromYield(returnAllItems.withDefaultOrderOnColumns(List("PROCEDURE", "OUTPUT"))))
+        )(pos)
       ),
       comparePosition = false
     )
@@ -240,13 +277,13 @@ class ShowProceduresCommandParserTest extends AdministrationAndSchemaCommandPars
         None,
         None,
         List(commandResultItem("a")),
-        yieldAll = false
-      )(pos),
-      withFromYield(
-        returnAllItems.withDefaultOrderOnColumns(List("a")),
-        Some(orderBy(sortItem(varFor("a")))),
-        where = Some(where(equals(varFor("a"), literalInt(1))))
-      )
+        yieldAll = false,
+        Some(withFromYield(
+          returnAllItems.withDefaultOrderOnColumns(List("a")),
+          Some(orderBy(sortItem(varFor("a")))),
+          where = Some(where(equals(varFor("a"), literalInt(1))))
+        ))
+      )(pos)
     ))
   }
 
@@ -256,13 +293,13 @@ class ShowProceduresCommandParserTest extends AdministrationAndSchemaCommandPars
         None,
         None,
         List(commandResultItem("a", Some("b"))),
-        yieldAll = false
-      )(pos),
-      withFromYield(
-        returnAllItems.withDefaultOrderOnColumns(List("b")),
-        Some(orderBy(sortItem(varFor("b")))),
-        where = Some(where(equals(varFor("b"), literalInt(1))))
-      )
+        yieldAll = false,
+        Some(withFromYield(
+          returnAllItems.withDefaultOrderOnColumns(List("b")),
+          Some(orderBy(sortItem(varFor("b")))),
+          where = Some(where(equals(varFor("b"), literalInt(1))))
+        ))
+      )(pos)
     ))
   }
 
@@ -272,13 +309,13 @@ class ShowProceduresCommandParserTest extends AdministrationAndSchemaCommandPars
         None,
         None,
         List(commandResultItem("a", Some("b"))),
-        yieldAll = false
-      )(pos),
-      withFromYield(
-        returnAllItems.withDefaultOrderOnColumns(List("b")),
-        Some(orderBy(sortItem(varFor("b")))),
-        where = Some(where(equals(varFor("b"), literalInt(1))))
-      )
+        yieldAll = false,
+        Some(withFromYield(
+          returnAllItems.withDefaultOrderOnColumns(List("b")),
+          Some(orderBy(sortItem(varFor("b")))),
+          where = Some(where(equals(varFor("b"), literalInt(1))))
+        ))
+      )(pos)
     ))
   }
 
@@ -288,13 +325,13 @@ class ShowProceduresCommandParserTest extends AdministrationAndSchemaCommandPars
         None,
         None,
         List(commandResultItem("a")),
-        yieldAll = false
-      )(pos),
-      withFromYield(
-        returnAllItems.withDefaultOrderOnColumns(List("a")),
-        Some(orderBy(sortItem(simpleExistsExpression(patternForMatch(nodePat(Some("a"))), None)))),
-        where = Some(where(simpleExistsExpression(patternForMatch(nodePat(Some("a"))), None)))
-      )
+        yieldAll = false,
+        Some(withFromYield(
+          returnAllItems.withDefaultOrderOnColumns(List("a")),
+          Some(orderBy(sortItem(simpleExistsExpression(patternForMatch(nodePat(Some("a"))), None)))),
+          where = Some(where(simpleExistsExpression(patternForMatch(nodePat(Some("a"))), None)))
+        ))
+      )(pos)
     ))
   }
 
@@ -304,13 +341,13 @@ class ShowProceduresCommandParserTest extends AdministrationAndSchemaCommandPars
         None,
         None,
         List(commandResultItem("a")),
-        yieldAll = false
-      )(pos),
-      withFromYield(
-        returnAllItems.withDefaultOrderOnColumns(List("a")),
-        Some(orderBy(sortItem(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))),
-        where = Some(where(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))
-      )
+        yieldAll = false,
+        Some(withFromYield(
+          returnAllItems.withDefaultOrderOnColumns(List("a")),
+          Some(orderBy(sortItem(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))),
+          where = Some(where(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))
+        ))
+      )(pos)
     ))
   }
 
@@ -320,13 +357,13 @@ class ShowProceduresCommandParserTest extends AdministrationAndSchemaCommandPars
         None,
         None,
         List(commandResultItem("a", Some("b"))),
-        yieldAll = false
-      )(pos),
-      withFromYield(
-        returnAllItems.withDefaultOrderOnColumns(List("b")),
-        Some(orderBy(sortItem(simpleCountExpression(patternForMatch(nodePat(Some("b"))), None)))),
-        where = Some(where(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))
-      )
+        yieldAll = false,
+        Some(withFromYield(
+          returnAllItems.withDefaultOrderOnColumns(List("b")),
+          Some(orderBy(sortItem(simpleCountExpression(patternForMatch(nodePat(Some("b"))), None)))),
+          where = Some(where(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))
+        ))
+      )(pos)
     ))
   }
 
@@ -336,16 +373,16 @@ class ShowProceduresCommandParserTest extends AdministrationAndSchemaCommandPars
         None,
         None,
         List(commandResultItem("a", Some("b"))),
-        yieldAll = false
-      )(pos),
-      withFromYield(
-        returnAllItems.withDefaultOrderOnColumns(List("b")),
-        Some(orderBy(sortItem(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))),
-        where = Some(where(notEquals(
-          simpleCollectExpression(patternForMatch(nodePat(Some("b"))), None, return_(returnItem(varFor("b"), "a"))),
-          listOf()
-        )))
-      )
+        yieldAll = false,
+        Some(withFromYield(
+          returnAllItems.withDefaultOrderOnColumns(List("b")),
+          Some(orderBy(sortItem(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))),
+          where = Some(where(notEquals(
+            simpleCollectExpression(patternForMatch(nodePat(Some("b"))), None, return_(returnItem(varFor("b"), "a"))),
+            listOf()
+          )))
+        ))
+      )(pos)
     ))
   }
 
@@ -355,13 +392,13 @@ class ShowProceduresCommandParserTest extends AdministrationAndSchemaCommandPars
         None,
         None,
         List(commandResultItem("a", Some("b"))),
-        yieldAll = false
-      )(pos),
-      withFromYield(
-        returnAllItems.withDefaultOrderOnColumns(List("b")),
-        Some(orderBy(sortItem(add(varFor("b"), simpleCountExpression(patternForMatch(nodePat()), None))))),
-        where = Some(where(or(varFor("b"), simpleExistsExpression(patternForMatch(nodePat()), None))))
-      )
+        yieldAll = false,
+        Some(withFromYield(
+          returnAllItems.withDefaultOrderOnColumns(List("b")),
+          Some(orderBy(sortItem(add(varFor("b"), simpleCountExpression(patternForMatch(nodePat()), None))))),
+          where = Some(where(or(varFor("b"), simpleExistsExpression(patternForMatch(nodePat()), None))))
+        ))
+      )(pos)
     ))
   }
 
@@ -371,20 +408,20 @@ class ShowProceduresCommandParserTest extends AdministrationAndSchemaCommandPars
         None,
         None,
         List(commandResultItem("a", Some("b"))),
-        yieldAll = false
-      )(pos),
-      withFromYield(
-        returnAllItems.withDefaultOrderOnColumns(List("b")),
-        Some(orderBy(sortItem(add(varFor("b"), simpleExistsExpression(patternForMatch(nodePat()), None))))),
-        where = Some(where(or(
-          varFor("b"),
-          AllIterablePredicate(
-            varFor("x"),
-            listOfInt(1, 2),
-            Some(isTyped(varFor("x"), IntegerType(isNullable = true)(pos)))
-          )(pos)
-        )))
-      )
+        yieldAll = false,
+        Some(withFromYield(
+          returnAllItems.withDefaultOrderOnColumns(List("b")),
+          Some(orderBy(sortItem(add(varFor("b"), simpleExistsExpression(patternForMatch(nodePat()), None))))),
+          where = Some(where(or(
+            varFor("b"),
+            AllIterablePredicate(
+              varFor("x"),
+              listOfInt(1, 2),
+              Some(isTyped(varFor("x"), IntegerType(isNullable = true)(pos)))
+            )(pos)
+          )))
+        ))
+      )(pos)
     ))
   }
 
@@ -397,16 +434,87 @@ class ShowProceduresCommandParserTest extends AdministrationAndSchemaCommandPars
           commandResultItem("name", Some("option")),
           commandResultItem("option", Some("name"))
         ),
-        yieldAll = false
-      )(pos),
-      withFromYield(
-        returnAllItems.withDefaultOrderOnColumns(List("option", "name")),
-        where = Some(where(
-          greaterThan(size(varFor("option")), literalInt(0))
+        yieldAll = false,
+        Some(withFromYield(
+          returnAllItems.withDefaultOrderOnColumns(List("option", "name")),
+          where = Some(where(
+            greaterThan(size(varFor("option")), literalInt(0))
+          ))
         ))
-      ),
+      )(pos),
       return_(aliasedReturnItem("option", "name"))
     ))
+  }
+
+  test(
+    "SHOW PROCEDURES YIELD name RETURN name ORDER BY name"
+  ) {
+    assertAst(
+      singleQuery(
+        ShowProceduresClause(
+          None,
+          None,
+          List(commandResultItem("name")),
+          yieldAll = false,
+          Some(withFromYield(returnAllItems.withDefaultOrderOnColumns(List("name"))))
+        )(pos),
+        return_(orderBy(sortItem(varFor("name"))), variableReturnItem("name"))
+      ),
+      comparePosition = false
+    )
+  }
+
+  test("SHOW PROCEDURES WHERE name = 'my.proc' RETURN *") {
+    parsesIn[Statements] {
+      case Cypher5 => _.withSyntaxErrorContaining("Invalid input 'RETURN'")
+      case _ => _.toAstPositioned(singleQuery(
+          ShowProceduresClause(
+            None,
+            Some(Where(
+              Equals(
+                varFor("name", (1, 23, 22)),
+                StringLiteral("my.proc")((1, 30, 29).withInputLength(9))
+              )((1, 28, 27))
+            )((1, 17, 16))),
+            List.empty,
+            yieldAll = false,
+            None
+          )(defaultPos),
+          returnAll
+        ))
+    }
+  }
+
+  test("SHOW PROCEDURES WHERE true RETURN *") {
+    parsesIn[Statements] {
+      case Cypher5 => _.withSyntaxErrorContaining("Invalid input 'RETURN'")
+      case _ => _.toAstPositioned(singleQuery(
+          ShowProceduresClause(
+            None,
+            Some(Where(True()(InputPosition.Range(22, 1, 23, 4)))((1, 17, 16))),
+            List.empty,
+            yieldAll = false,
+            None
+          )(defaultPos),
+          returnAll
+        ))
+    }
+  }
+
+  test("SHOW PROCEDURES RETURN *") {
+    parsesIn[Statements] {
+      case Cypher5 => _.withSyntaxErrorContaining("Invalid input 'RETURN'")
+      case _ => _.toAstPositioned(singleQuery(
+          ShowProceduresClause(
+            None,
+            None,
+            List.empty,
+            yieldAll = false,
+            None
+          )(defaultPos),
+          returnAll
+        ))
+    }
   }
 
   // Negative tests
@@ -431,78 +539,19 @@ class ShowProceduresCommandParserTest extends AdministrationAndSchemaCommandPars
     failsParsing[Statements]
   }
 
-  test("SHOW PROCEDURES WHERE name = 'my.proc' RETURN *") {
-    failsParsing[Statements]
-  }
-
   test("SHOW PROCEDURES YIELD a b RETURN *") {
-    failsParsing[Statements]
-  }
-
-  test("SHOW PROCEDURES RETURN *") {
     failsParsing[Statements]
   }
 
   test("SHOW EXECUTABLE PROCEDURE") {
     failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          """Invalid input 'EXECUTABLE': expected
-            |  "ALIAS"
-            |  "ALIASES"
-            |  "ALL"
-            |  "BTREE"
-            |  "BUILT"
-            |  "CONSTRAINT"
-            |  "CONSTRAINTS"
-            |  "CURRENT"
-            |  "DATABASE"
-            |  "DATABASES"
-            |  "DEFAULT"
-            |  "EXIST"
-            |  "EXISTENCE"
-            |  "EXISTS"
-            |  "FULLTEXT"
-            |  "FUNCTION"
-            |  "FUNCTIONS"
-            |  "HOME"
-            |  "INDEX"
-            |  "INDEXES"
-            |  "KEY"
-            |  "LOOKUP"
-            |  "NODE"
-            |  "POINT"
-            |  "POPULATED"
-            |  "PRIVILEGE"
-            |  "PRIVILEGES"
-            |  "PROCEDURE"
-            |  "PROCEDURES"
-            |  "PROPERTY"
-            |  "RANGE"
-            |  "REL"
-            |  "RELATIONSHIP"
-            |  "ROLE"
-            |  "ROLES"
-            |  "SERVER"
-            |  "SERVERS"
-            |  "SETTING"
-            |  "SETTINGS"
-            |  "SUPPORTED"
-            |  "TEXT"
-            |  "TRANSACTION"
-            |  "TRANSACTIONS"
-            |  "UNIQUE"
-            |  "UNIQUENESS"
-            |  "USER"
-            |  "USERS"
-            |  "VECTOR" (line 1, column 6 (offset: 5))""".stripMargin
-        )
       case Cypher5 => _.withSyntaxError(
           """Invalid input 'EXECUTABLE': expected 'ALIAS', 'ALIASES', 'ALL', 'BTREE', 'CONSTRAINT', 'CONSTRAINTS', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', 'EXIST', 'EXISTENCE', 'EXISTS', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', 'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', 'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'CURRENT USER', 'USERS' or 'VECTOR' (line 1, column 6 (offset: 5))
             |"SHOW EXECUTABLE PROCEDURE"
             |      ^""".stripMargin
         )
       case _ => _.withSyntaxError(
-          """Invalid input 'EXECUTABLE': expected 'ALIAS', 'ALIASES', 'ALL', 'CONSTRAINT', 'CONSTRAINTS', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', 'EXIST', 'EXISTENCE', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', 'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', 'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'CURRENT USER', 'USERS' or 'VECTOR' (line 1, column 6 (offset: 5))
+          """Invalid input 'EXECUTABLE': expected 'ALIAS', 'ALIASES', 'ALL', 'AUTH', 'CONSTRAINT', 'CONSTRAINTS', 'CURRENT', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', 'EXIST', 'EXISTENCE', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', 'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', 'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'USERS' or 'VECTOR' (line 1, column 6 (offset: 5))
             |"SHOW EXECUTABLE PROCEDURE"
             |      ^""".stripMargin
         )
@@ -519,17 +568,13 @@ class ShowProceduresCommandParserTest extends AdministrationAndSchemaCommandPars
 
   test("SHOW PROCEDURE EXEC") {
     failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          """Invalid input 'EXEC': expected
-            |  "EXECUTABLE"
-            |  "SHOW"
-            |  "TERMINATE"
-            |  "WHERE"
-            |  "YIELD"
-            |  <EOF> (line 1, column 16 (offset: 15))""".stripMargin
+      case Cypher5 => _.withSyntaxError(
+          """Invalid input 'EXEC': expected 'EXECUTABLE', 'WHERE', 'YIELD' or <EOF> (line 1, column 16 (offset: 15))
+            |"SHOW PROCEDURE EXEC"
+            |                ^""".stripMargin
         )
       case _ => _.withSyntaxError(
-          """Invalid input 'EXEC': expected 'EXECUTABLE', 'SHOW', 'TERMINATE', 'WHERE', 'YIELD' or <EOF> (line 1, column 16 (offset: 15))
+          """Invalid input 'EXEC': expected 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'EXECUTABLE', 'FILTER', 'FINISH', 'FOR', 'FOREACH', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NEXT', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SHOW', 'SKIP', 'TERMINATE', 'UNION', 'UNWIND', 'USE', 'WHERE', 'WITH', 'YIELD' or <EOF> (line 1, column 16 (offset: 15))
             |"SHOW PROCEDURE EXEC"
             |                ^""".stripMargin
         )
@@ -573,29 +618,19 @@ class ShowProceduresCommandParserTest extends AdministrationAndSchemaCommandPars
   }
 
   test("SHOW user PROCEDURE") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          """Invalid input '': expected ",", "PRIVILEGE" or "PRIVILEGES" (line 1, column 20 (offset: 19))"""
-        )
-      case _ => _.withSyntaxError(
-          """Invalid input '': expected 'PRIVILEGE' or 'PRIVILEGES' (line 1, column 20 (offset: 19))
-            |"SHOW user PROCEDURE"
-            |                    ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '': expected 'PRIVILEGE' or 'PRIVILEGES' (line 1, column 20 (offset: 19))
+        |"SHOW user PROCEDURE"
+        |                    ^""".stripMargin
+    )
   }
 
   test("SHOW USER user PROCEDURE") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          """Invalid input 'PROCEDURE': expected ",", "PRIVILEGE" or "PRIVILEGES" (line 1, column 16 (offset: 15))"""
-        )
-      case _ => _.withSyntaxError(
-          """Invalid input 'PROCEDURE': expected 'PRIVILEGE' or 'PRIVILEGES' (line 1, column 16 (offset: 15))
-            |"SHOW USER user PROCEDURE"
-            |                ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'PROCEDURE': expected 'PRIVILEGE' or 'PRIVILEGES' (line 1, column 16 (offset: 15))
+        |"SHOW USER user PROCEDURE"
+        |                ^""".stripMargin
+    )
   }
 
   test("SHOW PROCEDURE EXECUTABLE BY USER user") {
@@ -613,107 +648,15 @@ class ShowProceduresCommandParserTest extends AdministrationAndSchemaCommandPars
   // Invalid clause order
 
   for (prefix <- Seq("USE neo4j", "")) {
-    test(s"$prefix SHOW PROCEDURES YIELD * WITH * MATCH (n) RETURN n") {
-      // Can't parse WITH after SHOW
-      failsParsing[Statements].in {
-        case Cypher5JavaCc => _.withMessageStart("Invalid input 'WITH': expected")
-        case _ => _.withSyntaxErrorContaining(
-            """Invalid input 'WITH': expected 'ORDER BY'""".stripMargin
-          )
-      }
-
-    }
-
-    test(s"$prefix UNWIND range(1,10) as b SHOW PROCEDURES YIELD * RETURN *") {
-      // Can't parse SHOW  after UNWIND
-      failsParsing[Statements].in {
-        case Cypher5JavaCc => _.withMessageStart("Invalid input 'SHOW': expected")
-        case _ => _.withSyntaxErrorContaining(
-            """Invalid input 'SHOW': expected 'FOREACH', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF>""".stripMargin
-          )
-      }
-
-    }
-
-    test(s"$prefix SHOW PROCEDURES WITH name, type RETURN *") {
-      // Can't parse WITH after SHOW
-      failsParsing[Statements].in {
-        case Cypher5JavaCc => _.withMessageStart("Invalid input 'WITH': expected")
-        case _ => _.withSyntaxErrorContaining(
-            """Invalid input 'WITH': expected 'EXECUTABLE'""".stripMargin
-          )
-      }
-
-    }
-
-    test(s"$prefix WITH 'n' as n SHOW PROCEDURES YIELD name RETURN name as numIndexes") {
-      failsParsing[Statements].in {
-        case Cypher5JavaCc => _.withMessageStart("Invalid input 'SHOW': expected")
-        case _ => _.withSyntaxErrorContaining(
-            """Invalid input 'SHOW': expected 'FOREACH', ',', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WHERE', 'WITH' or <EOF>""".stripMargin
-          )
-      }
-
-    }
-
-    test(s"$prefix SHOW PROCEDURES RETURN name as numIndexes") {
-      failsParsing[Statements].in {
-        case Cypher5JavaCc => _.withMessageStart("Invalid input 'RETURN': expected")
-        case _ => _.withSyntaxErrorContaining(
-            """Invalid input 'RETURN': expected 'EXECUTABLE'""".stripMargin
-          )
-      }
-
-    }
-
-    test(s"$prefix SHOW PROCEDURES WITH 1 as c RETURN name as numIndexes") {
-      failsParsing[Statements].in {
-        case Cypher5JavaCc => _.withMessageStart("Invalid input 'WITH': expected")
-        case _ => _.withSyntaxErrorContaining(
-            """Invalid input 'WITH': expected 'EXECUTABLE'""".stripMargin
-          )
-      }
-
-    }
-
-    test(s"$prefix SHOW PROCEDURES WITH 1 as c") {
-      failsParsing[Statements].in {
-        case Cypher5JavaCc => _.withMessageStart("Invalid input 'WITH': expected")
-        case _ => _.withSyntaxErrorContaining(
-            """Invalid input 'WITH': expected 'EXECUTABLE'""".stripMargin
-          )
-      }
-
-    }
-
-    test(s"$prefix SHOW PROCEDURES YIELD a WITH a RETURN a") {
-      failsParsing[Statements].in {
-        case Cypher5JavaCc => _.withMessageStart("Invalid input 'WITH': expected")
-        case _ => _.withSyntaxErrorContaining(
-            """Invalid input 'WITH': expected ',', 'AS', 'ORDER BY', 'LIMIT', 'OFFSET', 'RETURN', 'SHOW', 'SKIP', 'TERMINATE', 'WHERE' or <EOF>""".stripMargin
-          )
-      }
-
-    }
-
-    test(s"$prefix SHOW PROCEDURES YIELD as UNWIND as as a RETURN a") {
-      failsParsing[Statements].in {
-        case Cypher5JavaCc => _.withMessageStart("Invalid input 'UNWIND': expected")
-        case _ => _.withSyntaxErrorContaining(
-            """Invalid input 'UNWIND': expected ',', 'AS', 'ORDER BY', 'LIMIT', 'OFFSET', 'RETURN', 'SHOW', 'SKIP', 'TERMINATE', 'WHERE' or <EOF>""".stripMargin
-          )
-      }
-
-    }
-
     test(s"$prefix SHOW PROCEDURES RETURN name2 YIELD name2") {
       failsParsing[Statements].in {
-        case Cypher5JavaCc => _.withMessageStart("Invalid input 'RETURN': expected")
-        case _ => _.withSyntaxErrorContaining(
+        case Cypher5 => _.withSyntaxErrorContaining(
             """Invalid input 'RETURN': expected 'EXECUTABLE'""".stripMargin
           )
+        case _ => _.withSyntaxErrorContaining(
+            """Invalid input 'YIELD': expected an expression, ','""".stripMargin
+          )
       }
-
     }
   }
 
@@ -765,48 +708,13 @@ class ShowProceduresCommandParserTest extends AdministrationAndSchemaCommandPars
 
   test("SHOW PROCEDURE YIELD name ORDER BY name AST RETURN *") {
     failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          """Invalid input 'AST': expected
-            |  "!="
-            |  "%"
-            |  "*"
-            |  "+"
-            |  ","
-            |  "-"
-            |  "/"
-            |  "::"
-            |  "<"
-            |  "<="
-            |  "<>"
-            |  "="
-            |  "=~"
-            |  ">"
-            |  ">="
-            |  "AND"
-            |  "ASC"
-            |  "ASCENDING"
-            |  "CONTAINS"
-            |  "DESC"
-            |  "DESCENDING"
-            |  "ENDS"
-            |  "IN"
-            |  "IS"
-            |  "LIMIT"
-            |  "OFFSET"
-            |  "OR"
-            |  "RETURN"
-            |  "SHOW"
-            |  "SKIP"
-            |  "STARTS"
-            |  "TERMINATE"
-            |  "WHERE"
-            |  "XOR"
-            |  "^"
-            |  "||"
-            |  <EOF> (line 1, column 41 (offset: 40))""".stripMargin
+      case Cypher5 => _.withSyntaxError(
+          """Invalid input 'AST': expected an expression, ',', 'ASC', 'ASCENDING', 'DESC', 'DESCENDING', 'LIMIT', 'OFFSET', 'RETURN', 'SKIP', 'WHERE' or <EOF> (line 1, column 41 (offset: 40))
+            |"SHOW PROCEDURE YIELD name ORDER BY name AST RETURN *"
+            |                                         ^""".stripMargin
         )
       case _ => _.withSyntaxError(
-          """Invalid input 'AST': expected an expression, ',', 'ASC', 'ASCENDING', 'DESC', 'DESCENDING', 'LIMIT', 'OFFSET', 'RETURN', 'SHOW', 'SKIP', 'TERMINATE', 'WHERE' or <EOF> (line 1, column 41 (offset: 40))
+          """Invalid input 'AST': expected an expression, ',', 'ASC', 'ASCENDING', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DESC', 'DESCENDING', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'FOREACH', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NEXT', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SHOW', 'SKIP', 'TERMINATE', 'UNION', 'UNWIND', 'USE', 'WHERE', 'WITH' or <EOF> (line 1, column 41 (offset: 40))
             |"SHOW PROCEDURE YIELD name ORDER BY name AST RETURN *"
             |                                         ^""".stripMargin
         )

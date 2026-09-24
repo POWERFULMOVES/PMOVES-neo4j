@@ -10,13 +10,25 @@
     "$resolver": "level",
     "field": "name"
   },
+  "marker": {
+    "parents":{
+      "$resolver": "marker",
+      "field": "parents"
+    },
+    "name":{
+      "$resolver": "marker",
+      "field": "name"
+    }
+  },
   "category": {
     "$resolver": "pattern",
     "pattern": "%c{1.}",
     "stackTraceEnabled": false
   },
   "message": {
-    "$resolver": "message"
+    "$resolver": "pattern",
+    "pattern": "%m",
+    "stackTraceEnabled": false
   },
   "includeFullMap": {
     "$resolver": "map",

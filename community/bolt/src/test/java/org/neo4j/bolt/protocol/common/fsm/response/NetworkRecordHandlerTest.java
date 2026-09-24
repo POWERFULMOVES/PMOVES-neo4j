@@ -123,7 +123,7 @@ class NetworkRecordHandlerTest {
             ch.flush();
 
             for (var i = 0; i < 2; ++i) {
-                var buffer = ctx.output(ch.<ByteBuf>readOutbound());
+                var buffer = ctx.tracked(ch.<ByteBuf>readOutbound(), 2);
                 Assertions.assertThat(buffer)
                         .isNotNull()
                         .asInstanceOf(PackstreamBufAssertions.wrap())

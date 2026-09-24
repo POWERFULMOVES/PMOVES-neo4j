@@ -20,9 +20,8 @@
 package org.neo4j.kernel.impl.transaction;
 
 import static java.util.Collections.emptyList;
-import static org.neo4j.storageengine.AppendIndexProvider.UNKNOWN_APPEND_INDEX;
-import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_CHUNK_ID;
-import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_CONSENSUS_INDEX;
+import static org.neo4j.kernel.impl.api.LeaseService.NO_LEASE;
+import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_TX_ID;
 
 import java.io.IOException;
 import org.apache.commons.lang3.mutable.MutableLong;
@@ -31,11 +30,20 @@ import org.neo4j.io.fs.WritableChannel;
 import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.impl.api.chunk.ChunkMetadata;
 import org.neo4j.kernel.impl.api.chunk.ChunkedCommandBatch;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntryWriter;
 import org.neo4j.storageengine.api.CommandBatch;
+import org.neo4j.wal.entry.LogEntryWriter;
 
 public record ChunkedRollbackBatchRepresentation(
-        KernelVersion kernelVersion, long transactionId, long appendIndex, long timeWritten, int checksum)
+        KernelVersion kernelVersion,
+        long transactionId,
+        long appendIndex,
+        long chunkId,
+        long timeWritten,
+        int checksum,
+        int previousChecksum,
+        long transactionSequenceNumber,
+        long previousBatchAppendIndex,
+        long consensusIndex)
         implements CommittedCommandBatchRepresentation {
 
     @Override
@@ -46,21 +54,29 @@ public record ChunkedRollbackBatchRepresentation(
                         false,
                         true,
                         true,
-                        UNKNOWN_APPEND_INDEX,
-                        UNKNOWN_CHUNK_ID,
-                        new MutableLong(UNKNOWN_CONSENSUS_INDEX),
-                        new MutableLong(UNKNOWN_APPEND_INDEX),
+                        previousBatchAppendIndex,
+                        chunkId,
+                        new MutableLong(consensusIndex),
+                        new MutableLong(appendIndex),
                         timeWritten,
-                        -1,
+                        UNKNOWN_TX_ID,
                         timeWritten,
-                        -1,
+                        NO_LEASE,
                         kernelVersion,
-                        Subject.ANONYMOUS));
+                        Subject.AUTH_DISABLED));
     }
 
     @Override
     public int serialize(LogEntryWriter<? extends WritableChannel> writer) throws IOException {
-        return writer.writeRollbackEntry(kernelVersion, transactionId, appendIndex, timeWritten);
+        return writer.writeRollbackEntry(
+                kernelVersion,
+                transactionId,
+                appendIndex,
+                chunkId,
+                timeWritten,
+                transactionSequenceNumber,
+                previousBatchAppendIndex,
+                consensusIndex);
     }
 
     @Override
@@ -86,10 +102,5 @@ public record ChunkedRollbackBatchRepresentation(
     @Override
     public boolean isRollback() {
         return true;
-    }
-
-    @Override
-    public long previousBatchAppendIndex() {
-        return UNKNOWN_APPEND_INDEX;
     }
 }

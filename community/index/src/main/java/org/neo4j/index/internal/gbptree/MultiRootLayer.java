@@ -22,7 +22,6 @@ package org.neo4j.index.internal.gbptree;
 import static org.neo4j.index.internal.gbptree.CursorCreator.bind;
 import static org.neo4j.index.internal.gbptree.Generation.stableGeneration;
 import static org.neo4j.index.internal.gbptree.Generation.unstableGeneration;
-import static org.neo4j.index.internal.gbptree.InternalTreeLogic.DEFAULT_SPLIT_RATIO;
 import static org.neo4j.index.internal.gbptree.SeekCursor.DEFAULT_MAX_READ_AHEAD;
 import static org.neo4j.index.internal.gbptree.SeekCursor.LEAF_LEVEL;
 import static org.neo4j.index.internal.gbptree.TreeNodeUtil.DATA_LAYER_FLAG;
@@ -36,13 +35,13 @@ import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.OptionalLong;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Supplier;
 import org.neo4j.common.DependencyResolver;
 import org.neo4j.index.internal.gbptree.RootMappingLayout.RootMappingValue;
-import org.neo4j.internal.helpers.collection.LfuCache;
 import org.neo4j.io.pagecache.PageCursor;
 import org.neo4j.io.pagecache.PagedFile;
 import org.neo4j.io.pagecache.context.CursorContext;
@@ -60,15 +59,13 @@ import org.neo4j.util.concurrent.Futures;
  * @param <DATA_VALUE> values used in the data entries in the data roots.
  */
 class MultiRootLayer<ROOT_KEY, DATA_KEY, DATA_VALUE> extends RootLayer<ROOT_KEY, DATA_KEY, DATA_VALUE> {
-    private static final int BYTE_SIZE_PER_CACHED_EXTERNAL_ROOT =
-            16 /*obj.overhead*/ + 16 /*obj.fields*/ + 16 /*inner root instance*/ + 8 /* cache references*/;
     private static final long NULL_ROOT_ID = -1;
     private static final long NOT_FOUND_ROOT_ID = 0;
     private static final Root NULL_ROOT = new Root(NULL_ROOT_ID, -1);
     private final Layout<ROOT_KEY, RootMappingValue> rootLayout;
     private final LeafNodeBehaviour<ROOT_KEY, RootMappingValue> rootLeafNode;
     private final InternalNodeBehaviour<ROOT_KEY> rootInternalNode;
-    private final LfuCache<ROOT_KEY, DataTreeRoot<ROOT_KEY>> rootMappingCache;
+    private final RootMappingCache<ROOT_KEY, DataTreeRoot<ROOT_KEY>> rootMappingCache;
     private final ValueMerger<ROOT_KEY, RootMappingValue> DONT_ALLOW_CREATE_EXISTING_ROOT =
             (existingKey, newKey, existingValue, newValue) -> {
                 throw new DataTreeAlreadyExistsException(existingKey);
@@ -82,7 +79,7 @@ class MultiRootLayer<ROOT_KEY, DATA_KEY, DATA_VALUE> extends RootLayer<ROOT_KEY,
             RootLayerSupport support,
             Layout<ROOT_KEY, RootMappingValue> rootLayout,
             Layout<DATA_KEY, DATA_VALUE> dataLayout,
-            int rootCacheSizeInBytes,
+            RootMappingCacheFactory rootMappingCacheFactory,
             TreeNodeSelector treeNodeSelector,
             DependencyResolver dependencyResolver) {
         super(support, treeNodeSelector);
@@ -91,8 +88,7 @@ class MultiRootLayer<ROOT_KEY, DATA_KEY, DATA_VALUE> extends RootLayer<ROOT_KEY,
 
         this.rootLayout = rootLayout;
         this.dataLayout = dataLayout;
-        this.rootMappingCache = new LfuCache<>(
-                "Root mapping cache", Math.max(100, rootCacheSizeInBytes / BYTE_SIZE_PER_CACHED_EXTERNAL_ROOT));
+        this.rootMappingCache = rootMappingCacheFactory.create("Root mapping cache");
         var rootMappingFormat = treeNodeSelector.selectByLayout(this.rootLayout);
         var format = treeNodeSelector.selectByLayout(dataLayout);
         OffloadStoreImpl<ROOT_KEY, RootMappingValue> rootOffloadStore = support.buildOffload(this.rootLayout);
@@ -135,19 +131,13 @@ class MultiRootLayer<ROOT_KEY, DATA_KEY, DATA_VALUE> extends RootLayer<ROOT_KEY,
         try {
             var cursorCreator = bind(support, PF_SHARED_WRITE_LOCK, cursorContext);
             Root dataRoot;
-            try (Writer<ROOT_KEY, RootMappingValue> rootMappingWriter = support.internalParallelWriter(
-                    rootLayout,
-                    rootLeafNode,
-                    rootInternalNode,
-                    DEFAULT_SPLIT_RATIO,
-                    cursorContext,
-                    this,
-                    ROOT_LAYER_FLAG)) {
+            try (Writer<ROOT_KEY, RootMappingValue> rootMappingWriter = support.newInitializedWriter(
+                    rootLayout, this, rootLeafNode, rootInternalNode, cursorContext, 0, ROOT_LAYER_FLAG)) {
                 dataRootKey = rootLayout.copyKey(dataRootKey);
                 long generation = support.generation();
                 long stableGeneration = stableGeneration(generation);
                 long unstableGeneration = unstableGeneration(generation);
-                long rootId = support.idProvider().acquireNewId(stableGeneration, unstableGeneration, cursorCreator);
+                long rootId = support.idProvider().acquireNewId(stableGeneration, cursorCreator, cursorContext);
                 try {
                     dataRoot = new Root(rootId, unstableGeneration);
                     support.initializeNewRoot(dataRoot, dataLeafNode, DATA_LAYER_FLAG, cursorContext);
@@ -173,39 +163,46 @@ class MultiRootLayer<ROOT_KEY, DATA_KEY, DATA_VALUE> extends RootLayer<ROOT_KEY,
 
     @Override
     void delete(ROOT_KEY dataRootKey, CursorContext cursorContext) throws IOException {
-        try (var rootMappingMerger = new RootDeleteValueMerger(cursorContext, dataRootKey)) {
-            try (Writer<ROOT_KEY, RootMappingValue> rootMappingWriter = support.internalParallelWriter(
-                    rootLayout,
-                    rootLeafNode,
-                    rootInternalNode,
-                    DEFAULT_SPLIT_RATIO,
-                    cursorContext,
-                    this,
-                    ROOT_LAYER_FLAG)) {
-                dataRootKey = rootLayout.copyKey(dataRootKey);
-                while (true) {
-                    rootMappingMerger.reset();
-                    rootMappingWriter.mergeIfExists(
-                            dataRootKey, new RootMappingValue().initialize(NULL_ROOT), rootMappingMerger);
-                    var rootId = rootMappingMerger.rootIdToRelease;
-                    if (rootId == NOT_FOUND_ROOT_ID) {
-                        throw new DataTreeNotFoundException(dataRootKey);
-                    }
-                    if (rootId != NULL_ROOT_ID) {
-                        long generation = support.generation();
-                        var unstableGeneration = unstableGeneration(generation);
-                        support.structureWriteLog().deleteRoot(unstableGeneration, rootId);
-                        support.idProvider()
-                                .releaseId(
-                                        stableGeneration(generation),
-                                        unstableGeneration,
-                                        rootId,
-                                        bind(support, PF_SHARED_WRITE_LOCK, cursorContext));
-                        break;
-                    }
+        try (var rootDeleteValueMerger = new DefaultRootDeleteValueMerger(cursorContext, dataRootKey)) {
+            // Emptying the cache first to avoid stale cache values in MultiRootGBPTree for a short duration after
+            // deleted roots
+            var rootUnderDeletion = new DataTreeRoot<ROOT_KEY>(null, NULL_ROOT);
+            rootMappingCache.put(dataRootKey, rootUnderDeletion);
+            try {
+                long dataRootIdToDelete = deleteRootFromTree(dataRootKey, cursorContext, rootDeleteValueMerger);
+                long generation = support.generation();
+                var unstableGeneration = unstableGeneration(generation);
+                support.structureWriteLog().deleteRoot(unstableGeneration, dataRootIdToDelete);
+                support.idProvider()
+                        .releaseId(
+                                stableGeneration(generation),
+                                unstableGeneration,
+                                dataRootIdToDelete,
+                                bind(support, PF_SHARED_WRITE_LOCK, cursorContext));
+            } finally {
+                rootMappingCache.remove(dataRootKey);
+            }
+        }
+    }
+
+    private long deleteRootFromTree(
+            ROOT_KEY dataRootKey, CursorContext cursorContext, RootDeleteValueMerger<ROOT_KEY> rootDeleteValueMerger)
+            throws IOException {
+        try (Writer<ROOT_KEY, RootMappingValue> rootMappingWriter = support.newInitializedWriter(
+                rootLayout, this, rootLeafNode, rootInternalNode, cursorContext, 0, ROOT_LAYER_FLAG)) {
+            dataRootKey = rootLayout.copyKey(dataRootKey);
+            while (true) {
+                rootDeleteValueMerger.reset();
+                rootMappingWriter.mergeIfExists(
+                        dataRootKey, new RootMappingValue().initialize(NULL_ROOT), rootDeleteValueMerger);
+                long rootId = rootDeleteValueMerger.rootIdToRelease();
+                if (rootId == NOT_FOUND_ROOT_ID) {
+                    throw new DataTreeNotFoundException(dataRootKey);
+                }
+                if (rootId != NULL_ROOT_ID) {
+                    return rootId;
                 }
             }
-            rootMappingCache.remove(dataRootKey);
         }
     }
 
@@ -232,7 +229,9 @@ class MultiRootLayer<ROOT_KEY, DATA_KEY, DATA_VALUE> extends RootLayer<ROOT_KEY,
             structure.visitTree(cursor, visitor, cursorContext);
             support.idProvider().visitFreelist(visitor, cursorCreator);
         }
-
+        if (!visitor.visitDataLayer()) {
+            return;
+        }
         try (Seeker<ROOT_KEY, RootMappingValue> allRootsSeek = allRootsSeek(cursorContext)) {
             while (allRootsSeek.next()) {
                 // Data
@@ -406,6 +405,18 @@ class MultiRootLayer<ROOT_KEY, DATA_KEY, DATA_VALUE> extends RootLayer<ROOT_KEY,
                 SeekCursor.NO_MONITOR);
     }
 
+    private Seeker<ROOT_KEY, RootMappingValue> rootsSeek(
+            CursorContext cursorContext, ROOT_KEY fromInclusiveKey, ROOT_KEY toExclusiveKey) throws IOException {
+        return support.initializeSeeker(
+                support.internalAllocateSeeker(rootLayout, cursorContext, rootLeafNode, rootInternalNode),
+                this,
+                fromInclusiveKey,
+                toExclusiveKey,
+                DEFAULT_MAX_READ_AHEAD,
+                LEAF_LEVEL,
+                SeekCursor.NO_MONITOR);
+    }
+
     @Override
     int keyValueSizeCap() {
         return dataLeafNode.keyValueSizeCap();
@@ -481,6 +492,37 @@ class MultiRootLayer<ROOT_KEY, DATA_KEY, DATA_VALUE> extends RootLayer<ROOT_KEY,
         }
     }
 
+    @Override
+    void visitDataTreeRoots(
+            CursorContext cursorContext,
+            TreeRootsVisitor<ROOT_KEY> visitor,
+            ROOT_KEY fromInclusiveKey,
+            ROOT_KEY toExclusiveKey)
+            throws IOException {
+        try (Seeker<ROOT_KEY, RootMappingValue> seek = rootsSeek(cursorContext, fromInclusiveKey, toExclusiveKey)) {
+            while (seek.next()) {
+                if (visitor.accept(rootLayout.copyKey(seek.key()))) {
+                    break;
+                }
+            }
+        }
+    }
+
+    @Override
+    GBPTreeWriter writer(byte layerType) {
+        if (layerType == ROOT_LAYER_FLAG) {
+            return support.newWriter(
+                    rootLayout,
+                    this,
+                    rootLeafNode,
+                    rootInternalNode,
+                    TreeWriterCoordination.NO_COORDINATION,
+                    false,
+                    layerType);
+        }
+        throw new UnsupportedOperationException("Only supported for root layer");
+    }
+
     private class RootMappingInteraction implements TreeRootExchange {
         private final ROOT_KEY dataRootKey;
 
@@ -525,20 +567,22 @@ class MultiRootLayer<ROOT_KEY, DATA_KEY, DATA_VALUE> extends RootLayer<ROOT_KEY,
         }
 
         boolean exists(CursorContext context) {
-            return rootMappingCache.computeIfAbsent(dataRootKey, key -> getFromTree(key, context, () -> null)) != null;
+            var root = rootMappingCache.computeIfAbsent(dataRootKey, key -> getFromTree(key, context, () -> null));
+            if (root == null) {
+                return false;
+            }
+            if (root.root() == NULL_ROOT) {
+                // Let's read from the tree to see if there is something here and not just a stale cache value!
+                return getFromTree(dataRootKey, context, () -> null) != null;
+            }
+            return true;
         }
 
         @Override
         public void setRoot(Root newRoot, CursorContext context) {
             rootMappingCache.compute(dataRootKey, (key, ignored) -> {
-                try (Writer<ROOT_KEY, RootMappingValue> rootMappingWriter = support.internalParallelWriter(
-                        rootLayout,
-                        rootLeafNode,
-                        rootInternalNode,
-                        DEFAULT_SPLIT_RATIO,
-                        context,
-                        MultiRootLayer.this,
-                        DATA_LAYER_FLAG)) {
+                try (Writer<ROOT_KEY, RootMappingValue> rootMappingWriter = support.newInitializedWriter(
+                        rootLayout, MultiRootLayer.this, rootLeafNode, rootInternalNode, context, 0, DATA_LAYER_FLAG)) {
                     TrackingValueMerger<ROOT_KEY, RootMappingValue> merger = new TrackingValueMerger<>(overwrite());
                     rootMappingWriter.mergeIfExists(key, new RootMappingValue().initialize(newRoot), merger);
                     if (!merger.wasMerged()) {
@@ -561,13 +605,13 @@ class MultiRootLayer<ROOT_KEY, DATA_KEY, DATA_VALUE> extends RootLayer<ROOT_KEY,
 
         @Override
         public Writer<DATA_KEY, DATA_VALUE> writer(int flags, CursorContext cursorContext) throws IOException {
-            return support.internalParallelWriter(
+            return support.newInitializedWriter(
                     dataLayout,
+                    rootMappingInteraction,
                     dataLeafNode,
                     dataInternalNode,
-                    splitRatio(flags),
                     cursorContext,
-                    rootMappingInteraction,
+                    flags,
                     DATA_LAYER_FLAG);
         }
 
@@ -615,20 +659,42 @@ class MultiRootLayer<ROOT_KEY, DATA_KEY, DATA_VALUE> extends RootLayer<ROOT_KEY,
         public boolean exists(CursorContext cursorContext) {
             return rootMappingInteraction.exists(cursorContext);
         }
+
+        @Override
+        public OptionalLong rootTreeNodeId(CursorContext cursorContext) {
+            try {
+                return OptionalLong.of(
+                        rootMappingInteraction.getRoot(cursorContext).id());
+            } catch (DataTreeNotFoundException e) {
+                return OptionalLong.empty();
+            }
+        }
+    }
+
+    /**
+     * Remove this tree's root mappings from the cache - essential if the cache is shared with other trees.
+     */
+    @Override
+    public void clearCache() {
+        rootMappingCache.clear();
     }
 
     private record DataTreeRoot<DATA_ROOT_KEY>(DATA_ROOT_KEY key, Root root) {}
 
-    private class RootDeleteValueMerger implements ValueMerger<ROOT_KEY, RootMappingValue>, AutoCloseable {
+    private interface RootDeleteValueMerger<KEY> extends ValueMerger<KEY, RootMappingValue>, AutoCloseable {
+        long rootIdToRelease();
+    }
+
+    private class DefaultRootDeleteValueMerger implements RootDeleteValueMerger<ROOT_KEY> {
         private final CursorContext cursorContext;
         private final ROOT_KEY dataRootKey;
+        private final RootLatch dataRootLatch;
         private long rootIdToRelease;
-        private LongSpinLatch rootLatch;
-        private boolean hasWriteLatch;
 
-        public RootDeleteValueMerger(CursorContext cursorContext, ROOT_KEY dataRootKey) {
+        private DefaultRootDeleteValueMerger(CursorContext cursorContext, ROOT_KEY dataRootKey) {
             this.cursorContext = cursorContext;
             this.dataRootKey = dataRootKey;
+            this.dataRootLatch = new RootLatch();
         }
 
         @Override
@@ -639,15 +705,11 @@ class MultiRootLayer<ROOT_KEY, DATA_KEY, DATA_VALUE> extends RootLayer<ROOT_KEY,
             // split/shrink/successor,
             // wants to setRoot which means that it wants to acquire the latch on the root mapping ->
             // deadlock
-
-            rootLatch = support.latchService().latch(existingValue.rootId);
-            if (!rootLatch.tryAcquireWrite()) {
-                // Someone else is just now writing to the contents of this data tree.
-                // Back out and try again
+            if (!dataRootLatch.tryAcquireWrite(existingValue.rootId)) {
                 rootIdToRelease = NULL_ROOT_ID;
                 return MergeResult.UNCHANGED;
             }
-            hasWriteLatch = true;
+
             try (PageCursor cursor =
                     support.openRootCursor(existingValue.asRoot(), PF_SHARED_WRITE_LOCK, cursorContext)) {
                 if (TreeNodeUtil.keyCount(cursor) != 0) {
@@ -661,12 +723,34 @@ class MultiRootLayer<ROOT_KEY, DATA_KEY, DATA_VALUE> extends RootLayer<ROOT_KEY,
         }
 
         @Override
-        public void reset() {
-            rootIdToRelease = NOT_FOUND_ROOT_ID;
-            closeLatch();
+        public long rootIdToRelease() {
+            return rootIdToRelease;
         }
 
-        private void closeLatch() {
+        @Override
+        public void reset() {
+            rootIdToRelease = NOT_FOUND_ROOT_ID;
+            close();
+        }
+
+        @Override
+        public void close() {
+            dataRootLatch.close();
+        }
+    }
+
+    private class RootLatch implements AutoCloseable {
+        private TreeNodeLatch rootLatch;
+        private boolean hasWriteLatch;
+
+        private boolean tryAcquireWrite(long rootId) {
+            rootLatch = support.latchService().latch(rootId);
+            hasWriteLatch = rootLatch.tryAcquireWrite();
+            return hasWriteLatch;
+        }
+
+        @Override
+        public void close() {
             if (rootLatch != null) {
                 try {
                     if (hasWriteLatch) {
@@ -678,11 +762,6 @@ class MultiRootLayer<ROOT_KEY, DATA_KEY, DATA_VALUE> extends RootLayer<ROOT_KEY,
                     rootLatch = null;
                 }
             }
-        }
-
-        @Override
-        public void close() {
-            closeLatch();
         }
     }
 }

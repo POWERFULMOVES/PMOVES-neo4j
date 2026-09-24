@@ -19,9 +19,13 @@
  */
 package org.neo4j.kernel.impl.api.index;
 
+import static org.neo4j.kernel.impl.api.index.IndexPopulationFailure.failure;
+
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.concurrent.CopyOnWriteArrayList;
+import org.neo4j.common.TokenNameLookup;
+import org.neo4j.internal.helpers.Exceptions;
 import org.neo4j.internal.kernel.api.InternalIndexState;
 import org.neo4j.internal.kernel.api.exceptions.schema.ConstraintValidationException;
 import org.neo4j.internal.kernel.api.exceptions.schema.IndexNotFoundKernelException;
@@ -56,39 +60,43 @@ import org.neo4j.storageengine.api.IndexEntryUpdate;
 public class TentativeConstraintIndexProxy extends AbstractDelegatingIndexProxy {
     private final FlippableIndexProxy flipper;
     private final OnlineIndexProxy target;
+    private final TokenNameLookup tokenNameLookup;
     private final Collection<IndexEntryConflictException> failures = new CopyOnWriteArrayList<>();
 
-    TentativeConstraintIndexProxy(FlippableIndexProxy flipper, OnlineIndexProxy target) {
+    TentativeConstraintIndexProxy(
+            FlippableIndexProxy flipper, OnlineIndexProxy target, TokenNameLookup tokenNameLookup) {
         this.flipper = flipper;
         this.target = target;
+        this.tokenNameLookup = tokenNameLookup;
     }
 
     @Override
     public IndexUpdater newUpdater(IndexUpdateMode mode, CursorContext cursorContext, boolean parallel) {
         return switch (mode) {
-            case ONLINE, RECOVERY -> new DeferredConflictCheckingIndexUpdater(
-                    target.accessor.newUpdater(mode, cursorContext, parallel),
-                    target::newValueReader,
-                    target.getDescriptor(),
-                    cursorContext) {
-                @Override
-                public void process(IndexEntryUpdate<?> update) {
-                    try {
-                        super.process(update);
-                    } catch (IndexEntryConflictException conflict) {
-                        failures.add(conflict);
+            case ONLINE, RECOVERY ->
+                new DeferredConflictCheckingIndexUpdater(
+                        target.accessor.newUpdater(mode, cursorContext, parallel),
+                        target::newValueReader,
+                        target.getDescriptor(),
+                        tokenNameLookup) {
+                    @Override
+                    public void process(IndexEntryUpdate update) {
+                        try {
+                            super.process(update);
+                        } catch (IndexEntryConflictException conflict) {
+                            failures.add(conflict);
+                        }
                     }
-                }
 
-                @Override
-                public void close() {
-                    try {
-                        super.close();
-                    } catch (IndexEntryConflictException conflict) {
-                        failures.add(conflict);
+                    @Override
+                    public void close() {
+                        try {
+                            super.close();
+                        } catch (IndexEntryConflictException conflict) {
+                            failures.add(conflict);
+                        }
                     }
-                }
-            };
+                };
             default -> throw new IllegalArgumentException("Unsupported update mode: " + mode);
         };
     }
@@ -96,6 +104,13 @@ public class TentativeConstraintIndexProxy extends AbstractDelegatingIndexProxy 
     @Override
     public InternalIndexState getState() {
         return failures.isEmpty() ? InternalIndexState.POPULATING : InternalIndexState.FAILED;
+    }
+
+    @Override
+    public IndexPopulationFailure getPopulationFailure() throws IllegalStateException {
+        return failures.isEmpty()
+                ? target.getPopulationFailure()
+                : failure(failures.stream().reduce(Exceptions::chain).get());
     }
 
     @Override

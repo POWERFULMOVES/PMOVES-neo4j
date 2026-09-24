@@ -22,6 +22,7 @@ package org.neo4j.kernel.impl.storemigration;
 import static org.neo4j.storageengine.migration.StoreMigrationParticipant.NOT_PARTICIPATING;
 import static org.neo4j.util.Preconditions.checkState;
 
+import java.io.PrintStream;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -92,7 +93,10 @@ public class StorageEngineMigrationAbstraction {
             JobScheduler jobScheduler,
             CursorContextFactory contextFactory,
             MemoryTracker memoryTracker,
-            IndexProviderMap indexProviderMap) {
+            IndexProviderMap indexProviderMap,
+            long maxOffHeapMemory,
+            PrintStream verboseProgressOutput,
+            boolean verboseOutput) {
         List<StoreMigrationParticipant> storeParticipants = new ArrayList<>();
         if (migrationAcrossEngine) {
             // One participant that copies over the data and schema. It doesn't care about any other
@@ -109,7 +113,10 @@ public class StorageEngineMigrationAbstraction {
                     storageEngineFactory,
                     targetStorageEngineFactory,
                     forceBtreeIndexesToRange,
-                    keepNodeIds));
+                    keepNodeIds,
+                    maxOffHeapMemory,
+                    verboseProgressOutput,
+                    verboseOutput));
         } else {
             // Get all the participants from the storage engine and add them where they want to be
             storeParticipants.addAll(storageEngineFactory.migrationParticipants(
@@ -121,7 +128,8 @@ public class StorageEngineMigrationAbstraction {
                     memoryTracker,
                     pageCacheTracer,
                     contextFactory,
-                    forceBtreeIndexesToRange));
+                    forceBtreeIndexesToRange,
+                    maxOffHeapMemory));
 
             // Do individual index provider migration last because they may delete files that we need in earlier steps.
             indexProviderMap.accept(provider -> storeParticipants.add(provider.storeMigrationParticipant(

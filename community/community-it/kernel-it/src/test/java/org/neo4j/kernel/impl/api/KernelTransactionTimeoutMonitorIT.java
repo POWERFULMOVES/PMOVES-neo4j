@@ -41,6 +41,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.RelationshipType;
 import org.neo4j.graphdb.Transaction;
@@ -50,6 +52,7 @@ import org.neo4j.kernel.api.KernelTransactionHandle;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.impl.api.transaction.monitor.TransactionMonitor;
 import org.neo4j.kernel.impl.coreapi.InternalTransaction;
+import org.neo4j.kernel.impl.locking.LockClientStoppedException;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.DbmsExtension;
@@ -90,14 +93,14 @@ public class KernelTransactionTimeoutMonitorIT {
         AtomicBoolean nodeLockAcquired = new AtomicBoolean();
         AtomicBoolean lockerDone = new AtomicBoolean();
         BinaryLatch lockerPause = new BinaryLatch();
-        long nodeId;
+        String nodeId;
         try (Transaction tx = database.beginTx()) {
-            nodeId = tx.createNode().getId();
+            nodeId = tx.createNode().getElementId();
             tx.commit();
         }
         Future<?> locker = executor.submit(() -> {
             try (Transaction tx = database.beginTx()) {
-                Node node = tx.getNodeById(nodeId);
+                Node node = tx.getNodeByElementId(nodeId);
                 tx.acquireReadLock(node);
                 nodeLockAcquired.set(true);
                 lockerPause.await();
@@ -116,7 +119,7 @@ public class KernelTransactionTimeoutMonitorIT {
         // Yet we should be able to proceed and grab the locks they once held
         try (Transaction tx = database.beginTx()) {
             // Write-locking is only possible if their shared lock was released
-            tx.acquireWriteLock(tx.getNodeById(nodeId));
+            tx.acquireWriteLock(tx.getNodeByElementId(nodeId));
             tx.commit();
         }
         // No exception from our lock client being stopped (e.g. we ended up blocked for too long) or from timeout
@@ -141,6 +144,18 @@ public class KernelTransactionTimeoutMonitorIT {
             }
         });
         assertThat(exception.getMessage()).contains("The transaction has been terminated.");
+        assertThat(exception.getCause()).isInstanceOf(LockClientStoppedException.class);
+        LockClientStoppedException gqlException = (LockClientStoppedException) exception.getCause();
+        ErrorGqlStatusObjectAssertions.assertThat(gqlException)
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_25N14)
+                .hasStatusDescriptionContaining(
+                        "error: invalid transaction state - transaction termination client error. "
+                                + "The transaction has been terminated. "
+                                + "Retry your operation in a new transaction, and you should see a successful result. "
+                                + "Reason: The transaction has been terminated, so no more locks can be acquired. "
+                                + "This can occur because the transaction ran longer than the configured transaction timeout, "
+                                + "or because a human operator manually terminated the transaction, "
+                                + "or because the database is shutting down.");
     }
 
     @Test
@@ -170,13 +185,12 @@ public class KernelTransactionTimeoutMonitorIT {
     @Test
     void concurrentTransactionAndSnapshotCreation() throws ExecutionException, InterruptedException {
         int numberOfExecutors = 40;
-        var txExecutors = Executors.newFixedThreadPool(numberOfExecutors);
-        var monitorThread = Executors.newSingleThreadExecutor();
-        CountDownLatch startLatch = new CountDownLatch(1);
+        try (var txExecutors = Executors.newFixedThreadPool(numberOfExecutors);
+                var monitorThread = Executors.newSingleThreadExecutor()) {
+            CountDownLatch startLatch = new CountDownLatch(1);
 
-        var transactionFutures = new ArrayList<Future<?>>(numberOfExecutors);
+            var transactionFutures = new ArrayList<Future<?>>(numberOfExecutors);
 
-        try {
             TestTransactionMonitor transactionMonitor = new TestTransactionMonitor(
                     database.getDependencyResolver().resolveDependency(KernelTransactions.class));
             var monitorFuture = monitorThread.submit(transactionMonitor);
@@ -200,8 +214,6 @@ public class KernelTransactionTimeoutMonitorIT {
             transactionMonitor.terminate();
 
             monitorFuture.get();
-        } finally {
-            txExecutors.shutdown();
         }
     }
 
@@ -238,10 +250,9 @@ public class KernelTransactionTimeoutMonitorIT {
         @Override
         public void run() {
             while (!terminated) {
-                Set<KernelTransactionHandle> activeTransactions = transactions.activeTransactions();
-                for (KernelTransactionHandle activeTransaction : activeTransactions) {
-                    assertThat(activeTransaction.getTransactionHorizon()).isGreaterThan(1);
-                    assertThat(activeTransaction.getLastClosedTxId()).isGreaterThan(1);
+                for (var monitoredTransaction : transactions.allTransactions()) {
+                    assertThat(monitoredTransaction.getTransactionHorizon()).isGreaterThan(1);
+                    assertThat(monitoredTransaction.getHighestGapFreeTxId()).isGreaterThan(1);
                 }
             }
         }

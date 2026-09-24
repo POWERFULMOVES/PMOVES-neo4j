@@ -19,19 +19,27 @@
  */
 package org.neo4j.router.impl;
 
-import static org.neo4j.fabric.executor.FabricExecutor.WRITING_IN_READ_NOT_ALLOWED_MSG;
-
+import java.util.List;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-import org.neo4j.bolt.protocol.common.message.AccessMode;
+import org.neo4j.boltmessages.AccessMode;
 import org.neo4j.configuration.Config;
-import org.neo4j.cypher.internal.QueryOptions;
+import org.neo4j.configuration.GraphDatabaseSettings;
+import org.neo4j.cypher.internal.CypherVersion;
+import org.neo4j.cypher.internal.notification.DeprecatedGraphReferenceNotification;
+import org.neo4j.cypher.internal.notification.DeprecatedIdentifierUnicode;
+import org.neo4j.cypher.internal.notification.DeprecatedIdentifierWhitespaceUnicode;
+import org.neo4j.cypher.internal.notification.DeprecatedKeywordVariableInWhenOperand;
+import org.neo4j.cypher.internal.notification.InternalNotification;
 import org.neo4j.cypher.internal.options.CypherExecutionMode;
+import org.neo4j.cypher.internal.preparser.QueryOptions;
 import org.neo4j.cypher.internal.util.CancellationChecker;
 import org.neo4j.cypher.internal.util.InputPosition;
 import org.neo4j.cypher.internal.util.ObfuscationMetadata;
+import org.neo4j.dbms.systemgraph.DefaultQueryLanguageLookup;
+import org.neo4j.exceptions.InvalidSemanticsException;
 import org.neo4j.fabric.bookmark.BookmarkFormat;
 import org.neo4j.fabric.bookmark.LocalGraphTransactionIdTracker;
 import org.neo4j.fabric.bookmark.TransactionBookmarkManager;
@@ -42,7 +50,6 @@ import org.neo4j.fabric.transaction.ErrorReporter;
 import org.neo4j.fabric.transaction.TransactionMode;
 import org.neo4j.internal.kernel.api.security.AbstractSecurityLog;
 import org.neo4j.internal.kernel.api.security.LoginContext;
-import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.database.DatabaseReference;
 import org.neo4j.kernel.database.DatabaseReferenceImpl;
 import org.neo4j.kernel.impl.api.transaction.trace.TraceProviderFactory;
@@ -73,7 +80,6 @@ import org.neo4j.router.transaction.RouterTransaction;
 import org.neo4j.router.transaction.RouterTransactionContext;
 import org.neo4j.router.transaction.RoutingInfo;
 import org.neo4j.router.transaction.TransactionInfo;
-import org.neo4j.router.util.Errors;
 import org.neo4j.time.SystemNanoClock;
 
 public class QueryRouterImpl implements QueryRouter {
@@ -92,6 +98,8 @@ public class QueryRouterImpl implements QueryRouter {
     private final QueryRoutingMonitor queryRoutingMonitor;
     private final AbstractSecurityLog securityLog;
     private final InternalLog queryRouterLog;
+    final CypherVersion systemDefaultQueryLanguage;
+    private final DefaultQueryLanguageLookup defaultQueryLanguageLookup;
 
     public QueryRouterImpl(
             Config config,
@@ -107,7 +115,8 @@ public class QueryRouterImpl implements QueryRouter {
             QueryRoutingMonitor queryRoutingMonitor,
             RouterTransactionManager transactionManager,
             AbstractSecurityLog securityLog,
-            InternalLog queryRouterLog) {
+            InternalLog queryRouterLog,
+            DefaultQueryLanguageLookup defaultQueryLanguageLookup) {
         this.config = config;
         this.databaseReferenceResolver = databaseReferenceResolver;
         this.locationServiceFactory = locationServiceFactory;
@@ -122,6 +131,11 @@ public class QueryRouterImpl implements QueryRouter {
         this.transactionManager = transactionManager;
         this.securityLog = securityLog;
         this.queryRouterLog = queryRouterLog;
+        this.systemDefaultQueryLanguage = switch (config.get(GraphDatabaseSettings.default_language)) {
+            case Cypher5 -> CypherVersion.Cypher5;
+            case Cypher25 -> CypherVersion.Cypher25;
+        };
+        this.defaultQueryLanguageLookup = defaultQueryLanguageLookup;
     }
 
     @Override
@@ -147,13 +161,8 @@ public class QueryRouterImpl implements QueryRouter {
         // Try to create a dummy kernel transaction so that this router transaction can be monitored
         DatabaseTransaction sessionTransaction = null;
         try {
-            var dummyTransactionMode = transactionInfo.accessMode().equals(AccessMode.READ)
-                    ? TransactionMode.DEFINITELY_READ
-                    : TransactionMode.MAYBE_WRITE;
-            Location location = rpcCall
-                    ? new Location.Local(-1, (DatabaseReferenceImpl.Internal) sessionDatabaseReference)
-                    : locationService.locationOf(sessionDatabaseReference);
-            sessionTransaction = routerTransaction.transactionFor(location, dummyTransactionMode, locationService);
+            sessionTransaction = RouterTransactionContext.beginSessionTransaction(
+                    transactionInfo, sessionDatabaseReference, rpcCall, locationService, routerTransaction);
         } catch (Exception e) {
             queryRouterLog.warn("Could not eagerly create kernel transaction due to: %s".formatted(e));
         }
@@ -186,7 +195,7 @@ public class QueryRouterImpl implements QueryRouter {
     private CypherExecutionMode executionMode(QueryOptions queryOptions, Boolean isComposite) {
         CypherExecutionMode cypherExecutionMode = queryOptions.queryOptions().executionMode();
         if (isComposite && cypherExecutionMode.isProfile()) {
-            Errors.semantic("'PROFILE' is not supported on composite databases.");
+            throw InvalidSemanticsException.profileNotSupportedOnComposite();
         }
         return cypherExecutionMode;
     }
@@ -209,11 +218,11 @@ public class QueryRouterImpl implements QueryRouter {
     }
 
     private void authorize(DatabaseReference sessionDb, LoginContext loginContext) {
-        loginContext.authorize(LoginContext.IdLookup.EMPTY, sessionDb, securityLog);
+        loginContext.authorize(LoginContext.IdLookup.EMPTY, sessionDb, securityLog, systemNanoClock.millis());
     }
 
     private boolean isRpcCall(DatabaseReference databaseReference) {
-        return databaseReference instanceof DatabaseReferenceImpl.SPDShard;
+        return databaseReference instanceof DatabaseReferenceImpl.PropertyShard;
     }
 
     @Override
@@ -228,12 +237,20 @@ public class QueryRouterImpl implements QueryRouter {
         statementLifecycle.startProcessing();
         try {
             LocationService locationService = context.locationService();
+            final var queryLangScope = context.transactionInfo().defaultQueryLanguageScope();
+            final var defaultLanguage = defaultQueryLanguageLookup.dbDefaultQueryLanguage(
+                    queryLangScope, context.sessionDatabaseReference().namedDatabaseId(), systemDefaultQueryLanguage);
+
+            final var preParsedQuery = queryProcessor.preParse(query, defaultLanguage);
+            statementLifecycle.donePreParsing(preParsedQuery);
             var processedQueryInfo = queryProcessor.processQuery(
                     query,
+                    preParsedQuery,
                     context.targetService(),
                     locationService,
                     cancellationChecker(context.routerTransaction()),
-                    context.sessionDatabaseReference());
+                    context.sessionDatabaseReference(),
+                    statementLifecycle);
             StatementType statementType = processedQueryInfo.statementType();
             QueryOptions queryOptions = processedQueryInfo.queryOptions();
             CypherExecutionMode executionMode = executionMode(queryOptions, transactionInfo.isComposite());
@@ -254,9 +271,7 @@ public class QueryRouterImpl implements QueryRouter {
              */
             if (statementType.statementType().equals(StatementType.AdminCommand())
                     && !transactionInfo.targetsSystemDatabase()) {
-                if (context.sessionTransaction() != null) {
-                    context.routerTransaction().closeTransaction(context.sessionTransaction());
-                }
+                context.closeSessionTransaction();
             }
             updateQueryRouterMetric(location);
             statementLifecycle.doneRouterProcessing(
@@ -276,15 +291,31 @@ public class QueryRouterImpl implements QueryRouter {
             var databaseTransaction = context.transactionFor(
                     location,
                     TransactionMode.from(accessMode, executionMode, statementType.isReadQuery(), target.isComposite()));
-            if (databaseTransaction instanceof LocalDatabaseTransaction) {
-                ((LocalDatabaseTransaction) databaseTransaction)
-                        .setConstituentTransactionFactory(constituentTransactionFactory);
+            if (databaseTransaction instanceof LocalDatabaseTransaction localDbTx) {
+                localDbTx.setConstituentTransactionFactory(constituentTransactionFactory);
+            }
+
+            if (databaseTransaction.defaultQueryLanguageScope().defaultQueryLanguage() == null) {
+                // set default transaction of underlying kernel transaction
+                // so we won't resolve it a second time later in the stack
+                databaseTransaction.defaultQueryLanguageScope().setDefaultQueryLanguage(defaultLanguage);
+            }
+            Stream<InternalNotification> rewrittenParserDeprecations = Stream.empty();
+            if (target instanceof DatabaseReferenceImpl.External
+                    && target.namespace().isEmpty()) {
+                // These are deprecations we might find in the user query that no longer exist after rewriting.
+                // Therefore, we need to include them in the deprecated notifications.
+                // If we included all notifications, we would instead have duplicates.
+                rewrittenParserDeprecations = processedQueryInfo.parsingNotifications().stream()
+                        .filter(notification ->
+                                deprecatedRewritten.stream().anyMatch(clazz -> clazz.isInstance(notification)));
             }
             return databaseTransaction.executeQuery(
                     processedQueryInfo.rewrittenQuery(),
                     subscriber,
                     statementLifecycle,
-                    processedQueryInfo.routingNotifications());
+                    Stream.concat(processedQueryInfo.routingNotifications().stream(), rewrittenParserDeprecations)
+                            .collect(Collectors.toSet()));
         } catch (RuntimeException e) {
             statementLifecycle.endFailure(e);
 
@@ -334,9 +365,7 @@ public class QueryRouterImpl implements QueryRouter {
             StatementType statementType,
             DatabaseReference databaseReference) {
         if (!(executionMode.isExplain()) && accessMode == AccessMode.READ && statementType.isWrite()) {
-            throw new QueryRouterException(
-                    Status.Statement.AccessMode,
-                    WRITING_IN_READ_NOT_ALLOWED_MSG + ". Attempted write to %s",
+            throw QueryRouterException.writingInReadAccessMode(
                     databaseReference.alias().name());
         }
     }
@@ -355,4 +384,10 @@ public class QueryRouterImpl implements QueryRouter {
             queryRoutingMonitor.queryRoutedRemoteExternal();
         }
     }
+
+    private static final List<Class<? extends InternalNotification>> deprecatedRewritten = List.of(
+            DeprecatedGraphReferenceNotification.class,
+            DeprecatedIdentifierWhitespaceUnicode.class,
+            DeprecatedKeywordVariableInWhenOperand.class,
+            DeprecatedIdentifierUnicode.class);
 }

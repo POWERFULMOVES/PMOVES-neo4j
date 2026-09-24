@@ -19,8 +19,7 @@
  */
 package org.neo4j.configuration.database.readonly;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.Map;
 import java.util.Optional;
@@ -31,31 +30,29 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
+import org.neo4j.kernel.database.DatabaseId;
 import org.neo4j.kernel.database.DatabaseIdFactory;
-import org.neo4j.kernel.database.DatabaseIdRepository;
-import org.neo4j.kernel.database.NamedDatabaseId;
 
 public class ConfigBasedLookupTest {
-    private static final NamedDatabaseId foo = DatabaseIdFactory.from("foo", UUID.randomUUID());
-    private static final NamedDatabaseId bar = DatabaseIdFactory.from("bar", UUID.randomUUID());
-    private static final NamedDatabaseId baz = DatabaseIdFactory.from("baz", UUID.randomUUID());
-    private final Set<NamedDatabaseId> databases = Set.of(foo, bar, baz);
-    private static final DatabaseIdRepository databaseIdRepository = Mockito.mock(DatabaseIdRepository.class);
+    private static final DatabaseId foo = DatabaseIdFactory.from(UUID.randomUUID());
+    private static final DatabaseId bar = DatabaseIdFactory.from(UUID.randomUUID());
+    private static final DatabaseId baz = DatabaseIdFactory.from(UUID.randomUUID());
+    private final Set<DatabaseId> databases = Set.of(foo, bar, baz);
+    private static final ConfigBasedLookupFactory.DatabaseIdResolver databaseIdRepository =
+            Mockito.mock(ConfigBasedLookupFactory.DatabaseIdResolver.class);
 
     @BeforeAll
     static void setup() {
-        Mockito.when(databaseIdRepository.getByName("foo")).thenReturn(Optional.of(foo));
-        Mockito.when(databaseIdRepository.getByName("bar")).thenReturn(Optional.of(bar));
-        Mockito.when(databaseIdRepository.getByName("baz")).thenReturn(Optional.of(baz));
+        Mockito.when(databaseIdRepository.resolve("foo")).thenReturn(Optional.of(foo));
+        Mockito.when(databaseIdRepository.resolve("bar")).thenReturn(Optional.of(bar));
+        Mockito.when(databaseIdRepository.resolve("baz")).thenReturn(Optional.of(baz));
     }
 
     @Test
     void withDefaultConfigDatabaseAreWritable() {
         var lookupFactory = new ConfigBasedLookupFactory(Config.defaults(), databaseIdRepository);
         var lookup = lookupFactory.lookupReadOnlyDatabases();
-        for (var db : databases) {
-            assertFalse(lookup.databaseIsReadOnly(db.databaseId()));
-        }
+        assertThat(databases).as("all databases should be writable").noneMatch(lookup::databaseIsReadOnly);
     }
 
     @Test
@@ -63,19 +60,17 @@ public class ConfigBasedLookupTest {
         var config = Config.defaults(GraphDatabaseSettings.read_only_database_default, true);
         var lookupFactory = new ConfigBasedLookupFactory(config, databaseIdRepository);
         var lookup = lookupFactory.lookupReadOnlyDatabases();
-        for (var db : databases) {
-            assertTrue(lookup.databaseIsReadOnly(db.databaseId()));
-        }
+        assertThat(databases).as("all databases should be read-only").allMatch(lookup::databaseIsReadOnly);
     }
 
     @Test
     void readOnlyLookupShouldIncludeAllConfiguredDatabases() {
-        var config = Config.defaults(GraphDatabaseSettings.read_only_databases, Set.of(foo.name(), bar.name()));
+        var config = Config.defaults(GraphDatabaseSettings.read_only_databases, Set.of("foo", "bar"));
         var lookupFactory = new ConfigBasedLookupFactory(config, databaseIdRepository);
         var lookup = lookupFactory.lookupReadOnlyDatabases();
-        assertFalse(lookup.databaseIsReadOnly(baz.databaseId()));
-        assertTrue(lookup.databaseIsReadOnly(foo.databaseId()));
-        assertTrue(lookup.databaseIsReadOnly(bar.databaseId()));
+        assertThat(lookup.databaseIsReadOnly(baz)).isFalse();
+        assertThat(lookup.databaseIsReadOnly(foo)).isTrue();
+        assertThat(lookup.databaseIsReadOnly(bar)).isTrue();
     }
 
     @Test
@@ -87,8 +82,8 @@ public class ConfigBasedLookupTest {
                 Set.of("foo")));
         var lookupFactory = new ConfigBasedLookupFactory(config, databaseIdRepository);
         var lookup = lookupFactory.lookupReadOnlyDatabases();
-        assertFalse(lookup.databaseIsReadOnly(foo.databaseId()));
-        assertTrue(lookup.databaseIsReadOnly(bar.databaseId()));
-        assertTrue(lookup.databaseIsReadOnly(baz.databaseId()));
+        assertThat(lookup.databaseIsReadOnly(foo)).isFalse();
+        assertThat(lookup.databaseIsReadOnly(bar)).isTrue();
+        assertThat(lookup.databaseIsReadOnly(baz)).isTrue();
     }
 }

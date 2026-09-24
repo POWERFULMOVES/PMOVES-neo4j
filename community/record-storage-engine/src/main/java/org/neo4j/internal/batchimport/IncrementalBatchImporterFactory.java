@@ -24,8 +24,8 @@ import static java.util.Comparator.comparingLong;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.util.NoSuchElementException;
+import java.util.function.Supplier;
 import org.neo4j.annotations.service.Service;
-import org.neo4j.batchimport.api.AdditionalInitialIds;
 import org.neo4j.batchimport.api.Configuration;
 import org.neo4j.batchimport.api.IncrementalBatchImporter;
 import org.neo4j.batchimport.api.IndexImporterFactory;
@@ -38,13 +38,13 @@ import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.api.index.IndexProvidersAccess;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
 import org.neo4j.logging.internal.LogService;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.scheduler.JobScheduler;
 import org.neo4j.service.NamedService;
 import org.neo4j.service.Services;
 import org.neo4j.storageengine.api.LogFilesInitializer;
+import org.neo4j.wal.LogTailMetadata;
 
 @Service
 public abstract class IncrementalBatchImporterFactory implements NamedService {
@@ -62,7 +62,6 @@ public abstract class IncrementalBatchImporterFactory implements NamedService {
             LogService logService,
             PrintStream progressOutput,
             boolean verboseProgressOutput,
-            AdditionalInitialIds additionalInitialIds,
             ThrowingSupplier<LogTailMetadata, IOException> logTailMetadataSupplier,
             Config dbConfig,
             Monitor monitor,
@@ -72,7 +71,7 @@ public abstract class IncrementalBatchImporterFactory implements NamedService {
             IndexImporterFactory indexImporterFactory,
             MemoryTracker memoryTracker,
             CursorContextFactory contextFactory,
-            IndexProvidersAccess indexProvidersAccess);
+            Supplier<IndexProvidersAccess> indexProvidersAccess);
 
     public static IncrementalBatchImporterFactory withHighestPriority() {
         return Services.loadAll(IncrementalBatchImporterFactory.class).stream()

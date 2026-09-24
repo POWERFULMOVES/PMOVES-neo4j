@@ -27,29 +27,36 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-import static org.neo4j.kernel.impl.transaction.log.LastAppendBatchInfoProvider.EMPTY_LAST_APPEND_BATCH_INFO_PROVIDER;
-import static org.neo4j.kernel.impl.transaction.log.entry.LogSegments.UNKNOWN_LOG_SEGMENT_SIZE;
 import static org.neo4j.kernel.recovery.RecoveryStartInformation.MISSING_LOGS;
 import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_CHECKSUM;
 import static org.neo4j.test.LatestVersions.LATEST_KERNEL_VERSION;
 import static org.neo4j.test.LatestVersions.LATEST_LOG_FORMAT;
+import static org.neo4j.test.LatestVersions.LATEST_LOG_FORMAT_PROVIDER;
+import static org.neo4j.wal.LastAppendBatchInfoProvider.EMPTY_LAST_APPEND_BATCH_INFO_PROVIDER;
+import static org.neo4j.wal.LogTermProvider.UNKNOWN_TERM_PROVIDER;
+import static org.neo4j.wal.entry.LogHeader.UNSPECIFIED_CREATION_TIME;
 
 import java.io.IOException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.neo4j.configuration.Config;
+import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.exceptions.UnderlyingStorageException;
+import org.neo4j.io.fs.ReadableChannel;
 import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.KernelVersionProvider;
-import org.neo4j.kernel.impl.transaction.log.CheckpointInfo;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
-import org.neo4j.kernel.impl.transaction.log.entry.LogFormat;
-import org.neo4j.kernel.impl.transaction.log.entry.LogHeader;
-import org.neo4j.kernel.impl.transaction.log.files.LogFile;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
-import org.neo4j.kernel.impl.transaction.log.files.LogTailInformation;
 import org.neo4j.kernel.recovery.RecoveryStartInformationProvider.Monitor;
+import org.neo4j.storageengine.api.StoreIdentifier;
 import org.neo4j.storageengine.api.TransactionId;
 import org.neo4j.test.LatestVersions;
+import org.neo4j.wal.CheckpointInfo;
+import org.neo4j.wal.LogFile;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.LogPosition;
+import org.neo4j.wal.entry.LogFormat;
+import org.neo4j.wal.entry.LogHeader;
+import org.neo4j.wal.files.LogRangeInfo;
+import org.neo4j.wal.files.LogTailInformation;
 
 class RecoveryStartInformationProviderTest {
     private static final long NO_APPEND_INDEX = -1;
@@ -62,7 +69,14 @@ class RecoveryStartInformationProviderTest {
     @BeforeEach
     void setUp() throws IOException {
         var logHeader = LATEST_LOG_FORMAT.newHeader(
-                0, 1, LogHeader.UNKNOWN_TERM, null, UNKNOWN_LOG_SEGMENT_SIZE, BASE_TX_CHECKSUM, LATEST_KERNEL_VERSION);
+                0,
+                1,
+                ReadableChannel.BASE_TERM,
+                null,
+                LATEST_LOG_FORMAT.getDefaultSegmentBlockSize(),
+                BASE_TX_CHECKSUM,
+                LATEST_KERNEL_VERSION,
+                UNSPECIFIED_CREATION_TIME);
         when(logFile.extractHeader(0)).thenReturn(logHeader);
         when(logFiles.getLogFile()).thenReturn(logFile);
     }
@@ -78,11 +92,14 @@ class RecoveryStartInformationProviderTest {
                         currentLogVersion,
                         LatestVersions.LATEST_KERNEL_VERSION.version(),
                         kernelProv,
-                        EMPTY_LAST_APPEND_BATCH_INFO_PROVIDER));
+                        LATEST_LOG_FORMAT_PROVIDER,
+                        UNKNOWN_TERM_PROVIDER,
+                        EMPTY_LAST_APPEND_BATCH_INFO_PROVIDER,
+                        null));
 
         // when
         RecoveryStartInformation recoveryStartInformation =
-                new RecoveryStartInformationProvider(logFiles, monitor).get();
+                new RecoveryStartInformationProvider(logFiles, monitor, Config.defaults()).get();
 
         // then
         verify(monitor).recoveryNotRequired(null);
@@ -121,11 +138,13 @@ class RecoveryStartInformationProviderTest {
                         LatestVersions.LATEST_KERNEL_VERSION.version(),
                         null,
                         kernelProv,
+                        LATEST_LOG_FORMAT_PROVIDER,
+                        UNKNOWN_TERM_PROVIDER,
                         EMPTY_LAST_APPEND_BATCH_INFO_PROVIDER));
 
         // when
         RecoveryStartInformation recoveryStartInformation =
-                new RecoveryStartInformationProvider(logFiles, monitor).get();
+                new RecoveryStartInformationProvider(logFiles, monitor, Config.defaults()).get();
 
         // then
         verify(monitor).recoveryRequiredAfterLastCheckPoint(txPosition, txPosition, 10L);
@@ -164,10 +183,12 @@ class RecoveryStartInformationProviderTest {
                         LatestVersions.LATEST_KERNEL_VERSION.version(),
                         null,
                         kernelProv,
+                        LATEST_LOG_FORMAT_PROVIDER,
+                        UNKNOWN_TERM_PROVIDER,
                         EMPTY_LAST_APPEND_BATCH_INFO_PROVIDER));
 
         RecoveryStartInformation recoveryStartInformation =
-                new RecoveryStartInformationProvider(logFiles, monitor).get();
+                new RecoveryStartInformationProvider(logFiles, monitor, Config.defaults()).get();
 
         verify(monitor).recoveryRequiredAfterLastCheckPoint(txPosition, oldestNotVisibleTransactionPosition, 10L);
         assertEquals(txPosition, recoveryStartInformation.transactionLogPosition());
@@ -190,17 +211,20 @@ class RecoveryStartInformationProviderTest {
                         currentLogVersion,
                         kernelVersion.version(),
                         kernelProv,
-                        EMPTY_LAST_APPEND_BATCH_INFO_PROVIDER));
+                        LATEST_LOG_FORMAT_PROVIDER,
+                        UNKNOWN_TERM_PROVIDER,
+                        EMPTY_LAST_APPEND_BATCH_INFO_PROVIDER,
+                        null));
+        when(logFiles.getLogFile().getLogRangeInfo()).thenReturn(new LogRangeInfo(0, null, 0, null));
 
         // when
         RecoveryStartInformation recoveryStartInformation =
-                new RecoveryStartInformationProvider(logFiles, monitor).get();
+                new RecoveryStartInformationProvider(logFiles, monitor, Config.defaults()).get();
 
         // then
         verify(monitor).noCheckPointFound();
-        assertEquals(
-                new LogPosition(0, LogFormat.fromKernelVersion(kernelVersion).getHeaderSize()),
-                recoveryStartInformation.transactionLogPosition());
+        var startOffset = LATEST_LOG_FORMAT.getDefaultDataStartByteOffset();
+        assertEquals(new LogPosition(0, startOffset), recoveryStartInformation.transactionLogPosition());
         assertEquals(LogPosition.UNSPECIFIED, recoveryStartInformation.getCheckpointPosition());
         assertEquals(10L, recoveryStartInformation.firstAppendIndexAfterLastCheckPoint());
         assertTrue(recoveryStartInformation.isRecoveryRequired());
@@ -216,10 +240,13 @@ class RecoveryStartInformationProviderTest {
                         -1,
                         LatestVersions.LATEST_KERNEL_VERSION.version(),
                         kernelProv,
-                        EMPTY_LAST_APPEND_BATCH_INFO_PROVIDER));
+                        LATEST_LOG_FORMAT_PROVIDER,
+                        UNKNOWN_TERM_PROVIDER,
+                        EMPTY_LAST_APPEND_BATCH_INFO_PROVIDER,
+                        null));
 
         RecoveryStartInformation recoveryStartInformation =
-                new RecoveryStartInformationProvider(logFiles, monitor).get();
+                new RecoveryStartInformationProvider(logFiles, monitor, Config.defaults()).get();
 
         assertSame(MISSING_LOGS, recoveryStartInformation);
     }
@@ -228,7 +255,7 @@ class RecoveryStartInformationProviderTest {
     void shouldFailIfThereAreNoCheckPointsAndOldestLogVersionInNotZero() {
         // given
         long oldestLogVersionFound = 1L;
-        when(logFile.getLowestLogVersion()).thenReturn(oldestLogVersionFound);
+        when(logFile.getLogRangeInfo()).thenReturn(new LogRangeInfo(oldestLogVersionFound, null, 100, null));
         when(logFiles.getTailMetadata())
                 .thenReturn(new LogTailInformation(
                         true,
@@ -237,14 +264,98 @@ class RecoveryStartInformationProviderTest {
                         currentLogVersion,
                         LatestVersions.LATEST_KERNEL_VERSION.version(),
                         kernelProv,
-                        EMPTY_LAST_APPEND_BATCH_INFO_PROVIDER));
+                        LATEST_LOG_FORMAT_PROVIDER,
+                        UNKNOWN_TERM_PROVIDER,
+                        EMPTY_LAST_APPEND_BATCH_INFO_PROVIDER,
+                        null));
 
         // when
         final String expectedMessage = "No check point found in any log file and transaction log "
                 + "files do not exist from expected version 0. Lowest found log file is 1.";
-        RecoveryStartInformationProvider provider = new RecoveryStartInformationProvider(logFiles, monitor);
+        RecoveryStartInformationProvider provider =
+                new RecoveryStartInformationProvider(logFiles, monitor, Config.defaults());
         assertThatThrownBy(provider::get)
                 .isInstanceOf(UnderlyingStorageException.class)
                 .hasMessage(expectedMessage);
+    }
+
+    @Test
+    void shouldRecoverMergedLogStartingAboveVersionZeroWhenLowestHeaderShowsCompleteHistory() throws IOException {
+        // given: raft bootstrap advances a merged log's start version without appending anything before it,
+        // so the lowest header records no prior append index
+        var header = mergedLogHeader(1, 0);
+        when(logFile.extractHeader(1)).thenReturn(header);
+        when(logFile.getLogRangeInfo()).thenReturn(new LogRangeInfo(1, null, 100, null));
+        when(logFiles.getTailMetadata()).thenReturn(recoveryRequiredTailWithoutCheckpoint());
+
+        // when
+        RecoveryStartInformation recoveryStartInformation =
+                new RecoveryStartInformationProvider(logFiles, monitor, mergedLogConfig()).get();
+
+        // then
+        verify(monitor).noCheckPointFound();
+        assertEquals(header.getStartPosition(), recoveryStartInformation.transactionLogPosition());
+        assertTrue(recoveryStartInformation.isRecoveryRequired());
+    }
+
+    @Test
+    void shouldFailMergedLogRecoveryWhenLowestHeaderShowsPrunedHistory() throws IOException {
+        // given: the lowest header records a real prior append index, meaning earlier files were pruned;
+        // recovering without a checkpoint would silently start mid-history
+        when(logFile.extractHeader(1)).thenReturn(mergedLogHeader(1, 5));
+        when(logFile.getLogRangeInfo()).thenReturn(new LogRangeInfo(1, null, 100, null));
+        when(logFiles.getTailMetadata()).thenReturn(recoveryRequiredTailWithoutCheckpoint());
+
+        RecoveryStartInformationProvider provider =
+                new RecoveryStartInformationProvider(logFiles, monitor, mergedLogConfig());
+        assertThatThrownBy(provider::get)
+                .isInstanceOf(UnderlyingStorageException.class)
+                .hasMessageContaining("Lowest found log file is 1");
+    }
+
+    @Test
+    void shouldRecoverMergedLogFromAnyStartVersionWhenLowestHeaderShowsCompleteHistory() throws IOException {
+        var header = mergedLogHeader(5, 0);
+        when(logFile.extractHeader(5)).thenReturn(header);
+        when(logFile.getLogRangeInfo()).thenReturn(new LogRangeInfo(5, null, 100, null));
+        when(logFiles.getTailMetadata()).thenReturn(recoveryRequiredTailWithoutCheckpoint());
+
+        RecoveryStartInformation recoveryStartInformation =
+                new RecoveryStartInformationProvider(logFiles, monitor, mergedLogConfig()).get();
+
+        verify(monitor).noCheckPointFound();
+        assertEquals(header.getStartPosition(), recoveryStartInformation.transactionLogPosition());
+    }
+
+    private static LogHeader mergedLogHeader(long logVersion, long lastAppendIndex) {
+        return LogFormat.V11.newHeader(
+                logVersion,
+                lastAppendIndex,
+                ReadableChannel.BASE_TERM,
+                StoreIdentifier.newStoreIdentifier(12345),
+                LogFormat.V11.getDefaultSegmentBlockSize(),
+                BASE_TX_CHECKSUM,
+                KernelVersion.GLORIOUS_FUTURE,
+                UNSPECIFIED_CREATION_TIME);
+    }
+
+    private LogTailInformation recoveryRequiredTailWithoutCheckpoint() {
+        return new LogTailInformation(
+                true,
+                10L,
+                false,
+                currentLogVersion,
+                LatestVersions.LATEST_KERNEL_VERSION.version(),
+                kernelProv,
+                LATEST_LOG_FORMAT_PROVIDER,
+                UNKNOWN_TERM_PROVIDER,
+                EMPTY_LAST_APPEND_BATCH_INFO_PROVIDER,
+                null);
+    }
+
+    private static Config mergedLogConfig() {
+        return Config.newBuilder()
+                .set(GraphDatabaseInternalSettings.merged_log, true)
+                .build();
     }
 }

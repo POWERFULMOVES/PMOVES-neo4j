@@ -19,7 +19,6 @@
  */
 package org.neo4j.queryapi;
 
-import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
 import static org.assertj.core.api.Assertions.within;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -37,19 +36,26 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.function.Consumer;
+import java.util.stream.Collectors;
 import org.assertj.core.api.AbstractAssert;
 import org.assertj.core.api.Assertions;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.notifications.NotificationCodeWithDescription;
-import org.neo4j.queryapi.testclient.QueryContentType;
-import org.neo4j.queryapi.testclient.QueryResponse;
+import org.neo4j.queryapi.test.QueryAPITestRetryException;
+import org.neo4j.queryapi.test.testclient.QueryContentType;
+import org.neo4j.queryapi.test.testclient.QueryResponse;
+import org.neo4j.server.queryapi.exception.TransactionIdCollisionException;
+import org.neo4j.test.TestDatabaseManagementServiceFactorySupplier;
 
 public final class QueryResponseAssertions
         extends AbstractAssert<QueryResponseAssertions, HttpResponse<QueryResponse>> {
 
     private final HttpResponse<QueryResponse> queryResponse;
 
-    protected QueryResponseAssertions(HttpResponse<QueryResponse> queryResponse) {
+    private QueryResponseAssertions(HttpResponse<QueryResponse> queryResponse) {
         super(queryResponse, QueryResponseAssertions.class);
         this.queryResponse = queryResponse;
     }
@@ -65,44 +71,72 @@ public final class QueryResponseAssertions
     }
 
     public QueryResponseAssertions wasSuccessful() {
-        Assertions.assertThat(queryResponse.statusCode()).isEqualTo(202);
+        if (queryResponse.statusCode() != 202
+                && queryResponse.body() != null
+                && queryResponse.body().errors() != null
+                && !queryResponse.body().errors().isEmpty()) {
+            var errorCode = queryResponse.body().errors().get(0).get(ERROR_CODE).asText();
+            var errorMessage =
+                    queryResponse.body().errors().get(0).get(ERROR_MESSAGE).asText();
+            if (errorCode.equals(Status.Request.ResourceExhaustion.code().serialize())) {
+                var transactionIdCollisionException = new TransactionIdCollisionException();
+                if (transactionIdCollisionException.getMessage().equals(errorMessage)) {
+                    throw new QueryAPITestRetryException("Transaction ID Collision", transactionIdCollisionException);
+                }
+            }
+        }
+
+        Assertions.assertThat(queryResponse.statusCode())
+                .as(
+                        "Expected successful response but was a %s with body: %s",
+                        queryResponse.statusCode(), queryResponse.body())
+                .isEqualTo(202);
+
         Assertions.assertThat(queryResponse.body().errors()).isNull();
         return this;
     }
 
     public QueryResponseAssertions wasNotFound() {
-        Assertions.assertThat(queryResponse.statusCode()).isEqualTo(404);
-        Assertions.assertThat(queryResponse.body().errors().size()).isEqualTo(1);
-        Assertions.assertThat(
-                        queryResponse.body().errors().get(0).get(ERROR_CODE).asText())
-                .isEqualTo(Status.Request.Invalid.code().serialize());
-        Assertions.assertThat(
-                        queryResponse.body().errors().get(0).get(ERROR_MESSAGE).asText())
-                .isNotBlank();
-        return this;
+        return hasErrorStatus(404, Status.Request.Invalid);
     }
 
     public QueryResponseAssertions wasDatabaseNotFound() {
-        Assertions.assertThat(queryResponse.statusCode()).isEqualTo(404);
-        Assertions.assertThat(queryResponse.body().errors().size()).isEqualTo(1);
-        Assertions.assertThat(
-                        queryResponse.body().errors().get(0).get(ERROR_CODE).asText())
-                .isEqualTo(Status.Database.DatabaseNotFound.code().serialize());
-        Assertions.assertThat(
-                        queryResponse.body().errors().get(0).get(ERROR_MESSAGE).asText())
-                .isNotBlank();
-        return this;
+        return hasErrorStatus(404, Status.Database.DatabaseNotFound);
     }
 
     public QueryResponseAssertions hasErrorStatus(int httpCode, Status status) {
-        Assertions.assertThat(queryResponse.statusCode()).isEqualTo(httpCode);
+        return hasErrorStatus(httpCode, status, (Consumer<String>) null);
+    }
+
+    public QueryResponseAssertions hasErrorStatus(int httpCode, Status status, String message) {
+        return hasErrorStatus(
+                httpCode, status, actual -> Assertions.assertThat(message).isEqualTo(actual));
+    }
+
+    public QueryResponseAssertions hasErrorStatus(int httpCode, Status status, Consumer<String> messageRequirements) {
         Assertions.assertThat(queryResponse.body().errors().size()).isEqualTo(1);
-        Assertions.assertThat(
-                        queryResponse.body().errors().get(0).get(ERROR_CODE).asText())
-                .isEqualTo(status.code().serialize());
-        Assertions.assertThat(
-                        queryResponse.body().errors().get(0).get(ERROR_MESSAGE).asText())
-                .isNotBlank();
+        var errorCode = queryResponse.body().errors().get(0).get(ERROR_CODE).asText();
+        var errorMessage =
+                queryResponse.body().errors().get(0).get(ERROR_MESSAGE).asText();
+
+        if (!status.equals(Status.Request.ResourceExhaustion)
+                && errorCode.equals(Status.Request.ResourceExhaustion.code().serialize())) {
+            var transactionIdCollisionException = new TransactionIdCollisionException();
+            if (transactionIdCollisionException.getMessage().equals(errorMessage)) {
+                throw new QueryAPITestRetryException("Transaction ID Collision", transactionIdCollisionException);
+            }
+        }
+
+        Assertions.assertThat(queryResponse.statusCode()).isEqualTo(httpCode);
+
+        Assertions.assertThat(errorCode).isEqualTo(status.code().serialize());
+        if (messageRequirements == null) {
+            Assertions.assertThat(errorMessage).isNotBlank();
+
+        } else {
+            Assertions.assertThat(errorMessage).satisfies(messageRequirements);
+        }
+
         return this;
     }
 
@@ -131,7 +165,7 @@ public final class QueryResponseAssertions
             for (int j = 0; j < expectedRecord.size(); j++) {
                 Object unwrapped = unwrapValue(responseRecord.get(j), expectedRecord.get(j));
 
-                Assertions.assertThat(expectedRecord.get(j)).isEqualTo(unwrapped);
+                Assertions.assertThat(unwrapped).isEqualTo(expectedRecord.get(j));
             }
         }
         return this;
@@ -187,13 +221,13 @@ public final class QueryResponseAssertions
     }
 
     public QueryResponseAssertions hasBookmark() {
-        Assertions.assertThat(queryResponse.body().bookmarks().size()).isEqualTo(1);
+        Assertions.assertThat(queryResponse.body().bookmarks()).hasSize(1);
         return this;
     }
 
     public QueryResponseAssertions hasBookmark(String bookmark) {
         Assertions.assertThat(queryResponse.body().bookmarks().size()).isEqualTo(1);
-        Assertions.assertThat(queryResponse.body().bookmarks().get(0)).isEqualTo(bookmark);
+        Assertions.assertThat(queryResponse.body().bookmarks().getFirst()).isEqualTo(bookmark);
         return this;
     }
 
@@ -217,11 +251,11 @@ public final class QueryResponseAssertions
                     .isEqualTo(notifications[i].getStatus().code().description());
             Assertions.assertThat(reqNotifications.get("description").asText()).isNotBlank();
             Assertions.assertThat(reqNotifications.get("position").get("offset").asInt())
-                    .isNotNull();
+                    .isNotNegative();
             Assertions.assertThat(reqNotifications.get("position").get("line").asInt())
-                    .isNotNull();
+                    .isPositive();
             Assertions.assertThat(reqNotifications.get("position").get("column").asInt())
-                    .isNotNull();
+                    .isPositive();
             Assertions.assertThat(reqNotifications.get("severity").asText()).isNotBlank();
             Assertions.assertThat(reqNotifications.get("category").asText()).isNotBlank();
         }
@@ -265,7 +299,7 @@ public final class QueryResponseAssertions
     public QueryResponseAssertions hasQueryPlan() {
         var queryPlan = queryResponse.body().queryPlan();
 
-        Assertions.assertThat(queryPlan.get("operatorType").asText()).isEqualTo("ProduceResults@neo4j");
+        Assertions.assertThat(queryPlan.get("operatorType").asText()).startsWith("ProduceResults@neo4j");
         assertNotNull(queryPlan.get("arguments"));
         Assertions.assertThat(queryPlan.get("identifiers").size()).isEqualTo(1);
         Assertions.assertThat(queryPlan.get("identifiers").get(0).asText()).isEqualTo("`1`");
@@ -273,7 +307,7 @@ public final class QueryResponseAssertions
 
         var childPlan = queryPlan.get("children").get(0);
 
-        Assertions.assertThat(childPlan.get("operatorType").asText()).isEqualTo("Projection@neo4j");
+        Assertions.assertThat(childPlan.get("operatorType").asText()).startsWith("Projection@neo4j");
         assertNotNull(childPlan.get("arguments"));
         Assertions.assertThat(childPlan.get("identifiers").size()).isEqualTo(1);
         Assertions.assertThat(queryPlan.get("identifiers").get(0).asText()).isEqualTo("`1`");
@@ -295,16 +329,24 @@ public final class QueryResponseAssertions
         Assertions.assertThat(profiledQueryPlan.get("records").asInt()).isEqualTo(1);
         Assertions.assertThat(profiledQueryPlan.get("hasPageCacheStats").asBoolean())
                 .isEqualTo(false);
-        Assertions.assertThat(profiledQueryPlan.get("pageCacheHits").asInt()).isEqualTo(0);
-        Assertions.assertThat(profiledQueryPlan.get("pageCacheMisses").asInt()).isEqualTo(0);
-        Assertions.assertThat(profiledQueryPlan.get("pageCacheHitRatio").asDouble())
-                .isEqualTo(0);
-        Assertions.assertThat(profiledQueryPlan.get("operatorType").asText()).isEqualTo("ProduceResults@neo4j");
+        if (TestDatabaseManagementServiceFactorySupplier.isSpd()) {
+            Assertions.assertThat(profiledQueryPlan.get("pageCacheHits")).isNull();
+            Assertions.assertThat(profiledQueryPlan.get("pageCacheMisses")).isNull();
+            Assertions.assertThat(profiledQueryPlan.get("pageCacheHitRatio")).isNull();
+        } else {
+            Assertions.assertThat(profiledQueryPlan.get("pageCacheHits").asInt())
+                    .isEqualTo(0);
+            Assertions.assertThat(profiledQueryPlan.get("pageCacheMisses").asInt())
+                    .isEqualTo(0);
+            Assertions.assertThat(profiledQueryPlan.get("pageCacheHitRatio").asDouble())
+                    .isEqualTo(0);
+        }
+        Assertions.assertThat(profiledQueryPlan.get("operatorType").asText()).startsWith("ProduceResults@neo4j");
         assertNotNull(profiledQueryPlan.get("arguments"));
         Assertions.assertThat(profiledQueryPlan.get("identifiers").size()).isEqualTo(1);
         Assertions.assertThat(profiledQueryPlan.get("identifiers").get(0).asText())
                 .isEqualTo("`1`");
-        Assertions.assertThat(profiledQueryPlan.get("time").asInt()).isEqualTo(0);
+        Assertions.assertThat(profiledQueryPlan.get("time")).isNull();
 
         var childProfile = profiledQueryPlan.get("children");
 
@@ -319,8 +361,12 @@ public final class QueryResponseAssertions
                 .isEqualTo(0);
         Assertions.assertThat(childProfile.get(0).get("pageCacheHitRatio").asDouble())
                 .isEqualTo(0);
-        Assertions.assertThat(childProfile.get(0).get("time").asInt()).isEqualTo(0);
-        Assertions.assertThat(childProfile.get(0).get("operatorType").asText()).isEqualTo("Projection@neo4j");
+        if (TestDatabaseManagementServiceFactorySupplier.isSpd()) {
+            Assertions.assertThat(childProfile.get(0).get("time").asInt()).isEqualTo(0);
+        } else {
+            Assertions.assertThat(childProfile.get(0).get("time")).isNull();
+        }
+        Assertions.assertThat(childProfile.get(0).get("operatorType").asText()).startsWith("Projection@neo4j");
         assertNotNull(childProfile.get(0).get("arguments"));
         Assertions.assertThat(childProfile.get(0).get("identifiers").size()).isEqualTo(1);
         Assertions.assertThat(childProfile.get(0).get("identifiers").get(0).asText())
@@ -333,12 +379,31 @@ public final class QueryResponseAssertions
         Assertions.assertThat(queryResponse.body().profiledQueryPlan()).isNull();
     }
 
+    public void hasQueryType(String queryType) {
+        Assertions.assertThat(queryResponse.body().queryType()).isEqualTo(queryType);
+    }
+
+    public QueryResponseAssertions hasTimers() {
+        Assertions.assertThat(queryResponse.body().resultAvailableAfter()).isGreaterThanOrEqualTo(0);
+        Assertions.assertThat(queryResponse.body().resultConsumedAfter())
+                .isGreaterThanOrEqualTo(queryResponse.body().resultAvailableAfter());
+        return this;
+    }
+
+    public QueryResponseAssertions hasNoTimers() {
+        Assertions.assertThat(queryResponse.body().resultAvailableAfter()).isNull();
+        Assertions.assertThat(queryResponse.body().resultConsumedAfter()).isNull();
+        return this;
+    }
+
     private Object unwrapValue(JsonNode responseRecord, Object expectedRecord) {
         Object unwrapped = null;
         switch (responseRecord.getNodeType()) {
             case NUMBER -> unwrapped = unwrapNumber(responseRecord, expectedRecord);
             case STRING -> unwrapped = responseRecord.asText();
             case BOOLEAN -> unwrapped = responseRecord.asBoolean();
+            case OBJECT -> unwrapped = unwrapObject(responseRecord);
+            case ARRAY -> unwrapped = unwrapArray(responseRecord);
             case NULL -> unwrapped = null;
             default -> fail();
         }
@@ -346,6 +411,10 @@ public final class QueryResponseAssertions
     }
 
     private Object unwrapNumber(JsonNode responseValue, Object expectedValue) {
+        if (Objects.isNull(expectedValue)) {
+            return unwrapNumber(responseValue);
+        }
+
         if (expectedValue instanceof Integer) {
             return responseValue.asInt();
         } else if (expectedValue instanceof Double) {
@@ -356,5 +425,24 @@ public final class QueryResponseAssertions
             return (float) responseValue.asDouble();
         }
         return null;
+    }
+
+    private Object unwrapNumber(JsonNode value) {
+        if (value.isIntegralNumber()) {
+            return value.asLong();
+        } else if (value.isFloatingPointNumber()) {
+            return value.asDouble();
+        }
+        return null;
+    }
+
+    private Map<String, Object> unwrapObject(JsonNode responseRecord) {
+        return responseRecord
+                .propertyStream()
+                .collect(Collectors.toMap(Map.Entry::getKey, entry -> unwrapValue(entry.getValue(), null)));
+    }
+
+    private List<Object> unwrapArray(JsonNode responseRecord) {
+        return responseRecord.valueStream().map(v -> unwrapValue(v, null)).collect(Collectors.toList());
     }
 }

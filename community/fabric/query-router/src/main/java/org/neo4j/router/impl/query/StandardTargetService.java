@@ -48,10 +48,13 @@ public class StandardTargetService implements TargetService {
                         || (!target.reference().isPrimary()
                                 && target.reference().namespace().isPresent()))
                 .isPresent()) {
-            var message = "Accessing a composite database and its constituents is only allowed when connected to it. "
-                    + "Attempted to access '%s' while connected to '%s'";
-            throw new InvalidSemanticsException(String.format(
-                    message, parsedTarget.get().reference().toPrettyString(), sessionDatabase.toPrettyString()));
+            throw InvalidSemanticsException.unsupportedAccessOfCompositeDatabase(
+                    parsedTarget.get().reference().toPrettyString(), sessionDatabase.toPrettyString());
+        }
+        if (parsedTarget.filter(target -> target.reference().isShard()).isPresent()) {
+            String target = parsedTarget.get().reference().toPrettyString();
+            String shardedDatabase = parsedTarget.get().reference().owningDatabaseName();
+            throw InvalidSemanticsException.invalidShardTarget("USE", shardedDatabase, target);
         }
         return parsedTarget.orElse(new QueryTarget(sessionDatabase));
     }

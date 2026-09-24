@@ -74,7 +74,7 @@ class ProfilingContextTest {
     }
 
     @Test
-    void testProfileHandling() throws IOException {
+    void profileHandling() throws IOException {
         recordProfile(1, "Query 1", 10, "Profile 1");
         recordProfile(1, "Query 1", 30, "Profile 2");
         recordProfile(1, "Query 1", 20, "Profile 3");
@@ -89,12 +89,11 @@ class ProfilingContextTest {
 
         profilingContext.close();
 
-        var profiles = Files.list(profilesDir).toList();
-        assertThat(profiles.size()).isEqualTo(1);
+        List<Path> profiles = getProfiles();
+        assertThat(profiles).hasSize(1);
         var profileContent = Files.readString(profiles.get(0));
 
-        var expected =
-                """
+        var expected = """
                 Composite Query:
 
                 Composite query
@@ -149,7 +148,13 @@ class ProfilingContextTest {
 
                 """;
 
-        assertThat(profileContent).isEqualTo(expected);
+        assertThat(profileContent).isEqualToNormalizingNewlines(expected);
+    }
+
+    private List<Path> getProfiles() throws IOException {
+        try (var files = Files.list(profilesDir)) {
+            return files.toList();
+        }
     }
 
     void recordProfile(int dbId, String query, long duration, String profileName) {

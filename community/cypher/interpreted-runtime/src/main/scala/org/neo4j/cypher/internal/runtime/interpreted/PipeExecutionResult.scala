@@ -19,12 +19,12 @@
  */
 package org.neo4j.cypher.internal.runtime.interpreted
 
+import org.neo4j.cypher.internal.notification.InternalNotification
 import org.neo4j.cypher.internal.runtime.ClosingIterator
 import org.neo4j.cypher.internal.runtime.QueryStatistics
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.Pipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.QueryState
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.TransactionCommittedCounterIterator.wrap
-import org.neo4j.cypher.internal.util.InternalNotification
 import org.neo4j.cypher.result.QueryProfile
 import org.neo4j.cypher.result.RuntimeResult
 import org.neo4j.cypher.result.RuntimeResult.ConsumptionState
@@ -51,7 +51,9 @@ class PipeExecutionResult(
 
   override def getErrorOrNull: Throwable = null
 
-  override def queryStatistics(): QueryStatistics = state.getStatistics
+  override def queryStatistics(): QueryStatistics = {
+    queryStatisticsSnapshot
+  }
 
   override def heapHighWaterMark: Long = state.queryMemoryTracker.heapHighWaterMark
 
@@ -91,7 +93,16 @@ class PipeExecutionResult(
     inner == null || (inner.hasNext && !cancelled)
   }
 
-  override def notifications(): util.Set[InternalNotification] = state.notifications()
+  override def notifications(): util.Set[InternalNotification] = state.notifications
+
+  private def queryStatisticsSnapshot: QueryStatistics = {
+    val statisticsSnapshot = state.getStatistics
+    val fileLinesRead = state.resources.getFileLinesRead
+    if (fileLinesRead > 0L) {
+      return new QueryStatistics(fileLinesRead = fileLinesRead) + statisticsSnapshot
+    }
+    statisticsSnapshot
+  }
 
   private def serveResults(): Unit = {
     while (inner.hasNext && demand > 0 && !cancelled) {
@@ -100,7 +111,7 @@ class PipeExecutionResult(
       demand -= 1L
     }
     if (!inner.hasNext) {
-      subscriber.onResultCompleted(state.getStatistics)
+      subscriber.onResultCompleted(queryStatisticsSnapshot)
     }
   }
 

@@ -44,7 +44,6 @@ import org.eclipse.collections.impl.factory.primitive.LongLists;
 import org.eclipse.collections.impl.factory.primitive.LongSets;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.configuration.Config;
 import org.neo4j.internal.kernel.api.InternalIndexState;
 import org.neo4j.internal.schema.AllIndexProviderDescriptors;
@@ -64,11 +63,11 @@ import org.neo4j.storageengine.api.StubStorageCursors;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.Values;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class DynamicIndexStoreViewTest {
     private final JobScheduler jobScheduler = JobSchedulerFactory.createInitialisedScheduler();
     private static final CursorContextFactory CONTEXT_FACTORY =
@@ -123,8 +122,8 @@ class DynamicIndexStoreViewTest {
             storeScan.run(StoreScan.NO_EXTERNAL_UPDATES);
         }
 
-        assertThat(consumer.batches.size()).isEqualTo(1);
-        assertThat(consumer.batches.get(0).size()).isEqualTo(nodeIds.length);
+        assertThat(consumer.batches).hasSize(1);
+        assertThat(consumer.batches.get(0)).hasSize(nodeIds.length);
     }
 
     @Test
@@ -182,11 +181,11 @@ class DynamicIndexStoreViewTest {
         storeScan.run(StoreScan.NO_EXTERNAL_UPDATES);
 
         // Then make sure all the fitting relationships where included
-        assertThat(propertyScanConsumer.batches.size()).isEqualTo(1);
-        assertThat(propertyScanConsumer.batches.get(0).size()).isEqualTo(wantedPropertyUpdates);
+        assertThat(propertyScanConsumer.batches).hasSize(1);
+        assertThat(propertyScanConsumer.batches.get(0)).hasSize(wantedPropertyUpdates);
         // and that we didn't visit any more relationships than what we would get from scan store
-        assertThat(tokenConsumer.batches.size()).isEqualTo(1);
-        assertThat(tokenConsumer.batches.get(0).size()).isEqualTo(relationshipsWithTargetType.size());
+        assertThat(tokenConsumer.batches).hasSize(1);
+        assertThat(tokenConsumer.batches.get(0)).hasSize(relationshipsWithTargetType.size());
     }
 
     @Test
@@ -219,8 +218,8 @@ class DynamicIndexStoreViewTest {
             storeScan.run(StoreScan.NO_EXTERNAL_UPDATES);
         }
 
-        assertThat(consumer.batches.size()).isEqualTo(1);
-        assertThat(consumer.batches.get(0).size()).isEqualTo(nodeIds.length + 2);
+        assertThat(consumer.batches).hasSize(1);
+        assertThat(consumer.batches.get(0)).hasSize(nodeIds.length + 2);
     }
 
     @Test
@@ -263,8 +262,8 @@ class DynamicIndexStoreViewTest {
                 INSTANCE);
         storeScan.run(StoreScan.NO_EXTERNAL_UPDATES);
 
-        assertThat(tokenConsumer.batches.size()).isEqualTo(1);
-        assertThat(tokenConsumer.batches.get(0).size()).isEqualTo(relationshipsWithTargetType.size());
+        assertThat(tokenConsumer.batches).hasSize(1);
+        assertThat(tokenConsumer.batches.get(0)).hasSize(relationshipsWithTargetType.size());
     }
 
     @Test
@@ -339,7 +338,7 @@ class DynamicIndexStoreViewTest {
         storeScan.run(StoreScan.NO_EXTERNAL_UPDATES);
 
         // Then make sure all the fitting relationships where included
-        assertThat(propertyScanConsumer.batches.size()).isEqualTo(1);
+        assertThat(propertyScanConsumer.batches).hasSize(1);
         assertThat(new HashSet<>(propertyScanConsumer.batches.get(0))).isEqualTo(wantedPropertyUpdates);
     }
 

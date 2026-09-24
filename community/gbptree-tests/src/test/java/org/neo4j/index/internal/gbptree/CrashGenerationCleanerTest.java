@@ -46,7 +46,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
@@ -54,17 +53,18 @@ import org.neo4j.io.pagecache.PageCursor;
 import org.neo4j.io.pagecache.PagedFile;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.extension.pagecache.PageCacheSupportExtension;
 import org.neo4j.test.extension.testdirectory.EphemeralTestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
 
 @EphemeralTestDirectoryExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class CrashGenerationCleanerTest {
     @RegisterExtension
     static PageCacheSupportExtension pageCacheExtension = new PageCacheSupportExtension();
@@ -130,7 +130,10 @@ class CrashGenerationCleanerTest {
         pageCache = PageCacheSupportExtension.getPageCache(
                 fileSystem, config().withPageSize(PAGE_SIZE).withAccessChecks(true));
         pagedFile = pageCache.map(
-                testDirectory.file(FILE_NAME), PAGE_SIZE, DATABASE_NAME, immutable.of(CREATE, DELETE_ON_CLOSE));
+                new StoreFile(testDirectory.file(FILE_NAME)),
+                PAGE_SIZE,
+                DATABASE_NAME,
+                immutable.of(CREATE, DELETE_ON_CLOSE));
     }
 
     @AfterEach

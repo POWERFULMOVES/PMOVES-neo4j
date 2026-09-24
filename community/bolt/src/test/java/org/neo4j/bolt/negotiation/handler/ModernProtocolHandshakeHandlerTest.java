@@ -30,12 +30,12 @@ import java.util.Optional;
 import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
-import org.neo4j.bolt.negotiation.ProtocolVersion;
 import org.neo4j.bolt.negotiation.codec.ModernProtocolNegotiationFinalizeMessageDecoder;
 import org.neo4j.bolt.negotiation.codec.ModernProtocolNegotiationInitMessageEncoder;
 import org.neo4j.bolt.negotiation.message.ModernProtocolNegotiationFinalizeMessage;
 import org.neo4j.bolt.negotiation.message.ModernProtocolNegotiationInitMessage;
 import org.neo4j.bolt.negotiation.message.ProtocolCapability;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 import org.neo4j.bolt.protocol.common.handler.ProtocolLoggingHandler;
 import org.neo4j.bolt.testing.annotation.StrictBufferExtension;
 import org.neo4j.bolt.testing.assertions.ChannelAssertions;
@@ -108,8 +108,8 @@ public class ModernProtocolHandshakeHandlerTest extends AbstractProtocolHandshak
 
         var channel = ctx.withConnection(
                 conn -> conn.withConnector(factory -> factory.withProtocolRegistry(protocolRegistry)
-                                .withConfiguration(config -> config.withProtocolLogging(ProtocolLoggingMode.BOTH)
-                                        .withInboundBufferThrottle(512, 1024)))
+                                .withConfiguration(config -> config.enableProtocolLogging(ProtocolLoggingMode.BOTH)
+                                        .enableInboundBufferThrottle(512, 1024)))
                         .withMemoryTracker(memoryTracker),
                 new ModernProtocolHandshakeHandler(logProvider));
 
@@ -148,7 +148,7 @@ public class ModernProtocolHandshakeHandlerTest extends AbstractProtocolHandshak
 
         var channel = ctx.withConnection(
                 conn -> conn.withConnector(factory -> factory.withProtocolRegistry(protocolRegistry)
-                                .withConfiguration(config -> config.withProtocolLogging(ProtocolLoggingMode.RAW)))
+                                .withConfiguration(config -> config.enableProtocolLogging(ProtocolLoggingMode.RAW)))
                         .withMemoryTracker(memoryTracker),
                 new ModernProtocolHandshakeHandler(logProvider));
 
@@ -186,8 +186,8 @@ public class ModernProtocolHandshakeHandlerTest extends AbstractProtocolHandshak
 
         var channel = ctx.withConnection(
                 conn -> conn.withConnector(factory -> factory.withProtocolRegistry(protocolRegistry)
-                                .withConfiguration(config -> config.withProtocolLogging(ProtocolLoggingMode.DECODED)
-                                        .withInboundBufferThrottle(512, 1024)))
+                                .withConfiguration(config -> config.enableProtocolLogging(ProtocolLoggingMode.DECODED)
+                                        .enableInboundBufferThrottle(512, 1024)))
                         .withMemoryTracker(memoryTracker),
                 new ModernProtocolHandshakeHandler(logProvider));
 
@@ -223,8 +223,8 @@ public class ModernProtocolHandshakeHandlerTest extends AbstractProtocolHandshak
 
         var channel = ctx.withConnection(
                 conn -> conn.withConnector(factory -> factory.withProtocolRegistry(protocolRegistry)
-                                .withConfiguration(config -> config.withProtocolLogging(ProtocolLoggingMode.DECODED)
-                                        .withInboundBufferThrottle(512, 1024)))
+                                .withConfiguration(config -> config.enableProtocolLogging(ProtocolLoggingMode.DECODED)
+                                        .enableInboundBufferThrottle(512, 1024)))
                         .withMemoryTracker(memoryTracker),
                 new ModernProtocolHandshakeHandler(logProvider));
 

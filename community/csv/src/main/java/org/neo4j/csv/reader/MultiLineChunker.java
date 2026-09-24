@@ -30,7 +30,6 @@ import java.util.OptionalInt;
  * {@link Configuration#quotationCharacter()} setting.
  */
 public class MultiLineChunker extends NewLineChunker {
-
     private final char delimiter;
     private final char quotationCharacter;
 
@@ -64,7 +63,7 @@ public class MultiLineChunker extends NewLineChunker {
                     switch (states.peek().state) {
                         case END_TEXT_CELL -> states.push(ParseState.startText(pos + 1));
                         case END_OTHER_CELLS -> states.push(ParseState.startOthers(pos + 1));
-                            // first char read is the end of some text cell
+                        // first char read is the end of some text cell
                         case DELIMITER, EOB -> states.push(ParseState.endText(pos + 1));
                         case CR -> {
                             final var currentPos = pos;
@@ -107,9 +106,9 @@ public class MultiLineChunker extends NewLineChunker {
                     switch (states.peek().state) {
                         case EOB -> states.push(ParseState.newline(posAfterCR));
                         case DELIMITER, CR -> ensureInTextCellForCR(states, posAfterCR);
-                            // , or ," would already have consumed delimiter (and be in END_X state)
-                        case START_TEXT_CELL, START_OTHER_CELLS -> throw error(
-                                "found CR outside a text cell", posAfterCR);
+                        // , or ," would already have consumed delimiter (and be in END_X state)
+                        case START_TEXT_CELL, START_OTHER_CELLS ->
+                            throw error("found CR outside a text cell", posAfterCR);
                         case END_OTHER_CELLS -> {
                             // after a run of cells non text cells found the start of the row
                             return posAfterCR;
@@ -188,8 +187,8 @@ public class MultiLineChunker extends NewLineChunker {
 
     private IllegalStateException error(String message, int position) {
         return new IllegalStateException(
-                "Weird input data, %s at position %d of buffer of length %d, not supported a.t.m."
-                        .formatted(message, position, chunkSize));
+                "Weird input data in '%s', %s at position %d of buffer of length %d, not supported a.t.m."
+                        .formatted(reader.sourceDescription(), message, position, chunkSize));
     }
 
     private boolean isDelimiter(char[] buffer, int offset) {

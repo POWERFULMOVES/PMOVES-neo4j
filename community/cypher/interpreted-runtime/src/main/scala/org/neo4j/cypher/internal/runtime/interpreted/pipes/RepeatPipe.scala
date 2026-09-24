@@ -29,16 +29,22 @@ import org.neo4j.cypher.internal.runtime.ClosingIterator
 import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.runtime.IsNoValue
 import org.neo4j.cypher.internal.runtime.PrefetchingIterator
+import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Expression
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.RepeatPipe.AcyclicModeConstraint
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.RepeatPipe.AllReduceAcc
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.RepeatPipe.TrailModeConstraint
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.RepeatPipe.TraversalModeConstraint
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.RepeatPipe.WalkModeConstraint
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.RepeatPipe.emptyLists
 import org.neo4j.cypher.internal.util.Repetition
 import org.neo4j.cypher.internal.util.attribution.Id
-import org.neo4j.exceptions.InternalException
+import org.neo4j.cypher.operations.CypherTypeValueMapper
+import org.neo4j.exceptions.CypherTypeException
 import org.neo4j.memory.EmptyMemoryTracker
 import org.neo4j.memory.MemoryTracker
 import org.neo4j.values.AnyValue
+import org.neo4j.values.VirtualValue
+import org.neo4j.values.virtual.IdentifiedVirtualValue
 import org.neo4j.values.virtual.ListValue
 import org.neo4j.values.virtual.VirtualNodeValue
 import org.neo4j.values.virtual.VirtualRelationshipValue
@@ -46,13 +52,37 @@ import org.neo4j.values.virtual.VirtualValues
 import org.neo4j.values.virtual.VirtualValues.EMPTY_LIST
 
 import scala.annotation.tailrec
+import scala.reflect.ClassTag
 
 sealed trait LegacyRepeatState {
   val endNode: Long
   val groupNodes: HeapTrackingArrayList[ListValue]
   val groupRelationships: HeapTrackingArrayList[ListValue]
   val iterations: Int
+  val accumulatorValues: Array[AnyValue]
   def close(): Unit
+}
+
+case class AcyclicLegacyRepeatState(
+  endNode: Long,
+  groupNodes: HeapTrackingArrayList[ListValue],
+  groupRelationships: HeapTrackingArrayList[ListValue],
+  iterations: Int,
+  closeGroupsOnClose: Boolean,
+  constraint: AcyclicModeConstraint,
+  relationshipsSeen: HeapTrackingLongHashSet,
+  nodesSeen: HeapTrackingLongHashSet,
+  accumulatorValues: Array[AnyValue]
+) extends LegacyRepeatState {
+
+  def close(): Unit = {
+    if (closeGroupsOnClose) {
+      groupNodes.close()
+      groupRelationships.close()
+    }
+    relationshipsSeen.close()
+    nodesSeen.close()
+  }
 }
 
 case class TrailLegacyRepeatState(
@@ -62,7 +92,8 @@ case class TrailLegacyRepeatState(
   iterations: Int,
   closeGroupsOnClose: Boolean,
   constraint: TrailModeConstraint,
-  relationshipsSeen: HeapTrackingLongHashSet
+  relationshipsSeen: HeapTrackingLongHashSet,
+  accumulatorValues: Array[AnyValue]
 ) extends LegacyRepeatState {
 
   def close(): Unit = {
@@ -79,7 +110,8 @@ case class WalkLegacyRepeatState(
   groupNodes: HeapTrackingArrayList[ListValue],
   groupRelationships: HeapTrackingArrayList[ListValue],
   iterations: Int,
-  closeGroupsOnClose: Boolean
+  closeGroupsOnClose: Boolean,
+  accumulatorValues: Array[AnyValue]
 ) extends LegacyRepeatState {
 
   def close(): Unit = {
@@ -101,37 +133,38 @@ case class RepeatPipe(
   groupNodes: Set[VariableGrouping],
   groupRelationships: Set[VariableGrouping],
   uniquenessConstraint: TraversalModeConstraint,
-  reverseGroupVariableProjections: Boolean
+  reverseGroupVariableProjections: Boolean,
+  nodeInScope: Boolean,
+  accumulatorMappings: Array[AllReduceAcc]
 )(val id: Id = Id.INVALID_ID) extends PipeWithSource(source) {
 
   private val groupNodeNames = groupNodes.toArray.sortBy(_.singleton.name)
   private val groupRelationshipNames = groupRelationships.toArray.sortBy(_.singleton.name)
   private val emptyGroupNodes = emptyLists(groupNodes.size)
   private val emptyGroupRelationships = emptyLists(groupRelationships.size)
+  private val sortedAccumulators = accumulatorMappings.sortBy(_.previous)
+  private val sortedPreviousAccumulatorNames = sortedAccumulators.map(_.previous)
 
   private def createNewState(
     outerRow: CypherRow,
     startNode: VirtualNodeValue,
-    tracker: MemoryTracker
-  ): LegacyRepeatState =
+    tracker: MemoryTracker,
+    state: QueryState
+  ): LegacyRepeatState = {
+    val initialAccumulatorValues = sortedAccumulators.map(_.initial(outerRow, state))
     uniquenessConstraint match {
       case constraint @ RepeatPipe.TrailModeConstraint(
           _,
           previouslyBoundRelationships,
           previouslyBoundRelationshipGroups
         ) =>
-        val relationshipsSeen = HeapTrackingCollections.newLongSet(tracker)
-        val ir = previouslyBoundRelationships.iterator
-        while (ir.hasNext) {
-          relationshipsSeen.add(castOrFail[VirtualRelationshipValue](outerRow.getByName(ir.next())).id())
-        }
-        val ig = previouslyBoundRelationshipGroups.iterator
-        while (ig.hasNext) {
-          val i = castOrFail[ListValue](outerRow.getByName(ig.next())).iterator()
-          while (i.hasNext) {
-            relationshipsSeen.add(castOrFail[VirtualRelationshipValue](i.next()).id())
-          }
-        }
+        val relationshipsSeen =
+          createSeen[VirtualRelationshipValue](
+            previouslyBoundRelationships,
+            previouslyBoundRelationshipGroups,
+            outerRow,
+            tracker
+          )
         TrailLegacyRepeatState(
           startNode.id(),
           emptyGroupNodes,
@@ -139,7 +172,8 @@ case class RepeatPipe(
           iterations = 1,
           closeGroupsOnClose = false,
           constraint,
-          relationshipsSeen
+          relationshipsSeen,
+          initialAccumulatorValues
         )
       case WalkModeConstraint =>
         WalkLegacyRepeatState(
@@ -147,9 +181,61 @@ case class RepeatPipe(
           emptyGroupNodes,
           emptyGroupRelationships,
           iterations = 1,
-          closeGroupsOnClose = false
+          closeGroupsOnClose = false,
+          initialAccumulatorValues
+        )
+      case constraint @ AcyclicModeConstraint(
+          _,
+          _,
+          previouslyBoundRelationships,
+          previouslyBoundRelationshipGroups,
+          previouslyBoundNodes,
+          previouslyBoundNodeGroups
+        ) =>
+        val relationshipsSeen =
+          createSeen[VirtualRelationshipValue](
+            previouslyBoundRelationships,
+            previouslyBoundRelationshipGroups,
+            outerRow,
+            tracker
+          )
+        val nodesSeen =
+          createSeen[VirtualNodeValue](previouslyBoundNodes, previouslyBoundNodeGroups, outerRow, tracker)
+
+        AcyclicLegacyRepeatState(
+          startNode.id(),
+          emptyGroupNodes,
+          emptyGroupRelationships,
+          iterations = 1,
+          closeGroupsOnClose = false,
+          constraint,
+          relationshipsSeen,
+          nodesSeen,
+          initialAccumulatorValues
         )
     }
+  }
+
+  private def createSeen[V <: VirtualValue with IdentifiedVirtualValue : ClassTag](
+    previouslyBound: Set[String],
+    previouslyBoundGroups: Set[String],
+    outerRow: CypherRow,
+    tracker: MemoryTracker
+  ): HeapTrackingLongHashSet = {
+    val seen = HeapTrackingCollections.newLongSet(tracker)
+    val ir = previouslyBound.iterator
+    while (ir.hasNext) {
+      seen.add(castOrFail[V](outerRow.getByName(ir.next())).id())
+    }
+    val ig = previouslyBoundGroups.iterator
+    while (ig.hasNext) {
+      val i = castOrFail[ListValue](outerRow.getByName(ig.next())).iterator()
+      while (i.hasNext) {
+        seen.add(castOrFail[V](i.next()).id())
+      }
+    }
+    seen
+  }
 
   private def maybeCreateNextState(
     repeatState: LegacyRepeatState,
@@ -158,7 +244,7 @@ case class RepeatPipe(
     newGroupNodes: HeapTrackingArrayList[ListValue],
     newGroupRels: HeapTrackingArrayList[ListValue],
     tracker: MemoryTracker
-  ): Option[LegacyRepeatState] =
+  ): Option[LegacyRepeatState] = {
     repeatState match {
       case trailState: TrailLegacyRepeatState =>
         val newSet = HeapTrackingCollections.newLongSet(tracker, trailState.relationshipsSeen)
@@ -173,6 +259,7 @@ case class RepeatPipe(
         }
 
         if (allRelationshipsUnique) {
+          val accumulatorValues = sortedAccumulators.map(acc => row.getByName(acc.next))
           Some(TrailLegacyRepeatState(
             innerEndNode.id(),
             newGroupNodes,
@@ -180,21 +267,95 @@ case class RepeatPipe(
             trailState.iterations + 1,
             closeGroupsOnClose = true,
             trailState.constraint,
-            newSet
+            newSet,
+            accumulatorValues
+          ))
+        } else None
+      case acyclicState: AcyclicLegacyRepeatState =>
+        val newNodes = HeapTrackingCollections.newLongSet(tracker, acyclicState.nodesSeen)
+        val innerNodesArray = acyclicState.constraint.innerNodes
+
+        var allNodesUnique = true
+        var i = 1
+        while (allNodesUnique && i < innerNodesArray.length) {
+          val n = innerNodesArray(i)
+          allNodesUnique = newNodes.add(
+            castOrFail[VirtualNodeValue](row.getByName(n)).id()
+          )
+          i += 1
+        }
+
+        val newRelationships = HeapTrackingCollections.newLongSet(
+          tracker,
+          acyclicState.relationshipsSeen
+        )
+        val innerRelationshipsArray = acyclicState.constraint.innerRelationships
+
+        var allRelationshipsUnique = true
+        i = 0
+        while (i < innerRelationshipsArray.length) {
+          val r = innerRelationshipsArray(i)
+          allRelationshipsUnique = newRelationships.add(castOrFail[VirtualRelationshipValue](row.getByName(r)).id())
+          i += 1
+        }
+
+        if (allNodesUnique && allRelationshipsUnique) {
+          val accumulatorValues = sortedAccumulators.map(acc => row.getByName(acc.next))
+          Some(AcyclicLegacyRepeatState(
+            innerEndNode.id(),
+            newGroupNodes,
+            newGroupRels,
+            acyclicState.iterations + 1,
+            closeGroupsOnClose = true,
+            acyclicState.constraint,
+            newRelationships,
+            newNodes,
+            accumulatorValues
           ))
         } else None
       case walkState: WalkLegacyRepeatState =>
+        val accumulatorValues = sortedAccumulators.map(acc => row.getByName(acc.next))
         Some(WalkLegacyRepeatState(
           innerEndNode.id(),
           newGroupNodes,
           newGroupRels,
           walkState.iterations + 1,
-          closeGroupsOnClose = true
+          closeGroupsOnClose = true,
+          accumulatorValues
         ))
     }
+  }
 
   private def filterRow(row: CypherRow, repeatState: LegacyRepeatState): Boolean =
     repeatState match {
+      case acyclicState: AcyclicLegacyRepeatState =>
+        val innerRelationshipsArray = acyclicState.constraint.innerRelationships
+        var relationshipsAreUnique = true
+        var i = 0
+        val innerRelationshipsSeen = collection.mutable.Set[Long]()
+        while (relationshipsAreUnique && i < innerRelationshipsArray.length) {
+          val r = innerRelationshipsArray(i)
+          val rel = castOrFail[VirtualRelationshipValue](row.getByName(r)).id()
+          relationshipsAreUnique = !acyclicState.relationshipsSeen.contains(rel) && innerRelationshipsSeen.add(rel)
+          i += 1
+        }
+        val innerNodesArray = acyclicState.constraint.innerNodes
+        var nodesAreUnique = true
+        i = 0
+        val innerNodesSeen = collection.mutable.Set[Long]()
+        while (nodesAreUnique && i < innerNodesArray.length) {
+          val n = innerNodesArray(i)
+          val node = castOrFail[VirtualNodeValue](row.getByName(n)).id()
+          val uniqueInnerNode = innerNodesSeen.add(
+            node
+          )
+          nodesAreUnique =
+            (!acyclicState.nodesSeen.contains(
+              node
+            )) && uniqueInnerNode || node == acyclicState.endNode && uniqueInnerNode // previous endNode is now startNode
+          i += 1
+        }
+        relationshipsAreUnique && nodesAreUnique
       case trailState: TrailLegacyRepeatState =>
         val innerRelationshipsArray = trailState.constraint.innerRelationships
         var relationshipsAreUnique = true
@@ -221,12 +382,27 @@ case class RepeatPipe(
         case startNode: VirtualNodeValue =>
           val stack = newArrayDeque[LegacyRepeatState](tracker)
           if (repetition.max.isGreaterThan(0)) {
-            stack.push(createNewState(outerRow, startNode, tracker))
+            stack.push(createNewState(outerRow, startNode, tracker, state))
           }
           new PrefetchingIterator[CypherRow] {
             private var innerResult: ClosingIterator[CypherRow] = ClosingIterator.empty
             private var stackHead: LegacyRepeatState = _
             private var emitFirst = repetition.min == 0
+
+            private def allocateZeroRepetitionResultRowOrNull(): CypherRow = {
+              if (emitFirst) {
+                emitFirst = false
+                val resultRow =
+                  outerRow.copyWith(computeNewEntries(emptyGroupNodes, emptyGroupRelationships, startNode, Array.empty))
+                if (testEndNode(resultRow, startNode)) {
+                  resultRow
+                } else {
+                  null
+                }
+              } else {
+                null
+              }
+            }
 
             override protected[this] def closeMore(): Unit = {
               if (stackHead != null) {
@@ -238,11 +414,9 @@ case class RepeatPipe(
 
             @tailrec
             def produceNext(): Option[CypherRow] = {
-              if (emitFirst) {
-                emitFirst = false
-                val resultRow =
-                  outerRow.copyWith(computeNewEntries(emptyGroupNodes, emptyGroupRelationships, startNode))
-                Some(resultRow)
+              val firstRowOrNull = allocateZeroRepetitionResultRowOrNull()
+              if (firstRowOrNull != null) {
+                Some(firstRowOrNull)
               } else if (innerResult.hasNext) {
                 val row = innerResult.next()
                 val innerEndNode = castOrFail[VirtualNodeValue](row.getByName(innerEnd))
@@ -254,8 +428,13 @@ case class RepeatPipe(
                     .foreach(stack.push)
                 }
                 // if iterated long enough emit, otherwise recurse
-                if (stackHead.iterations >= repetition.min) {
-                  val resultRow = row.copyWith(computeNewEntries(newGroupNodes, newGroupRels, innerEndNode))
+                if (stackHead.iterations >= repetition.min && testEndNode(row, innerEndNode)) {
+                  val resultRow = row.copyWith(computeNewEntries(
+                    newGroupNodes,
+                    newGroupRels,
+                    innerEndNode,
+                    stackHead.accumulatorValues
+                  ))
                   Some(resultRow)
                 } else {
                   produceNext()
@@ -268,6 +447,13 @@ case class RepeatPipe(
                 // Run RHS with previous end-node as new innerStartNode
                 stackHead = stack.pop()
                 outerRow.set(innerStart, VirtualValues.node(stackHead.endNode))
+
+                // Set initial accumulator values
+                var i = 0
+                while (i < sortedPreviousAccumulatorNames.length) {
+                  outerRow.set(sortedPreviousAccumulatorNames(i), stackHead.accumulatorValues(i))
+                  i += 1
+                }
                 val innerState = state.withInitialContext(outerRow)
                 innerResult = inner.createResults(innerState).filter(filterRow(_, stackHead))
                 produceNext()
@@ -278,7 +464,12 @@ case class RepeatPipe(
           }
 
         case IsNoValue() => ClosingIterator.empty
-        case value       => throw new InternalException(s"Expected to find a node at '$start' but found $value instead")
+        case value =>
+          throw CypherTypeException.expectedNodeButGot(
+            value.prettyPrint(),
+            value.getTypeName,
+            CypherTypeValueMapper.valueType(value)
+          )
       }
     }
   }
@@ -301,9 +492,10 @@ case class RepeatPipe(
   private def computeNewEntries(
     newGroupNodes: HeapTrackingArrayList[ListValue],
     newGroupRels: HeapTrackingArrayList[ListValue],
-    innerEndNode: VirtualNodeValue
+    innerEndNode: VirtualNodeValue,
+    accumulatorValues: Array[AnyValue]
   ): collection.Seq[(String, AnyValue)] = {
-    val newSize = newGroupNodes.size() + newGroupRels.size() + 1 // +1 for end node
+    val newSize = (if (!nodeInScope) 1 else 0) + newGroupNodes.size() + newGroupRels.size() + accumulatorValues.length
     val res = new Array[(String, AnyValue)](newSize)
     var i = 0
     while (i < newGroupNodes.size()) {
@@ -312,6 +504,7 @@ case class RepeatPipe(
       res(i) = (groupNodeNames(i).group.name, projectedGroupNodes)
       i += 1
     }
+
     var j = 0
     while (j < newGroupRels.size()) {
       val groupRels = newGroupRels.get(j)
@@ -320,12 +513,35 @@ case class RepeatPipe(
       j += 1
       i += 1
     }
-    res(i) = (end, innerEndNode)
+
+    var l = 0
+    while (l < accumulatorValues.length) {
+      res(i) = (sortedPreviousAccumulatorNames(l), accumulatorValues(l))
+      i += 1
+      l += 1
+    }
+
+    if (!nodeInScope) {
+      res(i) = (end, innerEndNode)
+    }
     res
+  }
+
+  private def testEndNode(row: CypherRow, endNode: VirtualNodeValue): Boolean = {
+    !nodeInScope || {
+      row.getByName(end) match {
+        case toNode: VirtualNodeValue =>
+          endNode.id == toNode.id
+        case _ =>
+          false
+      }
+    }
   }
 }
 
 object RepeatPipe {
+
+  case class AllReduceAcc(initial: Expression, previous: String, next: String)
 
   def emptyLists(size: Int): HeapTrackingArrayList[ListValue] = {
     val emptyList = HeapTrackingCollections.newArrayList[ListValue](size, EmptyMemoryTracker.INSTANCE)
@@ -339,6 +555,15 @@ object RepeatPipe {
     innerRelationships: Array[String],
     previouslyBoundRelationships: Set[String],
     previouslyBoundRelationshipGroups: Set[String]
+  ) extends TraversalModeConstraint
+
+  case class AcyclicModeConstraint(
+    innerRelationships: Array[String],
+    innerNodes: Array[String],
+    previouslyBoundRelationships: Set[String],
+    previouslyBoundRelationshipGroups: Set[String],
+    previouslyBoundNodes: Set[String],
+    previouslyBoundNodeGroups: Set[String]
   ) extends TraversalModeConstraint
 
   case object WalkModeConstraint extends TraversalModeConstraint

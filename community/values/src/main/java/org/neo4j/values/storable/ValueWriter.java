@@ -50,7 +50,9 @@ public interface ValueWriter<E extends Exception> {
         DATE,
         ZONED_TIME,
         LOCAL_TIME,
-        DURATION
+        DURATION,
+        UUID,
+        VECTOR
     }
 
     void writeNull() throws E;
@@ -97,85 +99,122 @@ public interface ValueWriter<E extends Exception> {
 
     void writeDateTime(ZonedDateTime zonedDateTime) throws E;
 
+    void writeInt8Vector(byte[] values) throws E;
+
+    void writeInt16Vector(short[] values) throws E;
+
+    void writeInt32Vector(int[] values) throws E;
+
+    void writeInt64Vector(long[] values) throws E;
+
+    void writeFloat16Vector(Float16Format format, short[] values) throws E;
+
+    void writeFloat32Vector(float[] values) throws E;
+
+    void writeFloat64Vector(double[] values) throws E;
+
+    void writeUUID(long msb, long lsb) throws E;
+
+    /**
+     * Writes a value of a type that this server does not understand, but which a downstream/remote instance produced.
+     * Such values flow in through the bundled driver (Fabric / server-side routing) and are surfaced back to the
+     * client verbatim so a newer driver can still interpret them.
+     *
+     * @param typeName the remote type name (e.g. {@code "UUID"}).
+     * @param minProtocolVersion the lowest Bolt protocol version that understands this type (e.g. {@code "6.1"}).
+     * @param message an optional human-readable description, or {@code null} if none was provided.
+     */
+    default void writeUnsupported(String typeName, String minProtocolVersion, String message) throws E {
+        throw new UnsupportedOperationException(
+                "Writing unsupported-type values is not supported by this writer: " + typeName);
+    }
+
     class Adapter<E extends Exception> implements ValueWriter<E> {
         @Override
-        public void writeNull() throws E { // no-op
-        }
+        public void writeNull() throws E {}
 
         @Override
-        public void writeBoolean(boolean value) throws E { // no-op
-        }
+        public void writeBoolean(boolean value) throws E {}
 
         @Override
-        public void writeInteger(byte value) throws E { // no-op
-        }
+        public void writeInteger(byte value) throws E {}
 
         @Override
-        public void writeInteger(short value) throws E { // no-op
-        }
+        public void writeInteger(short value) throws E {}
 
         @Override
-        public void writeInteger(int value) throws E { // no-op
-        }
+        public void writeInteger(int value) throws E {}
 
         @Override
-        public void writeInteger(long value) throws E { // no-op
-        }
+        public void writeInteger(long value) throws E {}
 
         @Override
-        public void writeFloatingPoint(float value) throws E { // no-op
-        }
+        public void writeFloatingPoint(float value) throws E {}
 
         @Override
-        public void writeFloatingPoint(double value) throws E { // no-op
-        }
+        public void writeFloatingPoint(double value) throws E {}
 
         @Override
-        public void writeString(String value) throws E { // no-op
-        }
+        public void writeString(String value) throws E {}
 
         @Override
-        public void writeString(char value) throws E { // no-op
-        }
+        public void writeString(char value) throws E {}
 
         @Override
-        public void beginArray(int size, ArrayType arrayType) throws E { // no-op
-        }
+        public void beginArray(int size, ArrayType arrayType) throws E {}
 
         @Override
-        public void endArray() throws E { // no-opa
-        }
+        public void endArray() throws E {}
 
         @Override
-        public void writeByteArray(byte[] value) throws E { // no-op
-        }
+        public void writeByteArray(byte[] value) throws E {}
 
         @Override
-        public void writePoint(CoordinateReferenceSystem crs, double[] coordinate) throws E { // no-op
-        }
+        public void writePoint(CoordinateReferenceSystem crs, double[] coordinate) throws E {}
 
         @Override
-        public void writeDuration(long months, long days, long seconds, int nanos) { // no-op
-        }
+        public void writeDuration(long months, long days, long seconds, int nanos) {}
 
         @Override
-        public void writeDate(LocalDate localDate) throws E { // no-op
-        }
+        public void writeDate(LocalDate localDate) throws E {}
 
         @Override
-        public void writeLocalTime(LocalTime localTime) throws E { // no-op
-        }
+        public void writeLocalTime(LocalTime localTime) throws E {}
 
         @Override
-        public void writeTime(OffsetTime offsetTime) throws E { // no-op
-        }
+        public void writeTime(OffsetTime offsetTime) throws E {}
 
         @Override
-        public void writeLocalDateTime(LocalDateTime localDateTime) throws E { // no-op
-        }
+        public void writeLocalDateTime(LocalDateTime localDateTime) throws E {}
 
         @Override
-        public void writeDateTime(ZonedDateTime zonedDateTime) throws E { // no-op
-        }
+        public void writeDateTime(ZonedDateTime zonedDateTime) throws E {}
+
+        @Override
+        public void writeFloat16Vector(Float16Format format, short[] values) throws E {}
+
+        @Override
+        public void writeFloat32Vector(float[] values) throws E {}
+
+        @Override
+        public void writeInt8Vector(byte[] values) throws E {}
+
+        @Override
+        public void writeInt16Vector(short[] values) throws E {}
+
+        @Override
+        public void writeInt32Vector(int[] values) throws E {}
+
+        @Override
+        public void writeInt64Vector(long[] values) throws E {}
+
+        @Override
+        public void writeFloat64Vector(double[] values) throws E {}
+
+        @Override
+        public void writeUUID(long msb, long lsb) throws E {}
+
+        @Override
+        public void writeUnsupported(String typeName, String minProtocolVersion, String message) throws E {}
     }
 }

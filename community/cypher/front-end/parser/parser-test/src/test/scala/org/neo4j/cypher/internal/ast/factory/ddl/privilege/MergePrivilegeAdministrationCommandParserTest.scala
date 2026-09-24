@@ -29,7 +29,8 @@ import org.neo4j.cypher.internal.ast.Statements
 import org.neo4j.cypher.internal.ast.factory.ddl.AdministrationAndSchemaCommandParserTestBase
 import org.neo4j.cypher.internal.ast.prettifier.Prettifier.maybeImmutable
 import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
+import org.neo4j.cypher.internal.util.test_helpers.GqlExceptionMatchers.gqlStatus
+import org.neo4j.gqlstatus.GqlStatusInfoCodes
 
 class MergePrivilegeAdministrationCommandParserTest extends AdministrationAndSchemaCommandParserTestBase {
 
@@ -46,9 +47,9 @@ class MergePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
           val immutableString = maybeImmutable(immutable)
           test(s"$verb$immutableString MERGE { prop } ON GRAPH foo $preposition role") {
             parsesTo[Statements](func(
-              GraphPrivilege(MergeAdminAction, graphScopeFoo)(_),
-              PropertiesResource(propSeq)(_),
-              List(ElementsAllQualifier()(_)),
+              GraphPrivilege(MergeAdminAction, graphScopeFoo)(pos),
+              PropertiesResource(propSeq)(pos),
+              List(ElementsAllQualifier()(pos)),
               Seq(literalRole),
               immutable
             )(pos))
@@ -58,9 +59,9 @@ class MergePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString MERGE { * } ON GRAPH foo $preposition role") {
             parsesTo[Statements](func(
-              GraphPrivilege(MergeAdminAction, graphScopeFoo)(_),
-              AllPropertyResource()(_),
-              List(ElementsAllQualifier()(_)),
+              GraphPrivilege(MergeAdminAction, graphScopeFoo)(pos),
+              AllPropertyResource()(pos),
+              List(ElementsAllQualifier()(pos)),
               Seq(literalRole),
               immutable
             )(pos))
@@ -68,9 +69,9 @@ class MergePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString MERGE { prop1, prop2 } ON GRAPH foo $preposition role") {
             parsesTo[Statements](func(
-              GraphPrivilege(MergeAdminAction, graphScopeFoo)(_),
-              PropertiesResource(Seq("prop1", "prop2"))(_),
-              List(ElementsAllQualifier()(_)),
+              GraphPrivilege(MergeAdminAction, graphScopeFoo)(pos),
+              PropertiesResource(Seq("prop1", "prop2"))(pos),
+              List(ElementsAllQualifier()(pos)),
               Seq(literalRole),
               immutable
             )(pos))
@@ -80,9 +81,9 @@ class MergePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString MERGE { * } ON HOME GRAPH $preposition role") {
             parsesTo[Statements](func(
-              GraphPrivilege(MergeAdminAction, HomeGraphScope()(_))(_),
-              AllPropertyResource()(_),
-              List(ElementsAllQualifier()(_)),
+              GraphPrivilege(MergeAdminAction, HomeGraphScope()(pos))(pos),
+              AllPropertyResource()(pos),
+              List(ElementsAllQualifier()(pos)),
               Seq(literalRole),
               immutable
             )(pos))
@@ -90,9 +91,9 @@ class MergePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString MERGE { prop1, prop2 } ON HOME GRAPH RELATIONSHIP * $preposition role") {
             parsesTo[Statements](func(
-              GraphPrivilege(MergeAdminAction, HomeGraphScope()(_))(_),
-              PropertiesResource(Seq("prop1", "prop2"))(_),
-              List(RelationshipAllQualifier()(_)),
+              GraphPrivilege(MergeAdminAction, HomeGraphScope()(pos))(pos),
+              PropertiesResource(Seq("prop1", "prop2"))(pos),
+              List(RelationshipAllQualifier()(pos)),
               Seq(literalRole),
               immutable
             )(pos))
@@ -102,9 +103,9 @@ class MergePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString MERGE { prop } ON GRAPHS * $preposition role") {
             parsesTo[Statements](func(
-              GraphPrivilege(MergeAdminAction, AllGraphsScope()(_))(_),
-              PropertiesResource(propSeq)(_),
-              List(ElementsAllQualifier()(_)),
+              GraphPrivilege(MergeAdminAction, AllGraphsScope()(pos))(pos),
+              PropertiesResource(propSeq)(pos),
+              List(ElementsAllQualifier()(pos)),
               Seq(literalRole),
               immutable
             )(pos))
@@ -112,9 +113,9 @@ class MergePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString MERGE { prop } ON GRAPHS foo,baz $preposition role") {
             parsesTo[Statements](func(
-              GraphPrivilege(MergeAdminAction, graphScopeFooBaz)(_),
-              PropertiesResource(propSeq)(_),
-              List(ElementsAllQualifier()(_)),
+              GraphPrivilege(MergeAdminAction, graphScopeFooBaz)(pos),
+              PropertiesResource(propSeq)(pos),
+              List(ElementsAllQualifier()(pos)),
               Seq(literalRole),
               immutable
             )(pos))
@@ -124,8 +125,8 @@ class MergePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString MERGE { prop } ON GRAPHS foo ELEMENTS A,B $preposition role") {
             parsesTo[Statements](func(
-              GraphPrivilege(MergeAdminAction, graphScopeFoo)(_),
-              PropertiesResource(propSeq)(_),
+              GraphPrivilege(MergeAdminAction, graphScopeFoo)(pos),
+              PropertiesResource(propSeq)(pos),
               List(elemQualifierA, elemQualifierB),
               Seq(literalRole),
               immutable
@@ -134,8 +135,8 @@ class MergePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString MERGE { prop } ON GRAPHS foo ELEMENT A $preposition role") {
             parsesTo[Statements](func(
-              GraphPrivilege(MergeAdminAction, graphScopeFoo)(_),
-              PropertiesResource(propSeq)(_),
+              GraphPrivilege(MergeAdminAction, graphScopeFoo)(pos),
+              PropertiesResource(propSeq)(pos),
               List(elemQualifierA),
               Seq(literalRole),
               immutable
@@ -144,8 +145,8 @@ class MergePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString MERGE { prop } ON GRAPHS foo NODES A,B $preposition role") {
             parsesTo[Statements](func(
-              GraphPrivilege(MergeAdminAction, graphScopeFoo)(_),
-              PropertiesResource(propSeq)(_),
+              GraphPrivilege(MergeAdminAction, graphScopeFoo)(pos),
+              PropertiesResource(propSeq)(pos),
               List(labelQualifierA, labelQualifierB),
               Seq(literalRole),
               immutable
@@ -154,9 +155,9 @@ class MergePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString MERGE { prop } ON GRAPHS foo NODES * $preposition role") {
             parsesTo[Statements](func(
-              GraphPrivilege(MergeAdminAction, graphScopeFoo)(_),
-              PropertiesResource(propSeq)(_),
-              List(LabelAllQualifier()(_)),
+              GraphPrivilege(MergeAdminAction, graphScopeFoo)(pos),
+              PropertiesResource(propSeq)(pos),
+              List(LabelAllQualifier()(pos)),
               Seq(literalRole),
               immutable
             )(pos))
@@ -164,8 +165,8 @@ class MergePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString MERGE { prop } ON GRAPHS foo RELATIONSHIPS A,B $preposition role") {
             parsesTo[Statements](func(
-              GraphPrivilege(MergeAdminAction, graphScopeFoo)(_),
-              PropertiesResource(propSeq)(_),
+              GraphPrivilege(MergeAdminAction, graphScopeFoo)(pos),
+              PropertiesResource(propSeq)(pos),
               List(relQualifierA, relQualifierB),
               Seq(literalRole),
               immutable
@@ -174,9 +175,9 @@ class MergePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString MERGE { prop } ON GRAPHS foo RELATIONSHIP * $preposition role") {
             parsesTo[Statements](func(
-              GraphPrivilege(MergeAdminAction, graphScopeFoo)(_),
-              PropertiesResource(propSeq)(_),
-              List(RelationshipAllQualifier()(_)),
+              GraphPrivilege(MergeAdminAction, graphScopeFoo)(pos),
+              PropertiesResource(propSeq)(pos),
+              List(RelationshipAllQualifier()(pos)),
               Seq(literalRole),
               immutable
             )(pos))
@@ -186,9 +187,9 @@ class MergePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString MERGE { prop } ON GRAPHS foo $preposition role1, role2") {
             parsesTo[Statements](func(
-              GraphPrivilege(MergeAdminAction, graphScopeFoo)(_),
-              PropertiesResource(propSeq)(_),
-              List(ElementsAllQualifier()(_)),
+              GraphPrivilege(MergeAdminAction, graphScopeFoo)(pos),
+              PropertiesResource(propSeq)(pos),
+              List(ElementsAllQualifier()(pos)),
               Seq(literalRole1, literalRole2),
               immutable
             )(pos))
@@ -198,9 +199,9 @@ class MergePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString MERGE { prop } ON GRAPH $$foo $preposition role") {
             parsesTo[Statements](func(
-              GraphPrivilege(MergeAdminAction, graphScopeParamFoo)(_),
-              PropertiesResource(propSeq)(_),
-              List(ElementsAllQualifier()(_)),
+              GraphPrivilege(MergeAdminAction, graphScopeParamFoo)(pos),
+              PropertiesResource(propSeq)(pos),
+              List(ElementsAllQualifier()(pos)),
               Seq(literalRole),
               immutable
             )(pos))
@@ -208,9 +209,9 @@ class MergePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString MERGE { prop } ON GRAPH foo $preposition $$role") {
             parsesTo[Statements](func(
-              GraphPrivilege(MergeAdminAction, graphScopeFoo)(_),
-              PropertiesResource(propSeq)(_),
-              List(ElementsAllQualifier()(_)),
+              GraphPrivilege(MergeAdminAction, graphScopeFoo)(pos),
+              PropertiesResource(propSeq)(pos),
+              List(ElementsAllQualifier()(pos)),
               Seq(paramRole),
               immutable
             )(pos))
@@ -220,17 +221,15 @@ class MergePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
 
           test(s"$verb$immutableString MERGE { * } ON DEFAULT GRAPH $preposition role") {
             failsParsing[Statements].in {
-              case Cypher5JavaCc | Cypher5 =>
-                _.withMessageStart("`ON DEFAULT GRAPH` is not supported. Use `ON HOME GRAPH` instead.")
-              case _ => _.withSyntaxErrorContaining("Invalid input 'DEFAULT': expected ")
+              case Cypher5 => _.withOldSyntax("`ON DEFAULT GRAPH` is not supported. Use `ON HOME GRAPH` instead.")
+              case _       => _.withSyntaxErrorContaining("Invalid input 'DEFAULT': expected ")
             }
           }
 
           test(s"$verb$immutableString MERGE { prop1, prop2 } ON DEFAULT GRAPH RELATIONSHIP * $preposition role") {
             failsParsing[Statements].in {
-              case Cypher5JavaCc | Cypher5 =>
-                _.withMessageStart("`ON DEFAULT GRAPH` is not supported. Use `ON HOME GRAPH` instead.")
-              case _ => _.withSyntaxErrorContaining("Invalid input 'DEFAULT': expected ")
+              case Cypher5 => _.withOldSyntax("`ON DEFAULT GRAPH` is not supported. Use `ON HOME GRAPH` instead.")
+              case _       => _.withSyntaxErrorContaining("Invalid input 'DEFAULT': expected ")
             }
           }
 
@@ -239,9 +238,6 @@ class MergePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
           test(s"$verb$immutableString MERGE { prop } ON DATABASES * $preposition role") {
             val offset = verb.length + immutableString.length + 19
             failsParsing[Statements].in {
-              case Cypher5JavaCc => _.withMessage(
-                  s"""Invalid input 'DATABASES': expected "DEFAULT", "GRAPH", "GRAPHS" or "HOME" (line 1, column ${offset + 1} (offset: $offset))"""
-                )
               case Cypher5 => _.withSyntaxErrorContaining(
                   s"""Invalid input 'DATABASES': expected 'GRAPH', 'DEFAULT GRAPH', 'HOME GRAPH' or 'GRAPHS' (line 1, column ${offset + 1} (offset: $offset))"""
                 )
@@ -254,9 +250,6 @@ class MergePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
           test(s"$verb$immutableString MERGE { prop } ON DATABASE foo $preposition role") {
             val offset = verb.length + immutableString.length + 19
             failsParsing[Statements].in {
-              case Cypher5JavaCc => _.withMessage(
-                  s"""Invalid input 'DATABASE': expected "DEFAULT", "GRAPH", "GRAPHS" or "HOME" (line 1, column ${offset + 1} (offset: $offset))"""
-                )
               case Cypher5 => _.withSyntaxErrorContaining(
                   s"Invalid input 'DATABASE': expected 'GRAPH', 'DEFAULT GRAPH', 'HOME GRAPH' or 'GRAPHS' (line 1, column ${offset + 1} (offset: $offset))"
                 )
@@ -279,9 +272,30 @@ class MergePrivilegeAdministrationCommandParserTest extends AdministrationAndSch
           test(s"$verb$immutableString MERGE { prop } ON GRAPH `a`.`b`.`c` $preposition role") {
             // more than two components
             failsParsing[Statements]
-              .withMessageContaining(
-                "Invalid input ``a`.`b`.`c`` for name. Expected name to contain at most two components separated by `.`."
-              )
+              .in {
+                case Cypher5 => _.withMessageStart(
+                    "Invalid input ``a`.`b`.`c`` for name. Expected name to contain at most two components separated by `.`."
+                  )
+                    .withSyntaxErrorGqlStatus(
+                      gqlStatus(
+                        GqlStatusInfoCodes.STATUS_22N05,
+                        "error: data exception - input failed validation. Invalid input '`a`.`b`.`c`' for name."
+                      )
+                        .withCause(
+                          GqlStatusInfoCodes.STATUS_22N83,
+                          "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+                        )
+                    )
+                case _ => _.withMessageStart(
+                    "Incorrectly formatted graph reference '`a`.`b`.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+                  )
+                    .withSyntaxErrorGqlStatus(
+                      gqlStatus(
+                        GqlStatusInfoCodes.STATUS_42NAA,
+                        "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference '`a`.`b`.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+                      )
+                    )
+              }
           }
       }
   }

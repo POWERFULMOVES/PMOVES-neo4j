@@ -28,4 +28,13 @@ public enum QueryLanguage {
     CYPHER_5;
 
     public static final Set<QueryLanguage> ALL = Collections.unmodifiableSet(EnumSet.allOf(QueryLanguage.class));
+
+    public static QueryLanguage getOther(QueryLanguage queryLanguage) {
+        if (queryLanguage == CYPHER_5) {
+            return CYPHER_25;
+        } else if (queryLanguage == CYPHER_25) {
+            return CYPHER_5;
+        }
+        return queryLanguage;
+    }
 }

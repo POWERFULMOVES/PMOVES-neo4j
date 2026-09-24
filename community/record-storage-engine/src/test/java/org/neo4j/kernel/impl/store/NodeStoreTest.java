@@ -20,6 +20,7 @@
 package org.neo4j.kernel.impl.store;
 
 import static java.util.Collections.singletonList;
+import static org.apache.commons.lang3.ArrayUtils.EMPTY_LONG_ARRAY;
 import static org.apache.commons.lang3.exception.ExceptionUtils.indexOfThrowable;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -35,6 +36,7 @@ import static org.mockito.Mockito.verify;
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
 import static org.neo4j.internal.recordstorage.RecordCursorTypes.DYNAMIC_LABEL_STORE_CURSOR;
 import static org.neo4j.internal.recordstorage.RecordCursorTypes.NODE_CURSOR;
+import static org.neo4j.io.layout.DatabaseFile.ID_FILE_SUFFIX;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
 import static org.neo4j.kernel.impl.store.DynamicArrayStore.allocateFromNumbers;
@@ -49,9 +51,9 @@ import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
 
 import java.io.IOException;
 import java.nio.file.OpenOption;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Locale;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.LongSupplier;
 import org.apache.commons.lang3.mutable.MutableBoolean;
@@ -80,13 +82,15 @@ import org.neo4j.io.pagecache.PagedFile;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.impl.muninn.EvictionBouncer;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.impl.muninn.VersionStorage;
+import org.neo4j.io.pagecache.segment.FileSegmentTracker;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.store.allocator.ReusableRecordsAllocator;
 import org.neo4j.kernel.impl.store.cursor.CachedStoreCursors;
 import org.neo4j.kernel.impl.store.record.DynamicRecord;
 import org.neo4j.kernel.impl.store.record.NodeRecord;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.util.IdUpdateListener;
@@ -144,7 +148,7 @@ class NodeStoreTest {
     void shouldReadFirstAsNullFromEmptyDynamicLongArray() {
         // GIVEN
         Long expectedId = null;
-        long[] ids = new long[] {};
+        long[] ids = EMPTY_LONG_ARRAY;
         DynamicRecord firstRecord = new DynamicRecord(0L);
         allocateFromNumbers(
                 new ArrayList<>(), ids, new ReusableRecordsAllocator(60, firstRecord), NULL_CONTEXT, INSTANCE);
@@ -314,20 +318,32 @@ class NodeStoreTest {
                 PageCache customPageCache = new DelegatingPageCache(pageCache) {
                     @Override
                     public PagedFile map(
-                            Path path,
+                            StoreFile storePath,
                             int pageSize,
                             String databaseName,
                             ImmutableSet<OpenOption> openOptions,
                             IOController ioController,
                             EvictionBouncer evictionGuard,
-                            VersionStorage versionStorage)
+                            VersionStorage versionStorage,
+                            FileSegmentTracker segmentTracker)
                             throws IOException {
-                        if (path.getFileName().toString().toLowerCase().endsWith(".id")) {
+                        if (storePath
+                                .storeBaseFileName()
+                                .toString()
+                                .toLowerCase(Locale.ROOT)
+                                .endsWith(ID_FILE_SUFFIX)) {
                             fired.setTrue();
                             throw new IOException("Proving a point here");
                         }
                         return super.map(
-                                path, pageSize, databaseName, openOptions, ioController, evictionGuard, versionStorage);
+                                storePath,
+                                pageSize,
+                                databaseName,
+                                openOptions,
+                                ioController,
+                                evictionGuard,
+                                versionStorage,
+                                segmentTracker);
                     }
                 };
 
@@ -522,7 +538,7 @@ class NodeStoreTest {
                             FileSystemAbstraction fs,
                             PageCache pageCache,
                             RecoveryCleanupWorkCollector recoveryCleanupWorkCollector,
-                            Path fileName,
+                            StoreFile storePath,
                             LongSupplier highIdSupplier,
                             long maxValue,
                             IdType idType,
@@ -536,7 +552,7 @@ class NodeStoreTest {
                                 fs,
                                 pageCache,
                                 recoveryCleanupWorkCollector,
-                                fileName,
+                                storePath,
                                 highIdSupplier,
                                 maxValue,
                                 idType,
@@ -558,7 +574,7 @@ class NodeStoreTest {
                 NullLogProvider.getInstance(),
                 new CursorContextFactory(pageCacheTracer, EMPTY_CONTEXT_SUPPLIER),
                 false,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL);
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
         neoStores = factory.openAllNeoStores();
         allocatorProvider = DynamicAllocatorProviders.nonTransactionalAllocator(neoStores);
         storeCursors = new CachedStoreCursors(neoStores, NULL_CONTEXT);

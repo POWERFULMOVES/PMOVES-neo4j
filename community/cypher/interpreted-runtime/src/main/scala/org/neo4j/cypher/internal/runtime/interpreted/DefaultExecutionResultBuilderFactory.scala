@@ -23,6 +23,8 @@ import org.neo4j.cypher.internal.config.CUSTOM_MEMORY_TRACKING
 import org.neo4j.cypher.internal.config.MEMORY_TRACKING
 import org.neo4j.cypher.internal.config.MemoryTrackingController
 import org.neo4j.cypher.internal.config.NO_TRACKING
+import org.neo4j.cypher.internal.notification.InternalNotification
+import org.neo4j.cypher.internal.planner.spi.IndexComparatorFactory
 import org.neo4j.cypher.internal.runtime.InputDataStream
 import org.neo4j.cypher.internal.runtime.ParameterMapping
 import org.neo4j.cypher.internal.runtime.QueryContext
@@ -53,6 +55,8 @@ import org.neo4j.scheduler.CallableExecutor
 import org.neo4j.scheduler.Group
 import org.neo4j.values.AnyValue
 import org.neo4j.values.virtual.MapValue
+
+import java.util
 
 abstract class BaseExecutionResultBuilderFactory(
   pipe: Pipe,
@@ -152,7 +156,8 @@ case class InterpretedExecutionResultBuilderFactory(
   memoryTrackingController: MemoryTrackingController,
   hasLoadCSV: Boolean,
   transactionMode: QueryTransactionMode,
-  warnOnAggregationSkipNull: Boolean
+  warnOnAggregationSkipNull: Boolean,
+  indexComparatorFactory: IndexComparatorFactory
 ) extends BaseExecutionResultBuilderFactory(pipe, columns, hasLoadCSV, transactionMode) {
 
   override def create(queryContext: QueryContext): ExecutionResultBuilder =
@@ -185,11 +190,13 @@ case class InterpretedExecutionResultBuilderFactory(
         pipeDecorator,
         initialContext = None,
         cachedIn = createDefaultInCache(),
+        indexComparatorFactory,
         lenientCreateRelationship = lenientCreateRelationship,
         prePopulateResults = prePopulateResults,
         input = input,
         if (doProfile) profileInformation else null,
         transactionWorkerExecutor,
+        notifications = new util.HashSet[InternalNotification],
         warnOnAggregationSkipNull = warnOnAggregationSkipNull
       )
     }

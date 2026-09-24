@@ -29,8 +29,6 @@ import org.neo4j.fabric.stream.summary.Summary;
 import org.neo4j.fabric.transaction.parent.CompoundTransaction;
 import org.neo4j.graphdb.QueryExecutionType;
 import org.neo4j.kernel.api.exceptions.Status;
-import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
 
 public class AutocommitLocalStatementResult implements StatementResult, CompoundTransaction.AutocommitQuery {
     private final StatementResult result;
@@ -58,17 +56,23 @@ public class AutocommitLocalStatementResult implements StatementResult, Compound
     }
 
     @Override
-    public Flux<Record> records() {
-        return result.records().doOnComplete(this::doCommit);
+    public Record next() {
+        var record = result.next();
+
+        if (record == null) {
+            doCommit();
+        }
+
+        return record;
     }
 
     @Override
-    public Mono<Summary> summary() {
-        return result.summary();
+    public Summary consume() {
+        return result.consume();
     }
 
     @Override
-    public Mono<QueryExecutionType> executionType() {
+    public QueryExecutionType executionType() {
         return result.executionType();
     }
 

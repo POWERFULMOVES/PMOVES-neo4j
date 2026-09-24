@@ -23,6 +23,8 @@ import java.util.Map;
 import java.util.stream.Collectors;
 import org.eclipse.collections.impl.factory.Maps;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
+import org.neo4j.gqlstatus.ErrorMessageHolder;
+import org.neo4j.gqlstatus.GqlHelper;
 import org.neo4j.kernel.api.exceptions.Status;
 
 /**
@@ -36,12 +38,20 @@ public class StatusWrapCypherException extends Neo4jException {
 
     private final Map<ExtraInformation, String> extraInfoMap = Maps.mutable.of();
 
-    public StatusWrapCypherException(Neo4jException cause) {
-        super(cause.getMessage(), cause);
+    private <EX extends Throwable & ErrorGqlStatusObject> StatusWrapCypherException(EX cause) {
+        super(cause, cause.legacyMessage(), cause);
     }
 
-    public StatusWrapCypherException(ErrorGqlStatusObject gqlStatusObject, Neo4jException cause) {
+    private StatusWrapCypherException(ErrorGqlStatusObject gqlStatusObject, Throwable cause) {
         super(gqlStatusObject, cause.getMessage(), cause);
+    }
+
+    public static <EX extends Throwable & ErrorGqlStatusObject> StatusWrapCypherException wrapCypherException(EX e) {
+        if (e.gqlStatusObject() != null) {
+            return new StatusWrapCypherException(e);
+        }
+        // This case can be removed once all instances of Neo4jException has been ported to GQLSTATUS
+        return new StatusWrapCypherException(GqlHelper.getDefaultObject(), e);
     }
 
     public StatusWrapCypherException addExtraInfo(ExtraInformation informationType, String extraInfo) {
@@ -55,9 +65,18 @@ public class StatusWrapCypherException extends Neo4jException {
 
     @Override
     public String getMessage() {
+        return formatMessage(getCause().getMessage());
+    }
+
+    @Override
+    public String legacyMessage() {
+        return formatMessage(ErrorMessageHolder.getOldCauseMessage(getCause()));
+    }
+
+    private String formatMessage(String message) {
         return String.format(
                 "%s (%s)",
-                getCause().getMessage(),
+                message,
                 extraInfoMap.entrySet().stream()
                         .sorted(Map.Entry.comparingByKey())
                         .map(Map.Entry::getValue)

@@ -46,6 +46,7 @@ import java.util.Set;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
+import org.apache.commons.lang3.SystemUtils;
 import org.neo4j.io.fs.watcher.DefaultFileSystemWatcher;
 import org.neo4j.io.fs.watcher.FileWatcher;
 import org.neo4j.io.memory.NativeScopedBuffer;
@@ -59,8 +60,8 @@ public class DefaultFileSystemAbstraction implements FileSystemAbstraction {
     static final String UNABLE_TO_CREATE_DIRECTORY_FORMAT = "Unable to write directory path [%s] for Neo4j store.";
     public static final Set<OpenOption> WRITE_OPTIONS = Set.of(READ, WRITE, CREATE);
     private static final Set<OpenOption> READ_OPTIONS = Set.of(READ);
-    private static final Set<OpenOption> APPEND_OPTIONS = Set.of(CREATE, APPEND);
-    private static final Set<OpenOption> TRUNCATE_OPTIONS = Set.of(WRITE, CREATE, TRUNCATE_EXISTING);
+    public static final Set<OpenOption> APPEND_OPTIONS = Set.of(CREATE, APPEND);
+    public static final Set<OpenOption> TRUNCATE_OPTIONS = Set.of(WRITE, CREATE, TRUNCATE_EXISTING);
 
     @Override
     public FileWatcher fileWatcher() throws IOException {
@@ -75,8 +76,14 @@ public class DefaultFileSystemAbstraction implements FileSystemAbstraction {
     }
 
     @Override
-    public OutputStream openAsOutputStream(Path fileName, boolean append) throws IOException {
-        return toBufferedStream(fileName, this::getStoreFileChannel, append ? APPEND_OPTIONS : TRUNCATE_OPTIONS);
+    public OutputStream openAsOutputStream(Path fileName, boolean append, int bufferSize) throws IOException {
+        return toBufferedStream(
+                fileName, this::getStoreFileChannel, append ? APPEND_OPTIONS : TRUNCATE_OPTIONS, bufferSize);
+    }
+
+    @Override
+    public OutputStream openAsOutputStream(Path fileName, Set<OpenOption> options, int bufferSize) throws IOException {
+        return toBufferedStream(fileName, this::getStoreFileChannel, options, bufferSize);
     }
 
     @Override
@@ -237,6 +244,12 @@ public class DefaultFileSystemAbstraction implements FileSystemAbstraction {
     }
 
     @Override
+    public boolean supportsDirectoryChannel(Path directory) {
+        // Windows doesn't allow us to open a FileChannel against a directory
+        return !SystemUtils.IS_OS_WINDOWS;
+    }
+
+    @Override
     public void close() {
         // nothing
     }
@@ -254,45 +267,62 @@ public class DefaultFileSystemAbstraction implements FileSystemAbstraction {
 
     @VisibleForTesting
     static class NativeByteBufferOutputStream extends OutputStream {
-
-        private final StoreFileChannel fileChannel;
+        private final StoreChannel fileChannel;
         private final ByteBuffer buffer;
         private final NativeScopedBuffer scopedBuffer;
 
-        public NativeByteBufferOutputStream(StoreFileChannel fileChannel) {
+        public NativeByteBufferOutputStream(StoreChannel fileChannel, int bufferSize) {
             this.fileChannel = fileChannel;
             this.scopedBuffer =
-                    new NativeScopedBuffer((int) kibiBytes(8), ByteOrder.LITTLE_ENDIAN, EmptyMemoryTracker.INSTANCE);
+                    new NativeScopedBuffer(bufferSize, ByteOrder.LITTLE_ENDIAN, EmptyMemoryTracker.INSTANCE);
             this.buffer = scopedBuffer.getBuffer();
         }
 
         @Override
         public void write(int b) throws IOException {
-            throw new UnsupportedOperationException("All stream operations should be buffer based.");
+            if (!buffer.hasRemaining()) {
+                flushBuffer();
+            }
+            buffer.put((byte) b);
         }
 
         @Override
         public void write(byte[] b, int off, int len) throws IOException {
             int length;
+            int left = len;
             for (int offset = off; offset < off + len; offset += length) {
-                length = Math.min(len - offset, buffer.capacity());
-                buffer.clear();
+                if (!buffer.hasRemaining()) {
+                    flushBuffer();
+                }
+                length = Math.min(left, buffer.remaining());
+                left -= length;
                 buffer.put(b, offset, length);
-                buffer.flip();
-                fileChannel.writeAll(buffer);
+            }
+        }
+
+        @Override
+        public void flush() throws IOException {
+            if (buffer.position() > 0) {
+                flushBuffer();
             }
         }
 
         @Override
         public void close() throws IOException {
+            flush();
             fileChannel.close();
             scopedBuffer.close();
             super.close();
         }
+
+        private void flushBuffer() throws IOException {
+            buffer.flip();
+            fileChannel.writeAll(buffer);
+            buffer.clear();
+        }
     }
 
     private static class NativeByteBufferInputStream extends InputStream {
-
         private final StoreFileChannel fileChannel;
         private final ByteBuffer buffer;
         private final NativeScopedBuffer scopedBuffer;
@@ -320,7 +350,7 @@ public class DefaultFileSystemAbstraction implements FileSystemAbstraction {
         }
 
         @Override
-        public int read() throws IOException {
+        public int read() {
             throw new UnsupportedOperationException("All stream operations should be buffer based.");
         }
 

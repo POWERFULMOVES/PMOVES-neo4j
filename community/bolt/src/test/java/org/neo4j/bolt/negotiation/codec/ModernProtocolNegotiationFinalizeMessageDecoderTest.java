@@ -22,9 +22,9 @@ package org.neo4j.bolt.negotiation.codec;
 import io.netty.handler.codec.DecoderException;
 import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.Test;
-import org.neo4j.bolt.negotiation.ProtocolVersion;
 import org.neo4j.bolt.negotiation.message.ModernProtocolNegotiationFinalizeMessage;
 import org.neo4j.bolt.negotiation.message.ProtocolCapability;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 import org.neo4j.bolt.testing.annotation.StrictBufferExtension;
 import org.neo4j.bolt.testing.channel.StrictBufferContext;
 
@@ -85,12 +85,14 @@ class ModernProtocolNegotiationFinalizeMessageDecoderTest {
     void shouldIgnoreTruncatedPayloads(StrictBufferContext ctx) {
         var channel = ctx.channel(new ModernProtocolNegotiationFinalizeMessageDecoder());
 
-        channel.writeInbound(ctx.buffer().writeByte(0));
+        var payload = ctx.buffer().writeByte(0);
+        channel.writeInbound(payload);
 
         Assertions.assertThat(channel.<ModernProtocolNegotiationFinalizeMessage>readInbound())
                 .isNull();
 
-        channel.writeInbound(ctx.buffer().writeByte(0).writeByte(0).writeByte(0));
+        payload = ctx.buffer().writeByte(0).writeByte(0).writeByte(0);
+        channel.writeInbound(payload);
 
         Assertions.assertThat(channel.<ModernProtocolNegotiationFinalizeMessage>readInbound())
                 .isNull();

@@ -20,7 +20,7 @@ import org.neo4j.cypher.internal.util.InputPosition
 
 case class MapType(isNullable: Boolean)(val position: InputPosition) extends CypherType {
   val parentType: CypherType = CTAny
-  override val toString = "Map"
+  override val toClassString = "Map"
   override val toCypherTypeString = "MAP"
 
   override def sortOrder: Int = CypherTypeOrder.MAP.id
@@ -28,4 +28,6 @@ case class MapType(isNullable: Boolean)(val position: InputPosition) extends Cyp
   override def withIsNullable(isNullable: Boolean): CypherType = this.copy(isNullable = isNullable)(position)
 
   def withPosition(newPosition: InputPosition): CypherType = this.copy()(position = newPosition)
+
+  def asRecordType: RecordType = RecordType(Map.empty, isOpen = true, isNullable)(position)
 }

@@ -44,7 +44,6 @@ import org.neo4j.kernel.impl.store.record.RelationshipRecord;
 import org.neo4j.kernel.impl.store.record.RelationshipTypeTokenRecord;
 import org.neo4j.kernel.impl.store.record.SchemaRecord;
 import org.neo4j.kernel.impl.store.record.TokenRecord;
-import org.neo4j.lock.LockGroup;
 import org.neo4j.lock.LockService;
 import org.neo4j.lock.LockType;
 import org.neo4j.storageengine.api.RelationshipDirection;
@@ -53,6 +52,7 @@ import org.neo4j.storageengine.api.TransactionApplicationMode;
 import org.neo4j.storageengine.api.enrichment.Enrichment;
 import org.neo4j.storageengine.api.enrichment.EnrichmentCommand;
 import org.neo4j.string.Mask;
+import org.neo4j.wal.entry.LogFormat;
 
 /**
  * Command implementations for all the commands that can be performed on a Neo
@@ -143,14 +143,13 @@ public abstract class Command implements StorageCommand {
 
     public abstract boolean handle(CommandVisitor handler) throws IOException;
 
-    public void lockForRecovery(LockService lockService, LockGroup lockGroup, TransactionApplicationMode mode) {
+    public void lockForRecovery(LockService.Client lockService, TransactionApplicationMode mode) {
         // most commands does not need this locking
     }
 
     protected void takeSchemaBoundaryLockForRecovery(
-            LockService lockService, LockGroup lockGroup, EntityType entityType, LockType lockType) {
-        lockGroup.add(
-                lockService.acquireCustomLock(RECOVERY_LOCK_TYPE_SCHEMA_BOUNDARY, entityType.ordinal(), lockType));
+            LockService.Client lockService, EntityType entityType, LockType lockType) {
+        lockService.acquireCustomLock(RECOVERY_LOCK_TYPE_SCHEMA_BOUNDARY, entityType.ordinal(), lockType);
     }
 
     protected static String beforeAndAfterToString(AbstractBaseRecord before, AbstractBaseRecord after, Mask mask) {
@@ -208,12 +207,12 @@ public abstract class Command implements StorageCommand {
         }
 
         @Override
-        public void lockForRecovery(LockService lockService, LockGroup locks, TransactionApplicationMode mode) {
-            takeSchemaBoundaryLockForRecovery(lockService, locks, EntityType.NODE, LockType.SHARED);
-            locks.add(lockService.acquireNodeLock(getKey(), LockType.EXCLUSIVE));
+        public void lockForRecovery(LockService.Client lockService, TransactionApplicationMode mode) {
+            takeSchemaBoundaryLockForRecovery(lockService, EntityType.NODE, LockType.SHARED);
+            lockService.acquireNodeLock(getKey(), LockType.EXCLUSIVE);
             for (DynamicRecord dynamicLabelRecord : record(mode).getDynamicLabelRecords()) {
-                locks.add(lockService.acquireCustomLock(
-                        RECOVERY_LOCK_TYPE_NODE_LABEL_DYNAMIC, dynamicLabelRecord.getId(), LockType.EXCLUSIVE));
+                lockService.acquireCustomLock(
+                        RECOVERY_LOCK_TYPE_NODE_LABEL_DYNAMIC, dynamicLabelRecord.getId(), LockType.EXCLUSIVE);
             }
         }
     }
@@ -241,9 +240,9 @@ public abstract class Command implements StorageCommand {
         }
 
         @Override
-        public void lockForRecovery(LockService lockService, LockGroup locks, TransactionApplicationMode mode) {
-            takeSchemaBoundaryLockForRecovery(lockService, locks, EntityType.RELATIONSHIP, LockType.SHARED);
-            locks.add(lockService.acquireRelationshipLock(getKey(), LockType.EXCLUSIVE));
+        public void lockForRecovery(LockService.Client lockService, TransactionApplicationMode mode) {
+            takeSchemaBoundaryLockForRecovery(lockService, EntityType.RELATIONSHIP, LockType.SHARED);
+            lockService.acquireRelationshipLock(getKey(), LockType.EXCLUSIVE);
         }
     }
 
@@ -266,12 +265,11 @@ public abstract class Command implements StorageCommand {
         }
 
         @Override
-        public void lockForRecovery(LockService lockService, LockGroup locks, TransactionApplicationMode mode) {
-            locks.add(lockService.acquireNodeLock(after.getOwningNode(), LockType.EXCLUSIVE));
+        public void lockForRecovery(LockService.Client lockService, TransactionApplicationMode mode) {
+            lockService.acquireNodeLock(after.getOwningNode(), LockType.EXCLUSIVE);
             if (getMode() == Mode.CREATE || getMode() == Mode.DELETE) {
                 // This lock on the property guards for reuse of this property
-                locks.add(lockService.acquireCustomLock(
-                        RECOVERY_LOCK_TYPE_RELATIONSHIP_GROUP, after.getId(), LockType.EXCLUSIVE));
+                lockService.acquireCustomLock(RECOVERY_LOCK_TYPE_RELATIONSHIP_GROUP, after.getId(), LockType.EXCLUSIVE);
             }
         }
     }
@@ -279,6 +277,22 @@ public abstract class Command implements StorageCommand {
     public static class MetaDataCommand extends BaseCommand<MetaDataRecord> implements VersionUpgradeCommand {
         MetaDataCommand(LogCommandSerialization serialization, MetaDataRecord before, MetaDataRecord after) {
             super(serialization, before, after);
+        }
+
+        public static MetaDataCommand upgradeCommand(
+                LogCommandSerialization serialization, KernelVersion from, KernelVersion to, LogFormat logFormatTo) {
+            MetaDataRecord before = new MetaDataRecord();
+            before.initialize(true, from.version());
+            MetaDataRecord after = new MetaDataRecord();
+            long versionLong = to.versionAsInt();
+            versionLong |= ((long) logFormatTo.getVersionByte()) << Byte.SIZE;
+            after.initialize(true, versionLong);
+            return new MetaDataCommand(serialization, before, after);
+        }
+
+        @Override
+        public KernelVersion toVersion() {
+            return KernelVersion.getForVersion((byte) (getAfter().getValue() & 0xFF));
         }
 
         @Override
@@ -330,31 +344,29 @@ public abstract class Command implements StorageCommand {
         }
 
         @Override
-        public void lockForRecovery(LockService lockService, LockGroup locks, TransactionApplicationMode mode) {
+        public void lockForRecovery(LockService.Client lockService, TransactionApplicationMode mode) {
             if (after.isNodeSet()) {
-                locks.add(lockService.acquireNodeLock(getNodeId(), LockType.EXCLUSIVE));
+                lockService.acquireNodeLock(getNodeId(), LockType.EXCLUSIVE);
             } else if (after.isRelSet()) {
-                locks.add(lockService.acquireRelationshipLock(getRelId(), LockType.EXCLUSIVE));
+                lockService.acquireRelationshipLock(getRelId(), LockType.EXCLUSIVE);
             } else if (after.isSchemaSet()) {
-                locks.add(lockService.acquireCustomLock(
-                        RECOVERY_LOCK_TYPE_SCHEMA_RULE, getSchemaRuleId(), LockType.EXCLUSIVE));
+                lockService.acquireCustomLock(RECOVERY_LOCK_TYPE_SCHEMA_RULE, getSchemaRuleId(), LockType.EXCLUSIVE);
             }
 
             // Guard for reuse of these records
             PropertyRecord record = record(mode);
             for (DynamicRecord deletedRecord : record.getDeletedRecords()) {
-                locks.add(lockService.acquireCustomLock(
-                        RECOVERY_LOCK_TYPE_PROPERTY_DYNAMIC, deletedRecord.getId(), LockType.EXCLUSIVE));
+                lockService.acquireCustomLock(
+                        RECOVERY_LOCK_TYPE_PROPERTY_DYNAMIC, deletedRecord.getId(), LockType.EXCLUSIVE);
             }
             for (PropertyBlock block : record.propertyBlocks()) {
                 for (DynamicRecord valueRecord : block.getValueRecords()) {
-                    locks.add(lockService.acquireCustomLock(
-                            RECOVERY_LOCK_TYPE_PROPERTY_DYNAMIC, valueRecord.getId(), LockType.EXCLUSIVE));
+                    lockService.acquireCustomLock(
+                            RECOVERY_LOCK_TYPE_PROPERTY_DYNAMIC, valueRecord.getId(), LockType.EXCLUSIVE);
                 }
             }
             if (getMode() == Mode.CREATE || getMode() == Mode.DELETE) {
-                locks.add(
-                        lockService.acquireCustomLock(RECOVERY_LOCK_TYPE_PROPERTY, after.getId(), LockType.EXCLUSIVE));
+                lockService.acquireCustomLock(RECOVERY_LOCK_TYPE_PROPERTY, after.getId(), LockType.EXCLUSIVE);
             }
         }
     }
@@ -471,9 +483,8 @@ public abstract class Command implements StorageCommand {
         }
 
         @Override
-        public void lockForRecovery(LockService lockService, LockGroup lockGroup, TransactionApplicationMode mode) {
-            takeSchemaBoundaryLockForRecovery(
-                    lockService, lockGroup, schemaRule.schema().entityType(), LockType.EXCLUSIVE);
+        public void lockForRecovery(LockService.Client lockService, TransactionApplicationMode mode) {
+            takeSchemaBoundaryLockForRecovery(lockService, schemaRule.schema().entityType(), LockType.EXCLUSIVE);
         }
 
         public SchemaRule getSchemaRule() {

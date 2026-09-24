@@ -24,15 +24,14 @@ import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
 
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.kernel.impl.store.format.standard.PropertyRecordFormat;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.Values;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class PropertyValueRecordSizeCalculatorTest {
     private static final int PROPERTY_RECORD_SIZE = PropertyRecordFormat.RECORD_SIZE;
     private static final int DYNAMIC_RECORD_SIZE = 120;
@@ -46,7 +45,7 @@ class PropertyValueRecordSizeCalculatorTest {
         PropertyValueRecordSizeCalculator calculator = newCalculator();
 
         // when
-        int size = calculator.calculateSize(new Value[] {Values.of(10)}, NULL_CONTEXT, INSTANCE);
+        long size = calculator.calculateSize(new Value[] {Values.of(10)}, NULL_CONTEXT, INSTANCE);
 
         // then
         assertEquals(PropertyRecordFormat.RECORD_SIZE, size);
@@ -58,7 +57,7 @@ class PropertyValueRecordSizeCalculatorTest {
         PropertyValueRecordSizeCalculator calculator = newCalculator();
 
         // when
-        int size = calculator.calculateSize(
+        long size = calculator.calculateSize(
                 new Value[] {Values.of(string(80)), Values.of(new String[] {string(150)})}, NULL_CONTEXT, INSTANCE);
 
         // then
@@ -71,7 +70,7 @@ class PropertyValueRecordSizeCalculatorTest {
         PropertyValueRecordSizeCalculator calculator = newCalculator();
 
         // when
-        int size = calculator.calculateSize(
+        long size = calculator.calculateSize(
                 new Value[] {
                     Values.of(10), // 1 block  go to record 1
                     Values.of("test"), // 1 block
@@ -90,7 +89,7 @@ class PropertyValueRecordSizeCalculatorTest {
     }
 
     private String string(int length) {
-        return random.nextAlphaNumericString(length, length);
+        return random.nextAlphaNumericString(length);
     }
 
     private static PropertyValueRecordSizeCalculator newCalculator() {
@@ -99,6 +98,7 @@ class PropertyValueRecordSizeCalculatorTest {
                 DYNAMIC_RECORD_SIZE,
                 DYNAMIC_RECORD_SIZE - 10,
                 DYNAMIC_RECORD_SIZE,
-                DYNAMIC_RECORD_SIZE - 10);
+                DYNAMIC_RECORD_SIZE - 10,
+                "db-format-2000");
     }
 }

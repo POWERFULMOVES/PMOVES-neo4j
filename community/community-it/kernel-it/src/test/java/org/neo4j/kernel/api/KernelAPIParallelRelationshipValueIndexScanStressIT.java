@@ -22,10 +22,10 @@ package org.neo4j.kernel.api;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.neo4j.internal.kernel.api.IndexQueryConstraints.unorderedValues;
-import static org.neo4j.kernel.api.KernelTransaction.Type.EXPLICIT;
 
+import java.util.ArrayList;
+import java.util.List;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.RelationshipType;
@@ -36,7 +36,6 @@ import org.neo4j.internal.kernel.api.QueryContext;
 import org.neo4j.internal.kernel.api.Read;
 import org.neo4j.internal.kernel.api.RelationshipValueIndexCursor;
 import org.neo4j.internal.kernel.api.exceptions.schema.IndexNotFoundKernelException;
-import org.neo4j.internal.kernel.api.security.LoginContext;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.kernel.impl.coreapi.schema.IndexDefinitionImpl;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
@@ -44,10 +43,10 @@ import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.DbmsExtension;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
 @DbmsExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class KernelAPIParallelRelationshipValueIndexScanStressIT {
     private static final int N_THREADS = 10;
     private static final int N_RELS = 10_000;
@@ -64,29 +63,24 @@ class KernelAPIParallelRelationshipValueIndexScanStressIT {
     @Test
     void shouldDoParallelIndexScans() throws Throwable {
         // Given
+        List<String> relationshipTypeNames = new ArrayList<>();
         try (org.neo4j.graphdb.Transaction tx = db.beginTx()) {
-            createRelationships(tx, N_RELS, "TYPE1", "prop");
-            createRelationships(tx, N_RELS, "TYPE2", "prop");
-            createRelationships(tx, N_RELS, "TYPE3", "prop");
+            for (int i = 0; i < 3; i++) {
+                String relationshipTypeName = "TYPE" + (i + 1);
+                createRelationships(tx, N_RELS, relationshipTypeName, "prop");
+                relationshipTypeNames.add(relationshipTypeName);
+            }
             tx.commit();
         }
 
-        IndexDescriptor index1;
-        IndexDescriptor index2;
-        IndexDescriptor index3;
+        List<IndexDescriptor> indexes = new ArrayList<>();
         try (org.neo4j.graphdb.Transaction tx = db.beginTx()) {
-            index1 = unwrap(tx.schema()
-                    .indexFor(RelationshipType.withName("TYPE1"))
-                    .on("prop")
-                    .create());
-            index2 = unwrap(tx.schema()
-                    .indexFor(RelationshipType.withName("TYPE2"))
-                    .on("prop")
-                    .create());
-            index3 = unwrap(tx.schema()
-                    .indexFor(RelationshipType.withName("TYPE3"))
-                    .on("prop")
-                    .create());
+            for (String relationshipTypeName : relationshipTypeNames) {
+                indexes.add((unwrap(tx.schema()
+                        .indexFor(RelationshipType.withName(relationshipTypeName))
+                        .on("prop")
+                        .create())));
+            }
             tx.commit();
         }
 
@@ -96,32 +90,33 @@ class KernelAPIParallelRelationshipValueIndexScanStressIT {
         }
 
         // when & then
-        IndexReadSession[] indexes = new IndexReadSession[3];
-        try (KernelTransaction tx = kernel.beginTransaction(EXPLICIT, LoginContext.AUTH_DISABLED)) {
-            indexes[0] = indexReadSession(tx, index1);
-            indexes[1] = indexReadSession(tx, index2);
-            indexes[2] = indexReadSession(tx, index3);
-            tx.commit();
-        }
-
         KernelAPIParallelStress.parallelStressInTx(
                 kernel,
                 N_THREADS,
                 tx -> {
                     var statement = tx.acquireStatement();
                     var executionContext = tx.createExecutionContext();
-                    var cursor = tx.cursors()
+                    var cursor = executionContext
+                            .cursors()
                             .allocateRelationshipValueIndexCursor(
                                     executionContext.cursorContext(), EmptyMemoryTracker.INSTANCE);
                     return new WorkerContext<>(cursor, executionContext, tx, statement);
                 },
-                (read, workerContext) -> indexSeek(
-                        read,
-                        new WorkerQueryContext(
-                                workerContext.getTransaction().queryContext(),
-                                workerContext.getContext().cursorContext()),
-                        workerContext,
-                        indexes[random.nextInt(indexes.length)]));
+                (read, workerContext) -> {
+                    IndexReadSession indexReadSession;
+                    try {
+                        indexReadSession = indexReadSession(workerContext.getTransaction(), random.among(indexes));
+                    } catch (IndexNotFoundKernelException e) {
+                        throw new RuntimeException(e);
+                    }
+                    return indexSeek(
+                            read,
+                            new WorkerQueryContext(
+                                    workerContext.getTransaction().queryContext(),
+                                    workerContext.getContext().cursorContext()),
+                            workerContext,
+                            indexReadSession);
+                });
     }
 
     private static IndexDescriptor unwrap(IndexDefinition indexDefinition) {
@@ -134,8 +129,8 @@ class KernelAPIParallelRelationshipValueIndexScanStressIT {
     }
 
     private static void createRelationships(
-            org.neo4j.graphdb.Transaction tx, int count, String labelName, String propKey) {
-        RelationshipType type = RelationshipType.withName(labelName);
+            org.neo4j.graphdb.Transaction tx, int count, String typeName, String propKey) {
+        RelationshipType type = RelationshipType.withName(typeName);
         for (int i = 0; i < count; i++) {
             Node from = tx.createNode();
             Node to = tx.createNode();

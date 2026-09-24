@@ -26,18 +26,26 @@ import org.neo4j.cypher.internal.runtime.interpreted.pipes.DirectedUnionRelation
 import org.neo4j.cypher.internal.util.attribution.Id
 
 case class UndirectedUnionRelationshipTypesScanPipe(
-  ident: String,
-  fromNode: String,
+  ident: Option[String],
+  fromNode: Option[String],
   types: Seq[LazyTypeStatic],
-  toNode: String,
-  indexOrder: IndexOrder
+  toNode: Option[String],
+  indexOrder: IndexOrder,
+  includeChangesFromThisTransaction: Boolean
 )(
   val id: Id =
     Id.INVALID_ID
 ) extends Pipe {
 
   protected def internalCreateResults(state: QueryState): ClosingIterator[CypherRow] = {
-    val relIterator = unionTypeIterator(state, types, indexOrder, state.relTypeTokenReadSession.get)
+    val relIterator = unionTypeIterator(
+      state,
+      types,
+      indexOrder,
+      state.relTypeTokenReadSession.get,
+      callReadFromStore = true,
+      includeChangesFromThisTransaction
+    )
     new UndirectedRelationshipTypeScanPipe.UndirectedIterator(relIterator, ident, fromNode, toNode, rowFactory, state)
   }
 }

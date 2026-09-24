@@ -85,6 +85,8 @@ public interface Cypher5ParserListener extends ParseTreeListener {
 
     void exitHint(Cypher5Parser.HintContext ctx);
 
+    void exitExpandHintStep(Cypher5Parser.ExpandHintStepContext ctx);
+
     void exitMergeClause(Cypher5Parser.MergeClauseContext ctx);
 
     void exitMergeAction(Cypher5Parser.MergeActionContext ctx);
@@ -112,6 +114,8 @@ public interface Cypher5ParserListener extends ParseTreeListener {
     void exitSubqueryInTransactionsBatchParameters(Cypher5Parser.SubqueryInTransactionsBatchParametersContext ctx);
 
     void exitSubqueryInTransactionsErrorParameters(Cypher5Parser.SubqueryInTransactionsErrorParametersContext ctx);
+
+    void exitSubqueryInTransactionsRetryParameters(Cypher5Parser.SubqueryInTransactionsRetryParametersContext ctx);
 
     void exitSubqueryInTransactionsReportParameters(Cypher5Parser.SubqueryInTransactionsReportParametersContext ctx);
 
@@ -300,6 +304,8 @@ public interface Cypher5ParserListener extends ParseTreeListener {
     void exitNamespace(Cypher5Parser.NamespaceContext ctx);
 
     void exitVariable(Cypher5Parser.VariableContext ctx);
+
+    void exitObfuscatedLiteral(Cypher5Parser.ObfuscatedLiteralContext ctx);
 
     void exitNonEmptyNameList(Cypher5Parser.NonEmptyNameListContext ctx);
 
@@ -607,6 +613,8 @@ public interface Cypher5ParserListener extends ParseTreeListener {
 
     void exitSecondaryToken(Cypher5Parser.SecondaryTokenContext ctx);
 
+    void exitDefaultLanguageSpecification(Cypher5Parser.DefaultLanguageSpecificationContext ctx);
+
     void exitDropDatabase(Cypher5Parser.DropDatabaseContext ctx);
 
     void exitAliasAction(Cypher5Parser.AliasActionContext ctx);
@@ -650,8 +658,6 @@ public interface Cypher5ParserListener extends ParseTreeListener {
     void exitAlterAliasProperties(Cypher5Parser.AlterAliasPropertiesContext ctx);
 
     void exitShowAliases(Cypher5Parser.ShowAliasesContext ctx);
-
-    void exitSymbolicNameOrStringParameter(Cypher5Parser.SymbolicNameOrStringParameterContext ctx);
 
     void exitCommandNameExpression(Cypher5Parser.CommandNameExpressionContext ctx);
 

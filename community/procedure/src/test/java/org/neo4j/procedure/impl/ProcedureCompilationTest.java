@@ -23,10 +23,8 @@ import static java.lang.String.format;
 import static java.util.Arrays.asList;
 import static java.util.Collections.emptyList;
 import static java.util.Collections.singletonList;
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -70,6 +68,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -102,7 +101,9 @@ import org.neo4j.values.storable.LocalTimeValue;
 import org.neo4j.values.storable.NumberValue;
 import org.neo4j.values.storable.TextValue;
 import org.neo4j.values.storable.TimeValue;
+import org.neo4j.values.storable.UUIDValue;
 import org.neo4j.values.storable.Values;
+import org.neo4j.values.storable.VectorValue;
 import org.neo4j.values.virtual.ListValue;
 import org.neo4j.values.virtual.MapValue;
 
@@ -139,7 +140,7 @@ public class ProcedureCompilationTest {
         CallableUserFunction longMethod = compileFunction(signature, emptyList(), method("longMethod"));
 
         // Then
-        assertEquals(longMethod.apply(ctx, EMPTY), longValue(1337L));
+        assertThat(longMethod.apply(ctx, EMPTY)).isEqualTo(longValue(1337L));
     }
 
     @Test
@@ -151,7 +152,7 @@ public class ProcedureCompilationTest {
         CallableUserFunction function = compileFunction(signature, emptyList(), method("longMethod"));
 
         // Then
-        assertEquals(function.signature(), signature);
+        assertThat(function.signature()).isEqualTo(signature);
     }
 
     @Test
@@ -166,18 +167,17 @@ public class ProcedureCompilationTest {
 
         // Then
         String threadName = Thread.currentThread().getName();
-        assertEquals(
-                stringValue("NULL AND NULL"),
-                compileFunction(signature, emptyList(), longMethod).apply(ctx, EMPTY));
-        assertEquals(
-                stringValue("I'm transaction AND NULL"),
-                compileFunction(signature, singletonList(setter1), longMethod).apply(ctx, EMPTY));
-        assertEquals(
-                stringValue("NULL AND " + threadName),
-                compileFunction(signature, singletonList(setter2), longMethod).apply(ctx, EMPTY));
-        assertEquals(
-                stringValue("I'm transaction AND " + threadName),
-                compileFunction(signature, asList(setter1, setter2), longMethod).apply(ctx, EMPTY));
+        assertThat(compileFunction(signature, emptyList(), longMethod).apply(ctx, EMPTY))
+                .isEqualTo(stringValue("NULL AND NULL"));
+        assertThat(compileFunction(signature, singletonList(setter1), longMethod)
+                        .apply(ctx, EMPTY))
+                .isEqualTo(stringValue("I'm transaction AND NULL"));
+        assertThat(compileFunction(signature, singletonList(setter2), longMethod)
+                        .apply(ctx, EMPTY))
+                .isEqualTo(stringValue("NULL AND " + threadName));
+        assertThat(compileFunction(signature, asList(setter1, setter2), longMethod)
+                        .apply(ctx, EMPTY))
+                .isEqualTo(stringValue("I'm transaction AND " + threadName));
     }
 
     @Test
@@ -190,7 +190,7 @@ public class ProcedureCompilationTest {
         CallableUserFunction longMethod = compileFunction(signature, emptyList(), method("throwingLongMethod"));
 
         // Then
-        assertThrows(ProcedureException.class, () -> longMethod.apply(ctx, EMPTY));
+        assertThatThrownBy(() -> longMethod.apply(ctx, EMPTY)).isInstanceOf(ProcedureException.class);
     }
 
     @Test
@@ -208,9 +208,8 @@ public class ProcedureCompilationTest {
                 compileFunction(signature, emptyList(), method("concat", long.class, Double.class, boolean.class));
 
         // Then
-        assertEquals(
-                stringValue("421.1true"),
-                concatMethod.apply(ctx, new AnyValue[] {longValue(42), doubleValue(1.1), booleanValue(true)}));
+        assertThat(concatMethod.apply(ctx, new AnyValue[] {longValue(42), doubleValue(1.1), booleanValue(true)}))
+                .isEqualTo(stringValue("421.1true"));
     }
 
     @Test
@@ -225,9 +224,8 @@ public class ProcedureCompilationTest {
         CallableUserFunction concatMethod = compileFunction(signature, emptyList(), method("concat", List.class));
 
         // Then
-        assertEquals(
-                stringValue("421.1true"),
-                concatMethod.apply(ctx, new AnyValue[] {list(longValue(42), doubleValue(1.1), TRUE)}));
+        assertThat(concatMethod.apply(ctx, new AnyValue[] {list(longValue(42), doubleValue(1.1), TRUE)}))
+                .isEqualTo(stringValue("421.1true"));
     }
 
     @Test
@@ -241,8 +239,8 @@ public class ProcedureCompilationTest {
                 compileFunction(signature, emptyList(), method("nullyMethod", Boolean.class));
 
         // Then
-        assertEquals(Values.NO_VALUE, nullyMethod.apply(ctx, new AnyValue[] {TRUE}));
-        assertEquals(PI, nullyMethod.apply(ctx, new AnyValue[] {Values.NO_VALUE}));
+        assertThat(nullyMethod.apply(ctx, new AnyValue[] {TRUE})).isEqualTo(Values.NO_VALUE);
+        assertThat(nullyMethod.apply(ctx, new AnyValue[] {Values.NO_VALUE})).isEqualTo(PI);
     }
 
     @Test
@@ -257,7 +255,8 @@ public class ProcedureCompilationTest {
         CallableUserFunction sumMethod = compileFunction(signature, emptyList(), method("sum", List.class));
 
         // Then
-        assertEquals(longValue(3), sumMethod.apply(ctx, new AnyValue[] {list(longValue(1), longValue(2))}));
+        assertThat(sumMethod.apply(ctx, new AnyValue[] {list(longValue(1), longValue(2))}))
+                .isEqualTo(longValue(3));
     }
 
     @Test
@@ -272,13 +271,12 @@ public class ProcedureCompilationTest {
         CallableUserFunction bytesMethod = compileFunction(signature, emptyList(), method("testMethod", byte[].class));
 
         // Then
-        assertEquals(
-                byteArray(new byte[] {1, 2, 3}),
-                bytesMethod.apply(ctx, new AnyValue[] {byteArray(new byte[] {1, 2, 3})}));
-        assertEquals(byteArray(new byte[] {1, 2, 3}), bytesMethod.apply(ctx, new AnyValue[] {
-            list(byteValue((byte) 1), byteValue((byte) 2), byteValue((byte) 3))
-        }));
-        assertEquals(NO_VALUE, bytesMethod.apply(ctx, new AnyValue[] {NO_VALUE}));
+        assertThat(bytesMethod.apply(ctx, new AnyValue[] {byteArray(new byte[] {1, 2, 3})}))
+                .isEqualTo(byteArray(new byte[] {1, 2, 3}));
+        assertThat(bytesMethod.apply(
+                        ctx, new AnyValue[] {list(byteValue((byte) 1), byteValue((byte) 2), byteValue((byte) 3))}))
+                .isEqualTo(byteArray(new byte[] {1, 2, 3}));
+        assertThat(bytesMethod.apply(ctx, new AnyValue[] {NO_VALUE})).isEqualTo(NO_VALUE);
     }
 
     @Test
@@ -293,8 +291,9 @@ public class ProcedureCompilationTest {
         CallableUserFunction stringMethod = compileFunction(signature, emptyList(), method("testMethod", String.class));
 
         // Then
-        assertEquals(stringValue("good"), stringMethod.apply(ctx, new AnyValue[] {stringValue("good")}));
-        assertEquals(NO_VALUE, stringMethod.apply(ctx, new AnyValue[] {NO_VALUE}));
+        assertThat(stringMethod.apply(ctx, new AnyValue[] {stringValue("good")}))
+                .isEqualTo(stringValue("good"));
+        assertThat(stringMethod.apply(ctx, new AnyValue[] {NO_VALUE})).isEqualTo(NO_VALUE);
     }
 
     @Test
@@ -309,15 +308,16 @@ public class ProcedureCompilationTest {
             Type type = entry.getKey();
 
             if (type.equals(long.class)) {
-                assertEquals(longValue(1337L), function.apply(ctx, new AnyValue[] {longValue(1337L)}));
+                assertThat(function.apply(ctx, new AnyValue[] {longValue(1337L)}))
+                        .isEqualTo(longValue(1337L));
             } else if (type.equals(double.class)) {
-                assertEquals(PI, function.apply(ctx, new AnyValue[] {PI}));
+                assertThat(function.apply(ctx, new AnyValue[] {PI})).isEqualTo(PI);
             } else if (type.equals(boolean.class)) {
-                assertEquals(TRUE, function.apply(ctx, new AnyValue[] {TRUE}));
+                assertThat(function.apply(ctx, new AnyValue[] {TRUE})).isEqualTo(TRUE);
             } else if (type instanceof Class<?> && AnyValue.class.isAssignableFrom((Class<?>) type)) {
-                assertEquals(NO_VALUE, function.apply(ctx, new AnyValue[] {null}));
+                assertThat(function.apply(ctx, new AnyValue[] {null})).isEqualTo(NO_VALUE);
             } else {
-                assertEquals(NO_VALUE, function.apply(ctx, new AnyValue[] {NO_VALUE}));
+                assertThat(function.apply(ctx, new AnyValue[] {NO_VALUE})).isEqualTo(NO_VALUE);
             }
         }
     }
@@ -335,8 +335,8 @@ public class ProcedureCompilationTest {
         // Then
         RawIterator<AnyValue[], ProcedureException> iterator =
                 longStream.apply(ctx, new AnyValue[] {longValue(1337L)}, RESOURCE_TRACKER);
-        assertArrayEquals(new AnyValue[] {longValue(1337L)}, iterator.next());
-        assertFalse(iterator.hasNext());
+        assertThat(iterator.next()).containsExactly(longValue(1337L));
+        assertThat(iterator.hasNext()).isFalse();
     }
 
     @Test
@@ -350,7 +350,7 @@ public class ProcedureCompilationTest {
         CallableProcedure longStream = compileProcedure(signature, emptyList(), method("longStream", long.class));
 
         // Then
-        assertEquals(signature, longStream.signature());
+        assertThat(longStream.signature()).isEqualTo(signature);
     }
 
     @Test
@@ -367,26 +367,22 @@ public class ProcedureCompilationTest {
 
         // Then
         String threadName = Thread.currentThread().getName();
-        assertEquals(
-                stringValue("NULL AND NULL"),
-                compileProcedure(signature, emptyList(), stringStream)
+        assertThat(compileProcedure(signature, emptyList(), stringStream)
                         .apply(ctx, EMPTY, RESOURCE_TRACKER)
-                        .next()[0]);
-        assertEquals(
-                stringValue("I'm transaction AND NULL"),
-                compileProcedure(signature, singletonList(setter1), stringStream)
+                        .next()[0])
+                .isEqualTo(stringValue("NULL AND NULL"));
+        assertThat(compileProcedure(signature, singletonList(setter1), stringStream)
                         .apply(ctx, EMPTY, RESOURCE_TRACKER)
-                        .next()[0]);
-        assertEquals(
-                stringValue("NULL AND " + threadName),
-                compileProcedure(signature, singletonList(setter2), stringStream)
+                        .next()[0])
+                .isEqualTo(stringValue("I'm transaction AND NULL"));
+        assertThat(compileProcedure(signature, singletonList(setter2), stringStream)
                         .apply(ctx, EMPTY, RESOURCE_TRACKER)
-                        .next()[0]);
-        assertEquals(
-                stringValue("I'm transaction AND " + threadName),
-                compileProcedure(signature, asList(setter1, setter2), stringStream)
+                        .next()[0])
+                .isEqualTo(stringValue("NULL AND " + threadName));
+        assertThat(compileProcedure(signature, asList(setter1, setter2), stringStream)
                         .apply(ctx, EMPTY, RESOURCE_TRACKER)
-                        .next()[0]);
+                        .next()[0])
+                .isEqualTo(stringValue("I'm transaction AND " + threadName));
     }
 
     @Test
@@ -402,9 +398,7 @@ public class ProcedureCompilationTest {
         CallableProcedure longMethod = compileProcedure(signature, emptyList(), method("throwingLongStreamMethod"));
 
         // Then
-        assertThrows(
-                ProcedureException.class,
-                () -> longMethod.apply(ctx, EMPTY, tracker).next());
+        assertThatThrownBy(() -> longMethod.apply(ctx, EMPTY, tracker).next()).isInstanceOf(ProcedureException.class);
         verify(tracker).registerCloseableResource(any(Stream.class));
         verify(tracker).unregisterCloseableResource(any(Stream.class));
     }
@@ -422,7 +416,7 @@ public class ProcedureCompilationTest {
 
         // Then
         RawIterator<AnyValue[], ProcedureException> iterator = voidMethod.apply(ctx, EMPTY, RESOURCE_TRACKER);
-        assertFalse(iterator.hasNext());
+        assertThat(iterator.hasNext()).isFalse();
         verify(TRANSACTION).traversalDescription();
     }
 
@@ -438,8 +432,8 @@ public class ProcedureCompilationTest {
 
         // Then
         RawIterator<AnyValue[], ProcedureException> iterator = stringStream.apply(ctx, EMPTY, RESOURCE_TRACKER);
-        assertArrayEquals(new AnyValue[] {stringValue("hello")}, iterator.next());
-        assertFalse(iterator.hasNext());
+        assertThat(iterator.next()).containsExactly(stringValue("hello"));
+        assertThat(iterator.hasNext()).isFalse();
     }
 
     @Test
@@ -454,8 +448,8 @@ public class ProcedureCompilationTest {
 
         // Then
         RawIterator<AnyValue[], ProcedureException> iterator = stringStream.apply(ctx, EMPTY, RESOURCE_TRACKER);
-        assertArrayEquals(new AnyValue[] {stringValue("hello"), longValue(42L)}, iterator.next());
-        assertFalse(iterator.hasNext());
+        assertThat(iterator.next()).containsExactly(stringValue("hello"), longValue(42L));
+        assertThat(iterator.hasNext()).isFalse();
     }
 
     @Test
@@ -479,7 +473,7 @@ public class ProcedureCompilationTest {
             updater.update(new AnyValue[] {longValue(i)});
         }
         updater.applyUpdates();
-        assertEquals(longValue(55), aggregator.result());
+        assertThat(aggregator.result()).isEqualTo(longValue(55));
     }
 
     @Test
@@ -497,7 +491,7 @@ public class ProcedureCompilationTest {
                 method(Adder.class, "result"));
 
         // Then
-        assertEquals(adder.signature(), signature);
+        assertThat(signature).isEqualTo(adder.signature());
     }
 
     @Test
@@ -522,8 +516,8 @@ public class ProcedureCompilationTest {
         updater.update(new AnyValue[] {stringValue("3:")});
 
         // Then
-        assertEquals(
-                stringValue(format("1: %s, 2: %s, 3: %s", threadName, threadName, threadName)), aggregator.result());
+        assertThat(aggregator.result())
+                .isEqualTo(stringValue(format("1: %s, 2: %s, 3: %s", threadName, threadName, threadName)));
     }
 
     @Test
@@ -539,8 +533,8 @@ public class ProcedureCompilationTest {
                         method(BlackAdder.class, "result"))
                 .createReducer(ctx);
 
-        assertThrows(ProcedureException.class, () -> aggregator.newUpdater().update(EMPTY));
-        assertThrows(ProcedureException.class, aggregator::result);
+        assertThatThrownBy(() -> aggregator.newUpdater().update(EMPTY)).isInstanceOf(ProcedureException.class);
+        assertThatThrownBy(aggregator::result).isInstanceOf(ProcedureException.class);
     }
 
     @Test
@@ -564,7 +558,7 @@ public class ProcedureCompilationTest {
         updater.update(new AnyValue[] {longValue(4)});
         updater.update(new AnyValue[] {longValue(5)});
         updater.applyUpdates();
-        assertEquals(longValue(3), aggregator.result());
+        assertThat(aggregator.result()).isEqualTo(longValue(3));
     }
 
     @Test
@@ -586,7 +580,7 @@ public class ProcedureCompilationTest {
         var updater = aggregator.newUpdater();
         updater.update(new AnyValue[] {longValue(42L)});
         updater.applyUpdates();
-        assertEquals(asMapValue(Map.of("result", longValue(42))), aggregator.result());
+        assertThat(aggregator.result()).isEqualTo(asMapValue(Map.of("result", longValue(42))));
     }
 
     private <T> FieldSetter createSetter(
@@ -775,6 +769,14 @@ public class ProcedureCompilationTest {
         return in;
     }
 
+    public UUID testMethod(UUID in) {
+        return in;
+    }
+
+    public UUIDValue testMethod(UUIDValue in) {
+        return in;
+    }
+
     public LocalDateTimeValue testMethod(LocalDateTimeValue in) {
         return in;
     }
@@ -835,9 +837,14 @@ public class ProcedureCompilationTest {
         return in;
     }
 
+    public VectorValue testMethod(VectorValue in) {
+        return in;
+    }
+
     private Map<Type, Method> typeMaps() {
         Map<Type, Method> methodHashMap = new HashMap<>();
         methodHashMap.put(String.class, method("testMethod", String.class));
+        methodHashMap.put(UUID.class, method("testMethod", UUID.class));
         methodHashMap.put(long.class, method("testMethod", long.class));
         methodHashMap.put(Long.class, method("testMethod", Long.class));
         methodHashMap.put(double.class, method("testMethod", double.class));
@@ -870,6 +877,8 @@ public class ProcedureCompilationTest {
         methodHashMap.put(IntegralValue.class, method("testMethod", IntegralValue.class));
         methodHashMap.put(TextValue.class, method("testMethod", TextValue.class));
         methodHashMap.put(DurationValue.class, method("testMethod", DurationValue.class));
+        methodHashMap.put(VectorValue.class, method("testMethod", VectorValue.class));
+        methodHashMap.put(UUIDValue.class, method("testMethod", UUIDValue.class));
 
         // safety check, make sure we are testing all types
         Set<Type> types = new Cypher5TypeCheckers().allTypes();

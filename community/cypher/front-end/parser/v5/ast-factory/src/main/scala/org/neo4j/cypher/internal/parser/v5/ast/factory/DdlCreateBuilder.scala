@@ -16,6 +16,7 @@
  */
 package org.neo4j.cypher.internal.parser.v5.ast.factory
 
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.AdministrationCommand.NATIVE_AUTH
 import org.neo4j.cypher.internal.ast.Auth
 import org.neo4j.cypher.internal.ast.AuthAttribute
@@ -34,18 +35,18 @@ import org.neo4j.cypher.internal.ast.NoWait
 import org.neo4j.cypher.internal.ast.Options
 import org.neo4j.cypher.internal.ast.Password
 import org.neo4j.cypher.internal.ast.PasswordChange
+import org.neo4j.cypher.internal.ast.RemoteAliasStoredCredentials
 import org.neo4j.cypher.internal.ast.Topology
 import org.neo4j.cypher.internal.ast.UserOptions
 import org.neo4j.cypher.internal.ast.WaitUntilComplete
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
-import org.neo4j.cypher.internal.expressions.FunctionName
 import org.neo4j.cypher.internal.expressions.LabelName
 import org.neo4j.cypher.internal.expressions.Parameter
 import org.neo4j.cypher.internal.expressions.Property
 import org.neo4j.cypher.internal.expressions.RelTypeName
 import org.neo4j.cypher.internal.expressions.Variable
-import org.neo4j.cypher.internal.macros.AssertMacros
+import org.neo4j.cypher.internal.macros.AssertMacros3
 import org.neo4j.cypher.internal.parser.AstRuleCtx
 import org.neo4j.cypher.internal.parser.ast.util.Util.astOpt
 import org.neo4j.cypher.internal.parser.ast.util.Util.astOptFromList
@@ -63,6 +64,8 @@ import org.neo4j.cypher.internal.parser.v5.Cypher5Parser.ConstraintTypedContext
 import org.neo4j.cypher.internal.parser.v5.Cypher5Parser.CreateCommandContext
 import org.neo4j.cypher.internal.parser.v5.Cypher5Parser.CreateIndexContext
 import org.neo4j.cypher.internal.parser.v5.Cypher5ParserListener
+import org.neo4j.cypher.internal.util.FunctionName
+import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.symbols.CypherType
 
 import scala.collection.immutable.ArraySeq
@@ -84,7 +87,7 @@ trait DdlCreateBuilder extends Cypher5ParserListener {
     val parent = ctx.getParent.asInstanceOf[CreateCommandContext]
     val nodePattern = ctx.commandNodePattern()
     val isNode = nodePattern != null
-    val constraintName = astOpt[Either[String, Parameter]](ctx.symbolicNameOrStringParameter())
+    val constraintName = astOpt[Expression](ctx.commandNameExpression())
     val existsDo = ifExistsDo(parent.REPLACE() != null, ctx.EXISTS() != null)
     val options = astOpt[Options](ctx.commandOptions(), NoOptions)
     val cT = ctx.constraintType()
@@ -120,7 +123,8 @@ trait DdlCreateBuilder extends Cypher5ParserListener {
             properties,
             constraintName,
             existsDo,
-            options
+            options,
+            fromCypher5 = true
           )(pos(parent))
         case _: ConstraintKeyContext =>
           CreateConstraint.createNodeKeyConstraint(
@@ -163,7 +167,8 @@ trait DdlCreateBuilder extends Cypher5ParserListener {
             properties,
             constraintName,
             existsDo,
-            options
+            options,
+            fromCypher5 = true
           )(pos(parent))
         case _: ConstraintKeyContext =>
           CreateConstraint.createRelationshipKeyConstraint(
@@ -222,7 +227,7 @@ trait DdlCreateBuilder extends Cypher5ParserListener {
     val parent = ctx.getParent.asInstanceOf[CreateIndexContext]
     val existsDo = ifExistsDo(grandparent.REPLACE() != null, ctx.EXISTS() != null)
     val options = astOpt[Options](ctx.commandOptions(), NoOptions)
-    val indexName = astOpt[Either[String, Parameter]](ctx.symbolicNameOrStringParameter())
+    val indexName = astOpt[Expression](ctx.commandNameExpression())
 
     val nodePattern = ctx.commandNodePattern()
     val relPattern = ctx.commandRelPattern()
@@ -311,8 +316,9 @@ trait DdlCreateBuilder extends Cypher5ParserListener {
           val label = labelOrRelType.asInstanceOf[LabelName]
           CreateIndex.createVectorNodeIndex(
             variable,
-            label,
+            List(label),
             propertyList,
+            List.empty,
             indexName,
             existsDo,
             options
@@ -321,8 +327,9 @@ trait DdlCreateBuilder extends Cypher5ParserListener {
           val relType = labelOrRelType.asInstanceOf[RelTypeName]
           CreateIndex.createVectorRelationshipIndex(
             variable,
-            relType,
+            List(relType),
             propertyList,
+            List.empty,
             indexName,
             existsDo,
             options
@@ -337,7 +344,7 @@ trait DdlCreateBuilder extends Cypher5ParserListener {
     val grandparent = ctx.getParent.getParent.asInstanceOf[CreateCommandContext]
     val existsDo = ifExistsDo(grandparent.REPLACE() != null, ctx.EXISTS() != null)
     val options = astOpt[Options](ctx.commandOptions(), NoOptions)
-    val indexName = astOpt[Either[String, Parameter]](ctx.symbolicNameOrStringParameter())
+    val indexName = astOpt[Expression](ctx.commandNameExpression())
     val nodePattern = ctx.fulltextNodePattern()
     val isNode = nodePattern != null
     val propertyList = ctx.enclosedPropertyList().ast[Seq[Property]]().toList
@@ -392,7 +399,7 @@ trait DdlCreateBuilder extends Cypher5ParserListener {
     val grandparent = ctx.getParent.getParent.asInstanceOf[CreateCommandContext]
     val existsDo = ifExistsDo(grandparent.REPLACE() != null, ctx.EXISTS() != null)
     val options = astOpt[Options](ctx.commandOptions(), NoOptions)
-    val indexName = astOpt[Either[String, Parameter]](ctx.symbolicNameOrStringParameter())
+    val indexName = astOpt[Expression](ctx.commandNameExpression())
     val nodePattern = ctx.lookupIndexNodePattern()
     val isNode = nodePattern != null
     val functionName = ctx.symbolicNameString
@@ -400,7 +407,8 @@ trait DdlCreateBuilder extends Cypher5ParserListener {
     val function = FunctionInvocation(
       FunctionName(functionName.ast[String]())(functionPos),
       distinct = false,
-      IndexedSeq(ctx.variable().ast[Variable]())
+      IndexedSeq(ctx.variable().ast[Variable]()),
+      maybeLocalFunction = None
     )(functionPos)
     val variable =
       if (isNode) nodePattern.ast[Variable]()
@@ -424,7 +432,7 @@ trait DdlCreateBuilder extends Cypher5ParserListener {
     val nameExpressions = ctx.commandNameExpression()
     val from =
       if (nameExpressions.size > 1) {
-        AssertMacros.checkOnlyWhenAssertionsAreEnabled(nameExpressions.size == 2)
+        AssertMacros3.checkOnlyWhenAssertionsAreEnabled(nameExpressions.size == 2)
         Some(nameExpressions.get(1).ast[Expression])
       } else
         None
@@ -469,7 +477,8 @@ trait DdlCreateBuilder extends Cypher5ParserListener {
       ctx.symbolicAliasNameOrParameter().ast[DatabaseName](),
       ifExistsDo(parent.REPLACE() != null, ctx.EXISTS() != null),
       astOpt[Options](ctx.commandOptions(), NoOptions),
-      astOpt[WaitUntilComplete](ctx.waitClause(), NoWait)
+      astOpt[WaitUntilComplete](ctx.waitClause(), NoWait()(InputPosition.NONE)),
+      astOpt[CypherVersion](ctx.defaultLanguageSpecification())
     )(pos(parent))
   }
 
@@ -487,8 +496,10 @@ trait DdlCreateBuilder extends Cypher5ParserListener {
       ctx.symbolicAliasNameOrParameter().ast[DatabaseName](),
       ifExistsDo(parent.REPLACE() != null, ctx.EXISTS() != null),
       astOpt[Options](ctx.commandOptions(), NoOptions),
-      astOpt[WaitUntilComplete](ctx.waitClause(), NoWait),
-      topology
+      astOpt[WaitUntilComplete](ctx.waitClause(), NoWait()(InputPosition.NONE)),
+      topology,
+      astOpt[CypherVersion](ctx.defaultLanguageSpecification()),
+      None
     )(pos(parent))
   }
 
@@ -518,10 +529,13 @@ trait DdlCreateBuilder extends Cypher5ParserListener {
         dbName,
         ifExistsDo(parent.REPLACE() != null, ifNotExists),
         ctx.stringOrParameter().ast[Either[String, Parameter]](),
-        ctx.commandNameExpression().ast[Expression](),
-        ctx.passwordExpression().ast[Expression](),
+        RemoteAliasStoredCredentials(
+          ctx.commandNameExpression().ast[Expression](),
+          ctx.passwordExpression().ast[Expression]()
+        )(pos(ctx)),
         driverSettings,
-        properties
+        properties,
+        astOpt[CypherVersion](ctx.defaultLanguageSpecification())
       )(pos(parent))
     }
   }

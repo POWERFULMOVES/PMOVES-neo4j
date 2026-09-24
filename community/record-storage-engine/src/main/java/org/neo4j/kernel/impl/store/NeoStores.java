@@ -23,7 +23,6 @@ import static org.apache.commons.lang3.ArrayUtils.contains;
 
 import java.io.IOException;
 import java.nio.file.OpenOption;
-import java.nio.file.Path;
 import java.util.function.Consumer;
 import org.apache.commons.lang3.mutable.MutableLong;
 import org.eclipse.collections.api.set.ImmutableSet;
@@ -34,22 +33,23 @@ import org.neo4j.graphdb.config.Setting;
 import org.neo4j.internal.diagnostics.DiagnosticsLogger;
 import org.neo4j.internal.helpers.Exceptions;
 import org.neo4j.internal.id.IdGeneratorFactory;
-import org.neo4j.internal.id.SchemaIdType;
 import org.neo4j.internal.recordstorage.RecordIdType;
 import org.neo4j.internal.recordstorage.RecordStorageEngineFactory;
+import org.neo4j.io.async.AsyncBlockAccessor;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.recordstorage.RecordDatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.store.format.RecordFormats;
 import org.neo4j.kernel.impl.store.record.AbstractBaseRecord;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.logging.InternalLog;
 import org.neo4j.logging.InternalLogProvider;
-import org.neo4j.storageengine.api.StoreId;
+import org.neo4j.storageengine.StoreIds;
 
 /**
  * This class contains the references to the "NodeStore,RelationshipStore,
@@ -75,8 +75,8 @@ public class NeoStores implements AutoCloseable {
     private final StoreType[] initializedStores;
     private final RecordFormats recordFormats;
     private final CommonAbstractStore[] stores;
-    private final LogTailLogVersionsMetadata logTailMetadata;
     private final ImmutableSet<OpenOption> openOptions;
+    private final DatabaseCreationOptions databaseCreationOptions;
     private final boolean readOnly;
     private final InternalLog log;
 
@@ -91,9 +91,9 @@ public class NeoStores implements AutoCloseable {
             RecordFormats recordFormats,
             CursorContextFactory contextFactory,
             boolean readOnly,
-            LogTailLogVersionsMetadata logTailMetadata,
             StoreType[] storeTypes,
-            ImmutableSet<OpenOption> openOptions) {
+            ImmutableSet<OpenOption> openOptions,
+            DatabaseCreationOptions databaseCreationOptions) {
         this.fileSystem = fileSystem;
         this.layout = layout;
         this.config = config;
@@ -105,8 +105,8 @@ public class NeoStores implements AutoCloseable {
         this.recordFormats = recordFormats;
         this.contextFactory = contextFactory;
         this.readOnly = readOnly;
-        this.logTailMetadata = logTailMetadata;
         this.openOptions = openOptions;
+        this.databaseCreationOptions = databaseCreationOptions;
 
         stores = new CommonAbstractStore[StoreType.STORE_TYPES.length];
         // First open the meta data store so that we can verify the record format. We know that this store is of the
@@ -156,16 +156,19 @@ public class NeoStores implements AutoCloseable {
         }
     }
 
-    public void flush(DatabaseFlushEvent flushEvent, CursorContext cursorContext) throws IOException {
+    public void flush(DatabaseFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext)
+            throws IOException {
         pageCache.flushAndForce(flushEvent);
-        checkpoint(flushEvent, cursorContext);
+        checkpoint(flushEvent, asyncBlockAccessor, cursorContext);
     }
 
-    public void checkpoint(DatabaseFlushEvent flushEvent, CursorContext cursorContext) throws IOException {
+    public void checkpoint(
+            DatabaseFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext)
+            throws IOException {
         visitStores(store -> {
-            log.debug("Checkpointing %s", store.storageFile.getFileName());
+            log.debug("Checkpointing %s", store.storeFile.storeBaseFileName());
             try (var fileFlushEvent = flushEvent.beginFileFlush()) {
-                store.getIdGenerator().checkpoint(fileFlushEvent, cursorContext);
+                store.getIdGenerator().checkpoint(fileFlushEvent, asyncBlockAccessor, cursorContext);
             }
         });
     }
@@ -487,7 +490,7 @@ public class NeoStores implements AutoCloseable {
                         layout.schemaStore(),
                         layout.idSchemaStore(),
                         config,
-                        SchemaIdType.SCHEMA,
+                        RecordIdType.SCHEMA,
                         idGeneratorFactory,
                         pageCache,
                         pageCacheTracer,
@@ -537,32 +540,32 @@ public class NeoStores implements AutoCloseable {
                         logProvider,
                         recordFormats.metaData(),
                         readOnly,
-                        logTailMetadata,
                         layout.getDatabaseName(),
                         openOptions,
-                        () -> StoreId.generateNew(
+                        () -> StoreIds.generateNewStoreId(
                                 RecordStorageEngineFactory.NAME,
                                 recordFormats.getFormatFamily().name(),
                                 recordFormats.majorVersion(),
-                                recordFormats.minorVersion())),
+                                recordFormats.minorVersion(),
+                                databaseCreationOptions)),
                 contextFactory);
     }
 
-    private CommonAbstractStore createDynamicStringStore(Path storeFile, Path idFile) {
+    private CommonAbstractStore createDynamicStringStore(StoreFile storeFile, StoreFile idStoreFile) {
         return createDynamicStringStore(
                 storeFile,
-                idFile,
+                idStoreFile,
                 RecordIdType.STRING_BLOCK,
                 config.get(GraphDatabaseInternalSettings.string_block_size));
     }
 
     private CommonAbstractStore createDynamicStringStore(
-            Path storeFile, Path idFile, RecordIdType idType, int blockSize) {
+            StoreFile storeFile, StoreFile idStoreFile, RecordIdType idType, int blockSize) {
         return initialize(
                 new DynamicStringStore(
                         fileSystem,
                         storeFile,
-                        idFile,
+                        idStoreFile,
                         config,
                         idType,
                         idGeneratorFactory,
@@ -578,11 +581,12 @@ public class NeoStores implements AutoCloseable {
     }
 
     private CommonAbstractStore createDynamicArrayStore(
-            Path storeFile, Path idFile, RecordIdType idType, Setting<Integer> blockSizeProperty) {
-        return createDynamicArrayStore(storeFile, idFile, idType, config.get(blockSizeProperty));
+            StoreFile storeFile, StoreFile idStoreFile, RecordIdType idType, Setting<Integer> blockSizeProperty) {
+        return createDynamicArrayStore(storeFile, idStoreFile, idType, config.get(blockSizeProperty));
     }
 
-    CommonAbstractStore createDynamicArrayStore(Path storeFile, Path idFile, RecordIdType idType, int blockSize) {
+    CommonAbstractStore createDynamicArrayStore(
+            StoreFile storeFile, StoreFile idStoreFile, RecordIdType idType, int blockSize) {
         if (blockSize <= 0) {
             throw new IllegalArgumentException("Block size of dynamic array store should be positive integer.");
         }
@@ -590,7 +594,7 @@ public class NeoStores implements AutoCloseable {
                 new DynamicArrayStore(
                         fileSystem,
                         storeFile,
-                        idFile,
+                        idStoreFile,
                         config,
                         idType,
                         idGeneratorFactory,
@@ -618,6 +622,10 @@ public class NeoStores implements AutoCloseable {
         return openOptions;
     }
 
+    public FileSystemAbstraction getFileSystem() {
+        return fileSystem;
+    }
+
     public static boolean isStorePresent(FileSystemAbstraction fs, RecordDatabaseLayout databaseLayout) {
         return fs.fileExists(databaseLayout.pathForExistsMarker());
     }
@@ -626,5 +634,9 @@ public class NeoStores implements AutoCloseable {
         final var bytes = new MutableLong();
         visitStores(store -> bytes.add(store.estimateAvailableReservedSpace()));
         return bytes.longValue();
+    }
+
+    public Config getConfig() {
+        return config;
     }
 }

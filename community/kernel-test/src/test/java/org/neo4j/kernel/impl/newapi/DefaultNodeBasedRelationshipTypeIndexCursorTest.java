@@ -26,18 +26,18 @@ import static org.neo4j.storageengine.api.cursor.StoreCursors.NULL;
 
 import org.eclipse.collections.api.factory.primitive.LongSets;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.graphdb.Direction;
 import org.neo4j.internal.kernel.api.EntityLocks;
 import org.neo4j.internal.kernel.api.QueryContext;
 import org.neo4j.internal.kernel.api.Read;
 import org.neo4j.internal.kernel.api.SchemaRead;
 import org.neo4j.internal.kernel.api.TokenRead;
-import org.neo4j.internal.kernel.api.security.AccessMode.Static;
+import org.neo4j.internal.kernel.api.security.StaticAccessMode;
 import org.neo4j.kernel.api.AssertOpen;
 import org.neo4j.kernel.api.index.IndexProgressor;
 import org.neo4j.kernel.api.txstate.TxStateHolder;
 import org.neo4j.kernel.impl.api.index.IndexingService;
+import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.RelationshipSelection;
 import org.neo4j.storageengine.api.StorageReader;
@@ -45,9 +45,9 @@ import org.neo4j.storageengine.api.StubStorageCursors;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class DefaultNodeBasedRelationshipTypeIndexCursorTest {
     @Inject
     private RandomSupport random;
@@ -82,10 +82,11 @@ class DefaultNodeBasedRelationshipTypeIndexCursorTest {
                 EmptyMemoryTracker.INSTANCE,
                 false,
                 mock(AssertOpen.class),
-                () -> Static.FULL,
-                false);
+                () -> StaticAccessMode.FULL,
+                false,
+                NullLogProvider.getInstance());
 
-        cursor.initState(read, mock(TxStateHolder.class), () -> Static.FULL);
+        cursor.initState(read, mock(TxStateHolder.class), () -> StaticAccessMode.FULL, true);
         int numNodes = 10;
         int numRelationships = 5;
         int type = 1;

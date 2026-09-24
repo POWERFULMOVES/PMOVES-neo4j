@@ -22,14 +22,13 @@ package org.neo4j.kernel.api.impl.schema.writer;
 import java.io.IOException;
 import java.util.List;
 import java.util.Objects;
-import org.apache.lucene.document.Document;
-import org.apache.lucene.index.IndexWriter;
-import org.apache.lucene.index.Term;
-import org.apache.lucene.search.Query;
-import org.apache.lucene.store.Directory;
 import org.neo4j.configuration.Config;
-import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.kernel.api.impl.index.WritableDatabaseIndex;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDirectory;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDocument;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDocumentsFactory;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneIndexWriter;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneSettings;
 import org.neo4j.kernel.api.impl.index.partition.AbstractIndexPartition;
 
 /**
@@ -37,68 +36,71 @@ import org.neo4j.kernel.api.impl.index.partition.AbstractIndexPartition;
  * on-demand if needed.
  * <p>
  * Writer threats partition as writable if partition has number of live and deleted documents that is less
- * than a value explicitly configured using {@link GraphDatabaseInternalSettings#lucene_max_partition_size}
+ * than a value explicitly configured using {@link LuceneSettings#lucene_max_partition_size}
  * or {@link #DEFAULT_MAXIMUM_PARTITION_SIZE} otherwise.
  * First observable partition that satisfy writer criteria is used for writing.
  */
-public class PartitionedIndexWriter implements LuceneIndexWriter {
+public class PartitionedIndexWriter implements LucenePartitionIndexWriter {
     // by default we still keep a spare of 10% to the maximum partition size: During concurrent updates
     // it could happen that 2 threads reserve space in a partition (without claiming it by doing addDocument):
-    private static final Integer DEFAULT_MAXIMUM_PARTITION_SIZE = IndexWriter.MAX_DOCS - (IndexWriter.MAX_DOCS / 10);
+    private static final Integer DEFAULT_MAXIMUM_PARTITION_SIZE =
+            LuceneIndexWriter.MAX_DOCS - (LuceneIndexWriter.MAX_DOCS / 10);
 
     private final WritableDatabaseIndex<?, ?> index;
     private final int maximumPartitionSize;
 
     public PartitionedIndexWriter(WritableDatabaseIndex<?, ?> index, Config config) {
         this.index = index;
-        var configuredMaxPartitionSize = config.get(GraphDatabaseInternalSettings.lucene_max_partition_size);
+        Integer configuredMaxPartitionSize = config.get(LuceneSettings.lucene_max_partition_size);
         maximumPartitionSize = Objects.requireNonNullElse(configuredMaxPartitionSize, DEFAULT_MAXIMUM_PARTITION_SIZE);
     }
 
     @Override
-    public void addDocument(Document doc) throws IOException {
+    public LuceneDocumentsFactory documentsFactory() {
+        List<AbstractIndexPartition> partitions = index.getPartitions();
+        if (partitions.isEmpty()) {
+            throw new IllegalStateException("No partitions found");
+        }
+
+        return partitions.getFirst().getIndexWriter().documentFactory();
+    }
+
+    @Override
+    public void addDocument(LuceneDocument doc) throws IOException {
         getIndexWriter(1).addDocument(doc);
     }
 
     @Override
-    public void addDocuments(int numDocs, Iterable<Document> documents) throws IOException {
+    public void addDocuments(int numDocs, Iterable<LuceneDocument> documents) throws IOException {
         getIndexWriter(numDocs).addDocuments(documents);
     }
 
     @Override
-    public void updateDocument(Term term, Document doc) throws IOException {
+    public void updateDocument(String idField, long id, LuceneDocument doc) throws IOException {
         List<AbstractIndexPartition> partitions = index.getPartitions();
         if (WritableDatabaseIndex.hasSinglePartition(partitions)
                 && writablePartition(WritableDatabaseIndex.getFirstPartition(partitions), 1)) {
-            WritableDatabaseIndex.getFirstPartition(partitions).getIndexWriter().updateDocument(term, doc);
+            WritableDatabaseIndex.getFirstPartition(partitions).getIndexWriter().updateDocument(idField, id, doc);
         } else {
-            deleteDocuments(term);
+            deleteDocuments(idField, id);
             addDocument(doc);
         }
     }
 
     @Override
-    public void deleteDocuments(Query query) throws IOException {
-        List<AbstractIndexPartition> partitions = index.getPartitions();
-        for (AbstractIndexPartition partition : partitions) {
-            partition.getIndexWriter().deleteDocuments(query);
-        }
-    }
-
-    @Override
-    public void addDirectory(int count, Directory directory) throws IOException {
+    public void addDirectory(int count, LuceneDirectory directory) throws IOException {
         getIndexWriter(count).addIndexes(directory);
     }
 
     @Override
-    public void deleteDocuments(Term term) throws IOException {
+    public void deleteDocuments(String idField, long id) throws IOException {
         List<AbstractIndexPartition> partitions = index.getPartitions();
         for (AbstractIndexPartition partition : partitions) {
-            partition.getIndexWriter().deleteDocuments(term);
+            partition.getIndexWriter().deleteDocuments(idField, id);
         }
     }
 
-    private IndexWriter getIndexWriter(int numDocs) throws IOException {
+    private LuceneIndexWriter getIndexWriter(int numDocs) throws IOException {
         synchronized (index) {
             // We synchronise on the index to coordinate with all writers about how many partitions we
             // have, and when new ones are created. The discovery that a new partition needs to be added,
@@ -107,7 +109,7 @@ public class PartitionedIndexWriter implements LuceneIndexWriter {
         }
     }
 
-    private IndexWriter unsafeGetIndexWriter(int numDocs) throws IOException {
+    private LuceneIndexWriter unsafeGetIndexWriter(int numDocs) throws IOException {
         List<AbstractIndexPartition> indexPartitions = index.getPartitions();
         int size = indexPartitions.size();
         //noinspection ForLoopReplaceableByForEach
@@ -124,6 +126,6 @@ public class PartitionedIndexWriter implements LuceneIndexWriter {
     }
 
     private boolean writablePartition(AbstractIndexPartition partition, int numDocs) {
-        return maximumPartitionSize - partition.getIndexWriter().getDocStats().maxDoc >= numDocs;
+        return maximumPartitionSize - partition.getIndexWriter().getMaxDocs() >= numDocs;
     }
 }

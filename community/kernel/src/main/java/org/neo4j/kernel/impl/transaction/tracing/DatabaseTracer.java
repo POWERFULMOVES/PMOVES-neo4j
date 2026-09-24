@@ -21,10 +21,11 @@ package org.neo4j.kernel.impl.transaction.tracing;
 
 import java.nio.file.Path;
 import org.neo4j.io.pagecache.context.CursorContext;
-import org.neo4j.kernel.impl.transaction.log.LogAppendEvent;
-import org.neo4j.kernel.impl.transaction.log.LogFileCreateEvent;
-import org.neo4j.kernel.impl.transaction.log.LogFileFlushEvent;
-import org.neo4j.kernel.impl.transaction.log.LogTracers;
+import org.neo4j.wal.LogAppendEvent;
+import org.neo4j.wal.LogFileCreateEvent;
+import org.neo4j.wal.LogFileFlushEvent;
+import org.neo4j.wal.LogTracers;
+import org.neo4j.wal.checkpoint.LogCheckPointEvent;
 
 public interface DatabaseTracer extends TransactionTracer, CheckPointTracer, LogTracers {
     DatabaseTracer NULL = new DatabaseTracer() {
@@ -110,8 +111,13 @@ public interface DatabaseTracer extends TransactionTracer, CheckPointTracer, Log
         }
 
         @Override
-        public TransactionRollbackEvent beginAsyncRollback() {
+        public TransactionRollbackEvent beginAsyncTransactionRollback() {
             return TransactionRollbackEvent.NULL;
+        }
+
+        @Override
+        public DatabaseAsyncRollbackEvent beginAsyncDatabaseRollback() {
+            return DatabaseAsyncRollbackEvent.NULL;
         }
 
         @Override

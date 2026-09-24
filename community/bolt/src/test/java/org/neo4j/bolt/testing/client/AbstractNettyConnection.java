@@ -28,44 +28,66 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
 import io.netty.handler.logging.LogLevel;
 import io.netty.handler.logging.LoggingHandler;
 import io.netty.handler.ssl.SslContext;
+import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.Future;
 import java.io.IOException;
 import java.net.SocketAddress;
 import java.security.PrivateKey;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLException;
-import org.neo4j.bolt.negotiation.ProtocolVersion;
 import org.neo4j.bolt.negotiation.message.ProtocolCapability;
 import org.neo4j.bolt.negotiation.util.BitMask;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
+import org.neo4j.bolt.protocol.common.connector.transport.ConnectorTransport;
+import org.neo4j.bolt.testing.client.error.BoltTestClientClosedException;
+import org.neo4j.bolt.testing.client.error.BoltTestClientConnectionTimeoutException;
 import org.neo4j.bolt.testing.client.error.BoltTestClientException;
 import org.neo4j.bolt.testing.client.error.BoltTestClientIOException;
 import org.neo4j.bolt.testing.client.error.BoltTestClientInterruptedException;
+import org.neo4j.bolt.testing.client.error.BoltTestClientReadTimeoutException;
+import org.neo4j.bolt.testing.client.error.BoltTestClientStateException;
+import org.neo4j.bolt.testing.client.error.BoltTestClientWriteTimeoutException;
 import org.neo4j.bolt.testing.client.handler.NotifyingChannelInboundHandler;
+import org.neo4j.bolt.testing.client.handler.NotifyingChannelResponseMessageInboundHandler;
 import org.neo4j.bolt.testing.client.handler.TestChannelInitializer;
 import org.neo4j.bolt.testing.client.struct.ProtocolProposal;
+import org.neo4j.bolt.testing.messages.BoltWire;
+import org.neo4j.boltmessages.request.RequestMessage;
+import org.neo4j.boltmessages.response.ResponseMessage;
+import org.neo4j.internal.helpers.Exceptions;
 
-public abstract sealed class AbstractNettyConnection implements BoltTestConnection
+public abstract sealed class AbstractNettyConnection implements BoltTestConnection, UnwiredTestConnection
         permits LocalConnection, SocketConnection, UnixDomainSocketConnection {
+
     private static final int MAX_CHUNK_SIZE = 1 << 16 - 1;
 
     protected static final String LOGGING_HANDLER_NAME = "loggingHandler";
     protected static final String INBOUND_HANDLER_NAME = "notifyingChannelInboundHandler";
+    public static final long RECV_TIMEOUT = 30_000_000_000L;
+    public static final int READ_LOCK_TIMEOUT = 1_000;
 
+    protected final ConnectorTransport transport;
+    protected final BoltWire wire;
     private final EventLoopGroup eventLoopGroup;
     protected final Object readLock = new Object();
     protected final CompositeByteBuf readBuffer = Unpooled.compositeBuffer();
+    protected final List<ResponseMessage> responseMessageList;
 
+    private boolean closed;
     private Channel channel;
     protected volatile SSLEngine sslEngine;
 
@@ -75,12 +97,17 @@ public abstract sealed class AbstractNettyConnection implements BoltTestConnecti
 
     private long noopCount;
 
-    public AbstractNettyConnection(EventLoopGroup eventLoopGroup) {
-        this.eventLoopGroup = eventLoopGroup;
+    public AbstractNettyConnection(ConnectorTransport transport, BoltWire wire) {
+        this.transport = transport;
+        this.wire = wire;
+        this.eventLoopGroup = new MultiThreadIoEventLoopGroup(1, transport.createIoHandlerFactory());
+        this.responseMessageList = Collections.synchronizedList(new ArrayList<>());
     }
 
-    public AbstractNettyConnection() {
-        this(new NioEventLoopGroup(1));
+    protected void ensureValid() {
+        if (this.closed) {
+            throw new IllegalStateException("Test client has already been closed");
+        }
     }
 
     protected abstract SocketAddress address();
@@ -108,12 +135,12 @@ public abstract sealed class AbstractNettyConnection implements BoltTestConnecti
                 throw new IllegalStateException("Requested mTLS authentication on connection without TLS support");
             }
         } catch (SSLException ex) {
-            throw new BoltTestClientIOException("Failed to instantiate SslContext", ex);
+            throw new BoltTestClientConnectionTimeoutException("Failed to instantiate SslContext", ex);
         }
 
         ch.pipeline()
                 .addLast(LOGGING_HANDLER_NAME, new LoggingHandler(LogLevel.INFO))
-                .addLast(INBOUND_HANDLER_NAME, new NotifyingChannelInboundHandler(this.readBuffer, this.readLock));
+                .addLast(INBOUND_HANDLER_NAME, getNotifyingChannelInboundHandler());
 
         var promise = ch.newPromise();
         if (future == null) {
@@ -137,12 +164,20 @@ public abstract sealed class AbstractNettyConnection implements BoltTestConnecti
 
     protected void ensureActive() {
         if (this.channel == null || !this.channel.isActive()) {
-            throw new BoltTestClientIOException("Connection closed");
+            throw new BoltTestClientClosedException("Connection closed");
         }
     }
 
     @Override
+    public BoltWire wire() {
+        this.ensureValid();
+        return this.wire;
+    }
+
+    @Override
     public BoltTestConnection connect() throws BoltTestClientException {
+        this.ensureValid();
+
         if (this.channel != null && this.channel.isOpen()) {
             return this;
         }
@@ -166,12 +201,13 @@ public abstract sealed class AbstractNettyConnection implements BoltTestConnecti
             var f = bootstrap.connect(address);
             if (!f.await(30, TimeUnit.SECONDS)) {
                 f.cancel(true);
-                throw new BoltTestClientIOException(
+
+                throw new BoltTestClientConnectionTimeoutException(
                         "Failed to establish connection to " + address + ": Timed out after 30 seconds");
             }
 
             if (!f.isSuccess()) {
-                throw new BoltTestClientIOException("Failed to establish connection: " + address, f.cause());
+                throw new BoltTestClientClosedException("Failed to establish connection: " + address, f.cause());
             }
 
             this.channel = f.channel();
@@ -185,6 +221,8 @@ public abstract sealed class AbstractNettyConnection implements BoltTestConnecti
 
     @Override
     public BoltTestConnection setCertificate(X509Certificate certificate, PrivateKey privateKey) {
+        this.ensureValid();
+
         Objects.requireNonNull(certificate);
         Objects.requireNonNull(privateKey);
 
@@ -195,6 +233,8 @@ public abstract sealed class AbstractNettyConnection implements BoltTestConnecti
 
     @Override
     public <T> BoltTestConnection setOption(ChannelOption<T> option, T value) {
+        this.ensureValid();
+
         this.options.put(option, value);
 
         if (this.channel != null) {
@@ -206,6 +246,8 @@ public abstract sealed class AbstractNettyConnection implements BoltTestConnecti
 
     @Override
     public BoltTestConnection disconnect() {
+        this.ensureValid();
+
         if (this.channel == null) {
             return this;
         }
@@ -217,7 +259,7 @@ public abstract sealed class AbstractNettyConnection implements BoltTestConnecti
                     f.await();
 
                     if (!f.isSuccess()) {
-                        throw new BoltTestClientIOException(
+                        throw new BoltTestClientClosedException(
                                 "Failed to close channel: " + this.channel.remoteAddress(), f.cause());
                     }
                 } catch (InterruptedException ex) {
@@ -234,8 +276,10 @@ public abstract sealed class AbstractNettyConnection implements BoltTestConnecti
 
     @Override
     public BoltTestConnection sendRaw(ByteBuf buf) {
+        this.ensureValid();
+
         if (this.channel == null) {
-            throw new BoltTestClientException("No active connection");
+            throw new BoltTestClientStateException("No active connection");
         }
 
         this.ensureActive();
@@ -247,12 +291,27 @@ public abstract sealed class AbstractNettyConnection implements BoltTestConnecti
 
                 this.ensureActive();
 
-                throw new BoltTestClientIOException(
+                throw new BoltTestClientWriteTimeoutException(
                         "Failed to write message to " + this.channel.remoteAddress() + ": Timed out after 30 seconds");
             }
 
             if (!f.isSuccess()) {
-                throw new BoltTestClientIOException(
+                var cause = f.cause();
+
+                var networkErrors = Exceptions.contains(cause, e -> {
+                    var simpleName = e.getClass().getSimpleName();
+                    if (simpleName.contains("StacklessClosedChannel") || simpleName.contains("NativeIoException")) {
+                        return true;
+                    }
+
+                    return e.getMessage() != null && e.getMessage().contains("Connection reset by peer");
+                });
+
+                if (networkErrors) {
+                    throw new BoltTestClientClosedException(cause);
+                }
+
+                throw new BoltTestClientClosedException(
                         "Failed to write message to " + this.channel.remoteAddress(), f.cause());
             }
         } catch (InterruptedException ex) {
@@ -281,6 +340,100 @@ public abstract sealed class AbstractNettyConnection implements BoltTestConnecti
         return this.sendRaw(buffer);
     }
 
+    @Override
+    public void unwired(Consumer<UnwiredTestConnection> work) {
+        this.ensureValid();
+
+        this.channel.pipeline().remove(INBOUND_HANDLER_NAME);
+        this.channel
+                .pipeline()
+                .addLast(new NotifyingChannelResponseMessageInboundHandler(this.responseMessageList, this.readLock));
+        work.accept(this);
+    }
+
+    private NotifyingChannelInboundHandler getNotifyingChannelInboundHandler() {
+        return new NotifyingChannelInboundHandler(this.readBuffer, this.readLock);
+    }
+
+    @Override
+    public UnwiredTestConnection sendRequest(RequestMessage requestMessage) {
+        this.ensureValid();
+
+        if (this.channel == null) {
+            throw new BoltTestClientStateException("No active connection");
+        }
+
+        this.ensureActive();
+
+        try {
+            var f = this.channel.writeAndFlush(requestMessage);
+            if (!f.await(30, TimeUnit.SECONDS)) {
+                f.cancel(true);
+
+                this.ensureActive();
+
+                throw new BoltTestClientWriteTimeoutException(
+                        "Failed to write message to " + this.channel.remoteAddress() + ": Timed out after 30 seconds");
+            }
+
+            if (!f.isSuccess()) {
+                var cause = f.cause();
+
+                var networkErrors = Exceptions.contains(cause, e -> {
+                    var simpleName = e.getClass().getSimpleName();
+                    if (simpleName.contains("StacklessClosedChannel") || simpleName.contains("NativeIoException")) {
+                        return true;
+                    }
+
+                    return e.getMessage() != null && e.getMessage().contains("Connection reset by peer");
+                });
+
+                if (networkErrors) {
+                    throw new BoltTestClientClosedException(cause);
+                }
+
+                throw new BoltTestClientClosedException(
+                        "Failed to write message to " + this.channel.remoteAddress(), f.cause());
+            }
+        } catch (InterruptedException ex) {
+            throw new BoltTestClientInterruptedException(ex);
+        }
+
+        return this;
+    }
+
+    @Override
+    public ResponseMessage receiveResponse() {
+        this.ensureValid();
+
+        if (this.channel == null) {
+            throw new BoltTestClientStateException("No active connection");
+        }
+
+        synchronized (this.readLock) {
+            var readInitializedAt = System.nanoTime();
+            while (this.responseMessageList.isEmpty()) {
+                this.ensureActive();
+
+                try {
+                    this.readLock.wait(READ_LOCK_TIMEOUT);
+
+                    // abort if the message has not been made available within a reasonable amount
+                    // of time
+                    if (this.responseMessageList.isEmpty()) {
+                        var currentTime = System.nanoTime();
+                        if (currentTime - readInitializedAt > RECV_TIMEOUT) {
+                            throw new BoltTestClientReadTimeoutException("Timeout reading next message");
+                        }
+                    }
+                } catch (InterruptedException ex) {
+                    throw new BoltTestClientInterruptedException(ex);
+                }
+            }
+            return this.responseMessageList.removeFirst();
+        }
+    }
+
     private static void writeBitMask(ByteBuf buf, BitMask mask) {
         var totalBits = mask.length();
         var encodedLength = totalBits / 7 + (totalBits % 7 == 0 ? 0 : 1);
@@ -300,7 +453,7 @@ public abstract sealed class AbstractNettyConnection implements BoltTestConnecti
         do {
             var length = Math.min(buf.readableBytes(), MAX_CHUNK_SIZE);
 
-            var bytes = buf.readSlice(length);
+            var bytes = buf.readBytes(length);
 
             var header = Unpooled.buffer(2);
             header.writeShort(length);
@@ -308,21 +461,27 @@ public abstract sealed class AbstractNettyConnection implements BoltTestConnecti
             this.sendRaw(Unpooled.compositeBuffer(2).addComponent(true, header).addComponent(true, bytes));
 
             if (length == 0) {
+                buf.release();
                 return this;
             }
         } while (buf.isReadable());
 
         this.sendRaw(Unpooled.buffer(2).writeShort(0));
+        buf.release();
         return this;
     }
 
     @Override
     public long noopCount() {
+        this.ensureValid();
+
         return this.noopCount;
     }
 
     @Override
     public ByteBuf receive(int length) {
+        this.ensureValid();
+
         // buffer is deliberately unpooled in order to keep the test code as simple as
         // possible (performance being secondary here)
         var buf = Unpooled.buffer(length);
@@ -334,19 +493,19 @@ public abstract sealed class AbstractNettyConnection implements BoltTestConnecti
                 this.ensureActive();
 
                 try {
-                    this.readLock.wait(1_000);
+                    this.readLock.wait(READ_LOCK_TIMEOUT);
                     currentReadableBytes = this.readBuffer.readableBytes();
 
                     // abort if the message has not been made available within a reasonable amount
                     // of time
                     if (currentReadableBytes < length) {
                         var currentTime = System.nanoTime();
-                        if (currentTime - readInitializedAt > 30_000_000_000L) {
+                        if (currentTime - readInitializedAt > RECV_TIMEOUT) {
                             var message = "Failed to receive expected message of " + length
                                     + " bytes within deadline of 30 seconds (available bytes: " + currentReadableBytes
                                     + "; channel: " + (this.channel.isOpen() ? "open" : "closed") + ")";
 
-                            throw new BoltTestClientIOException(message);
+                            throw new BoltTestClientReadTimeoutException(message);
                         }
                     }
                 } catch (InterruptedException ex) {
@@ -372,8 +531,7 @@ public abstract sealed class AbstractNettyConnection implements BoltTestConnecti
 
         var versionLength = this.receiveVarInt();
         if (versionLength < 0) {
-            throw new BoltTestClientIOException(
-                    "Received illegal protocol proposal: Announced " + versionLength + " versions");
+            throw new AssertionError("Received illegal protocol proposal: Announced " + versionLength + " versions");
         }
 
         var versions = new ArrayList<ProtocolVersion>(versionLength);
@@ -399,7 +557,7 @@ public abstract sealed class AbstractNettyConnection implements BoltTestConnecti
             }
         }
 
-        throw new BoltTestClientIOException("Received illegal VarInt consisting of more than 5 bytes");
+        throw new AssertionError("Received illegal VarInt consisting of more than 5 bytes");
     }
 
     public BitMask receiveBitMask() {
@@ -449,12 +607,24 @@ public abstract sealed class AbstractNettyConnection implements BoltTestConnecti
     }
 
     @Override
-    public boolean isClosed() {
+    public boolean isDisconnected() {
+        this.ensureValid();
+
         try {
             this.sendRaw(new byte[] {0, 0});
             return !this.channel.isActive();
         } catch (BoltTestClientIOException e) {
             return true;
+        }
+    }
+
+    @Override
+    public void close() {
+        try {
+            BoltTestConnection.super.close();
+        } finally {
+            ReferenceCountUtil.safeRelease(this.readBuffer);
+            this.closed = true;
         }
     }
 }

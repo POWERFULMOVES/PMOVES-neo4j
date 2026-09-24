@@ -30,6 +30,7 @@ import org.neo4j.annotations.api.PublicApi;
 public enum PropertyType {
     BOOLEAN,
     STRING,
+    UUID,
     INTEGER,
     FLOAT,
     DATE,
@@ -41,6 +42,7 @@ public enum PropertyType {
     POINT,
     LIST_BOOLEAN_NOT_NULL,
     LIST_STRING_NOT_NULL,
+    LIST_UUID_NOT_NULL,
     LIST_INTEGER_NOT_NULL,
     LIST_FLOAT_NOT_NULL,
     LIST_DATE_NOT_NULL,
@@ -50,4 +52,13 @@ public enum PropertyType {
     LIST_ZONED_DATETIME_NOT_NULL,
     LIST_DURATION_NOT_NULL,
     LIST_POINT_NOT_NULL,
+    /**
+     * Property type constraints with vectors must be created through Cypher.
+     * Passing this value to {@link ConstraintCreator#assertPropertyHasType(String, PropertyType...)}
+     * is not supported.
+     * This value can be returned from {@link ConstraintDefinition#getPropertyType()}. It does not specify the
+     * coordinate type and dimension. If that information is needed, Cypher must be used.
+     */
+    VECTOR,
+    LIST_VECTOR_NOT_NULL;
 }

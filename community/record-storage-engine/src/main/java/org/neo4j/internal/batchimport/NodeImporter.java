@@ -20,6 +20,7 @@
 package org.neo4j.internal.batchimport;
 
 import static java.lang.Long.max;
+import static org.neo4j.internal.batchimport.SchemaMonitor.EMPTY_UNIQUENESS_UPDATES_LISTENER;
 import static org.neo4j.kernel.impl.store.StoreType.NODE_LABEL;
 import static org.neo4j.kernel.impl.store.StoreType.PROPERTY_ARRAY;
 import static org.neo4j.kernel.impl.store.StoreType.PROPERTY_STRING;
@@ -30,6 +31,9 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
+import org.eclipse.collections.api.factory.primitive.IntSets;
+import org.eclipse.collections.api.set.primitive.IntSet;
+import org.neo4j.batchimport.api.input.ApplicationMode;
 import org.neo4j.batchimport.api.input.Collector;
 import org.neo4j.batchimport.api.input.Group;
 import org.neo4j.batchimport.api.input.InputChunk;
@@ -37,6 +41,7 @@ import org.neo4j.common.EntityType;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.internal.batchimport.DataImporter.Monitor;
 import org.neo4j.internal.batchimport.cache.idmapping.IdMapper;
+import org.neo4j.internal.batchimport.cache.idmapping.cuckoo.KeyCollisionException;
 import org.neo4j.internal.batchimport.store.BatchingNeoStores;
 import org.neo4j.internal.id.IdSequence;
 import org.neo4j.io.pagecache.PageCursor;
@@ -63,6 +68,7 @@ public class NodeImporter extends EntityImporter {
     private final Collector badCollector;
     private final NodeRecord nodeRecord;
     private final IdMapper idMapper;
+    private final IdMapper.Setter idMapperSetter;
     private final BatchingIdGetter nodeIds;
     private final PropertyStore idPropertyStore;
     private final PropertyRecord idPropertyRecord;
@@ -78,7 +84,10 @@ public class NodeImporter extends EntityImporter {
     private Object inputId;
     private Group group;
 
+    private boolean hasExternallyChosenIds;
+
     NodeImporter(
+            int workerId,
             BatchingNeoStores stores,
             IdMapper idMapper,
             Monitor monitor,
@@ -89,6 +98,7 @@ public class NodeImporter extends EntityImporter {
         super(stores, monitor, contextFactory, memoryTracker, schemaMonitor);
         this.labelTokenRepository = stores.getTokenHolders().labelTokens();
         this.idMapper = idMapper;
+        this.idMapperSetter = idMapper.newSetter(workerId);
         this.nodeStore = stores.getNodeStore();
         this.badCollector = badCollector;
         this.nodeRecord = nodeStore.newRecord();
@@ -105,16 +115,22 @@ public class NodeImporter extends EntityImporter {
     public boolean id(long id) {
         nodeRecord.setId(id);
         highestId = max(highestId, id);
+        hasExternallyChosenIds = true;
         return true;
     }
 
     @Override
     public boolean id(Object id, Group group) {
-        return id(id, group, nodeIds);
+        return assignId(id, group, nodeIds);
     }
 
     @Override
     public boolean id(Object id, Group group, IdSequence idSequence) {
+        hasExternallyChosenIds = true;
+        return assignId(id, group, idSequence);
+    }
+
+    private boolean assignId(Object id, Group group, IdSequence idSequence) {
         inputId = id;
         this.group = group;
         long nodeId = idSequence.nextId(cursorContext);
@@ -130,7 +146,8 @@ public class NodeImporter extends EntityImporter {
                     allocatorProvider.allocator(PROPERTY_STRING),
                     allocatorProvider.allocator(PROPERTY_ARRAY),
                     cursorContext,
-                    memoryTracker);
+                    memoryTracker,
+                    storeFormat);
             idPropertyRecord.addPropertyBlock(idPropertyBlock);
             idPropertyRecord.setId(nodeId); // yes nodeId
             idPropertyRecord.setInUse(true);
@@ -163,6 +180,7 @@ public class NodeImporter extends EntityImporter {
         }
 
         // Compose the labels
+        IntSet entityTokens = IntSets.immutable.empty();
         if (!hasLabelField) {
             if (!labels.isEmpty()) {
                 var labelsArray = labels.toArray(new String[0]);
@@ -170,7 +188,7 @@ public class NodeImporter extends EntityImporter {
                 try {
                     labelTokenRepository.getOrCreateIds(labelsArray, labelIdsInts);
                     Arrays.sort(labelIdsInts);
-                    schemaMonitor.entityTokens(labelIdsInts);
+                    entityTokens = IntSets.immutable.of(labelIdsInts);
                 } catch (KernelException e) {
                     throw new RuntimeException(e);
                 }
@@ -187,18 +205,46 @@ public class NodeImporter extends EntityImporter {
         }
 
         // Write data to stores
-        if (schemaMonitor.endOfEntity(
-                nodeRecord.getId(),
-                (entityId, tokens, properties, constraintDescription) -> badCollector.collectEntityViolatingConstraint(
-                        inputId, entityId, namedProperties(properties), constraintDescription, EntityType.NODE))) {
-            nodeRecord.setNextProp(createAndWritePropertyChain(cursorContext));
-            nodeRecord.setInUse(true);
-            nodeStore.updateRecord(nodeRecord, IGNORE, nodeUpdateCursor, cursorContext, storeCursors);
-            if (inputId != null) {
-                idMapper.put(inputId, nodeRecord.getId(), group);
+        try {
+            var entity = new SchemaMonitor.Entity(
+                    inputId,
+                    nodeRecord.getId(),
+                    properties,
+                    Collections.emptyList(),
+                    null,
+                    false,
+                    IntSets.immutable.empty(),
+                    IntSets.immutable.empty(),
+                    entityTokens,
+                    IntSets.immutable.empty(),
+                    ApplicationMode.CREATE,
+                    sourceDescription,
+                    lineNumber);
+            if (schemaMonitor.handle(
+                    entity,
+                    SchemaMonitor.NO_EXISTING_PROPERTY_KEYS_LOOKUP,
+                    (e, constraintDescription) -> badCollector.collectEntityViolatingConstraint(
+                            inputId,
+                            e.entityId,
+                            namedProperties(e.propertiesMap()),
+                            constraintDescription,
+                            EntityType.NODE,
+                            sourceDescription,
+                            lineNumber),
+                    EMPTY_UNIQUENESS_UPDATES_LISTENER)) {
+                if (inputId != null) {
+                    idMapperSetter.put(inputId, nodeRecord.getId(), group);
+                }
+                nodeRecord.setNextProp(createAndWritePropertyChain(cursorContext));
+                nodeRecord.setInUse(true);
+                nodeStore.updateRecord(nodeRecord, IGNORE, nodeUpdateCursor, cursorContext, storeCursors);
+                nodeCount++;
+            } else {
+                freeUnusedId(nodeStore, nodeRecord.getId(), cursorContext);
             }
-            nodeCount++;
-        } else {
+        } catch (KeyCollisionException e) {
+            badCollector.collectDuplicateNode(
+                    inputId, NULL_REFERENCE.longValue(), group, sourceDescription, lineNumber);
             freeUnusedId(nodeStore, nodeRecord.getId(), cursorContext);
         }
         reset();
@@ -229,6 +275,9 @@ public class NodeImporter extends EntityImporter {
         nodeUpdateCursor.close();
         idPropertyUpdateCursor.close();
         cursorContext.close();
+        if (hasExternallyChosenIds) {
+            monitor.noteExternallyChosenNodeIds();
+        }
     }
 
     @Override

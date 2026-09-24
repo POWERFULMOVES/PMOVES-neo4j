@@ -29,11 +29,8 @@ import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.io.pagecache.tracing.version.VersionStorageTracer;
 import org.neo4j.kernel.database.NamedDatabaseId;
-import org.neo4j.kernel.impl.transaction.log.LogAppendEvent;
-import org.neo4j.kernel.impl.transaction.log.LogFileCreateEvent;
-import org.neo4j.kernel.impl.transaction.log.LogFileFlushEvent;
+import org.neo4j.kernel.impl.transaction.tracing.DatabaseAsyncRollbackEvent;
 import org.neo4j.kernel.impl.transaction.tracing.DatabaseTracer;
-import org.neo4j.kernel.impl.transaction.tracing.LogCheckPointEvent;
 import org.neo4j.kernel.impl.transaction.tracing.StoreApplyEvent;
 import org.neo4j.kernel.impl.transaction.tracing.TransactionEvent;
 import org.neo4j.kernel.impl.transaction.tracing.TransactionRollbackEvent;
@@ -41,12 +38,16 @@ import org.neo4j.kernel.impl.transaction.tracing.TransactionWriteEvent;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.kernel.monitoring.tracing.Tracers;
 import org.neo4j.lock.LockTracer;
-import org.neo4j.storageengine.api.MetadataProvider;
+import org.neo4j.storageengine.api.LogMetadataProvider;
 import org.neo4j.storageengine.api.TransactionId;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.DbmsExtension;
 import org.neo4j.test.extension.ExtensionCallback;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.wal.LogAppendEvent;
+import org.neo4j.wal.LogFileCreateEvent;
+import org.neo4j.wal.LogFileFlushEvent;
+import org.neo4j.wal.checkpoint.LogCheckPointEvent;
 
 @DbmsExtension(configurationCallback = "configure")
 public class HighestEverClosedTransactionIT {
@@ -54,7 +55,7 @@ public class HighestEverClosedTransactionIT {
     private GraphDatabaseAPI db;
 
     @Inject
-    private MetadataProvider metadataProvider;
+    private LogMetadataProvider metadataProvider;
 
     private PostCommitChecker postCommitCallback;
 
@@ -96,7 +97,7 @@ public class HighestEverClosedTransactionIT {
 
     @Test
     void initialClosedAndHighestClosedTransactionAreAligned() {
-        var lastClosedTransaction = metadataProvider.getLastClosedTransaction();
+        var lastClosedTransaction = metadataProvider.getHighestGapFreeClosedTransaction();
         var highestClosedTransaction = metadataProvider.getHighestEverClosedTransaction();
 
         assertEquals(lastClosedTransaction.transactionId(), highestClosedTransaction);
@@ -249,7 +250,10 @@ public class HighestEverClosedTransactionIT {
 
                             @Override
                             public void chunkAppended(
-                                    int chunkNumber, long transactionSequenceNumber, long transactionId) {}
+                                    int chunkNumber,
+                                    long transactionSequenceNumber,
+                                    long transactionId,
+                                    long appendIndex) {}
                         };
                     }
 
@@ -283,8 +287,13 @@ public class HighestEverClosedTransactionIT {
             }
 
             @Override
-            public TransactionRollbackEvent beginAsyncRollback() {
+            public TransactionRollbackEvent beginAsyncTransactionRollback() {
                 return TransactionRollbackEvent.NULL;
+            }
+
+            @Override
+            public DatabaseAsyncRollbackEvent beginAsyncDatabaseRollback() {
+                return DatabaseAsyncRollbackEvent.NULL;
             }
 
             @Override

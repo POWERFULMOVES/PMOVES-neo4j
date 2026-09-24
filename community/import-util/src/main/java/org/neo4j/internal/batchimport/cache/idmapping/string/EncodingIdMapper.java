@@ -19,6 +19,7 @@
  */
 package org.neo4j.internal.batchimport.cache.idmapping.string;
 
+import static java.lang.Math.ceilDiv;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
 import static java.lang.Math.toIntExact;
@@ -32,10 +33,12 @@ import java.util.HashMap;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Function;
-import java.util.function.LongFunction;
+import java.util.function.LongPredicate;
 import java.util.stream.LongStream;
 import org.eclipse.collections.api.iterator.LongIterator;
+import org.eclipse.collections.api.set.primitive.LongSet;
 import org.eclipse.collections.api.tuple.primitive.LongLongPair;
 import org.eclipse.collections.impl.iterator.ImmutableEmptyLongIterator;
 import org.neo4j.batchimport.api.PropertyValueLookup;
@@ -49,13 +52,13 @@ import org.neo4j.internal.batchimport.Utils;
 import org.neo4j.internal.batchimport.cache.ByteArray;
 import org.neo4j.internal.batchimport.cache.LongArray;
 import org.neo4j.internal.batchimport.cache.MemoryStatsVisitor;
+import org.neo4j.internal.batchimport.cache.NumberArrayFactories;
 import org.neo4j.internal.batchimport.cache.NumberArrayFactory;
 import org.neo4j.internal.batchimport.cache.idmapping.IdMapper;
 import org.neo4j.internal.batchimport.cache.idmapping.string.ParallelSort.Comparator;
 import org.neo4j.internal.batchimport.cache.idmapping.string.ParallelSort.SortBucket;
 import org.neo4j.internal.batchimport.input.InputException;
 import org.neo4j.internal.helpers.Exceptions;
-import org.neo4j.internal.helpers.MathUtil;
 import org.neo4j.internal.helpers.progress.ProgressListener;
 import org.neo4j.internal.helpers.progress.ProgressMonitorFactory;
 import org.neo4j.memory.MemoryTracker;
@@ -64,12 +67,12 @@ import org.neo4j.util.concurrent.IdSpaceParallelExecution;
 import org.neo4j.util.concurrent.IdSpaceParallelExecution.Partition;
 
 /**
- * Maps arbitrary values to long ids. The values can be {@link #put(Object, long, Group) added} in any order,
- * but {@link #needsPreparation() needs} {@link IdMapper#prepare(PropertyValueLookup, Collector, ProgressMonitorFactory) preparation}
+ * Maps arbitrary values to long ids. The values can be {@link Setter#put(Object, long, Group) added} in any order,
+ * but {@link #needsPreparation() needs} {@link IdMapper#prepare(PropertyValueLookup, Collector, ProgressMonitorFactory, LongSet) preparation}
  *
  * in order to {@link Getter#get(Object, Group) get} ids back later.
  *
- * In the {@link IdMapper#prepare(PropertyValueLookup, Collector, ProgressMonitorFactory) preparation phase} the added entries are
+ * In the {@link IdMapper#prepare(PropertyValueLookup, Collector, ProgressMonitorFactory, LongSet) preparation phase} the added entries are
  * sorted according to a number representation of each input value and {@link Getter#get(Object, Group)} does simple
  * binary search to find the correct one.
  *
@@ -79,7 +82,7 @@ import org.neo4j.util.concurrent.IdSpaceParallelExecution.Partition;
  * of terms used in comments and variable names and some description what each generally means
  * (also applies to {@link ParallelSort} btw):
  * - input id:
- *       An id coming from the user that is associated with a neo4j id by calling {@link #put(Object, long, Group)}.
+ *       An id coming from the user that is associated with a neo4j id by calling {@link Setter#put(Object, long, Group)}.
  *       the first argument is the id that the user specified, the second is the neo4j id that user id will
  *       be associated with.
  * - encoder:
@@ -99,6 +102,7 @@ import org.neo4j.util.concurrent.IdSpaceParallelExecution.Partition;
  *       input ids will be encoded into the same eId. These are called collisions.
  */
 public class EncodingIdMapper implements IdMapper {
+
     public interface Monitor {
         /**
          * Called when mapper is starting to prepare, including the sorting.
@@ -171,8 +175,8 @@ public class EncodingIdMapper implements IdMapper {
     private final ReadableGroups groups;
 
     private long numberOfCollisions;
-    private final LongFunction<CollisionValues> collisionValuesFactory;
     private CollisionValues collisionValues;
+    private long numberOfDuplicates;
 
     public EncodingIdMapper(
             NumberArrayFactory cacheFactory,
@@ -182,7 +186,6 @@ public class EncodingIdMapper implements IdMapper {
             Monitor monitor,
             TrackerFactory trackerFactory,
             ReadableGroups groups,
-            LongFunction<CollisionValues> collisionValuesFactory,
             int chunkSize,
             int processorsForParallelWork,
             Comparator comparator,
@@ -191,7 +194,6 @@ public class EncodingIdMapper implements IdMapper {
         this.monitor = monitor;
         this.cacheFactory = cacheFactory;
         this.trackerFactory = trackerFactory;
-        this.collisionValuesFactory = collisionValuesFactory;
         this.comparator = comparator;
         this.processorsForParallelWork = max(processorsForParallelWork, 1);
         this.strictNodeCheck = strictNodeCheck;
@@ -204,12 +206,23 @@ public class EncodingIdMapper implements IdMapper {
     }
 
     @Override
-    public Getter newGetter() {
+    public Getter newGetter(int workerId) {
+        if (inputIdLookup == null) {
+            return new Getter() {
+                @Override
+                public long get(Object inputId, Group group) {
+                    return ID_NOT_FOUND;
+                }
+
+                @Override
+                public void close() {}
+            };
+        }
         return new LocalGetter();
     }
 
     private class LocalGetter implements Getter {
-        private final PropertyValueLookup.Lookup lookup = inputIdLookup.newLookup();
+        private final PropertyValueLookup.Lookup lookup = inputIdLookup.newLookup(true);
 
         /**
          * Returns the data index (i.e. node id) if found, or {@code -1} if not found.
@@ -227,13 +240,34 @@ public class EncodingIdMapper implements IdMapper {
     }
 
     @Override
-    public void put(Object inputId, long nodeId, Group group) {
-        // Encode and add the input id
-        long eId = encode(inputId);
-        dataCache.set(nodeId, eId);
-        groupCache.set(nodeId, group.id());
-        candidateHighestSetIndex.offer(nodeId);
-        radix.preRegisterRadixOf(eId);
+    public Setter newSetter(int workerId) {
+        if (readyForUse) {
+            throw new IllegalStateException("Cannot get a setter after the IdMapper has been prepared");
+        }
+        return (inputId, nodeId, group) -> {
+            // Encode and add the input id
+            long eId = encode(inputId);
+            dataCache.set(nodeId, eId);
+            groupCache.set(nodeId, group.id());
+            candidateHighestSetIndex.offer(nodeId);
+            radix.preRegisterRadixOf(eId);
+        };
+    }
+
+    @Override
+    public Getter newGetter() {
+        return newGetter(WORKER_ID_AGNOSTIC);
+    }
+
+    @Override
+    public void remove(Object inputId, long actualId, Group group) {
+        if (!readyForUse) {
+            // If we haven't yet prepared this IdMapper then we can simply mark this ID as removed
+            dataCache.set(actualId, GAP_VALUE);
+        } else {
+            // If we have prepared this IdMapper then we need to use the trackerCache to convey this fact
+            trackerCache.markAsDuplicate(actualId);
+        }
     }
 
     private long encode(Object inputId) {
@@ -261,7 +295,16 @@ public class EncodingIdMapper implements IdMapper {
      */
     @Override
     public void prepare(
-            PropertyValueLookup inputIdLookup, Collector collector, ProgressMonitorFactory progressMonitorFactory) {
+            PropertyValueLookup inputIdLookup,
+            Collector collector,
+            ProgressMonitorFactory progressMonitorFactory,
+            LongSet otherViolatingNodes) {
+        if (readyForUse) {
+            throw new IllegalStateException("Cannot prepare an IdMapper that has already been prepared");
+        }
+
+        otherViolatingNodes.forEach(violatingNodeId -> dataCache.set(violatingNodeId, GAP_VALUE));
+
         highestSetIndex = candidateHighestSetIndex.get();
         updateRadix(dataCache, radix, highestSetIndex);
         highestSetTrackerIndex = highestSetIndex - radix.getNullCount();
@@ -297,7 +340,16 @@ public class EncodingIdMapper implements IdMapper {
         readyForUse = true;
     }
 
+    /**
+     * Returns one more than the highest actual ID that has been set, i.e. the node high id. {@link #prepare} must
+     * have been called first.
+     */
+    public long getHighId() {
+        return highestSetIndex + 1;
+    }
+
     private void updateRadix(LongArray values, Radix radix, long highestSetIndex) {
+        radix.initialize(highestSetIndex + 1);
         runInParallel("update radix", highestSetIndex + 1, partition -> () -> {
             for (long dataIndex = partition.startInclusive(); dataIndex < partition.endExclusive(); dataIndex++) {
                 radix.registerRadixOf(values.get(dataIndex));
@@ -311,9 +363,22 @@ public class EncodingIdMapper implements IdMapper {
     }
 
     private long binarySearch(Object inputId, int groupId, PropertyValueLookup.Lookup lookup) {
+        if (highestSetTrackerIndex == -1) {
+            return ID_NOT_FOUND;
+        }
+
         long low = 0;
         long high = highestSetTrackerIndex;
-        long x = encode(inputId);
+        long x;
+        try {
+            x = encode(inputId);
+        } catch (NumberFormatException e) {
+            // A lookup id that cannot be encoded (e.g. a non-numeric value in an id space backed by
+            // LongEncoder) can never have been stored, so from a lookup point of view it simply does
+            // not exist. Reporting it as not found lets the caller route it to the bad collector
+            // instead of failing the whole import with a raw NumberFormatException.
+            return ID_NOT_FOUND;
+        }
         int rIndex = radixOf(x);
         for (int k = 0; k < sortBuckets.length; k++) {
             if (rIndex <= sortBuckets[k].highRadixRange) // bucketRange[k] > rIndex )
@@ -542,7 +607,9 @@ public class EncodingIdMapper implements IdMapper {
         numberOfCollisions = LongStream.of(numCollisionsPerWorker).sum();
         collisionNodeIdCache =
                 cacheFactory.newByteArray(pessimisticNumberOfCollisions, new byte[COLLISION_ENTRY_SIZE], memoryTracker);
-        collisionValues = collisionValuesFactory.apply(pessimisticNumberOfCollisions);
+        collisionValues =
+                new CollisionValues(NumberArrayFactories.OFF_HEAP, pessimisticNumberOfCollisions, memoryTracker);
+        radix.initialize(numberOfCollisions);
         runInParallel("build collision info", highestSetIndex + 1, partition -> () -> {
             int workerId = partition.partitionId();
             long nextLocalCollisionId = 0;
@@ -550,7 +617,7 @@ public class EncodingIdMapper implements IdMapper {
                 nextLocalCollisionId += numCollisionsPerWorker[i];
             }
             try (var localProgress = progress.threadLocalReporter();
-                    var lookup = inputIdLookup.newLookup()) {
+                    var lookup = inputIdLookup.newLookup(true)) {
                 for (long nodeId = partition.startInclusive(); nodeId < partition.endExclusive(); nodeId++) {
                     long eId = dataCache.get(nodeId);
                     if (isCollision(eId)) {
@@ -574,11 +641,13 @@ public class EncodingIdMapper implements IdMapper {
 
         collisionTrackerCache = trackerFactory.create(cacheFactory, pessimisticNumberOfCollisions);
 
-        // Detect input id duplicates within the same group, with source information, line number and the works
-        detectDuplicateInputIds(radix, collector, progress);
+        try {
+            // Detect input id duplicates within the same group, with source information, line number and the works
+            detectDuplicateInputIds(radix, collector, progress);
+        } finally {
+            collisionTrackerCache.close();
+        }
 
-        // We won't be needing these anymore
-        collisionTrackerCache.close();
         collisionTrackerCache = null;
     }
 
@@ -630,7 +699,11 @@ public class EncodingIdMapper implements IdMapper {
 
             @Override
             public long dataValue(long nodeId) {
-                return dataCache.get(nodeId);
+                // Must clear collision bit so radix matches what preRegisterRadixOf used.
+                // Without this, when radixShift >= 25 the collision bit (bit 56) shifts into
+                // bit 31, producing a negative rIndex that TrackerInitializer never assigns,
+                // leaving tracker slots at -1 and causing AIOOBE in partition().
+                return clearCollision(dataCache.get(nodeId));
             }
         };
 
@@ -647,6 +720,7 @@ public class EncodingIdMapper implements IdMapper {
 
         // Here we have a populated C
         // We want to detect duplicate input ids within it
+        var numDuplicates = new LongAdder();
         var detectionTasks = partitionDuplicateCheck().stream()
                 .map(partition -> (Callable<Void>) () -> {
                     try (var localProgress = progress.threadLocalReporter()) {
@@ -669,8 +743,9 @@ public class EncodingIdMapper implements IdMapper {
                             Object inputId = collisionValues.get(offset);
                             long nonDuplicateNodeId = detector.add(nodeId, inputId);
                             if (nonDuplicateNodeId != -1) { // Duplicate
-                                collector.collectDuplicateNode(inputId, nodeId, groups.get(groupId));
+                                collector.collectDuplicateNode(inputId, nodeId, groups.get(groupId), null, 0L);
                                 trackerCache.markAsDuplicate(nodeId);
+                                numDuplicates.add(1);
                                 unmarkAsCollision(nonDuplicateNodeId);
                             }
 
@@ -691,17 +766,18 @@ public class EncodingIdMapper implements IdMapper {
         } finally {
             executor.shutdown();
         }
+        this.numberOfDuplicates = numDuplicates.sum();
     }
 
     private Collection<LongLongPair> partitionDuplicateCheck() {
-        var roughNumPerPartition = Math.max(100, MathUtil.ceil(numberOfCollisions, processorsForParallelWork));
+        var roughNumPerPartition = Math.max(100, ceilDiv(numberOfCollisions, processorsForParallelWork));
         var partitions = new ArrayList<LongLongPair>();
         for (var fromInclusive = 0L; fromInclusive < numberOfCollisions; ) {
             var toExclusive = Math.min(fromInclusive + roughNumPerPartition, numberOfCollisions);
 
             // Avoid partition right in a seam
             var firstNodeId = collisionNodeIdCache.get5ByteLong(collisionTrackerCache.get(toExclusive - 1), 0);
-            while (toExclusive + 1 < numberOfCollisions) {
+            while (toExclusive < numberOfCollisions) {
                 var nextNodeId = collisionNodeIdCache.get5ByteLong(collisionTrackerCache.get(toExclusive), 0);
                 if (dataCache.get(firstNodeId) != dataCache.get(nextNodeId)
                         || groupOf(firstNodeId) != groupOf(nextNodeId)) {
@@ -739,12 +815,22 @@ public class EncodingIdMapper implements IdMapper {
             }
 
             @Override
-            public LongArray at(long index) {
-                return null;
+            public void set(long index, long value) {
+                throw new UnsupportedOperationException();
             }
 
             @Override
-            public void set(long index, long value) {
+            public boolean compareAndSet(long index, long expected, long value) {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public long compareAndExchange(long index, long expected, long value) {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public void getAndAdd(long index, long delta) {
                 throw new UnsupportedOperationException();
             }
 
@@ -810,7 +896,9 @@ public class EncodingIdMapper implements IdMapper {
                                 leftEq ? mid - 1 : mid, rightEq ? mid + 1 : mid, midValue, inputId, x, groupId);
                     }
                     // This is the only value here, let's do a simple comparison with correct group id and return
-                    return groupOf(dataIndex) == groupId ? dataIndex : ID_NOT_FOUND;
+                    return groupOf(dataIndex) == groupId && !trackerCache.isMarkedAsDuplicate(dataIndex)
+                            ? dataIndex
+                            : ID_NOT_FOUND;
                 case LT:
                     low = mid + 1;
                     break;
@@ -966,6 +1054,15 @@ public class EncodingIdMapper implements IdMapper {
                 return false;
             }
         };
+    }
+
+    @Override
+    public LongPredicate leftOverDuplicateNodesIdsPredicate() {
+        // Ids above the highest set index were never put into this mapper and so cannot be duplicates. The tracker
+        // cache is only sized to cover the ids that were.
+        return numberOfDuplicates == 0
+                ? null
+                : value -> value <= highestSetIndex && trackerCache.isMarkedAsDuplicate(value);
     }
 
     public static int defaultNumberOfSortWorkers() {

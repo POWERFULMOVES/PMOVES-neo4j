@@ -423,7 +423,7 @@ public final class Iterators {
     }
 
     /**
-     * Creates a {@link Set} from an array of items.an
+     * Creates a {@link Set} from an array of items.
      *
      * @param items the items to add to the set.
      * @param <T> the type of the items
@@ -569,6 +569,21 @@ public final class Iterators {
                 T toReturn = myItem;
                 myItem = null;
                 return toReturn;
+            }
+        };
+    }
+
+    // specifically does not allow Iterator::remove
+    public static <T> Iterator<T> asUnmodifiable(Iterator<T> iterator) {
+        return new Iterator<>() {
+            @Override
+            public boolean hasNext() {
+                return iterator.hasNext();
+            }
+
+            @Override
+            public T next() {
+                return iterator.next();
             }
         };
     }
@@ -724,6 +739,10 @@ public final class Iterators {
                 if (iter instanceof Resource resource) resource.close();
             }
         };
+    }
+
+    public static <T, EX extends Exception> ResourceRawIterator<T, EX> asRawIterator(List<T> list) {
+        return asRawIterator(list.iterator());
     }
 
     /**

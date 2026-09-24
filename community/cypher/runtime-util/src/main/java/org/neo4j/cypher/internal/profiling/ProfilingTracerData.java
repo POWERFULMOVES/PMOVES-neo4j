@@ -19,8 +19,9 @@
  */
 package org.neo4j.cypher.internal.profiling;
 
-import java.util.Arrays;
+import java.util.HashMap;
 import org.neo4j.cypher.result.OperatorProfile;
+import org.neo4j.internal.schema.IndexDescriptor;
 
 public class ProfilingTracerData implements OperatorProfile {
     private long time;
@@ -29,15 +30,31 @@ public class ProfilingTracerData implements OperatorProfile {
     private long pageCacheHits;
     private long pageCacheMisses;
     private long maxAllocatedMemory;
+    private final HashMap<IndexDescriptor, Integer> indexHits = new HashMap<>();
 
     public void update(
-            long time, long dbHits, long rows, long pageCacheHits, long pageCacheMisses, long maxAllocatedMemory) {
+            long time,
+            long dbHits,
+            long rows,
+            long pageCacheHits,
+            long pageCacheMisses,
+            long maxAllocatedMemory,
+            IndexDescriptor[] indexesUsed,
+            int[] indexUseCount) {
         this.time += time;
         this.dbHits += dbHits;
         this.rows += rows;
         this.pageCacheHits += pageCacheHits;
         this.pageCacheMisses += pageCacheMisses;
         this.maxAllocatedMemory += maxAllocatedMemory;
+
+        if (indexesUsed != null && indexUseCount != null) {
+            IndexDescriptor index;
+            for (int i = 0; i < indexesUsed.length; i++) {
+                index = indexesUsed[i];
+                this.indexHits.put(index, this.indexHits.getOrDefault(index, 0) + indexUseCount[i]);
+            }
+        }
     }
 
     @Override
@@ -70,6 +87,16 @@ public class ProfilingTracerData implements OperatorProfile {
         return maxAllocatedMemory;
     }
 
+    @Override
+    public IndexDescriptor[] indexesUsed() {
+        return this.indexHits.keySet().toArray(new IndexDescriptor[0]);
+    }
+
+    @Override
+    public int[] indexUseCount() {
+        return this.indexHits.values().stream().mapToInt(Integer::intValue).toArray();
+    }
+
     public void sanitize() {
         if (time < OperatorProfile.NO_DATA) {
             time = OperatorProfile.NO_DATA;
@@ -93,41 +120,16 @@ public class ProfilingTracerData implements OperatorProfile {
 
     @Override
     public int hashCode() {
-        return Arrays.hashCode(new long[] {
-            this.time(),
-            this.dbHits(),
-            this.rows(),
-            this.pageCacheHits(),
-            this.pageCacheMisses(),
-            this.maxAllocatedMemory()
-        });
+        return OperatorProfile.hashCode(this);
     }
 
     @Override
     public boolean equals(Object o) {
-        if (this == o) {
-            return true;
-        }
-        if (!(o instanceof OperatorProfile that)) {
-            return false;
-        }
-        return this.time() == that.time()
-                && this.dbHits() == that.dbHits()
-                && this.rows() == that.rows()
-                && this.pageCacheHits() == that.pageCacheHits()
-                && this.pageCacheMisses() == that.pageCacheMisses()
-                && this.maxAllocatedMemory() == that.maxAllocatedMemory();
+        return OperatorProfile.equals(this, o);
     }
 
     @Override
     public String toString() {
-        return String.format(
-                "Operator Profile { time: %d, dbHits: %d, rows: %d, page cache hits: %d, page cache misses: %d, max allocated: %d }",
-                this.time(),
-                this.dbHits(),
-                this.rows(),
-                this.pageCacheHits(),
-                this.pageCacheMisses(),
-                this.maxAllocatedMemory());
+        return OperatorProfile.toString(this);
     }
 }

@@ -64,11 +64,21 @@ public interface VersionContext {
     long committingTransactionId();
 
     /**
-     * Last closed transaction id that read context was initialised with.
-     * Used in snapshot execution engine as visibility guard.
-     * @return last closed transaction id
+     * Initialise write context with committingChunkId
      */
-    long lastClosedTransactionId();
+    void initChunkId(long committingChunkId);
+
+    /**
+     * @return id of currently committing chunk
+     */
+    long committingChunkId();
+
+    /**
+     * The highest gap-free closed transaction id that read context was initialized with.
+     * Used in the snapshot execution engine as the visibility guard.
+     * @return highest gap-free closed transaction id
+     */
+    long highestGapFree();
 
     /**
      * The highest closed tx id for this context. Together with array of not visible transactions ids
@@ -98,7 +108,7 @@ public interface VersionContext {
      * Global oldest visible transaction number at the time this context is initialized for write.
      * Any version lower than this one isn't visible by any active or future transaction and can be removed.
      */
-    long oldestVisibleTransactionNumber();
+    long oldestVisibilityHorizon();
 
     /**
      * Refresh cursor context visibility boundaries
@@ -133,4 +143,31 @@ public interface VersionContext {
     long chainHeadVersion();
 
     boolean initializedForWrite();
+
+    /**
+     * @return a value to use in {@link #validateStamp(int)}
+     */
+    int stamp();
+
+    /**
+     * Method to validate if the context changed visibility since the previous usage.
+     * Consumers can remember stamp and later pass it to this method to check if visibility still the same.
+     *
+     * @param stamp returned be {@link #stamp()}
+     * @return true is context haven't changed since provided stamp was taken
+     */
+    boolean validateStamp(int stamp);
+
+    /**
+     * Create related version context, with the same state as this context,
+     * that can be updated independently and/or safely passed to another thread
+     */
+    default VersionContext createRelatedContext() {
+        return this;
+    }
+
+    default VersionContext createUnboundedReadRelatedContext() {
+        return new UnboundedReadVersionContext(
+                committingTransactionId(), committingChunkId(), oldestVisibilityHorizon());
+    }
 }

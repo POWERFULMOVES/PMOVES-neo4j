@@ -20,11 +20,10 @@
 package org.neo4j.cypher.internal.runtime.interpreted.pipes
 
 import org.eclipse.collections.impl.factory.primitive.IntObjectMaps
-import org.neo4j.cypher.internal.macros.AssertMacros.checkOnlyWhenAssertionsAreEnabled
+import org.neo4j.cypher.internal.macros.AssertMacros3.checkOnlyWhenAssertionsAreEnabled
 import org.neo4j.cypher.internal.runtime.ClosingIterator
 import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.runtime.IsNoValue
-import org.neo4j.cypher.internal.runtime.LenientCreateRelationship
 import org.neo4j.cypher.internal.runtime.WriteOperations
 import org.neo4j.cypher.internal.runtime.interpreted.IsMap
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Expression
@@ -33,7 +32,7 @@ import org.neo4j.cypher.internal.util.attribution.Id
 import org.neo4j.cypher.operations.CypherFunctions
 import org.neo4j.cypher.operations.CypherTypeValueMapper
 import org.neo4j.exceptions.CypherTypeException
-import org.neo4j.exceptions.InternalException
+import org.neo4j.exceptions.InvalidArgumentException
 import org.neo4j.values.AnyValue
 import org.neo4j.values.storable.Value
 import org.neo4j.values.storable.Values
@@ -142,8 +141,15 @@ abstract class EntityCreatePipe(src: Pipe) extends BaseCreatePipe(src) {
       case n: VirtualNodeValue => n
       case IsNoValue() =>
         if (lenient) null
-        else throw new InternalException(LenientCreateRelationship.errorMsg(relName, name))
-      case x => throw new InternalException(s"Expected to find a node at '$name' but found instead: $x")
+        else {
+          throw InvalidArgumentException.createRelationshipMissingNode(relName, name)
+        }
+      case x =>
+        throw CypherTypeException.expectedNodeButGot(
+          x.prettyPrint(),
+          x.getTypeName,
+          CypherTypeValueMapper.valueType(x)
+        )
     }
 }
 

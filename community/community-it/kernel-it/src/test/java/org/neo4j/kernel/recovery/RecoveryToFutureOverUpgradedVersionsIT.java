@@ -47,26 +47,40 @@ import org.neo4j.dbms.database.DbmsRuntimeVersion;
 import org.neo4j.graphdb.GraphDatabaseService;
 import org.neo4j.graphdb.Transaction;
 import org.neo4j.graphdb.TransactionFailureException;
+import org.neo4j.graphdb.TransactionFailureHelper;
 import org.neo4j.graphdb.event.TransactionData;
 import org.neo4j.internal.helpers.collection.Iterables;
 import org.neo4j.io.fs.DefaultFileSystemAbstraction;
+import org.neo4j.io.fs.filename.SequentialFileNameHelper;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.layout.Neo4jLayout;
 import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.impl.coreapi.TransactionImpl;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
-import org.neo4j.kernel.impl.transaction.log.files.LogFilesBuilder;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.kernel.internal.event.InternalTransactionEventListener;
 import org.neo4j.storageengine.api.StorageEngineFactory;
 import org.neo4j.test.LatestVersions;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
+import org.neo4j.test.UpgradeTestUtil;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.Neo4jLayoutExtension;
+import org.neo4j.test.extension.SkipOnSpd;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
+import org.neo4j.wal.files.LogFilesBuilder;
+import org.neo4j.wal.files.TransactionLogFilesHelper;
 
+@SkipOnSpd(
+        reason =
+                "There are some tests in here that are green on SPD, but that's just a happy accident. Generically:"
+                        + " for system db having a cluster running has the automatic SystemGraphAutoUpgrader topology maintenance job"
+                        + " that will upgrade the system db to what is configured in the last startup, which is GLORIOUS_FUTURE."
+                        + " For non-system db the way of removing a checkpoint directly from the file on disk doesn't quite work for a SPD cluster."
+                        + " And even if taking care of those issues then cluster seems to just work differently regarding figuring out"
+                        + " kernel version for a db that needs to be recovered... and for some reason the Neo4j product is fine with this discrepancy.",
+        notes = {SkipOnSpd.Note.incompatible})
 @Neo4jLayoutExtension
 class RecoveryToFutureOverUpgradedVersionsIT {
     @Inject
@@ -125,9 +139,8 @@ class RecoveryToFutureOverUpgradedVersionsIT {
         GraphDatabaseAPI testDb = (GraphDatabaseAPI) managementService.database(dbName);
         DatabaseLayout dbLayout = testDb.databaseLayout();
         createWriteTransaction(testDb);
-        systemDb.executeTransactionally("CALL dbms.upgrade()");
-        createWriteTransaction(testDb);
-        assertKernelVersion(testDb, KernelVersion.GLORIOUS_FUTURE);
+        UpgradeTestUtil.upgradeDatabase(
+                managementService, testDb, LatestVersions.LATEST_KERNEL_VERSION, KernelVersion.GLORIOUS_FUTURE);
 
         shutdownDbms();
         var config = Config.newBuilder()
@@ -139,6 +152,12 @@ class RecoveryToFutureOverUpgradedVersionsIT {
 
         RecoveryHelpers.removeLastCheckpointRecordFromLogFile(dbLayout, fileSystem, config);
         assertFalse(logsContainCheckpoint(dbLayout, fileSystem));
+
+        // the above processing artificially leaves an empty checkpoint file with a higher kernel version
+        // after the first one, which isn't valid and hits an assert during DB startup
+        SequentialFileNameHelper checkpointMatcher =
+                TransactionLogFilesHelper.forCheckpoints(dbLayout.getTransactionLogsDirectory());
+        fileSystem.deleteFile(checkpointMatcher.getFileForVersion(1));
 
         startDbms(this::configureGloriousFutureAsLatest, true);
         testDb = (GraphDatabaseAPI) managementService.database(dbName);
@@ -179,9 +198,10 @@ class RecoveryToFutureOverUpgradedVersionsIT {
         createWriteTransaction(testDb);
         CheckPointer checkPointer = testDb.getDependencyResolver().resolveDependency(CheckPointer.class);
         checkPointer.forceCheckPoint(new SimpleTriggerInfo("extra checkpoint"));
-        systemDb.executeTransactionally("CALL dbms.upgrade()");
-        createWriteTransaction(testDb);
-        assertKernelVersion(testDb, KernelVersion.GLORIOUS_FUTURE);
+
+        UpgradeTestUtil.upgradeDatabase(
+                managementService, testDb, LatestVersions.LATEST_KERNEL_VERSION, KernelVersion.GLORIOUS_FUTURE);
+
         shutdownDbms();
 
         var config = Config.newBuilder()
@@ -257,15 +277,18 @@ class RecoveryToFutureOverUpgradedVersionsIT {
             public Object beforeCommit(
                     TransactionData data, Transaction transaction, GraphDatabaseService databaseService) {
                 if (data.metaData().containsKey("triggerTx")) {
-                    throw new TransactionFailureException(
-                            "Failed because you asked for it", Status.Transaction.TransactionHookFailed);
+                    throw TransactionFailureHelper.internalError(
+                            this.getClass().getSimpleName(),
+                            "Failed because you asked for it",
+                            new RuntimeException(),
+                            Status.Transaction.TransactionHookFailed);
                 }
                 return null;
             }
         });
 
         // then upgrade dbms runtime to trigger db upgrade on next write
-        systemDb.executeTransactionally("CALL dbms.upgrade()");
+        UpgradeTestUtil.manuallyUpgrade(systemDb);
 
         assertThatThrownBy(() -> {
                     try (TransactionImpl tx = (TransactionImpl) testDb.beginTx()) {
@@ -316,15 +339,18 @@ class RecoveryToFutureOverUpgradedVersionsIT {
             public Object beforeCommit(
                     TransactionData data, Transaction transaction, GraphDatabaseService databaseService) {
                 if (data.metaData().containsKey("triggerTx")) {
-                    throw new TransactionFailureException(
-                            "Failed because you asked for it", Status.Transaction.TransactionHookFailed);
+                    throw TransactionFailureHelper.internalError(
+                            this.getClass().getSimpleName(),
+                            "Failed because you asked for it",
+                            new RuntimeException(),
+                            Status.Transaction.TransactionHookFailed);
                 }
                 return null;
             }
         });
 
         // then upgrade dbms runtime to trigger db upgrade on next write
-        systemDb.executeTransactionally("CALL dbms.upgrade()");
+        UpgradeTestUtil.manuallyUpgrade(systemDb);
 
         assertThatThrownBy(() -> {
                     try (TransactionImpl tx = (TransactionImpl) testDb.beginTx()) {

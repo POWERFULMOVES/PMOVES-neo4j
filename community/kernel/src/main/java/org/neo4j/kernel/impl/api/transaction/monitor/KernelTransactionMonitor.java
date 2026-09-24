@@ -26,14 +26,18 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 import org.neo4j.configuration.Config;
+import org.neo4j.io.pagecache.context.ClusterHorizonTracker;
 import org.neo4j.kernel.api.KernelTransactionHandle;
 import org.neo4j.kernel.api.TerminationMark;
 import org.neo4j.kernel.api.TransactionTimeout;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.impl.api.KernelTransactions;
 import org.neo4j.kernel.impl.api.TransactionVisibilityProvider;
+import org.neo4j.kernel.impl.api.index.IndexPopulationJob;
+import org.neo4j.kernel.impl.api.index.IndexingService;
 import org.neo4j.kernel.impl.api.transaction.trace.TransactionInitializationTrace;
 import org.neo4j.logging.internal.LogService;
+import org.neo4j.monitoring.DatabaseHealth;
 import org.neo4j.storageengine.api.TransactionIdStore;
 import org.neo4j.time.SystemNanoClock;
 
@@ -41,22 +45,33 @@ public class KernelTransactionMonitor extends TransactionMonitor<KernelTransacti
         implements TransactionVisibilityProvider {
     private final KernelTransactions kernelTransactions;
     private final TransactionIdStore transactionIdStore;
-    private final AtomicLong oldestVisibilityBoundary = new AtomicLong(BASE_TX_ID);
-    private final AtomicLong oldestVisibleClosedTransactionId = new AtomicLong(BASE_TX_ID);
+    private final IndexingService indexingService;
+    private final DatabaseHealth databaseHealth;
+    private final boolean multiVersion;
+    private final ClusterHorizonTracker clusterHorizonTracker;
+    private final AtomicLong oldestCleanupHorizon = new AtomicLong(BASE_TX_ID);
+    private final AtomicLong oldestVisibilityHorizon = new AtomicLong(BASE_TX_ID);
 
     public KernelTransactionMonitor(
             KernelTransactions kernelTransactions,
             TransactionIdStore transactionIdStore,
             Config config,
             SystemNanoClock clock,
-            LogService logService) {
+            LogService logService,
+            IndexingService indexingService,
+            DatabaseHealth databaseHealth,
+            boolean multiVersion,
+            ClusterHorizonTracker clusterHorizonTracker) {
         super(config, clock, logService);
         this.kernelTransactions = kernelTransactions;
         this.transactionIdStore = transactionIdStore;
-        oldestVisibleClosedTransactionId.setRelease(
-                transactionIdStore.getHighestEverClosedTransaction().id());
-        oldestVisibilityBoundary.setRelease(
-                transactionIdStore.getHighestEverClosedTransaction().id());
+        this.indexingService = indexingService;
+        this.databaseHealth = databaseHealth;
+        this.multiVersion = multiVersion;
+        this.clusterHorizonTracker = clusterHorizonTracker;
+        long highestGapFreeClosedTransactionId = transactionIdStore.getHighestGapFreeClosedTransactionId();
+        this.oldestVisibilityHorizon.setRelease(highestGapFreeClosedTransactionId);
+        this.oldestCleanupHorizon.setRelease(transactionIdStore.getHighestGapFreeClosedTransactionId());
     }
 
     @Override
@@ -64,19 +79,51 @@ public class KernelTransactionMonitor extends TransactionMonitor<KernelTransacti
         // we return gap free transaction that is already closed, and if we do not have any readers it should be safe to
         // assume that no one will need
         // data before that point of history
-        var oldestOpenTransactionId = transactionIdStore.getLastClosedTransactionId();
-        var executingTransactions = kernelTransactions.executingTransactions();
-        long oldestTxId = oldestOpenTransactionId;
-        long oldestHorizon = oldestOpenTransactionId;
+        var oldestGapFreeClosedTransactionId = transactionIdStore.getHighestGapFreeClosedTransactionId();
+        var monitoringRecords = kernelTransactions.allTransactions();
+        long previousHorizon = oldestVisibilityHorizon.getAcquire();
+        TransactionMonitoringRecord firstEncounteredIncorrectTransaction = null;
 
-        for (var txHandle : executingTransactions) {
-            if (txHandle.terminationMark().isEmpty()) {
-                oldestTxId = Math.min(oldestTxId, txHandle.getLastClosedTxId());
-                oldestHorizon = Math.min(oldestHorizon, txHandle.getTransactionHorizon());
+        long minHighestGapFree = oldestGapFreeClosedTransactionId;
+        long minCleanupHorizon = oldestGapFreeClosedTransactionId;
+
+        for (var monitoringRecord : monitoringRecords) {
+            minHighestGapFree = Math.min(minHighestGapFree, monitoringRecord.getHighestGapFreeTxId());
+
+            if (minHighestGapFree < previousHorizon && firstEncounteredIncorrectTransaction == null) {
+                firstEncounteredIncorrectTransaction = monitoringRecord;
             }
+
+            minCleanupHorizon = Math.min(minCleanupHorizon, monitoringRecord.getTransactionHorizon());
         }
-        oldestVisibleClosedTransactionId.setRelease(oldestTxId);
-        oldestVisibilityBoundary.setRelease(oldestHorizon);
+        var populationJobs = indexingService.getPopulationJobs();
+        IndexPopulationJob firstEncounteredIncorrectJob = null;
+        for (var job : populationJobs) {
+            // for this purpose population job is read only transaction
+            // so it's horizon is last closed transaction
+            long populationHorizon = job.populationHorizon();
+            minHighestGapFree = Math.min(minHighestGapFree, populationHorizon);
+
+            if (minHighestGapFree < previousHorizon && firstEncounteredIncorrectJob == null) {
+                firstEncounteredIncorrectJob = job;
+            }
+
+            minCleanupHorizon = Math.min(minCleanupHorizon, populationHorizon);
+        }
+
+        minCleanupHorizon = Math.min(minCleanupHorizon, clusterHorizonTracker.oldestVisibilityHorizon());
+
+        if (multiVersion && minHighestGapFree < previousHorizon) {
+            databaseHealth.panic(new Exception("Global visibility horizon went backwards from " + previousHorizon
+                    + " to " + minHighestGapFree + ". Gap free closed tx id: "
+                    + oldestGapFreeClosedTransactionId + ". Incorrect transaction:"
+                    + firstEncounteredIncorrectTransaction + ". Incorrect index job: "
+                    + firstEncounteredIncorrectJob));
+            return;
+        }
+
+        oldestVisibilityHorizon.setRelease(minHighestGapFree);
+        oldestCleanupHorizon.setRelease(minCleanupHorizon);
     }
 
     @Override
@@ -87,21 +134,22 @@ public class KernelTransactionMonitor extends TransactionMonitor<KernelTransacti
     }
 
     @Override
-    public long oldestVisibleClosedTransactionId() {
-        return oldestVisibleClosedTransactionId.getAcquire();
+    public long oldestVisibilityHorizon() {
+        return oldestVisibilityHorizon.getAcquire();
     }
 
     @Override
-    public long oldestObservableHorizon() {
-        return oldestVisibilityBoundary.getAcquire();
+    public long oldestCleanupHorizon() {
+        return oldestCleanupHorizon.getAcquire();
     }
 
     @Override
     public long youngestObservableHorizon() {
         long youngestHorizon = Long.MIN_VALUE;
-        for (var monitoredTx : getActiveTransactions()) {
-            if (monitoredTx.terminationMark().isEmpty()) {
-                youngestHorizon = Math.max(youngestHorizon, monitoredTx.kernelTransaction.getTransactionHorizon());
+        for (var monitoredTx : kernelTransactions.allTransactions()) {
+            long transactionHorizon = monitoredTx.getTransactionHorizon();
+            if (Long.MAX_VALUE != transactionHorizon) {
+                youngestHorizon = Math.max(youngestHorizon, transactionHorizon);
             }
         }
         return youngestHorizon;

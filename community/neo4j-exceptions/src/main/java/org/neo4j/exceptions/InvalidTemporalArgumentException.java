@@ -26,12 +26,7 @@ import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 
 public class InvalidTemporalArgumentException extends InvalidArgumentException {
 
-    @Deprecated
-    public InvalidTemporalArgumentException(String message) {
-        super(message);
-    }
-
-    public InvalidTemporalArgumentException(ErrorGqlStatusObject gqlStatusObject, String message) {
+    private InvalidTemporalArgumentException(ErrorGqlStatusObject gqlStatusObject, String message) {
         super(gqlStatusObject, message);
     }
 

@@ -43,6 +43,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
@@ -54,15 +55,8 @@ import java.util.function.LongSupplier;
 import java.util.function.Predicate;
 import java.util.function.ToLongFunction;
 import java.util.stream.Stream;
-import org.eclipse.collections.api.factory.primitive.IntLists;
-import org.eclipse.collections.api.list.primitive.MutableIntList;
-import org.eclipse.collections.api.list.primitive.MutableLongList;
-import org.eclipse.collections.api.set.primitive.MutableLongSet;
-import org.eclipse.collections.impl.factory.primitive.LongLists;
-import org.eclipse.collections.impl.factory.primitive.LongSets;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.common.DependencyResolver;
@@ -128,7 +122,8 @@ import org.neo4j.kernel.impl.store.record.RelationshipRecord;
 import org.neo4j.kernel.impl.store.record.SchemaRecord;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.memory.EmptyMemoryTracker;
-import org.neo4j.storageengine.api.IndexEntryUpdate;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
+import org.neo4j.storageengine.api.TokenIndexEntryUpdate;
 import org.neo4j.storageengine.api.cursor.CursorType;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.test.RandomSupport;
@@ -139,6 +134,7 @@ import org.neo4j.test.extension.testdirectory.TestDirectorySupportExtension;
 import org.neo4j.test.utils.TestDirectory;
 import org.neo4j.token.TokenHolders;
 import org.neo4j.token.api.TokenNotFoundException;
+import org.neo4j.values.storable.RandomValuesUtils;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.Values;
 
@@ -176,17 +172,20 @@ public class DetectRandomSabotageIT {
         dbms = getDbms(directory.homePath());
         db = (GraphDatabaseAPI) dbms.database(DEFAULT_DATABASE_NAME);
 
+        random.withConfiguration(RandomValuesUtils.selectStorageEngineDependentConfiguration(db))
+                .reset();
+
         // Create some nodes
-        MutableLongList nodeIds = createNodes(db);
+        List<String> nodeIds = createNodes(db);
 
         // Force some nodes to be dense nodes and some to have only a single relationship
-        MutableLongSet singleRelationshipNodes = LongSets.mutable.empty();
-        MutableLongSet denseNodes = LongSets.mutable.empty();
+        Set<String> singleRelationshipNodes = new HashSet<>();
+        Set<String> denseNodes = new HashSet<>();
         while (singleRelationshipNodes.size() < 5) {
             singleRelationshipNodes.add(nodeIds.get(random.nextInt(nodeIds.size())));
         }
         while (denseNodes.size() < 5) {
-            long nodeId = nodeIds.get(random.nextInt(nodeIds.size()));
+            String nodeId = nodeIds.get(random.nextInt(nodeIds.size()));
             if (!singleRelationshipNodes.contains(nodeId)) {
                 denseNodes.add(nodeId);
             }
@@ -219,8 +218,6 @@ public class DetectRandomSabotageIT {
     }
 
     @Test
-    @Disabled(
-            "Disabled for maintenance branch as this test is flaky by design. It may sabotage data into a completely valid state")
     void shouldDetectRandomSabotage() throws Exception {
         // given
         SabotageType type = random.among(SabotageType.values());
@@ -273,7 +270,8 @@ public class DetectRandomSabotageIT {
         PropertyBlock block = Iterables.first(indexConfigPropertyRecord.propertyBlocks());
         indexConfigPropertyRecord.removePropertyBlock(block.getKeyIndexId());
         PropertyBlock newBlock = new PropertyBlock();
-        PropertyStore.encodeValue(newBlock, tokenId[0], intValue(11), null, null, NULL_CONTEXT, INSTANCE);
+        PropertyStore.encodeValue(
+                newBlock, tokenId[0], intValue(11), null, null, NULL_CONTEXT, INSTANCE, "db-format-2000");
         indexConfigPropertyRecord.addPropertyBlock(newBlock);
         try (var storeCursor = storageCursors.writeCursor(PROPERTY_CURSOR)) {
             propertyStore.updateRecord(indexConfigPropertyRecord, storeCursor, NULL_CONTEXT, storageCursors);
@@ -344,19 +342,16 @@ public class DetectRandomSabotageIT {
     }
 
     private void deleteSomeEntities(
-            GraphDatabaseAPI db,
-            MutableLongList nodeIds,
-            MutableLongSet singleRelationshipNodes,
-            MutableLongSet denseNodes) {
+            GraphDatabaseAPI db, List<String> nodeIds, Set<String> singleRelationshipNodes, Set<String> denseNodes) {
         int nodesToDelete = NUMBER_OF_NODES / 100;
         try (Transaction tx = db.beginTx()) {
             for (int i = 0; i < nodesToDelete; i++) {
-                long nodeId;
+                String nodeId;
                 do {
                     nodeId = nodeIds.get(random.nextInt(nodeIds.size()));
                 } while (singleRelationshipNodes.contains(nodeId) || denseNodes.contains(nodeId));
                 nodeIds.remove(nodeId);
-                Node node = tx.getNodeById(nodeId);
+                Node node = tx.getNodeByElementId(nodeId);
                 Iterables.forEach(node.getRelationships(), Relationship::delete);
                 node.delete();
             }
@@ -365,13 +360,13 @@ public class DetectRandomSabotageIT {
     }
 
     private void createAdditionalRelationshipsForDenseNodes(
-            GraphDatabaseAPI db, MutableLongList nodeIds, MutableLongSet denseNodes) {
+            GraphDatabaseAPI db, List<String> nodeIds, Set<String> denseNodes) {
         try (Transaction tx = db.beginTx()) {
             int additionalRelationships = denseNodes.size() * GraphDatabaseSettings.dense_node_threshold.defaultValue();
-            long[] denseNodeIds = denseNodes.toArray();
+            String[] denseNodeIds = denseNodes.toArray(new String[] {});
             for (int i = 0; i < additionalRelationships; i++) {
-                Node denseNode = tx.getNodeById(denseNodeIds[i % denseNodeIds.length]);
-                Node otherNode = tx.getNodeById(nodeIds.get(random.nextInt(nodeIds.size())));
+                Node denseNode = tx.getNodeByElementId(denseNodeIds[i % denseNodeIds.length]);
+                Node otherNode = tx.getNodeByElementId(nodeIds.get(random.nextInt(nodeIds.size())));
                 Node startNode = random.nextBoolean() ? denseNode : otherNode;
                 Node endNode = startNode == denseNode ? otherNode : denseNode;
                 startNode.createRelationshipTo(endNode, RelationshipType.withName(random.among(TOKEN_NAMES)));
@@ -380,35 +375,36 @@ public class DetectRandomSabotageIT {
         }
     }
 
-    private void createRelationships(
-            GraphDatabaseAPI db, MutableLongList nodeIds, MutableLongSet singleRelationshipNodes) {
+    private void createRelationships(GraphDatabaseAPI db, List<String> nodeIds, Set<String> singleRelationshipNodes) {
         try (Transaction tx = db.beginTx()) {
             int numberOfRelationships = (int) (NUMBER_OF_NODES * (10f + 10f * random.nextFloat()));
             for (int i = 0; i < numberOfRelationships; i++) {
-                Node startNode = tx.getNodeById(nodeIds.get(random.nextInt(nodeIds.size())));
-                Node endNode = tx.getNodeById(nodeIds.get(random.nextInt(nodeIds.size())));
+                String startNodeId = nodeIds.get(random.nextInt(nodeIds.size()));
+                String endNodeId = nodeIds.get(random.nextInt(nodeIds.size()));
+                Node startNode = tx.getNodeByElementId(startNodeId);
+                Node endNode = tx.getNodeByElementId(endNodeId);
                 Relationship relationship =
                         startNode.createRelationshipTo(endNode, RelationshipType.withName(random.among(TOKEN_NAMES)));
                 setRandomProperties(relationship);
                 // Prevent more relationships to be added to the "single-relationship" Nodes
-                if (singleRelationshipNodes.remove(startNode.getId())) {
-                    nodeIds.remove(startNode.getId());
+                if (singleRelationshipNodes.remove(startNodeId)) {
+                    nodeIds.remove(startNodeId);
                 }
-                if (singleRelationshipNodes.remove(endNode.getId())) {
-                    nodeIds.remove(endNode.getId());
+                if (singleRelationshipNodes.remove(endNodeId)) {
+                    nodeIds.remove(endNodeId);
                 }
             }
             tx.commit();
         }
     }
 
-    private MutableLongList createNodes(GraphDatabaseAPI db) {
-        MutableLongList nodeIds = LongLists.mutable.empty();
+    private List<String> createNodes(GraphDatabaseAPI db) {
+        List<String> nodeIds = new ArrayList<>();
         try (Transaction tx = db.beginTx()) {
             for (int i = 0; i < NUMBER_OF_NODES; i++) {
                 Node node = tx.createNode(labels(random.selection(TOKEN_NAMES, 0, TOKEN_NAMES.length, false)));
                 setRandomProperties(node);
-                nodeIds.add(node.getId());
+                nodeIds.add(node.getElementId());
             }
             tx.commit();
         }
@@ -890,21 +886,21 @@ public class DetectRandomSabotageIT {
                     StoreCursors storageCursors,
                     DynamicAllocatorProvider allocatorProvider) {
                 ToLongFunction<RelationshipGroupRecord> getter;
-                BiConsumer<RelationshipGroupRecord, Long> setter;
-                switch (random.nextInt(3)) {
-                    case 0:
-                        getter = RelationshipGroupRecord::getFirstOut;
-                        setter = RelationshipGroupRecord::setFirstOut;
-                        break;
-                    case 1:
-                        getter = RelationshipGroupRecord::getFirstIn;
-                        setter = RelationshipGroupRecord::setFirstIn;
-                        break;
-                    default:
-                        getter = RelationshipGroupRecord::getFirstLoop;
-                        setter = RelationshipGroupRecord::setFirstLoop;
-                        break;
-                }
+                BiConsumer<RelationshipGroupRecord, Long> setter =
+                        switch (random.nextInt(3)) {
+                            case 0 -> {
+                                getter = RelationshipGroupRecord::getFirstOut;
+                                yield RelationshipGroupRecord::setFirstOut;
+                            }
+                            case 1 -> {
+                                getter = RelationshipGroupRecord::getFirstIn;
+                                yield RelationshipGroupRecord::setFirstIn;
+                            }
+                            default -> {
+                                getter = RelationshipGroupRecord::getFirstLoop;
+                                yield RelationshipGroupRecord::setFirstLoop;
+                            }
+                        };
                 return loadChangeUpdate(
                         random,
                         stores.getRelationshipGroupStore(),
@@ -989,11 +985,11 @@ public class DetectRandomSabotageIT {
                         accessor.newUpdater(IndexUpdateMode.ONLINE_IDEMPOTENT, NULL_CONTEXT, false)) {
                     if (add) {
                         selectedEntityId = random.nextLong(SOME_WAY_TOO_HIGH_ID);
-                        updater.process(
-                                IndexEntryUpdate.add(selectedEntityId, indexProxy.getDescriptor(), selectedValues));
+                        updater.process(EagerValueIndexEntryUpdate.add(
+                                selectedEntityId, indexProxy.getDescriptor(), selectedValues));
                     } else {
-                        updater.process(
-                                IndexEntryUpdate.remove(selectedEntityId, indexProxy.getDescriptor(), selectedValues));
+                        updater.process(EagerValueIndexEntryUpdate.remove(
+                                selectedEntityId, indexProxy.getDescriptor(), selectedValues));
                     }
                 }
 
@@ -1042,43 +1038,38 @@ public class DetectRandomSabotageIT {
                         r -> add || (r.inUse() && r.getLabelField() != NO_LABELS_FIELD.longValue()),
                         storageCursors.readCursor(NODE_CURSOR));
                 TokenHolders tokenHolders = otherDependencies.resolveDependency(TokenHolders.class);
-                Set<String> labelNames = new HashSet<>(Arrays.asList(TOKEN_NAMES));
+
                 int labelId;
                 try (IndexUpdater writer = nliProxy.newUpdater(IndexUpdateMode.ONLINE, NULL_CONTEXT, false)) {
                     if (nodeRecord.inUse()) {
-                        // Our node is in use, make sure it's a label it doesn't already have
                         NodeLabels labelsField = NodeLabelsField.parseLabelsField(nodeRecord);
                         int[] labelsBefore = labelsField.get(store, storageCursors);
-                        for (int labelIdBefore : labelsBefore) {
-                            labelNames.remove(tokenHolders
-                                    .labelTokens()
-                                    .getTokenById(labelIdBefore)
-                                    .name());
-                        }
                         if (add) {
                             // Add a label to an existing node (in the label index only)
+                            // Our node is in use, make sure it's a label it doesn't already have
+                            Set<String> labelNames = new HashSet<>(Arrays.asList(TOKEN_NAMES));
+                            for (int labelIdBefore : labelsBefore) {
+                                labelNames.remove(tokenHolders
+                                        .labelTokens()
+                                        .getTokenById(labelIdBefore)
+                                        .name());
+                            }
                             labelId = labelNames.isEmpty()
                                     ? 9999
                                     : tokenHolders.labelTokens().getIdByName(random.among(new ArrayList<>(labelNames)));
-                            int[] labelsAfter = Arrays.copyOf(labelsBefore, labelsBefore.length + 1);
-                            labelsAfter[labelsBefore.length] = labelId;
-                            Arrays.sort(labelsAfter);
-                            writer.process(IndexEntryUpdate.change(
-                                    nodeRecord.getId(), nliDescriptor, labelsBefore, labelsAfter));
+                            writer.process(TokenIndexEntryUpdate.tokenChange(
+                                    nodeRecord.getId(), nliDescriptor, EMPTY_INT_ARRAY, new int[] {labelId}));
                         } else {
                             // Remove a label from an existing node (in the label index only)
-                            MutableIntList labels =
-                                    IntLists.mutable.of(Arrays.copyOf(labelsBefore, labelsBefore.length));
-                            labelId = labels.removeAtIndex(random.nextInt(labels.size()));
-                            int[] labelsAfter = labels.toSortedArray(); // With one of the labels removed
-                            writer.process(IndexEntryUpdate.change(
-                                    nodeRecord.getId(), nliDescriptor, labelsBefore, labelsAfter));
+                            labelId = labelsBefore[random.nextInt(labelsBefore.length)];
+                            writer.process(TokenIndexEntryUpdate.tokenChange(
+                                    nodeRecord.getId(), nliDescriptor, new int[] {labelId}, EMPTY_INT_ARRAY));
                         }
                     } else // Getting here means the we're adding something (see above when selecting the node)
                     {
                         // Add a label to a non-existent node (in the label index only)
                         labelId = tokenHolders.labelTokens().getIdByName(random.among(TOKEN_NAMES));
-                        writer.process(IndexEntryUpdate.change(
+                        writer.process(TokenIndexEntryUpdate.tokenChange(
                                 nodeRecord.getId(), nliDescriptor, EMPTY_INT_ARRAY, new int[] {labelId}));
                     }
                 }
@@ -1118,13 +1109,11 @@ public class DetectRandomSabotageIT {
                         randomRecord(random, store, r -> true, storageCursors.readCursor(RELATIONSHIP_CURSOR));
                 TokenHolders tokenHolders = otherDependencies.resolveDependency(TokenHolders.class);
                 Set<String> relationshipTypeNames = new HashSet<>(Arrays.asList(TOKEN_NAMES));
-                int typeBefore = relationshipRecord.getType();
-                int[] typesBefore = new int[] {typeBefore};
                 int typeId;
-                int[] typesAfter;
                 String operation;
                 try (IndexUpdater writer = rtiProxy.newUpdater(IndexUpdateMode.ONLINE, NULL_CONTEXT, false)) {
                     if (relationshipRecord.inUse()) {
+                        int typeBefore = relationshipRecord.getType();
                         int mode = random.nextInt(3);
                         if (mode < 2) {
                             relationshipTypeNames.remove(tokenHolders
@@ -1136,25 +1125,31 @@ public class DetectRandomSabotageIT {
                                     .getIdByName(random.among(new ArrayList<>(relationshipTypeNames)));
                             if (mode == 0) {
                                 operation = "Replace relationship type in index with a new type";
-                                typesAfter = new int[] {typeId};
+                                writer.process(TokenIndexEntryUpdate.tokenChange(
+                                        relationshipRecord.getId(), rtiDescriptor, new int[] {typeBefore}, new int[] {
+                                            typeId
+                                        }));
                             } else {
                                 operation = "Add additional relationship type in index";
-                                typesAfter = new int[] {typeId, typeBefore};
-                                Arrays.sort(typesAfter);
+                                writer.process(TokenIndexEntryUpdate.tokenChange(
+                                        relationshipRecord.getId(), rtiDescriptor, EMPTY_INT_ARRAY, new int[] {typeId
+                                        }));
                             }
                         } else {
                             operation = "Remove relationship type from index";
                             typeId = typeBefore;
-                            typesAfter = EMPTY_INT_ARRAY;
+                            writer.process(TokenIndexEntryUpdate.tokenChange(
+                                    relationshipRecord.getId(),
+                                    rtiDescriptor,
+                                    new int[] {typeBefore},
+                                    EMPTY_INT_ARRAY));
                         }
-                        writer.process(IndexEntryUpdate.change(
-                                relationshipRecord.getId(), rtiDescriptor, typesBefore, typesAfter));
                     } else {
                         // Getting here means the we're adding something (see above when selecting the relationship)
                         operation =
                                 "Add relationship type to a non-existing relationship (in relationship type index only)";
                         typeId = tokenHolders.labelTokens().getIdByName(random.among(TOKEN_NAMES));
-                        writer.process(IndexEntryUpdate.change(
+                        writer.process(TokenIndexEntryUpdate.tokenChange(
                                 relationshipRecord.getId(), rtiDescriptor, EMPTY_INT_ARRAY, new int[] {typeId}));
                     }
                 }
@@ -1225,7 +1220,8 @@ public class DetectRandomSabotageIT {
                                 allocatorProvider.allocator(StoreType.PROPERTY_STRING),
                                 allocatorProvider.allocator(StoreType.PROPERTY_ARRAY),
                                 NULL_CONTEXT,
-                                INSTANCE);
+                                INSTANCE,
+                                "db-format-2000");
                         property.addPropertyBlock(newBlock);
                         try (var storeCursor = storageCursors.writeCursor(PROPERTY_CURSOR)) {
                             propertyStore.updateRecord(property, storeCursor, NULL_CONTEXT, storageCursors);
@@ -1406,5 +1402,5 @@ public class DetectRandomSabotageIT {
                 throws Exception;
     }
 
-    private record Sabotage(String description, String record) {}
+    protected record Sabotage(String description, String record) {}
 }

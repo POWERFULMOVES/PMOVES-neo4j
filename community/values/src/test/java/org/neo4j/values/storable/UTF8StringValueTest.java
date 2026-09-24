@@ -32,6 +32,7 @@ import static org.neo4j.values.utils.AnyValueTestUtil.assertEqual;
 import org.junit.jupiter.api.Test;
 
 class UTF8StringValueTest {
+
     @Test
     void shouldHandleDifferentTypesOfStrings() {
         for (String string : STRINGS) {
@@ -218,9 +219,6 @@ class UTF8StringValueTest {
         assertThat(lhs.hashCode())
                 .as(format("%s.hashCode != %s.hashCode", rhs, lhs))
                 .isEqualTo(rhs.hashCode());
-        assertThat(lhs.hashCode64())
-                .as(format("%s.hashCode64 != %s.hashCode64", rhs, lhs))
-                .isEqualTo(rhs.hashCode64());
         assertThat(lhs).isEqualTo(rhs);
     }
 

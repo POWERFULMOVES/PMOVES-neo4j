@@ -27,7 +27,6 @@ import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.kernel.api.KernelTransaction.Type.IMPLICIT;
 
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.graphdb.Label;
 import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.Transaction;
@@ -36,17 +35,19 @@ import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.SchemaDescriptors;
 import org.neo4j.kernel.api.Kernel;
 import org.neo4j.kernel.api.KernelTransaction;
+import org.neo4j.kernel.api.index.ValueIndexReader;
 import org.neo4j.kernel.api.security.AnonymousContext;
 import org.neo4j.kernel.impl.api.index.IndexingService;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.DbmsExtension;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.values.storable.Values;
 
 @DbmsExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class IndexPopulationFlipRaceIT {
     private static final int NODES_PER_INDEX = 10;
 
@@ -60,6 +61,7 @@ class IndexPopulationFlipRaceIT {
     private RandomSupport random;
 
     @Test
+    @SkipOnSpd(reason = "We verify one indexed entity per node but direct store read on entity without props give 0")
     void shouldAtomicallyFlipMultipleIndexes() throws Exception {
         // A couple of times since this is probabilistic, but also because there seems to be a difference
         // in timings between the first time and all others... which is perhaps super obvious to some, but not to me.
@@ -140,9 +142,10 @@ class IndexPopulationFlipRaceIT {
             IndexDescriptor indexA = single(tx.schemaRead().index(SchemaDescriptors.forLabel(labelAId, keyAId)));
             IndexDescriptor indexB = single(tx.schemaRead().index(SchemaDescriptors.forLabel(labelBId, keyBId)));
 
-            var indexingService = db.getDependencyResolver().resolveDependency(IndexingService.class);
-            try (var valueIndexReaderA = indexingService.getIndexProxy(indexA).newValueReader();
-                    var valueIndexReaderB =
+            IndexingService indexingService = db.getDependencyResolver().resolveDependency(IndexingService.class);
+            try (ValueIndexReader valueIndexReaderA =
+                            indexingService.getIndexProxy(indexA).newValueReader();
+                    ValueIndexReader valueIndexReaderB =
                             indexingService.getIndexProxy(indexB).newValueReader()) {
                 for (int j = 0; j < NODES_PER_INDEX; j++) {
                     long nodeAId = data.first()[j];

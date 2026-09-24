@@ -19,8 +19,7 @@ package org.neo4j.cypher.internal.parser.v5.ast.factory;
 import static java.util.stream.Collectors.joining;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.fail;
+import static org.assertj.core.api.Assertions.fail;
 
 import java.io.IOException;
 import java.util.Arrays;
@@ -33,15 +32,14 @@ import org.antlr.v4.runtime.TokenSource;
 import org.antlr.v4.runtime.misc.Pair;
 import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.cypher.internal.parser.lexer.CypherToken;
 import org.neo4j.cypher.internal.parser.lexer.UnicodeEscapeReplacementReader.InvalidUnicodeLiteral;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
-@ExtendWith({RandomExtension.class})
-public class Cypher5AstLexerTest {
+@RandomSupportExtension
+class Cypher5AstLexerTest {
     @Inject
     private RandomSupport rand;
 
@@ -84,7 +82,7 @@ public class Cypher5AstLexerTest {
     void failureOnInvalidUnicodeEscape() {
         final var in = "\uD80C\uDC00\nᚠ\rhej\r\nhola\\uohno";
         final var lines = in.lines().toList();
-        final var expectedOffset = in.indexOf("\\uohno");
+        final var expectedOffset = in.indexOf("ohno");
         final var expectedLine = lines.size();
         final var expectedCol = lines.get(lines.size() - 1).indexOf("ohno") + 1;
 
@@ -95,7 +93,12 @@ public class Cypher5AstLexerTest {
                 .containsExactly(expectedOffset, expectedCol, expectedLine);
     }
 
-    // Tests copied from javacc CypherCharStreamTest
+    @Test
+    void offsetTableIncludesOffsetsForLastCharPlusOne() throws IOException {
+        final var in = "\\u0020";
+        assertThat(read(in).lexer.offsetTable()).containsExactly(0, 1, 1, 6, 1, 7);
+        assertReasonableOffsets(in, " ".codePoints().toArray());
+    }
 
     @Test
     void basicHappyPath() throws IOException {
@@ -133,10 +136,10 @@ public class Cypher5AstLexerTest {
         for (int i = 0; i < Q1_offset.length; i++) {
             final var c = read.result[i];
             final var pos = tokens.create(src, -1, null, -1, i, -1, -1, 1).position();
-            assertEquals(Q1_offset[i], pos.offset());
+            assertThat(pos.offset()).isEqualTo(Q1_offset[i]);
             if (pos.offset() != i) {
-                assertEquals(Q1_line[i], pos.line());
-                assertEquals(Q1_column[i], pos.column());
+                assertThat(pos.line()).isEqualTo(Q1_line[i]);
+                assertThat(pos.column()).isEqualTo(Q1_column[i]);
             }
         }
     }
@@ -176,8 +179,7 @@ public class Cypher5AstLexerTest {
                 var resultSub = IntStream.range(i, Math.min(i + 12, result.length))
                         .mapToObj(j -> pretty(result[j]))
                         .collect(joining(", "));
-                var message =
-                        """
+                var message = """
                     %nExpected to find: %s
                     Position in result (codepoint offset): %s
                     Position in input (char offset): %s

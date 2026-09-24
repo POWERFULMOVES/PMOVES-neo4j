@@ -25,7 +25,6 @@ import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAM
 import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.file.OpenOption;
-import java.nio.file.Path;
 import org.eclipse.collections.api.set.ImmutableSet;
 import org.neo4j.counts.CountsStore;
 import org.neo4j.counts.CountsUpdater;
@@ -36,14 +35,16 @@ import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.recovery.RecoveryStartupChecker;
 import org.neo4j.logging.InternalLogProvider;
 import org.neo4j.memory.MemoryTracker;
 
 /**
  * Counts store build on top of the {@link GBPTree}.
- * Changes between checkpoints are kept in memory and written out to the tree in {@link #checkpoint(FileFlushEvent, CursorContext)}.
+ * Changes between checkpoints are kept in memory and written out to the tree in {@link GBPTreeGenericCountsStore#checkpoint(FileFlushEvent, org.neo4j.io.async.AsyncBlockAccessor, CursorContext)}.
  * Multiple {@link #updater(long, boolean, CursorContext)} appliers} can run concurrently in a lock-free manner.
  * Checkpoint will acquire a write lock, wait for currently active appliers to close while at the same time blocking new appliers to start,
  * but doesn't wait for appliers that haven't even started yet, i.e. it doesn't require a gap-free transaction sequence to be completed.
@@ -91,7 +92,7 @@ public class GBPTreeCountsStore extends GBPTreeGenericCountsStore implements Cou
 
     public GBPTreeCountsStore(
             PageCache pageCache,
-            Path file,
+            StoreFile storeFile,
             FileSystemAbstraction fileSystem,
             RecoveryCleanupWorkCollector recoveryCollector,
             CountsBuilder initialCountsBuilder,
@@ -102,11 +103,12 @@ public class GBPTreeCountsStore extends GBPTreeGenericCountsStore implements Cou
             InternalLogProvider userLogProvider,
             CursorContextFactory contextFactory,
             PageCacheTracer pageCacheTracer,
-            ImmutableSet<OpenOption> openOptions)
+            ImmutableSet<OpenOption> openOptions,
+            RecoveryStartupChecker recoveryStartupChecker)
             throws IOException {
         super(
                 pageCache,
-                file,
+                storeFile,
                 fileSystem,
                 recoveryCollector,
                 new InitialCountsRebuilder(initialCountsBuilder),
@@ -118,7 +120,8 @@ public class GBPTreeCountsStore extends GBPTreeGenericCountsStore implements Cou
                 userLogProvider,
                 contextFactory,
                 pageCacheTracer,
-                openOptions);
+                openOptions,
+                recoveryStartupChecker);
     }
 
     @Override
@@ -153,18 +156,8 @@ public class GBPTreeCountsStore extends GBPTreeGenericCountsStore implements Cou
     }
 
     @Override
-    public long estimateNodeCount(int labelId, CursorContext cursorContext) {
-        return nodeCount(labelId, cursorContext);
-    }
-
-    @Override
     public long relationshipCount(int startLabelId, int typeId, int endLabelId, CursorContext cursorContext) {
         return read(relationshipKey(startLabelId, typeId, endLabelId), cursorContext);
-    }
-
-    @Override
-    public long estimateRelationshipCount(int startLabelId, int typeId, int endLabelId, CursorContext cursorContext) {
-        return relationshipCount(startLabelId, typeId, endLabelId, cursorContext);
     }
 
     @Override
@@ -202,7 +195,7 @@ public class GBPTreeCountsStore extends GBPTreeGenericCountsStore implements Cou
     public static void dump(
             PageCache pageCache,
             FileSystemAbstraction fileSystem,
-            Path file,
+            StoreFile storeFile,
             PrintStream out,
             CursorContextFactory contextFactory,
             PageCacheTracer pageCacheTracer,
@@ -211,7 +204,7 @@ public class GBPTreeCountsStore extends GBPTreeGenericCountsStore implements Cou
         GBPTreeGenericCountsStore.dump(
                 pageCache,
                 fileSystem,
-                file,
+                storeFile,
                 out,
                 DEFAULT_DATABASE_NAME,
                 NAME,

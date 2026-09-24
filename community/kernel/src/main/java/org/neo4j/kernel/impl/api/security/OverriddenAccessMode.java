@@ -21,14 +21,16 @@ package org.neo4j.kernel.impl.api.security;
 
 import java.net.InetAddress;
 import java.net.URI;
+import java.util.function.IntPredicate;
 import java.util.function.Supplier;
-import org.eclipse.collections.api.set.primitive.IntSet;
+import org.neo4j.internal.kernel.api.LabelsSupplier;
 import org.neo4j.internal.kernel.api.RelTypeSupplier;
 import org.neo4j.internal.kernel.api.TokenSet;
 import org.neo4j.internal.kernel.api.security.AccessMode;
 import org.neo4j.internal.kernel.api.security.PermissionState;
 import org.neo4j.internal.kernel.api.security.PrivilegeAction;
-import org.neo4j.internal.kernel.api.security.ReadSecurityPropertyProvider;
+import org.neo4j.internal.kernel.api.security.SelectedPropertiesProvider;
+import org.neo4j.internal.kernel.api.security.StaticAccessMode;
 import org.neo4j.messages.MessageUtil;
 import org.neo4j.storageengine.api.PropertySelection;
 
@@ -37,7 +39,7 @@ import org.neo4j.storageengine.api.PropertySelection;
  * mode allows, while retaining the meta data of the original mode only.
  */
 public class OverriddenAccessMode extends WrappedAccessMode {
-    public OverriddenAccessMode(AccessMode original, Static overriding) {
+    public OverriddenAccessMode(AccessMode original, StaticAccessMode overriding) {
         super(original, overriding);
     }
 
@@ -87,28 +89,23 @@ public class OverriddenAccessMode extends WrappedAccessMode {
     }
 
     @Override
+    public boolean hasNoTraverseNodePrivilege() {
+        return wrapping.hasNoTraverseNodePrivilege();
+    }
+
+    @Override
     public boolean allowsTraverseNode(int... labels) {
         return wrapping.allowsTraverseNode(labels);
     }
 
     @Override
-    public IntSet getTraverseSecurityProperties(int[] labels) {
-        return wrapping.getTraverseSecurityProperties(labels);
+    public boolean hasApplicableTraverseNodeAllowPropertyRules(int label) {
+        return wrapping.hasApplicableTraverseNodeAllowPropertyRules(label);
     }
 
     @Override
-    public boolean hasApplicableTraverseAllowPropertyRules(int label) {
-        return wrapping.hasApplicableTraverseAllowPropertyRules(label);
-    }
-
-    @Override
-    public boolean allowsTraverseNodeWithPropertyRules(ReadSecurityPropertyProvider propertyProvider, int... labels) {
-        return wrapping.allowsTraverseNodeWithPropertyRules(propertyProvider, labels);
-    }
-
-    @Override
-    public boolean hasTraversePropertyRules() {
-        return wrapping.hasTraversePropertyRules();
+    public boolean allowsTraverseNode(LabelsSupplier labels, SelectedPropertiesProvider selectedPropertiesProvider) {
+        return wrapping.allowsTraverseNode(labels, selectedPropertiesProvider);
     }
 
     @Override
@@ -122,79 +119,64 @@ public class OverriddenAccessMode extends WrappedAccessMode {
     }
 
     @Override
+    public boolean allowsTraverseAllRelsWithType(int relType) {
+        return wrapping.allowsTraverseAllRelsWithType(relType);
+    }
+
+    @Override
     public boolean disallowsTraverseRelType(int relType) {
         return wrapping.disallowsTraverseRelType(relType);
     }
 
     @Override
-    public boolean allowsReadPropertyAllLabels(int propertyKey) {
-        return wrapping.allowsReadPropertyAllLabels(propertyKey);
+    public boolean hasApplicableTraverseRelAllowPropertyRules(int type) {
+        return wrapping.hasApplicableTraverseRelAllowPropertyRules(type);
     }
 
     @Override
-    public boolean disallowsReadPropertyForSomeLabel(int propertyKey) {
-        return wrapping.disallowsReadPropertyForSomeLabel(propertyKey);
+    public boolean allowsTraverseRelationship(int type, SelectedPropertiesProvider propertyProviderSupplier) {
+        return wrapping.allowsTraverseRelationship(type, propertyProviderSupplier);
     }
 
     @Override
     public boolean allowsReadNodeProperties(
-            Supplier<TokenSet> labels, int[] propertyKeys, ReadSecurityPropertyProvider propertyProvider) {
+            LabelsSupplier labels, int[] propertyKeys, Supplier<SelectedPropertiesProvider> propertyProvider) {
         return wrapping.allowsReadNodeProperties(labels, propertyKeys, propertyProvider);
     }
 
     @Override
-    public boolean allowsReadNodeProperties(Supplier<TokenSet> labels, int[] propertyKeys) {
-        return wrapping.allowsReadNodeProperties(labels, propertyKeys);
+    public boolean allowsTraverseAndReadAllMatchingNodeProperties(int[] labels, int[] propertyKeys) {
+        return wrapping.allowsTraverseAndReadAllMatchingNodeProperties(labels, propertyKeys);
     }
 
     @Override
-    public boolean allowsReadNodeProperty(
-            Supplier<TokenSet> labels, int propertyKey, ReadSecurityPropertyProvider propertyProvider) {
-        return wrapping.allowsReadNodeProperty(labels, propertyKey, propertyProvider);
-    }
-
-    public boolean allowsReadNodeProperty(Supplier<TokenSet> labels, int propertyKey) {
-        return wrapping.allowsReadNodeProperty(labels, propertyKey);
+    public boolean allowsTraverseAndReadAllMatchingRelProperties(int[] relTypes, int[] propertyKeys) {
+        return wrapping.allowsTraverseAndReadAllMatchingRelProperties(relTypes, propertyKeys);
     }
 
     @Override
-    public boolean allowsReadPropertyAllRelTypes(int propertyKey) {
-        return wrapping.allowsReadPropertyAllRelTypes(propertyKey);
+    public boolean allowsReadRelProperties(
+            RelTypeSupplier relType, int[] propertyKeys, Supplier<SelectedPropertiesProvider> propertyProvider) {
+        return wrapping.allowsReadRelProperties(relType, propertyKeys, propertyProvider);
     }
 
     @Override
-    public boolean allowsReadRelationshipProperty(RelTypeSupplier relType, int propertyKey) {
-        return wrapping.allowsReadRelationshipProperty(relType, propertyKey);
+    public IntPredicate allowedToReadNodeProperties(
+            LabelsSupplier labels, Supplier<SelectedPropertiesProvider> propertyProvider, PropertySelection selection) {
+        return wrapping.allowedToReadNodeProperties(labels, propertyProvider, selection);
+    }
+
+    @Override
+    public IntPredicate allowedToReadRelationshipProperties(
+            RelTypeSupplier relType,
+            Supplier<SelectedPropertiesProvider> propertyProvider,
+            PropertySelection selection) {
+        return wrapping.allowedToReadRelationshipProperties(relType, propertyProvider, selection);
     }
 
     @Override
     public boolean allowsSeePropertyKeyToken(int propertyKey) {
         return wrapping.allowsSeePropertyKeyToken(propertyKey);
-    }
-
-    @Override
-    public boolean hasPropertyReadRules() {
-        return wrapping.hasPropertyReadRules();
-    }
-
-    @Override
-    public boolean hasPropertyReadRules(int... propertyKeys) {
-        return wrapping.hasPropertyReadRules(propertyKeys);
-    }
-
-    @Override
-    public IntSet getReadSecurityProperties(int propertyKey) {
-        return wrapping.getReadSecurityProperties(propertyKey);
-    }
-
-    @Override
-    public IntSet getAllReadSecurityProperties() {
-        return wrapping.getAllReadSecurityProperties();
-    }
-
-    @Override
-    public PropertySelection getSecurityPropertySelection(PropertySelection selection) {
-        return wrapping.getSecurityPropertySelection(selection);
     }
 
     @Override
@@ -233,7 +215,7 @@ public class OverriddenAccessMode extends WrappedAccessMode {
     }
 
     @Override
-    public boolean allowsSetProperty(Supplier<TokenSet> labels, int propertyKey) {
+    public boolean allowsSetProperty(LabelsSupplier labels, int propertyKey) {
         return wrapping.allowsSetProperty(labels, propertyKey);
     }
 
@@ -255,5 +237,9 @@ public class OverriddenAccessMode extends WrappedAccessMode {
     @Override
     public String name() {
         return MessageUtil.overriddenMode(original.name(), wrapping.name());
+    }
+
+    public String authTokenWrappingName() {
+        return wrapping.name();
     }
 }

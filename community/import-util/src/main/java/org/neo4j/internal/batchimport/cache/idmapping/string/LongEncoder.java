@@ -21,31 +21,29 @@ package org.neo4j.internal.batchimport.cache.idmapping.string;
 
 import static java.lang.Math.log10;
 import static java.lang.Math.max;
-import static org.neo4j.util.Preconditions.checkArgument;
 
 /**
  * {@link Encoder} that assumes that the entered strings can be parsed to {@link Long} directly.
  * The 8 higher-order bits are reserved for internal use and therefore the IDs cannot use the whole range of the long.
  */
 public class LongEncoder implements Encoder {
-    private static final long ID_BITS = 0x00FFFFFF_FFFFFFFFL;
+    public static final long ID_BITS = 0x00FFFFFF_FFFFFFFFL;
     private static final long RESERVED_BITS = ~ID_BITS;
 
     @Override
     public long encode(Object value) {
         long longValue = convertToLong(value);
-        checkArgument(
-                (longValue & RESERVED_BITS) == 0,
-                "Invalid integer ID %d, it must be %d <= id <= 0",
-                longValue,
-                ID_BITS);
+        if ((longValue & RESERVED_BITS) != 0) {
+            throw new ArithmeticException(
+                    "Invalid integer ID %d, it must be %d <= id <= 0".formatted(longValue, ID_BITS));
+        }
         long length = numberOfDigits(longValue);
         length = length << 57;
         long returnVal = length | longValue;
         return returnVal;
     }
 
-    private long convertToLong(Object value) {
+    private static long convertToLong(Object value) {
         if (value instanceof Number) {
             return ((Number) value).longValue();
         }

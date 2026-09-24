@@ -175,11 +175,54 @@ public interface PageCacheCounters {
 
     long snapshotsLoaded();
 
+    /**
+     * Total number of async io submits
+     */
+    long asyncIoSubmitted();
+
+    /**
+     * Total number of successfully completed async io requests
+     */
+    long asyncIoCompleted();
+
+    /**
+     * Total number of failed async io requests
+     */
+    long asyncIoFailed();
+
     default long prefetchedPages() {
         return 0L;
     }
 
     default long prefetchedPagesWithFaults() {
+        return 0L;
+    }
+
+    /**
+     * @return Total number of segment files created.
+     */
+    default long segmentsCreated() {
+        return 0L;
+    }
+
+    /**
+     * @return Total number of existing segment files loaded.
+     */
+    default long segmentsLoaded() {
+        return 0L;
+    }
+
+    /**
+     * @return Total number of segment files unloaded.
+     */
+    default long segmentsUnloaded() {
+        return 0L;
+    }
+
+    /**
+     * @return Total number of segment files deleted.
+     */
+    default long segmentsDeleted() {
         return 0L;
     }
 }

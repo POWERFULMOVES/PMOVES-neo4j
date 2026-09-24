@@ -20,64 +20,91 @@
 package org.neo4j.cypher.internal.compiler.planner.logical.steps
 
 import org.neo4j.cypher.internal.ast.CommandClause
+import org.neo4j.cypher.internal.ast.CommandResultItem
+import org.neo4j.cypher.internal.ast.ExpandHintAll
+import org.neo4j.cypher.internal.ast.ExpandHintInto
+import org.neo4j.cypher.internal.ast.ExpandHintMode
 import org.neo4j.cypher.internal.ast.GraphReference
-import org.neo4j.cypher.internal.ast.Hint
+import org.neo4j.cypher.internal.ast.IrHint
+import org.neo4j.cypher.internal.ast.ShowColumn
 import org.neo4j.cypher.internal.ast.ShowConstraintsClause
+import org.neo4j.cypher.internal.ast.ShowCurrentGraphTypeClause
+import org.neo4j.cypher.internal.ast.ShowDatabasesClause
 import org.neo4j.cypher.internal.ast.ShowFunctionsClause
 import org.neo4j.cypher.internal.ast.ShowIndexesClause
 import org.neo4j.cypher.internal.ast.ShowProceduresClause
 import org.neo4j.cypher.internal.ast.ShowSettingsClause
 import org.neo4j.cypher.internal.ast.ShowTransactionsClause
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsDisjointByMode
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsDisjointByParameters
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsErrorParameters
-import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorRetryThenBreak
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorRetryThenContinue
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorRetryThenFail
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsParameters
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsReportParameters
 import org.neo4j.cypher.internal.ast.TerminateTransactionsClause
 import org.neo4j.cypher.internal.ast.Union.UnionMapping
+import org.neo4j.cypher.internal.ast.UsingExpandStepHint
+import org.neo4j.cypher.internal.ast.UsingExpandStepId
 import org.neo4j.cypher.internal.ast.UsingIndexHint
 import org.neo4j.cypher.internal.ast.UsingJoinHint
 import org.neo4j.cypher.internal.ast.UsingScanHint
 import org.neo4j.cypher.internal.ast.UsingStatefulShortestPathHint
+import org.neo4j.cypher.internal.ast.Where
 import org.neo4j.cypher.internal.compiler.ExecutionModel
-import org.neo4j.cypher.internal.compiler.helpers.PredicateHelper.coercePredicatesWithAnds
+import org.neo4j.cypher.internal.compiler.helpers.PropertyAccessHelper
 import org.neo4j.cypher.internal.compiler.planner.ProcedureCallProjection
 import org.neo4j.cypher.internal.compiler.planner.logical.LogicalPlanningContext
 import org.neo4j.cypher.internal.compiler.planner.logical.Metrics.CardinalityModel
 import org.neo4j.cypher.internal.compiler.planner.logical.RemoteBatchingResult
+import org.neo4j.cypher.internal.compiler.planner.logical.RemoteBatchingSubQueryResult
 import org.neo4j.cypher.internal.compiler.planner.logical.irExpressionRewriter
 import org.neo4j.cypher.internal.compiler.planner.logical.ordering.InterestingOrderConfig
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.LogicalPlanProducer.solvedForTailApply
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.ContainsSearchMode
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.EndsWithSearchMode
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.StringSearchMode
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.projection.MaybeReportedProjections
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.skipAndLimit.planLimitOnTopOf
 import org.neo4j.cypher.internal.expressions.Add
+import org.neo4j.cypher.internal.expressions.AllReduceAccumulator
 import org.neo4j.cypher.internal.expressions.CachedHasProperty
 import org.neo4j.cypher.internal.expressions.CachedProperty
 import org.neo4j.cypher.internal.expressions.Equals
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.FilterScope
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
+import org.neo4j.cypher.internal.expressions.HasAnyDynamicLabel
+import org.neo4j.cypher.internal.expressions.HasAnyDynamicType
+import org.neo4j.cypher.internal.expressions.HasDynamicLabels
+import org.neo4j.cypher.internal.expressions.HasDynamicType
+import org.neo4j.cypher.internal.expressions.HasTypes
+import org.neo4j.cypher.internal.expressions.ImpliedLabel
 import org.neo4j.cypher.internal.expressions.LabelName
 import org.neo4j.cypher.internal.expressions.LabelToken
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.MapProjection
+import org.neo4j.cypher.internal.expressions.Ors
 import org.neo4j.cypher.internal.expressions.Parameter
+import org.neo4j.cypher.internal.expressions.PartialPredicate
 import org.neo4j.cypher.internal.expressions.PatternComprehension
 import org.neo4j.cypher.internal.expressions.PatternExpression
 import org.neo4j.cypher.internal.expressions.Property
 import org.neo4j.cypher.internal.expressions.PropertyKeyName
+import org.neo4j.cypher.internal.expressions.PropertyKeyToken
 import org.neo4j.cypher.internal.expressions.RelTypeName
 import org.neo4j.cypher.internal.expressions.RelationshipTypeToken
 import org.neo4j.cypher.internal.expressions.SemanticDirection
 import org.neo4j.cypher.internal.expressions.SemanticDirection.BOTH
 import org.neo4j.cypher.internal.expressions.SignedDecimalIntegerLiteral
 import org.neo4j.cypher.internal.expressions.StringLiteral
+import org.neo4j.cypher.internal.expressions.UnPositionedVariable
 import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.expressions.VariableGrouping
 import org.neo4j.cypher.internal.expressions.functions.Collect
 import org.neo4j.cypher.internal.expressions.functions.UnresolvedFunction
-import org.neo4j.cypher.internal.frontend.phases.ResolvedCall
+import org.neo4j.cypher.internal.frontend.phases.ResolvedNonLocalCall
 import org.neo4j.cypher.internal.ir.AggregatingQueryProjection
 import org.neo4j.cypher.internal.ir.CSVFormat
 import org.neo4j.cypher.internal.ir.CallSubqueryHorizon
@@ -89,9 +116,11 @@ import org.neo4j.cypher.internal.ir.DeleteExpression
 import org.neo4j.cypher.internal.ir.DistinctQueryProjection
 import org.neo4j.cypher.internal.ir.EagernessReason
 import org.neo4j.cypher.internal.ir.ForeachPattern
+import org.neo4j.cypher.internal.ir.FulltextSearchClause
 import org.neo4j.cypher.internal.ir.LoadCSVProjection
 import org.neo4j.cypher.internal.ir.MergeNodePattern
 import org.neo4j.cypher.internal.ir.MergeRelationshipPattern
+import org.neo4j.cypher.internal.ir.MutatingPattern
 import org.neo4j.cypher.internal.ir.NodeBinding
 import org.neo4j.cypher.internal.ir.PassthroughAllHorizon
 import org.neo4j.cypher.internal.ir.PatternRelationship
@@ -117,11 +146,11 @@ import org.neo4j.cypher.internal.ir.SetRelationshipPropertiesFromMapPattern
 import org.neo4j.cypher.internal.ir.SetRelationshipPropertiesPattern
 import org.neo4j.cypher.internal.ir.SetRelationshipPropertyPattern
 import org.neo4j.cypher.internal.ir.ShortestRelationshipPattern
-import org.neo4j.cypher.internal.ir.SimpleMutatingPattern
 import org.neo4j.cypher.internal.ir.SinglePlannerQuery
 import org.neo4j.cypher.internal.ir.UnionQuery
 import org.neo4j.cypher.internal.ir.UnwindProjection
 import org.neo4j.cypher.internal.ir.VarPatternLength
+import org.neo4j.cypher.internal.ir.VectorSearchClause
 import org.neo4j.cypher.internal.ir.ast.IRExpression
 import org.neo4j.cypher.internal.ir.ordering
 import org.neo4j.cypher.internal.ir.ordering.InterestingOrder
@@ -131,6 +160,7 @@ import org.neo4j.cypher.internal.logical.plans.AllNodesScan
 import org.neo4j.cypher.internal.logical.plans.AntiConditionalApply
 import org.neo4j.cypher.internal.logical.plans.AntiSemiApply
 import org.neo4j.cypher.internal.logical.plans.Apply
+import org.neo4j.cypher.internal.logical.plans.ApplyPlan
 import org.neo4j.cypher.internal.logical.plans.Argument
 import org.neo4j.cypher.internal.logical.plans.AssertSameNode
 import org.neo4j.cypher.internal.logical.plans.AssertSameRelationship
@@ -138,6 +168,8 @@ import org.neo4j.cypher.internal.logical.plans.AtMostOneRow
 import org.neo4j.cypher.internal.logical.plans.CachedProperties
 import org.neo4j.cypher.internal.logical.plans.CartesianProduct
 import org.neo4j.cypher.internal.logical.plans.ColumnOrder
+import org.neo4j.cypher.internal.logical.plans.CommandDefaultColumn
+import org.neo4j.cypher.internal.logical.plans.CommandYieldColumn
 import org.neo4j.cypher.internal.logical.plans.ConditionalApply
 import org.neo4j.cypher.internal.logical.plans.DeleteNode
 import org.neo4j.cypher.internal.logical.plans.DeletePath
@@ -148,21 +180,29 @@ import org.neo4j.cypher.internal.logical.plans.DetachDeletePath
 import org.neo4j.cypher.internal.logical.plans.DirectedAllRelationshipsScan
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipByElementIdSeek
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipByIdSeek
+import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipFulltextIndexSearch
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipIndexContainsScan
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipIndexEndsWithScan
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipIndexScan
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipIndexSeek
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipTypeScan
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipUniqueIndexSeek
+import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipVectorIndexSearch
 import org.neo4j.cypher.internal.logical.plans.DirectedUnionRelationshipTypesScan
 import org.neo4j.cypher.internal.logical.plans.Distinct
 import org.neo4j.cypher.internal.logical.plans.DistinctColumns
 import org.neo4j.cypher.internal.logical.plans.Distinctness
+import org.neo4j.cypher.internal.logical.plans.DynamicDirectedRelationshipTypeLookup
+import org.neo4j.cypher.internal.logical.plans.DynamicElement
+import org.neo4j.cypher.internal.logical.plans.DynamicLabelNodeLookup
+import org.neo4j.cypher.internal.logical.plans.DynamicUndirectedRelationshipTypeLookup
 import org.neo4j.cypher.internal.logical.plans.Eager
 import org.neo4j.cypher.internal.logical.plans.EmptyResult
 import org.neo4j.cypher.internal.logical.plans.ErrorPlan
 import org.neo4j.cypher.internal.logical.plans.ExhaustiveLimit
 import org.neo4j.cypher.internal.logical.plans.Expand
+import org.neo4j.cypher.internal.logical.plans.Expand.ExpandAll
+import org.neo4j.cypher.internal.logical.plans.Expand.ExpandInto
 import org.neo4j.cypher.internal.logical.plans.Expand.ExpansionMode
 import org.neo4j.cypher.internal.logical.plans.Expand.VariablePredicate
 import org.neo4j.cypher.internal.logical.plans.FindShortestPaths
@@ -185,8 +225,10 @@ import org.neo4j.cypher.internal.logical.plans.LetSelectOrSemiApply
 import org.neo4j.cypher.internal.logical.plans.LetSemiApply
 import org.neo4j.cypher.internal.logical.plans.Limit
 import org.neo4j.cypher.internal.logical.plans.LoadCSV
+import org.neo4j.cypher.internal.logical.plans.LogicalBinaryPlan
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 import org.neo4j.cypher.internal.logical.plans.LogicalPlanToPlanBuilderString
+import org.neo4j.cypher.internal.logical.plans.MatchAllQueryExpression
 import org.neo4j.cypher.internal.logical.plans.Merge
 import org.neo4j.cypher.internal.logical.plans.NFA
 import org.neo4j.cypher.internal.logical.plans.NFA.PathLength
@@ -194,6 +236,7 @@ import org.neo4j.cypher.internal.logical.plans.NodeByElementIdSeek
 import org.neo4j.cypher.internal.logical.plans.NodeByIdSeek
 import org.neo4j.cypher.internal.logical.plans.NodeByLabelScan
 import org.neo4j.cypher.internal.logical.plans.NodeCountFromCountStore
+import org.neo4j.cypher.internal.logical.plans.NodeFulltextIndexSearch
 import org.neo4j.cypher.internal.logical.plans.NodeHashJoin
 import org.neo4j.cypher.internal.logical.plans.NodeIndexContainsScan
 import org.neo4j.cypher.internal.logical.plans.NodeIndexEndsWithScan
@@ -201,6 +244,7 @@ import org.neo4j.cypher.internal.logical.plans.NodeIndexScan
 import org.neo4j.cypher.internal.logical.plans.NodeIndexSeek
 import org.neo4j.cypher.internal.logical.plans.NodeLogicalLeafPlan
 import org.neo4j.cypher.internal.logical.plans.NodeUniqueIndexSeek
+import org.neo4j.cypher.internal.logical.plans.NodeVectorIndexSearch
 import org.neo4j.cypher.internal.logical.plans.Optional
 import org.neo4j.cypher.internal.logical.plans.OrderedAggregation
 import org.neo4j.cypher.internal.logical.plans.OrderedDistinct
@@ -215,8 +259,13 @@ import org.neo4j.cypher.internal.logical.plans.RelationshipCountFromCountStore
 import org.neo4j.cypher.internal.logical.plans.RelationshipLogicalLeafPlan
 import org.neo4j.cypher.internal.logical.plans.RemoteBatchProperties
 import org.neo4j.cypher.internal.logical.plans.RemoteBatchPropertiesWithFilter
+import org.neo4j.cypher.internal.logical.plans.RemoteBatchPropertiesWithPushdownOperators
 import org.neo4j.cypher.internal.logical.plans.RemoveLabels
+import org.neo4j.cypher.internal.logical.plans.RepeatAcyclic
 import org.neo4j.cypher.internal.logical.plans.RepeatTrail
+import org.neo4j.cypher.internal.logical.plans.RepeatWalk
+import org.neo4j.cypher.internal.logical.plans.RewrittenSubQueryPredicates
+import org.neo4j.cypher.internal.logical.plans.RewrittenSubQueryPredicates.RewrittenSubQueryPredicatesMap
 import org.neo4j.cypher.internal.logical.plans.RightOuterHashJoin
 import org.neo4j.cypher.internal.logical.plans.RollUpApply
 import org.neo4j.cypher.internal.logical.plans.RunQueryAt
@@ -238,6 +287,8 @@ import org.neo4j.cypher.internal.logical.plans.SetRelationshipProperties
 import org.neo4j.cypher.internal.logical.plans.SetRelationshipPropertiesFromMap
 import org.neo4j.cypher.internal.logical.plans.SetRelationshipProperty
 import org.neo4j.cypher.internal.logical.plans.ShowConstraints
+import org.neo4j.cypher.internal.logical.plans.ShowCurrentGraphType
+import org.neo4j.cypher.internal.logical.plans.ShowDatabases
 import org.neo4j.cypher.internal.logical.plans.ShowFunctions
 import org.neo4j.cypher.internal.logical.plans.ShowIndexes
 import org.neo4j.cypher.internal.logical.plans.ShowProcedures
@@ -256,42 +307,54 @@ import org.neo4j.cypher.internal.logical.plans.Top1WithTies
 import org.neo4j.cypher.internal.logical.plans.TransactionApply
 import org.neo4j.cypher.internal.logical.plans.TransactionConcurrency
 import org.neo4j.cypher.internal.logical.plans.TransactionForeach
-import org.neo4j.cypher.internal.logical.plans.TraversalMatchMode
+import org.neo4j.cypher.internal.logical.plans.TransactionalPlan.ErrorHandling
+import org.neo4j.cypher.internal.logical.plans.TransactionalPlan.RecoveryMode
+import org.neo4j.cypher.internal.logical.plans.TransactionalPlan.RetryMode
+import org.neo4j.cypher.internal.logical.plans.TraversalPathMode
+import org.neo4j.cypher.internal.logical.plans.TraversalPathMode.Trail
 import org.neo4j.cypher.internal.logical.plans.TriadicSelection
 import org.neo4j.cypher.internal.logical.plans.UndirectedAllRelationshipsScan
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipByElementIdSeek
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipByIdSeek
+import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipFulltextIndexSearch
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipIndexContainsScan
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipIndexEndsWithScan
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipIndexScan
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipIndexSeek
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipTypeScan
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipUniqueIndexSeek
+import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipVectorIndexSearch
 import org.neo4j.cypher.internal.logical.plans.UndirectedUnionRelationshipTypesScan
 import org.neo4j.cypher.internal.logical.plans.Union
 import org.neo4j.cypher.internal.logical.plans.UnionNodeByLabelsScan
 import org.neo4j.cypher.internal.logical.plans.UnwindCollection
 import org.neo4j.cypher.internal.logical.plans.UpdatingPlan
 import org.neo4j.cypher.internal.logical.plans.ValueHashJoin
+import org.neo4j.cypher.internal.logical.plans.ValueMergeJoin
 import org.neo4j.cypher.internal.logical.plans.VarExpand
 import org.neo4j.cypher.internal.logical.plans.ordering.DefaultProvidedOrderFactory
 import org.neo4j.cypher.internal.logical.plans.ordering.ParallelExecutionProvidedOrderFactory
 import org.neo4j.cypher.internal.logical.plans.ordering.ProvidedOrder
 import org.neo4j.cypher.internal.logical.plans.ordering.ProvidedOrderFactory
-import org.neo4j.cypher.internal.macros.AssertMacros
-import org.neo4j.cypher.internal.macros.AssertMacros.checkOnlyWhenAssertionsAreEnabled
+import org.neo4j.cypher.internal.macros.AssertMacros3
+import org.neo4j.cypher.internal.macros.AssertMacros3.checkOnlyWhenAssertionsAreEnabled
 import org.neo4j.cypher.internal.planner.spi.IndexDescriptor.IndexType
+import org.neo4j.cypher.internal.planner.spi.PlanContext
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.LeveragedOrders
+import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.cypher.internal.util.AssertionRunner
 import org.neo4j.cypher.internal.util.Foldable.FoldableAny
 import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.cypher.internal.util.PredicateHelper.coercePredicatesWithAnds
 import org.neo4j.cypher.internal.util.Rewritable.RewritableAny
 import org.neo4j.cypher.internal.util.attribution.Attributes
 import org.neo4j.cypher.internal.util.attribution.IdGen
 import org.neo4j.cypher.internal.util.collection.immutable.ListSet
 import org.neo4j.exceptions.ExhaustiveShortestPathForbiddenException
 import org.neo4j.exceptions.InternalException
+
+import scala.util.chaining.scalaUtilChainingOps
 
 /*
  * The responsibility of this class is to produce the correct solved PlannerQuery when creating logical plans.
@@ -336,18 +399,10 @@ case class LogicalPlanProducer(
 
     def planApply(left: LogicalPlan, right: LogicalPlan, context: LogicalPlanningContext): LogicalPlan = {
       val plan = Apply(left, right)
-      val providedOrder =
-        providedOrderOfApply(left, right, plan, context.settings.executionModel, context.providedOrderFactory)
       // The RHS is the leaf plan we are wrapping under an apply in order to solve the pattern expression.
       // It has the correct solved
       val solved = solveds.get(right.id)
-      annotate(
-        plan,
-        solved,
-        providedOrder,
-        cachedPropertiesPerPlan.get(right.id),
-        context
-      )
+      annotateApply(plan, solved, cachedPropertiesPerPlan.get(right.id), context)
     }
 
     def planRollup(
@@ -376,13 +431,7 @@ case class LogicalPlanProducer(
     ): LogicalPlan = {
       val solved = solveds.get(lhs.id)
       val plan = Apply(lhs, rhs)
-      annotate(
-        plan,
-        solved,
-        providedOrderOfApply(lhs, rhs, plan, context.settings.executionModel, context.providedOrderFactory),
-        cachedPropertiesPerPlan.get(rhs.id),
-        context
-      )
+      annotateApply(plan, solved, cachedPropertiesPerPlan.get(rhs.id), context)
     }
   }
 
@@ -396,8 +445,17 @@ case class LogicalPlanProducer(
       Attributes(idGen, cardinalities, providedOrders, leveragedOrders, labelAndRelTypeInfos, cachedPropertiesPerPlan)
     val newPlan = plan.copyPlanWithIdGen(keptAttributes.copy(plan.id))
     val solvedPlannerQuery =
-      solveds.get(plan.id).asSinglePlannerQuery.amendQueryGraph(_.addPredicates(solvedExpressions.toSeq: _*))
+      solveds.get(plan.id).asSinglePlannerQuery.amendQueryGraph(_.addPredicates(solvedExpressions))
     solveds.set(newPlan.id, solvedPlannerQuery)
+    newPlan
+  }
+
+  def markAsSolved(plan: LogicalPlan, solved: SinglePlannerQuery): LogicalPlan = {
+    // Keep other attributes but change solved
+    val keptAttributes =
+      Attributes(idGen, cardinalities, providedOrders, leveragedOrders, labelAndRelTypeInfos, cachedPropertiesPerPlan)
+    val newPlan = plan.copyPlanWithIdGen(keptAttributes.copy(plan.id))
+    solveds.set(newPlan.id, solved)
     newPlan
   }
 
@@ -437,7 +495,7 @@ case class LogicalPlanProducer(
   }
 
   /**
-   * @param variable             the name of the relationship variable
+   * @param variable           the name of the relationship variable
    * @param patternForLeafPlan the pattern to use for the leaf plan
    * @param originalPattern    the original pattern, as it appears in the query graph
    * @param hiddenSelections   selections that make the leaf plan solve the originalPattern instead.
@@ -481,7 +539,7 @@ case class LogicalPlanProducer(
   }
 
   /**
-   * @param variable             the name of the relationship variable
+   * @param variable           the name of the relationship variable
    * @param relType            the relType to scan
    * @param patternForLeafPlan the pattern to use for the leaf plan
    * @param originalPattern    the original pattern, as it appears in the query graph
@@ -538,7 +596,7 @@ case class LogicalPlanProducer(
   }
 
   /**
-   * @param variable             the name of the relationship variable
+   * @param variable           the name of the relationship variable
    * @param relTypes           the relTypes to scan
    * @param patternForLeafPlan the pattern to use for the leaf plan
    * @param originalPattern    the original pattern, as it appears in the query graph
@@ -592,6 +650,83 @@ case class LogicalPlanProducer(
     }
 
     planHiddenSelectionIfNeeded(planLeaf, hiddenSelections, context, originalPattern)
+  }
+
+  def planDynamicRelationshipByTypeLookup(
+    variable: LogicalVariable,
+    relationshipTypes: Expression,
+    operator: DynamicElement.SetOperator,
+    patternForLeafPlan: PatternRelationship,
+    originalPattern: PatternRelationship,
+    hiddenSelections: Seq[Expression],
+    argumentIds: Set[LogicalVariable],
+    providedOrder: ProvidedOrder,
+    context: LogicalPlanningContext,
+    solvedPropertyPredicates: Set[Expression],
+    propertyPredicates: Map[PropertyKeyToken, Expression]
+  ): LogicalPlan = {
+    val predicate =
+      operator match {
+        case DynamicElement.All => HasDynamicType(variable, Seq(relationshipTypes))(InputPosition.NONE)
+        case DynamicElement.Any => HasAnyDynamicType(variable, Seq(relationshipTypes))(InputPosition.NONE)
+      }
+
+    val solver = SubqueryExpressionSolver.solverForLeafPlan(argumentIds, context)
+    val rewrittenRelationshipTypes = solver.solve(relationshipTypes)
+    val newArguments = solver.newArguments
+
+    val element = DynamicElement.Simple(rewrittenRelationshipTypes, operator)
+    val allArgumentIds = argumentIds.union(newArguments)
+    val indexOrder = toIndexOrder(providedOrder)
+
+    val leafPlan = patternForLeafPlan.dir match {
+      case SemanticDirection.OUTGOING =>
+        DynamicDirectedRelationshipTypeLookup(
+          idName = Some(variable),
+          startNode = Some(patternForLeafPlan.left),
+          relType = element,
+          endNode = Some(patternForLeafPlan.right),
+          argumentIds = allArgumentIds,
+          indexOrder = indexOrder,
+          propertyPredicates = propertyPredicates
+        )
+      case SemanticDirection.INCOMING =>
+        DynamicDirectedRelationshipTypeLookup(
+          idName = Some(variable),
+          startNode = Some(patternForLeafPlan.right),
+          relType = element,
+          endNode = Some(patternForLeafPlan.left),
+          argumentIds = allArgumentIds,
+          indexOrder = indexOrder,
+          propertyPredicates = propertyPredicates
+        )
+      case SemanticDirection.BOTH =>
+        DynamicUndirectedRelationshipTypeLookup(
+          idName = Some(variable),
+          leftNode = Some(patternForLeafPlan.left),
+          relType = element,
+          rightNode = Some(patternForLeafPlan.right),
+          argumentIds = allArgumentIds,
+          indexOrder = indexOrder,
+          propertyPredicates = propertyPredicates
+        )
+    }
+
+    val annotatedLeafPlan =
+      annotateRelationshipLeafPlan(
+        leafPlan = leafPlan,
+        patternForLeafPlan = patternForLeafPlan,
+        solvedPredicates = List(predicate) ++ solvedPropertyPredicates,
+        solvedHint = Nil,
+        argumentIds = argumentIds,
+        providedOrder = providedOrder,
+        context = context,
+        cachedProperties = context.plannerState.previouslyCachedProperties
+      )
+
+    val rewrittenPlan = solver.rewriteLeafPlan(annotatedLeafPlan)
+
+    planHiddenSelectionIfNeeded(rewrittenPlan, hiddenSelections, context, originalPattern)
   }
 
   def planRelationshipIndexScan(
@@ -675,28 +810,56 @@ case class LogicalPlanProducer(
       val rewrittenValueExpr = solver.solve(valueExpr)
       val newArguments = solver.newArguments
 
-      val planTemplate = (patternForLeafPlan.dir, stringSearchMode) match {
+      val leafPlan = (patternForLeafPlan.dir, stringSearchMode) match {
         case (SemanticDirection.BOTH, ContainsSearchMode) =>
-          UndirectedRelationshipIndexContainsScan(_, _, _, _, _, _, _, _, _)
+          UndirectedRelationshipIndexContainsScan(
+            Some(variable),
+            Some(patternForLeafPlan.inOrder._1),
+            Some(patternForLeafPlan.inOrder._2),
+            relationshipType,
+            properties.head,
+            rewrittenValueExpr,
+            argumentIds ++ newArguments,
+            indexOrder,
+            indexType.toPublicApi
+          )
         case (SemanticDirection.BOTH, EndsWithSearchMode) =>
-          UndirectedRelationshipIndexEndsWithScan(_, _, _, _, _, _, _, _, _)
+          UndirectedRelationshipIndexEndsWithScan(
+            Some(variable),
+            Some(patternForLeafPlan.inOrder._1),
+            Some(patternForLeafPlan.inOrder._2),
+            relationshipType,
+            properties.head,
+            rewrittenValueExpr,
+            argumentIds ++ newArguments,
+            indexOrder,
+            indexType.toPublicApi
+          )
         case (SemanticDirection.INCOMING | SemanticDirection.OUTGOING, ContainsSearchMode) =>
-          DirectedRelationshipIndexContainsScan(_, _, _, _, _, _, _, _, _)
+          DirectedRelationshipIndexContainsScan(
+            Some(variable),
+            Some(patternForLeafPlan.inOrder._1),
+            Some(patternForLeafPlan.inOrder._2),
+            relationshipType,
+            properties.head,
+            rewrittenValueExpr,
+            argumentIds ++ newArguments,
+            indexOrder,
+            indexType.toPublicApi
+          )
         case (SemanticDirection.INCOMING | SemanticDirection.OUTGOING, EndsWithSearchMode) =>
-          DirectedRelationshipIndexEndsWithScan(_, _, _, _, _, _, _, _, _)
+          DirectedRelationshipIndexEndsWithScan(
+            Some(variable),
+            Some(patternForLeafPlan.inOrder._1),
+            Some(patternForLeafPlan.inOrder._2),
+            relationshipType,
+            properties.head,
+            rewrittenValueExpr,
+            argumentIds ++ newArguments,
+            indexOrder,
+            indexType.toPublicApi
+          )
       }
-
-      val leafPlan = planTemplate(
-        variable,
-        patternForLeafPlan.inOrder._1,
-        patternForLeafPlan.inOrder._2,
-        relationshipType,
-        properties.head,
-        rewrittenValueExpr,
-        argumentIds ++ newArguments,
-        indexOrder,
-        indexType.toPublicApi
-      )
 
       solver.rewriteLeafPlan {
         annotateRelationshipLeafPlan(
@@ -818,7 +981,7 @@ case class LogicalPlanProducer(
   }
 
   /**
-   * @param variable             the name of the relationship variable
+   * @param variable           the name of the relationship variable
    * @param patternForLeafPlan the pattern to use for the leaf plan
    * @param originalPattern    the original pattern, as it appears in the query graph
    * @param hiddenSelections   selections that make the leaf plan solve the originalPattern instead.
@@ -941,7 +1104,7 @@ case class LogicalPlanProducer(
     leafPlan: RelationshipLogicalLeafPlan,
     patternForLeafPlan: PatternRelationship,
     solvedPredicates: Seq[Expression],
-    solvedHint: IterableOnce[Hint],
+    solvedHint: IterableOnce[IrHint],
     argumentIds: Set[LogicalVariable],
     providedOrder: ProvidedOrder,
     context: LogicalPlanningContext,
@@ -977,14 +1140,36 @@ case class LogicalPlanProducer(
     }
   }
 
-  private def computeErrorBehaviour(maybeErrorParams: Option[InTransactionsErrorParameters])
-    : InTransactionsOnErrorBehaviour = {
-    maybeErrorParams.map(_.behaviour).getOrElse(TransactionForeach.defaultOnErrorBehaviour)
+  private def computeErrorBehaviour(context: PlanContext, maybeErrorParams: Option[InTransactionsErrorParameters])
+    : ErrorHandling = {
+    val defaultRetryMode = if (context.storageIsMvcc) RetryMode.ImplicitOnMvcc else RetryMode.NoRetry
+
+    maybeErrorParams match {
+      case Some(InTransactionsErrorParameters(
+          behaviour @ (OnErrorRetryThenContinue | OnErrorRetryThenBreak | OnErrorRetryThenFail),
+          retryParams
+        )) =>
+        ErrorHandling.fromAst(behaviour, retryParams)
+      case Some(InTransactionsErrorParameters(behaviour, None)) =>
+        ErrorHandling.fromAst(behaviour, None, defaultRetryMode)
+      case None =>
+        ErrorHandling(RecoveryMode.Fail, defaultRetryMode)
+      case _ =>
+        throw new IllegalArgumentException("Invalid combination of error parameters and retry parameters")
+    }
   }
 
   private def computeMaybeReportAs(maybeReportParams: Option[InTransactionsReportParameters])
     : Option[LogicalVariable] = {
     maybeReportParams.map(_.reportAs)
+  }
+
+  private def computeEffectiveDisjointBy(maybeDisjointByParams: Option[InTransactionsDisjointByParameters])
+    : Seq[Expression] = {
+    maybeDisjointByParams.map(_.mode) match {
+      case Some(InTransactionsDisjointByMode.DisjointByExpressions(expressions)) => expressions
+      case _                                                                     => Seq.empty
+    }
   }
 
   /**
@@ -1026,21 +1211,20 @@ case class LogicalPlanProducer(
       solveds.get(right.id).asSinglePlannerQuery.updateTailOrSelf(_.amendQueryGraph(_.withArgumentIds(Set.empty)))
     val solved = solveds.get(left.id).asSinglePlannerQuery ++ rhsSolved
     val plan = Apply(left, right)
-    val providedOrder =
-      providedOrderOfApply(left, right, plan, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, cachedProperties, context)
+    annotateApply(plan, solved, cachedProperties, context)
   }
 
   def planMergeApply(left: LogicalPlan, right: Merge, context: LogicalPlanningContext): LogicalPlan = {
     val lhsSolved = solveds.get(left.id).asSinglePlannerQuery
     val rhsSolved = solveds.get(right.id).asSinglePlannerQuery
     val solved =
-      lhsSolved.updateTailOrSelf(_.amendQueryGraph(_.addMutatingPatterns(rhsSolved.queryGraph.mutatingPatterns)))
+      lhsSolved.updateTailOrSelf(
+        _.amendQueryGraph(_.addMutatingPatterns(rhsSolved.queryGraph.mutatingPatterns))
+          .resetQueryProjection()
+      )
 
     val plan = Apply(left, right)
-    val providedOrder =
-      providedOrderOfApply(left, right, plan, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, CachedProperties.empty, context)
+    annotateApply(plan, solved, cachedPropertiesPerPlan.get(right.id), context)
   }
 
   def planSubquery(
@@ -1051,7 +1235,8 @@ case class LogicalPlanProducer(
     yielding: Boolean,
     inTransactionsParameters: Option[InTransactionsParameters],
     optional: Boolean,
-    importedVariables: Set[LogicalVariable]
+    importedVariables: Set[LogicalVariable],
+    importedSymbolsFromLastCallSubquery: Set[LogicalVariable]
   ): LogicalPlan = {
     val solvedLeft = solveds.get(left.id)
     val solvedRight = solveds.get(right.id)
@@ -1061,20 +1246,30 @@ case class LogicalPlanProducer(
       yielding,
       inTransactionsParameters,
       optional,
-      importedVariables
+      importedVariables,
+      importedSymbolsFromLastCallSubquery
     )))
 
     val plan =
       if (yielding) {
         inTransactionsParameters match {
-          case Some(InTransactionsParameters(batchParams, concurrencyParams, errorParams, reportParams)) =>
+          case Some(InTransactionsParameters(
+              batchParams,
+              concurrencyParams,
+              errorParams,
+              reportParams,
+              disjointByParams
+            )) =>
+            val errorBehaviour = computeErrorBehaviour(context.staticComponents.planContext, errorParams)
             TransactionApply(
               left,
               right,
               computeBatchSize(batchParams.map(_.batchSize)),
               computeConcurrency(concurrencyParams.map(_.concurrency)),
-              computeErrorBehaviour(errorParams),
-              computeMaybeReportAs(reportParams)
+              errorBehaviour,
+              computeMaybeReportAs(reportParams),
+              disjointByParams,
+              computeEffectiveDisjointBy(disjointByParams)
             )
           case None =>
             if (!correlated && solvedRight.readOnly) {
@@ -1085,14 +1280,23 @@ case class LogicalPlanProducer(
         }
       } else {
         inTransactionsParameters match {
-          case Some(InTransactionsParameters(batchParams, concurrencyParams, errorParams, reportParams)) =>
+          case Some(InTransactionsParameters(
+              batchParams,
+              concurrencyParams,
+              errorParams,
+              reportParams,
+              disjointByParams
+            )) =>
+            val errorBehaviour = computeErrorBehaviour(context.staticComponents.planContext, errorParams)
             TransactionForeach(
               left,
               right,
               computeBatchSize(batchParams.map(_.batchSize)),
               computeConcurrency(concurrencyParams.map(_.concurrency)),
-              computeErrorBehaviour(errorParams),
-              computeMaybeReportAs(reportParams)
+              errorBehaviour,
+              computeMaybeReportAs(reportParams),
+              disjointByParams,
+              computeEffectiveDisjointBy(disjointByParams)
             )
           case None => SubqueryForeach(left, right)
         }
@@ -1106,9 +1310,7 @@ case class LogicalPlanProducer(
   def planTailApply(left: LogicalPlan, right: LogicalPlan, context: LogicalPlanningContext): LogicalPlan = {
     val solved = solvedForTailApply(left, right, solveds)
     val plan = Apply(left, right)
-    val providedOrder =
-      providedOrderOfApply(left, right, plan, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, cachedPropertiesPerPlan.get(right.id), context)
+    annotateApply(plan, solved, cachedPropertiesPerPlan.get(right.id), context)
   }
 
   def planInputApply(
@@ -1119,9 +1321,7 @@ case class LogicalPlanProducer(
   ): LogicalPlan = {
     val solved = solveds.get(right.id).asSinglePlannerQuery.withInput(symbols)
     val plan = Apply(left, right)
-    val providedOrder =
-      providedOrderOfApply(left, right, plan, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, CachedProperties.empty, context)
+    annotateApply(plan, solved, CachedProperties.empty, context)
   }
 
   def planCartesianProduct(left: LogicalPlan, right: LogicalPlan, context: LogicalPlanningContext): LogicalPlan = {
@@ -1145,10 +1345,29 @@ case class LogicalPlanProducer(
     to: LogicalVariable,
     pattern: PatternRelationship,
     mode: ExpansionMode,
-    context: LogicalPlanningContext
+    context: LogicalPlanningContext,
+    hints: Iterable[IrHint]
   ): LogicalPlan = {
     val dir = pattern.directionRelativeTo(from)
-    val solved = solveds.get(left.id).asSinglePlannerQuery.amendQueryGraph(_.addPatternRelationship(pattern))
+    val solved =
+      solveds.get(left.id).asSinglePlannerQuery
+        .amendQueryGraph { qg =>
+          val alreadySolvedExpandStepIds = qg.hints.collect {
+            case h: UsingExpandStepHint => h.stepId
+          }
+          qg.addPatternRelationship(pattern)
+            .addHints(hints.collect {
+              case h: UsingExpandStepHint
+                if LogicalPlanProducer.expandHintClaims(
+                  h,
+                  planFrom = from,
+                  planTo = to,
+                  planRelIds = Set(pattern.variable),
+                  planMode = mode,
+                  claimedStepIds = alreadySolvedExpandStepIds
+                ) => h
+            })
+        }
     annotate(
       Expand(left, from, dir, pattern.types, to, pattern.variable, mode),
       solved,
@@ -1166,8 +1385,10 @@ case class LogicalPlanProducer(
     relationshipPredicates: ListSet[VariablePredicate],
     nodePredicates: ListSet[VariablePredicate],
     solvedPredicates: ListSet[Expression],
-    mode: ExpansionMode,
-    context: LogicalPlanningContext
+    expansionMode: ExpansionMode,
+    pathMode: TraversalPathMode,
+    context: LogicalPlanningContext,
+    hints: Iterable[IrHint]
   ): LogicalPlan = {
 
     val dir = patternRelationship.directionRelativeTo(from)
@@ -1176,9 +1397,27 @@ case class LogicalPlanProducer(
       case l: VarPatternLength =>
         val projectedDir = projectedDirection(patternRelationship, from, dir)
 
-        val solved = solveds.get(source.id).asSinglePlannerQuery.amendQueryGraph(_
-          .addPatternRelationship(patternRelationship)
-          .addPredicates(solvedPredicates.toSeq: _*))
+        val solved =
+          solveds.get(source.id).asSinglePlannerQuery
+            .amendQueryGraph { qg =>
+              val alreadySolvedExpandStepIds: Set[UsingExpandStepId] = qg.hints.collect {
+                case h: UsingExpandStepHint => h.stepId
+              }
+              qg
+                .addPatternRelationship(patternRelationship)
+                .addPredicates(solvedPredicates)
+                .addHints(hints.collect {
+                  case h: UsingExpandStepHint
+                    if LogicalPlanProducer.expandHintClaims(
+                      h,
+                      planFrom = from,
+                      planTo = to,
+                      planRelIds = Set(patternRelationship.variable),
+                      planMode = expansionMode,
+                      claimedStepIds = alreadySolvedExpandStepIds
+                    ) => h
+                })
+            }
 
         val (rewrittenRelationshipPredicates, rewrittenNodePredicates, _, rewrittenSource) =
           solveSubqueryExpressionsForExtractedPredicates(
@@ -1198,12 +1437,13 @@ case class LogicalPlanProducer(
             dir = dir,
             projectedDir = projectedDir,
             types = patternRelationship.types,
-            to = to,
-            relName = patternRelationship.variable,
+            maybeTo = Some(to),
+            maybeRelName = Some(patternRelationship.variable),
             length = l,
-            mode = mode,
+            expansionMode = expansionMode,
             nodePredicates = rewrittenNodePredicates.toSeq,
-            relationshipPredicates = rewrittenRelationshipPredicates.toSeq
+            relationshipPredicates = rewrittenRelationshipPredicates.toSeq,
+            pathMode = pathMode
           ),
           solved,
           ProvidedOrder.Left,
@@ -1211,7 +1451,11 @@ case class LogicalPlanProducer(
           context
         )
 
-      case _ => throw new InternalException("Expected a varlength path to be here")
+      case _ =>
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          "Expected a varlength path to be here"
+        )
     }
   }
 
@@ -1265,20 +1509,25 @@ case class LogicalPlanProducer(
     newPlan
   }
 
-  def planTrail(
+  def planRepeat(
     source: LogicalPlan,
     pattern: QuantifiedPathPattern,
     startBinding: NodeBinding,
     endBinding: NodeBinding,
-    maybeHiddenFilter: Option[Expression],
     context: LogicalPlanningContext,
     innerPlan: LogicalPlan,
     predicates: Seq[Expression],
     previouslyBoundRelationships: Set[LogicalVariable],
     previouslyBoundRelationshipGroups: Set[LogicalVariable],
-    reverseGroupVariableProjections: Boolean
+    previouslyBoundNodes: Set[LogicalVariable],
+    previouslyBoundNodeGroups: Set[LogicalVariable],
+    reverseGroupVariableProjections: Boolean,
+    expansionMode: ExpansionMode,
+    pathMode: TraversalPathMode,
+    allReduceAccumulators: Set[AllReduceAccumulator],
+    hints: Iterable[IrHint]
   ): LogicalPlan = {
-    // Ensure that innerPlan does conform with the pattern contained inside of the quantified path pattern before we mark it as solved
+    // Ensure that innerPlan does conform with the pattern contained inside the quantified path pattern before we mark it as solved
     try {
       VerifyBestPlan(
         plan = innerPlan,
@@ -1288,65 +1537,107 @@ case class LogicalPlanProducer(
         context = context
       )
     } catch {
-      case planVerificationException: InternalException => throw new InternalException(
+      // As the planner query is generated by us, we would never expect `VerifyBestPlan` to fail on it.
+      case planVerificationException: InternalException => throw InternalException.internalError(
+          this.getClass.getSimpleName,
           "The provided inner plan doesn't conform with the quantified path pattern being planned",
           planVerificationException
         )
     }
 
-    val solved = solveds.get(source.id).asSinglePlannerQuery.amendQueryGraph(_
-      .addQuantifiedPathPattern(pattern)
-      .addPredicates(predicates: _*))
+    val solved = solveds.get(source.id).asSinglePlannerQuery.amendQueryGraph { qg =>
+      val alreadySolvedExpandStepIds = qg.hints.collect {
+        case h: UsingExpandStepHint => h.stepId
+      }
+      val relationshipGroupVariables = pattern.relationshipVariableGroupings.map(_.group)
+      qg.addQuantifiedPathPattern(pattern)
+        .addPredicates(predicates: _*)
+        .addHints(hints.collect {
+          case h: UsingExpandStepHint
+            if LogicalPlanProducer.expandHintClaims(
+              h,
+              planFrom = startBinding.outer,
+              planTo = endBinding.outer,
+              planRelIds = relationshipGroupVariables,
+              planMode = expansionMode,
+              claimedStepIds = alreadySolvedExpandStepIds
+            ) => h
+        })
+    }
+
+    val (rewrittenSourcePlan, rewrittenAllReduceAccumulators) =
+      allReduceAccumulators.toVector.sortBy(_.position).foldLeft((source, Set.empty[AllReduceAccumulator])) {
+        case ((plan, accumulators), allReduceAcc) =>
+          val (rewrittenInit, rewrittenPlan) =
+            SubqueryExpressionSolver.ForSingle.solve(plan, allReduceAcc.initial, context)
+          (rewrittenPlan, accumulators + allReduceAcc.copy(initial = rewrittenInit)(allReduceAcc.position))
+      }
 
     val providedOrderRule = ProvidedOrder.Left
-    val trailPlan = annotate(
-      RepeatTrail(
-        left = source,
-        right = innerPlan,
-        repetition = pattern.repetition,
-        start = startBinding.outer,
-        end = endBinding.outer,
-        innerStart = startBinding.inner,
-        innerEnd = endBinding.inner,
-        nodeVariableGroupings = pattern.nodeVariableGroupings,
-        relationshipVariableGroupings = pattern.relationshipVariableGroupings,
-        innerRelationships = pattern.patternRelationships.map(p => p.variable).toSet,
-        previouslyBoundRelationships = previouslyBoundRelationships,
-        previouslyBoundRelationshipGroups = previouslyBoundRelationshipGroups,
-        reverseGroupVariableProjections = reverseGroupVariableProjections
-      ),
+    val repeatPlan = pathMode match {
+      case TraversalPathMode.Trail =>
+        RepeatTrail(
+          left = rewrittenSourcePlan,
+          right = innerPlan,
+          repetition = pattern.repetition,
+          start = startBinding.outer,
+          end = endBinding.outer,
+          innerStart = startBinding.inner,
+          innerEnd = endBinding.inner,
+          nodeVariableGroupings = pattern.nodeVariableGroupings,
+          relationshipVariableGroupings = pattern.relationshipVariableGroupings,
+          innerRelationships = pattern.patternRelationships.map(p => p.variable).toSet,
+          previouslyBoundRelationships = previouslyBoundRelationships,
+          previouslyBoundRelationshipGroups = previouslyBoundRelationshipGroups,
+          reverseGroupVariableProjections = reverseGroupVariableProjections,
+          expansionMode = expansionMode,
+          accumulatorMappings = rewrittenAllReduceAccumulators
+        )
+      case TraversalPathMode.Walk =>
+        RepeatWalk(
+          left = rewrittenSourcePlan,
+          right = innerPlan,
+          repetition = pattern.repetition,
+          start = startBinding.outer,
+          end = endBinding.outer,
+          innerStart = startBinding.inner,
+          innerEnd = endBinding.inner,
+          nodeVariableGroupings = pattern.nodeVariableGroupings,
+          relationshipVariableGroupings = pattern.relationshipVariableGroupings,
+          reverseGroupVariableProjections = reverseGroupVariableProjections,
+          innerRelationships = pattern.patternRelationships.map(p => p.variable).toSet,
+          expansionMode = expansionMode,
+          accumulatorMappings = rewrittenAllReduceAccumulators
+        )
+      case TraversalPathMode.Acyclic =>
+        RepeatAcyclic(
+          left = rewrittenSourcePlan,
+          right = innerPlan,
+          repetition = pattern.repetition,
+          start = startBinding.outer,
+          end = endBinding.outer,
+          innerStart = startBinding.inner,
+          innerEnd = endBinding.inner,
+          nodeVariableGroupings = pattern.nodeVariableGroupings,
+          innerNodes = pattern.patternNodes,
+          previouslyBoundNodes = previouslyBoundNodes,
+          previouslyBoundNodeGroups = previouslyBoundNodeGroups,
+          relationshipVariableGroupings = pattern.relationshipVariableGroupings,
+          innerRelationships = pattern.patternRelationships.map(p => p.variable).toSet,
+          previouslyBoundRelationships = previouslyBoundRelationships,
+          previouslyBoundRelationshipGroups = previouslyBoundRelationshipGroups,
+          reverseGroupVariableProjections = reverseGroupVariableProjections,
+          expansionMode = expansionMode,
+          accumulatorMappings = rewrittenAllReduceAccumulators
+        )
+    }
+    annotate(
+      repeatPlan,
       solved,
       providedOrderRule,
       cachedPropertiesPerPlan.get(innerPlan.id),
       context
     )
-
-    maybeHiddenFilter match {
-      case Some(hiddenFilter) =>
-        val RemoteBatchingResult(
-          rewrittenExpressionsWithCachedProperties,
-          planWithProperties
-        ) =
-          context.settings.remoteBatchPropertiesStrategy.planBatchPropertiesForSelections(
-            solved.asSinglePlannerQuery.queryGraph,
-            trailPlan,
-            context,
-            Set(hiddenFilter)
-          )
-        rewrittenExpressionsWithCachedProperties.selections match {
-          case rewrittenSelections: Set[Expression] if rewrittenSelections.nonEmpty =>
-            annotateSelection(
-              Selection(rewrittenExpressionsWithCachedProperties.selections.toSeq, planWithProperties),
-              solved,
-              providedOrderRule,
-              cachedPropertiesPerPlan.get(planWithProperties.id),
-              context
-            )
-          case _ => planWithProperties
-        }
-
-      case None => trailPlan
-    }
   }
 
   def planNodeByIdSeek(
@@ -1515,6 +1806,50 @@ case class LogicalPlanProducer(
       context.plannerState.previouslyCachedProperties,
       context
     )
+  }
+
+  def planDynamicLabelNodeLookup(
+    variable: LogicalVariable,
+    labels: Expression,
+    operator: DynamicElement.SetOperator,
+    argumentIds: Set[LogicalVariable],
+    context: LogicalPlanningContext,
+    solvedPropertyPredicates: Set[Expression],
+    propertyPredicates: Map[PropertyKeyToken, Expression]
+  ): LogicalPlan = {
+    val predicate =
+      operator match {
+        case DynamicElement.All => HasDynamicLabels(variable, Seq(labels))(InputPosition.NONE)
+        case DynamicElement.Any => HasAnyDynamicLabel(variable, Seq(labels))(InputPosition.NONE)
+      }
+
+    val solved = RegularSinglePlannerQuery(
+      queryGraph =
+        QueryGraph.empty
+          .addPatternNodes(variable)
+          .addPredicates(predicate)
+          .addPredicates(solvedPropertyPredicates)
+          .addArgumentIds(argumentIds.toIndexedSeq),
+      horizon = RegularQueryProjection(
+        importedExposedSymbols = context.plannerState.importedSubqueryVariables
+      )
+    )
+
+    val solver = SubqueryExpressionSolver.solverForLeafPlan(argumentIds, context)
+    val rewrittenLabels = solver.solve(labels)
+    val newArguments = solver.newArguments
+
+    val plan = DynamicLabelNodeLookup(
+      idName = variable,
+      labelExpr = DynamicElement.Simple(rewrittenLabels, operator),
+      argumentIds = argumentIds.union(newArguments),
+      propertyPredicates = propertyPredicates
+    )
+
+    val annotatedPlan =
+      annotate(plan, solved, ProvidedOrder.empty, context.plannerState.previouslyCachedProperties, context)
+
+    solver.rewriteLeafPlan(annotatedPlan)
   }
 
   def planNodeIndexSeek(
@@ -1707,6 +2042,37 @@ case class LogicalPlanProducer(
     )
   }
 
+  def planMergeJoin(
+    left: LogicalPlan,
+    right: LogicalPlan,
+    join: Equals,
+    originalPredicate: Expression,
+    context: LogicalPlanningContext
+  ): LogicalPlan = {
+    val plannerQuery = solveds.get(left.id).asSinglePlannerQuery ++ solveds.get(right.id).asSinglePlannerQuery
+    val solved = plannerQuery.amendQueryGraph(_.addPredicates(originalPredicate))
+
+    val (rewrittenLhsExpr, rewrittenLhs) = SubqueryExpressionSolver.ForSingle.solve(left, join.lhs, context)
+    val (rewrittenRhsExpr, rewrittenRhs) = SubqueryExpressionSolver.ForSingle.solve(right, join.rhs, context)
+    val rewrittenJoin = join.copy(lhs = rewrittenLhsExpr, rhs = rewrittenRhsExpr)(join.position)
+
+    val mergeJoinPlan = ValueMergeJoin(rewrittenLhs, rewrittenRhs, rewrittenJoin)
+
+    val providedOrder =
+      providedOrders.get(left.id)
+        .fromBoth(context.providedOrderFactory, Some(mergeJoinPlan))
+
+    annotate(
+      mergeJoinPlan,
+      solved,
+      providedOrder,
+      cachedPropertiesPerPlan.get(rewrittenLhs.id).intersectProperties(cachedPropertiesPerPlan.get(rewrittenRhs.id)),
+      context
+    )
+    markOrderAsLeveragedBackwardsUntilOrigin(mergeJoinPlan, context.providedOrderFactory)
+    mergeJoinPlan
+  }
+
   def planNodeUniqueIndexSeek(
     variable: LogicalVariable,
     label: LabelToken,
@@ -1760,6 +2126,429 @@ case class LogicalPlanProducer(
 
     solver.rewriteLeafPlan(annotatedPlan)
 
+  }
+
+  def planNodeVectorIndexSearch(
+    context: LogicalPlanningContext,
+    resultVariable: LogicalVariable,
+    labels: Seq[LabelToken],
+    indexedProperties: Seq[IndexedProperty],
+    indexName: String,
+    embedding: Expression,
+    where: Option[Where],
+    maybeFilter: Option[QueryExpression[Expression]],
+    limit: Expression,
+    scoreVariable: Option[LogicalVariable],
+    argumentIds: Set[LogicalVariable],
+    implicitlySolvedPredicates: Set[Expression]
+  ): LogicalPlan = {
+
+    val solved = RegularSinglePlannerQuery(
+      queryGraph =
+        QueryGraph.empty
+          .addPatternNodes(resultVariable)
+          .addSearchClause(Some(VectorSearchClause(
+            resultVariable,
+            indexName,
+            embedding,
+            where,
+            limit,
+            scoreVariable
+          )))
+          .addPredicates(implicitlySolvedPredicates)
+          .addArgumentIds(argumentIds),
+      horizon = RegularQueryProjection(
+        importedExposedSymbols = context.plannerState.importedSubqueryVariables
+      )
+    )
+
+    val solver = SubqueryExpressionSolver.solverForLeafPlan(argumentIds, context)
+
+    val rewrittenEmbedding = solver.solve(embedding)
+    // While we cannot have subqueries in limit expressions today, we apply the solver here as a precautionary measure,
+    // should we change that restriction in the future.
+    val rewrittenLimit = solver.solve(limit)
+    val newArguments = solver.newArguments
+    val allArgumentIds = argumentIds.union(newArguments)
+
+    def createNodeVectorIndexSearchPlan(variable: LogicalVariable) = {
+      val nodeVectorIndexSearch = NodeVectorIndexSearch(
+        idName = variable,
+        labels = labels,
+        properties = indexedProperties,
+        score = scoreVariable,
+        indexName = indexName,
+        vector = rewrittenEmbedding,
+        limit = rewrittenLimit,
+        // TODO: we only produce match all for now
+        entityFilter = MatchAllQueryExpression,
+        maybePropertyFilter = maybeFilter,
+        argumentIds = allArgumentIds
+      )(idGen)
+
+      val annotatedVectorSearchPlan =
+        annotate(
+          nodeVectorIndexSearch,
+          solved,
+          ProvidedOrder.empty,
+          cachedPropertiesForIndexedProperties(context, variable, indexedProperties),
+          context
+        )
+
+      solver.rewriteLeafPlan(annotatedVectorSearchPlan)
+    }
+
+    planLeafFilteredOnPreBoundVariable(
+      resultVariable,
+      argumentIds,
+      context,
+      createNodeVectorIndexSearchPlan
+    )
+  }
+
+  def planNodeFulltextIndexSearch(
+    context: LogicalPlanningContext,
+    resultVariable: LogicalVariable,
+    labels: Seq[LabelToken],
+    indexedProperties: Seq[IndexedProperty],
+    indexName: String,
+    queryString: Expression,
+    analyzer: Option[Expression],
+    skip: Option[Expression],
+    limit: Expression,
+    scoreVariable: Option[LogicalVariable],
+    argumentIds: Set[LogicalVariable],
+    implicitlySolvedPredicates: Set[Expression]
+  ): LogicalPlan = {
+
+    val solved = RegularSinglePlannerQuery(
+      queryGraph =
+        QueryGraph.empty
+          .addPatternNodes(resultVariable)
+          .addSearchClause(Some(FulltextSearchClause(
+            resultVariable,
+            indexName,
+            queryString,
+            analyzer,
+            skip,
+            limit,
+            scoreVariable
+          )))
+          .addPredicates(implicitlySolvedPredicates)
+          .addArgumentIds(argumentIds),
+      horizon = RegularQueryProjection(
+        importedExposedSymbols = context.plannerState.importedSubqueryVariables
+      )
+    )
+
+    val solver = SubqueryExpressionSolver.solverForLeafPlan(argumentIds, context)
+
+    val rewrittenQueryString = solver.solve(queryString)
+    val rewrittenAnalyzer = analyzer.map(solver.solve(_))
+    // While we cannot have subqueries in skip and limit expressions today, we apply the solver here as a
+    // precautionary measure, should we change that restriction in the future.
+    val rewrittenSkip = skip.map(solver.solve(_))
+    val rewrittenLimit = solver.solve(limit)
+    val newArguments = solver.newArguments
+    val allArgumentIds = argumentIds.union(newArguments)
+
+    def createNodeFulltextIndexSearchPlan(variable: LogicalVariable) = {
+      val nodeFulltextIndexSearch = NodeFulltextIndexSearch(
+        idName = variable,
+        labels = labels,
+        properties = indexedProperties,
+        score = scoreVariable,
+        indexName = indexName,
+        queryString = rewrittenQueryString,
+        analyzer = rewrittenAnalyzer,
+        skip = rewrittenSkip,
+        limit = rewrittenLimit,
+        argumentIds = allArgumentIds
+      )(idGen)
+
+      val annotatedFulltextSearchPlan =
+        annotate(
+          nodeFulltextIndexSearch,
+          solved,
+          ProvidedOrder.empty,
+          cachedPropertiesForIndexedProperties(context, variable, indexedProperties),
+          context
+        )
+
+      solver.rewriteLeafPlan(annotatedFulltextSearchPlan)
+    }
+
+    planLeafFilteredOnPreBoundVariable(
+      resultVariable,
+      argumentIds,
+      context,
+      createNodeFulltextIndexSearchPlan
+    )
+  }
+
+  def planRelationshipVectorIndexSearch(
+    context: LogicalPlanningContext,
+    patternRelationship: PatternRelationship,
+    indexedTypes: Seq[RelationshipTypeToken],
+    indexedProperties: Seq[IndexedProperty],
+    indexName: String,
+    embedding: Expression,
+    where: Option[Where],
+    maybeFilter: Option[QueryExpression[Expression]],
+    limit: Expression,
+    scoreVariable: Option[LogicalVariable],
+    argumentIds: Set[LogicalVariable],
+    implicitlySolvedPredicates: Set[Expression] = Set.empty
+  ): LogicalPlan = {
+    val selectionsFromUnsolvedTypes = selectionsFromTypesUnsolvedByIndex(patternRelationship, indexedTypes)
+
+    val solvedQueryGraphWithPredicate =
+      QueryGraph.empty
+        .addSearchClause(Some(VectorSearchClause(
+          patternRelationship.variable,
+          indexName,
+          embedding,
+          where,
+          limit,
+          scoreVariable
+        )))
+        .addPredicates(implicitlySolvedPredicates)
+        .addArgumentIds(argumentIds)
+        .pipe { qg =>
+          if (selectionsFromUnsolvedTypes.isEmpty) {
+            // We have solved all types, let's add the pattern relationship to the query graph
+            qg.addPatternRelationship(patternRelationship)
+          } else {
+            // Let the hidden selection handle the solved pattern relationship to the query graph
+            qg
+          }
+        }
+
+    val solved = RegularSinglePlannerQuery(
+      queryGraph = solvedQueryGraphWithPredicate,
+      horizon = RegularQueryProjection(
+        importedExposedSymbols = context.plannerState.importedSubqueryVariables
+      )
+    )
+
+    val solver = SubqueryExpressionSolver.solverForLeafPlan(argumentIds, context)
+
+    val rewrittenEmbedding = solver.solve(embedding)
+    val rewrittenLimit = solver.solve(limit)
+    val newArguments = solver.newArguments
+    val allArgumentIds = argumentIds.union(newArguments)
+
+    def createRelationshipVectorIndexSearchPlan(relVariable: LogicalVariable): LogicalPlan = {
+      val (startNode, endNode) = patternRelationship.inOrder
+      val relVectorIndexSearch = patternRelationship.dir match {
+        case SemanticDirection.BOTH => UndirectedRelationshipVectorIndexSearch(
+            idName = Some(relVariable),
+            startNode = Some(startNode),
+            endNode = Some(endNode),
+            typeTokens = indexedTypes,
+            properties = indexedProperties,
+            score = scoreVariable,
+            indexName = indexName,
+            vector = rewrittenEmbedding,
+            limit = rewrittenLimit,
+            // TODO: we only produce match all for now
+            entityFilter = MatchAllQueryExpression,
+            maybePropertyFilter = maybeFilter,
+            argumentIds = allArgumentIds
+          )(idGen)
+        case _ => DirectedRelationshipVectorIndexSearch(
+            idName = Some(relVariable),
+            startNode = Some(startNode),
+            endNode = Some(endNode),
+            typeTokens = indexedTypes,
+            properties = indexedProperties,
+            score = scoreVariable,
+            indexName = indexName,
+            vector = rewrittenEmbedding,
+            limit = rewrittenLimit,
+            // TODO: we only produce match all for now
+            entityFilter = MatchAllQueryExpression,
+            maybePropertyFilter = maybeFilter,
+            argumentIds = allArgumentIds
+          )(idGen)
+      }
+
+      val annotatedPlan =
+        annotate(
+          relVectorIndexSearch,
+          solved,
+          ProvidedOrder.empty,
+          cachedPropertiesForIndexedProperties(context, relVariable, indexedProperties),
+          context
+        )
+      val rewritten = solver.rewriteLeafPlan(annotatedPlan)
+
+      planHiddenSelectionIfNeeded(rewritten, selectionsFromUnsolvedTypes, context, patternRelationship)
+    }
+
+    planLeafFilteredOnPreBoundVariable(
+      patternRelationship.variable,
+      argumentIds,
+      context,
+      createRelationshipVectorIndexSearchPlan
+    )
+  }
+
+  private def planLeafFilteredOnPreBoundVariable(
+    variable: LogicalVariable,
+    argumentIds: Set[LogicalVariable],
+    context: LogicalPlanningContext,
+    createLeaf: LogicalVariable => LogicalPlan
+  ): LogicalPlan =
+    if (argumentIds.contains(variable)) {
+      val renamedVariable = UnPositionedVariable.varFor(AnonymousVariableNameGenerator.genName(
+        context.staticComponents.anonymousVariableNameGenerator,
+        variable.name
+      ))
+      val leaf = createLeaf(renamedVariable)
+      val selection = Selection(Seq(Equals(renamedVariable, variable)(InputPosition.NONE)), leaf)(idGen)
+      annotateSelection(
+        selection = selection,
+        solved = solveds.get(leaf.id).asSinglePlannerQuery,
+        providedOrderPropagationRule = ProvidedOrder.Left,
+        cachedProperties = CachedProperties.empty,
+        context = context
+      )
+    } else {
+      createLeaf(variable)
+    }
+
+  def planRelationshipFulltextIndexSearch(
+    context: LogicalPlanningContext,
+    patternRelationship: PatternRelationship,
+    indexedTypes: Seq[RelationshipTypeToken],
+    indexedProperties: Seq[IndexedProperty],
+    indexName: String,
+    queryString: Expression,
+    analyzer: Option[Expression],
+    skip: Option[Expression],
+    limit: Expression,
+    scoreVariable: Option[LogicalVariable],
+    argumentIds: Set[LogicalVariable],
+    implicitlySolvedPredicates: Set[Expression] = Set.empty
+  ): LogicalPlan = {
+    val selectionsFromUnsolvedTypes = selectionsFromTypesUnsolvedByIndex(patternRelationship, indexedTypes)
+
+    val solvedQueryGraphWithPredicate =
+      QueryGraph.empty
+        .addSearchClause(Some(FulltextSearchClause(
+          patternRelationship.variable,
+          indexName,
+          queryString,
+          analyzer,
+          skip,
+          limit,
+          scoreVariable
+        )))
+        .addPredicates(implicitlySolvedPredicates)
+        .addArgumentIds(argumentIds)
+        .pipe { qg =>
+          if (selectionsFromUnsolvedTypes.isEmpty) {
+            // We have solved all types, let's add the pattern relationship to the query graph
+            qg.addPatternRelationship(patternRelationship)
+          } else {
+            // Let the hidden selection handle the solved pattern relationship to the query graph
+            qg
+          }
+        }
+
+    val solved = RegularSinglePlannerQuery(
+      queryGraph = solvedQueryGraphWithPredicate,
+      horizon = RegularQueryProjection(
+        importedExposedSymbols = context.plannerState.importedSubqueryVariables
+      )
+    )
+
+    val solver = SubqueryExpressionSolver.solverForLeafPlan(argumentIds, context)
+
+    val rewrittenQueryString = solver.solve(queryString)
+    val rewrittenAnalyzer = analyzer.map(solver.solve(_))
+    val rewrittenSkip = skip.map(solver.solve(_))
+    val rewrittenLimit = solver.solve(limit)
+    val newArguments = solver.newArguments
+    val allArgumentIds = argumentIds.union(newArguments)
+
+    val (startNode, endNode) = patternRelationship.inOrder
+
+    def createRelationshipFulltextIndexSearchPlan(relVariable: LogicalVariable): LogicalPlan = {
+      val relFulltextIndexSearch = patternRelationship.dir match {
+        case SemanticDirection.BOTH => UndirectedRelationshipFulltextIndexSearch(
+            idName = Some(relVariable),
+            startNode = Some(startNode),
+            endNode = Some(endNode),
+            typeTokens = indexedTypes,
+            properties = indexedProperties,
+            score = scoreVariable,
+            indexName = indexName,
+            queryString = rewrittenQueryString,
+            limit = rewrittenLimit,
+            analyzer = rewrittenAnalyzer,
+            skip = rewrittenSkip,
+            argumentIds = allArgumentIds
+          )(idGen)
+        case _ => DirectedRelationshipFulltextIndexSearch(
+            idName = Some(relVariable),
+            startNode = Some(startNode),
+            endNode = Some(endNode),
+            typeTokens = indexedTypes,
+            properties = indexedProperties,
+            score = scoreVariable,
+            indexName = indexName,
+            queryString = rewrittenQueryString,
+            limit = rewrittenLimit,
+            analyzer = rewrittenAnalyzer,
+            skip = rewrittenSkip,
+            argumentIds = allArgumentIds
+          )(idGen)
+      }
+
+      val annotatedPlan =
+        annotate(
+          relFulltextIndexSearch,
+          solved,
+          ProvidedOrder.empty,
+          cachedPropertiesForIndexedProperties(context, relVariable, indexedProperties),
+          context
+        )
+      val rewritten = solver.rewriteLeafPlan(annotatedPlan)
+
+      planHiddenSelectionIfNeeded(rewritten, selectionsFromUnsolvedTypes, context, patternRelationship)
+    }
+
+    planLeafFilteredOnPreBoundVariable(
+      patternRelationship.variable,
+      argumentIds,
+      context,
+      createRelationshipFulltextIndexSearchPlan
+    )
+  }
+
+  private def selectionsFromTypesUnsolvedByIndex(
+    patternRelationship: PatternRelationship,
+    indexedTypes: Seq[RelationshipTypeToken]
+  ): Seq[Expression] = {
+    // The relationship index determines the relationship type that is actually solved.
+    // The index could cover multiple relationship types, so we need to check which types are actually solved by the index.
+    // If the pattern relationship has a type that is either not included in the index or is a specific subset of it, then we should identify that and solve it separately as a hidden selection.
+    val solvedTypes = indexedTypes.map(_.name).toSet
+    val typesToSolve = patternRelationship.types.map(_.name).toSet
+    if (typesToSolve.nonEmpty && !solvedTypes.subsetOf(typesToSolve)) {
+      // Assume the types supported by the index are ACTS_IN and KNOWS, but the pattern relationship only allows ACTS_IN
+      // Then we need to solve the ACTS_IN type separately as a hidden selection.
+      // Furthermore, if the index only supports KNOWS, but the pattern relationship allows only ACTS_IN, we need a hidden selection that filters out all relationships (since a relationship only has one type).
+      // However, if it was the converse, i.e., the pattern relationship allows both ACTS_IN and KNOWS, but the index only supports ACTS_IN,
+      // then all relationships returned by the index would be valid since ACTS_IN is a valid subset of (ACTS_IN, KNOWS)
+      // Also, if the pattern relationship does not have any types specified, then we assume all types returned by the index are valid
+      val relTypeQueries = patternRelationship.types.map(relType =>
+        HasTypes(patternRelationship.variable, Seq(relType))(InputPosition.NONE)
+      )
+      Seq(Ors.create(ListSet.from(relTypeQueries)))
+    } else Seq.empty
   }
 
   private def cachedPropertiesForIndexedProperties(
@@ -1921,27 +2710,37 @@ case class LogicalPlanProducer(
   }
 
   def planSelection(source: LogicalPlan, predicates: Seq[Expression], context: LogicalPlanningContext): LogicalPlan = {
-    val solved =
-      solveds.get(source.id).asSinglePlannerQuery.updateTailOrSelf(_.amendQueryGraph(_.addPredicates(predicates: _*)))
+    val solved = solveds.get(source.id).asSinglePlannerQuery
     val (rewrittenPredicates, rewrittenSource) =
       SubqueryExpressionSolver.ForMulti.solve(source, predicates, context)
 
-    val RemoteBatchingResult(
+    val RemoteBatchingSubQueryResult(
       rewrittenExpressionsWithCachedProperties,
       planWithProperties
     ) =
       context.settings.remoteBatchPropertiesStrategy.planBatchPropertiesForSelections(
-        solved.asSinglePlannerQuery.queryGraph,
+        solved.queryGraph,
         rewrittenSource,
         context,
-        rewrittenPredicates.toSet
+        rewrittenPredicates
       )
 
-    coercePredicatesWithAnds(rewrittenExpressionsWithCachedProperties.selections.toSeq).fold(source) {
+    // planBatchPropertiesForSelections can solve some property predicates using RemoteBatchPropertiesWithFilter, which
+    // will be evaluated on the shards. We need to consider those predicates as being solved by this selection.
+    val solvedWithFetchedProperties = solveds.get(planWithProperties.id).asSinglePlannerQuery
+
+    // The rewrittenExpressionsWithCachedProperties will be solved too by this selection
+    val expressionsToReport = rewrittenExpressionsWithCachedProperties.originalExpressions.toSeq
+    val updatedSourcePlan =
+      solvedWithFetchedProperties.updateTailOrSelf(_.amendQueryGraph(_.addPredicates(expressionsToReport: _*)))
+
+    coercePredicatesWithAnds(
+      rewrittenExpressionsWithCachedProperties.allRewrittenExpressions
+    ).fold(planWithProperties) {
       coercedRewrittenPredicates =>
         annotateSelection(
           Selection(coercedRewrittenPredicates, planWithProperties),
-          solved,
+          updatedSourcePlan,
           ProvidedOrder.Left,
           cachedPropertiesPerPlan.get(planWithProperties.id),
           context
@@ -1951,19 +2750,22 @@ case class LogicalPlanProducer(
 
   def planSelectionWithSolvedPredicates(
     source: LogicalPlan,
-    predicates: Seq[Expression],
-    reportedPredicates: Seq[Expression],
+    previouslyRewrittenPredicates: RewrittenSubQueryPredicatesMap,
     context: LogicalPlanningContext
   ): LogicalPlan = {
     val solved =
       solveds.get(source.id).asSinglePlannerQuery.updateTailOrSelf(
-        _.amendQueryGraph(_.addPredicates(reportedPredicates: _*))
+        _.amendQueryGraph(_.addPredicates(previouslyRewrittenPredicates.originalExpressions))
       )
     val (rewrittenPredicates, rewrittenSource) =
-      SubqueryExpressionSolver.ForMulti.solve(source, predicates, context)
+      SubqueryExpressionSolver.ForMulti.solve(
+        source,
+        previouslyRewrittenPredicates.allRewrittenExpressions.toSeq,
+        context
+      )
     val cachedProperties = cachedPropertiesPerPlan.get(source.id)
 
-    coercePredicatesWithAnds(rewrittenPredicates).fold(source) { coercedRewrittenPredicates =>
+    coercePredicatesWithAnds(rewrittenPredicates.allRewrittenExpressions).fold(source) { coercedRewrittenPredicates =>
       annotateSelection(
         Selection(coercedRewrittenPredicates, rewrittenSource),
         solved,
@@ -1976,13 +2778,12 @@ case class LogicalPlanProducer(
 
   def planHorizonSelection(
     source: LogicalPlan,
-    predicates: Seq[Expression],
-    predicatesToReport: Seq[Expression],
+    previouslyRewrittenPredicates: RewrittenSubQueryPredicatesMap,
     interestingOrderConfig: InterestingOrderConfig,
     context: LogicalPlanningContext
   ): LogicalPlan = {
     val solved = solveds.get(source.id).asSinglePlannerQuery.updateTailOrSelf(_.updateHorizon {
-      case p: QueryProjection => p.addPredicates(predicatesToReport: _*)
+      case p: QueryProjection => p.addPredicates(previouslyRewrittenPredicates.originalExpressions)
       case _ => throw new IllegalArgumentException("You can only plan HorizonSelection after a projection")
     })
 
@@ -1992,16 +2793,25 @@ case class LogicalPlanProducer(
       ) {
         // solve existential subquery predicates
         val (solvedPredicates, existsPlan) =
-          SubqueryExpressionSolver.ForExistentialSubquery.solve(source, predicates, interestingOrderConfig, context)
-        val unsolvedPredicates = predicates.filterNot(solvedPredicates.contains(_))
-
+          SubqueryExpressionSolver.ForExistentialSubquery.solve(
+            source,
+            previouslyRewrittenPredicates.originalExpressions, // lets use the original expressions here since the solver will also rewrite them.
+            interestingOrderConfig,
+            context
+          )
+        val unsolvedPredicates =
+          previouslyRewrittenPredicates.backingStore.filterNot {
+            case (rewritten, original) => solvedPredicates.contains(rewritten) || solvedPredicates.contains(original)
+          }.keys.toSeq
         // solve remaining predicates
-        SubqueryExpressionSolver.ForMulti.solve(existsPlan, unsolvedPredicates, context)
+        val (solvedExpressions, solvedPlan) =
+          SubqueryExpressionSolver.ForMulti.solve(existsPlan, unsolvedPredicates, context)
+        (solvedExpressions.allRewrittenExpressions, solvedPlan)
       } else {
         // If the execution model does not preserve order and there is an ORDER BY, we are not allowed to use
         // NestedPlanExpressions here.
         val rewriter = irExpressionRewriter(source, context)
-        val rewrittenPredicates = predicates.endoRewrite(rewriter)
+        val rewrittenPredicates = previouslyRewrittenPredicates.allRewrittenExpressions.endoRewrite(rewriter)
         (rewrittenPredicates, source)
       }
 
@@ -2026,7 +2836,7 @@ case class LogicalPlanProducer(
     solved: PlannerQuery,
     context: LogicalPlanningContext
   ): LogicalPlan = {
-    val RemoteBatchingResult(
+    val RemoteBatchingSubQueryResult(
       rewrittenExpressionsWithCachedProperties,
       planWithProperties
     ) =
@@ -2034,9 +2844,9 @@ case class LogicalPlanProducer(
         solved.asSinglePlannerQuery.queryGraph,
         source,
         context,
-        predicates.toSet
+        RewrittenSubQueryPredicates.withNoRewrittenExprs(predicates)
       )
-    coercePredicatesWithAnds(rewrittenExpressionsWithCachedProperties.selections.toSeq).fold(source) {
+    coercePredicatesWithAnds(rewrittenExpressionsWithCachedProperties.allRewrittenExpressions).fold(source) {
       coercedPredicates =>
         annotateSelection(
           Selection(coercedPredicates, planWithProperties),
@@ -2177,7 +2987,7 @@ case class LogicalPlanProducer(
       case horizon: QueryProjection => horizon.addPredicates(expr)
       case horizon                  => horizon
     })
-    annotate(SemiApply(left, right), solved, ProvidedOrder.Left, cachedPropertiesPerPlan.get(right.id), context)
+    annotateApply(SemiApply(left, right), solved, cachedPropertiesPerPlan.get(right.id), context)
   }
 
   def planAntiSemiApplyInHorizon(
@@ -2190,7 +3000,7 @@ case class LogicalPlanProducer(
       case horizon: QueryProjection => horizon.addPredicates(expr)
       case horizon                  => horizon
     })
-    annotate(AntiSemiApply(left, right), solved, ProvidedOrder.Left, cachedPropertiesPerPlan.get(right.id), context)
+    annotateApply(AntiSemiApply(left, right), solved, cachedPropertiesPerPlan.get(right.id), context)
   }
 
   def planQueryArgument(queryGraph: QueryGraph, context: LogicalPlanningContext): LogicalPlan = {
@@ -2247,17 +3057,16 @@ case class LogicalPlanProducer(
       context
     )
 
-  def planStarProjection(inner: LogicalPlan, reported: Option[Map[LogicalVariable, Expression]]): LogicalPlan = {
-    reported.fold(inner) { reported =>
+  def planStarProjection(
+    inner: LogicalPlan,
+    reported: MaybeReportedProjections
+  ): LogicalPlan = {
+    reported.maybeProjections.fold(inner) { reported =>
       val newSolved: SinglePlannerQuery = solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(
         _.updateQueryProjection(_.withAddedProjections(reported))
       )
-      // Keep some attributes, but change solved
-      val keptAttributes =
-        Attributes(idGen, cardinalities, providedOrders, leveragedOrders, labelAndRelTypeInfos, cachedPropertiesPerPlan)
-      val newPlan = inner.copyPlanWithIdGen(keptAttributes.copy(inner.id))
-      solveds.set(newPlan.id, newSolved)
-      newPlan
+
+      markAsSolved(inner, newSolved)
     }
   }
 
@@ -2268,15 +3077,21 @@ case class LogicalPlanProducer(
   def planRegularProjection(
     inner: LogicalPlan,
     expressions: Map[LogicalVariable, Expression],
-    reported: Option[Map[LogicalVariable, Expression]],
+    reported: MaybeReportedProjections,
     context: LogicalPlanningContext
   ): LogicalPlan = {
     val innerSolved: SinglePlannerQuery = solveds.get(inner.id).asSinglePlannerQuery
-    val solved = reported.fold(innerSolved) { reported =>
-      innerSolved.updateTailOrSelf(_.updateQueryProjection(_.withAddedProjections(reported)))
+    val solved = reported.maybeProjections.fold(innerSolved) { reportedProjections =>
+      innerSolved.updateTailOrSelf(_.updateQueryProjection(_.withAddedProjections(reportedProjections)))
     }
 
-    planRegularProjectionHelper(inner, expressions, context, solved)
+    val newProjections = expressions.view.filterKeys(projectedVar =>
+      !inner.availableSymbols.contains(projectedVar)
+    ).toMap
+    if (newProjections.isEmpty) {
+      markAsSolved(inner, solved)
+    } else
+      planRegularProjectionHelper(inner, newProjections, context, solved, cachedPropertiesPerPlan.get(inner.id))
   }
 
   /**
@@ -2292,25 +3107,30 @@ case class LogicalPlanProducer(
     reportedGrouping: Map[LogicalVariable, Expression],
     reportedAggregation: Map[LogicalVariable, Expression],
     previousInterestingOrder: Option[InterestingOrder],
+    optionalPreprocessingToPlan: AggregatingQueryProjection.OptionalPreprocessing,
+    optionalPreprocessingToReport: AggregatingQueryProjection.OptionalPreprocessing,
     context: LogicalPlanningContext
   ): LogicalPlan = {
     val solved = solveds.get(left.id).asSinglePlannerQuery.updateTailOrSelf(_.withHorizon(
       AggregatingQueryProjection(
         groupingExpressions = reportedGrouping,
         aggregationExpressions = reportedAggregation,
-        importedExposedSymbols = context.plannerState.importedSubqueryVariables
+        importedExposedSymbols = context.plannerState.importedSubqueryVariables,
+        optionalPreprocessing = optionalPreprocessingToReport
       )
     ))
 
-    // NOTE: aggregation order is not used here as it is lost after aggregation
-    val trimmedAndRenamed = trimAndRenameProvidedOrder(providedOrders.get(left.id), grouping)
+    val sourcePlan = planOptionalPreprocessingForAggregation(left, optionalPreprocessingToPlan, context)
 
-    val agg = Aggregation(left, grouping, aggregation)
+    // NOTE: aggregation order is not used here as it is lost after aggregation
+    val trimmedAndRenamed = trimAndRenameProvidedOrder(providedOrders.get(sourcePlan.id), grouping)
+
+    val agg = Aggregation(sourcePlan, grouping, aggregation)
     val plan = annotate(
       agg,
       solved,
       context.providedOrderFactory.providedOrder(trimmedAndRenamed, ProvidedOrder.Left, Some(agg)),
-      cachedPropertiesPerPlan.get(left.id),
+      cachedPropertiesPerPlan.get(sourcePlan.id).retain(accessedPropertiesInGroupingKeys(grouping)),
       context
     )
 
@@ -2318,13 +3138,42 @@ case class LogicalPlanProducer(
       case fi: FunctionInvocation => fi.function == Collect || fi.function == UnresolvedFunction
       case _                      => false
     }
+    def hasOrderedAggregation = aggregation.values.exists {
+      case fi: FunctionInvocation => fi.isOrdered
+      case _                      => false
+    }
     // Aggregation functions may leverage the order of a preceding ORDER BY, if no other clause is inbetween.
-    // In practice, this is only collect and potentially user defined aggregations
-    if (previousInterestingOrder.exists(_.requiredOrderCandidate.nonEmpty) && hasCollectOrUDF) {
+    // Collect and potentially user defined aggregations need this.
+    // Also ordered aggregation functions (e.g. count(DISTINCT x) ASC) will need
+    // a leveragedOrder hint to ensure rows are sent through in argument order.
+    if (
+      (previousInterestingOrder.exists(_.requiredOrderCandidate.nonEmpty) && hasCollectOrUDF) || hasOrderedAggregation
+    ) {
       markOrderAsLeveragedBackwardsUntilOrigin(plan, context.providedOrderFactory)
     }
 
     plan
+  }
+
+  private def planOptionalPreprocessingForAggregation(
+    source: LogicalPlan,
+    optionalPreprocessing: AggregatingQueryProjection.OptionalPreprocessing,
+    context: LogicalPlanningContext
+  ): LogicalPlan = {
+    optionalPreprocessing match {
+      case AggregatingQueryProjection.OptionalPreprocessing.Passthrough =>
+        source
+
+      case AggregatingQueryProjection.OptionalPreprocessing.FilterAndLimit(filterExpr, limitExpr) =>
+        val solved = solveds.get(source.id)
+
+        val filtered = filterExpr.fold(source) { filterExpr =>
+          planSelectionWithGivenSolved(source, Seq(filterExpr), solved, context)
+        }
+
+        val limit = planLimitOnTopOf(filtered, limitExpr, context.staticComponents.expressionEvaluator)
+        annotate(limit, solved, ProvidedOrder.Left, cachedPropertiesPerPlan.get(filtered.id), context)
+    }
   }
 
   def planOrderedAggregation(
@@ -2334,13 +3183,15 @@ case class LogicalPlanProducer(
     orderToLeverage: Seq[Expression],
     reportedGrouping: Map[LogicalVariable, Expression],
     reportedAggregation: Map[LogicalVariable, Expression],
+    optionalPreprocessing: AggregatingQueryProjection.OptionalPreprocessing,
     context: LogicalPlanningContext
   ): LogicalPlan = {
     val solved = solveds.get(left.id).asSinglePlannerQuery.updateTailOrSelf(_.withHorizon(
       AggregatingQueryProjection(
         groupingExpressions = reportedGrouping,
         aggregationExpressions = reportedAggregation,
-        importedExposedSymbols = context.plannerState.importedSubqueryVariables
+        importedExposedSymbols = context.plannerState.importedSubqueryVariables,
+        optionalPreprocessing = optionalPreprocessing
       )
     ))
 
@@ -2352,7 +3203,7 @@ case class LogicalPlanProducer(
       agg,
       solved,
       context.providedOrderFactory.providedOrder(trimmedAndRenamed, ProvidedOrder.Left, Some(agg)),
-      cachedPropertiesPerPlan.get(left.id),
+      cachedPropertiesPerPlan.get(left.id).retain(accessedPropertiesInGroupingKeys(grouping)),
       context
     )
     markOrderAsLeveragedBackwardsUntilOrigin(plan, context.providedOrderFactory)
@@ -2445,13 +3296,15 @@ case class LogicalPlanProducer(
     url: Expression,
     format: CSVFormat,
     fieldTerminator: Option[StringLiteral],
-    context: LogicalPlanningContext
+    context: LogicalPlanningContext,
+    importedSymbolsFromLastCallSubquery: Set[LogicalVariable]
   ): LogicalPlan = {
     val solved = solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.withHorizon(LoadCSVProjection(
       variable,
       url,
       format,
-      fieldTerminator
+      fieldTerminator,
+      importedSymbolsFromLastCallSubquery
     )))
     val (rewrittenUrl, rewrittenInner) = SubqueryExpressionSolver.ForSingle.solve(inner, url, context)
     annotate(
@@ -2485,21 +3338,28 @@ case class LogicalPlanProducer(
     inner: LogicalPlan,
     variable: LogicalVariable,
     expression: Expression,
-    context: LogicalPlanningContext
+    context: LogicalPlanningContext,
+    importedSymbolsFromLastCallSubquery: Set[LogicalVariable]
   ): LogicalPlan = {
     val solved =
-      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.withHorizon(UnwindProjection(variable, expression)))
+      solveds.get(inner.id).asSinglePlannerQuery
+        .updateTailOrSelf(_.withHorizon(UnwindProjection(variable, expression, importedSymbolsFromLastCallSubquery)))
     val (rewrittenExpression, rewrittenInner) = SubqueryExpressionSolver.ForSingle.solve(inner, expression, context)
     val RemoteBatchingResult(
       rewrittenExpressionsWithCachedProperties,
       planWithAllProperties
-    ) = context.settings.remoteBatchPropertiesStrategy.planBatchPropertiesForProjections(
+    ) = context.settings.remoteBatchPropertiesStrategy.planRemoteBatchProperties(
       rewrittenInner,
       context,
-      projections = Map(variable -> rewrittenExpression)
+      Iterable(rewrittenExpression)
     )
+
     annotate(
-      UnwindCollection(planWithAllProperties, variable, rewrittenExpressionsWithCachedProperties.projections(variable)),
+      UnwindCollection(
+        planWithAllProperties,
+        variable,
+        rewrittenExpressionsWithCachedProperties.rewrittenExpressionOrSelf(rewrittenExpression)
+      ),
       solved,
       ProvidedOrder.Left,
       cachedPropertiesPerPlan.get(planWithAllProperties.id),
@@ -2507,9 +3367,15 @@ case class LogicalPlanProducer(
     )
   }
 
-  def planProcedureCall(inner: LogicalPlan, call: ResolvedCall, context: LogicalPlanningContext): LogicalPlan = {
+  def planProcedureCall(
+    inner: LogicalPlan,
+    call: ResolvedNonLocalCall,
+    context: LogicalPlanningContext,
+    importedSymbolsFromLastCallSubquery: Set[LogicalVariable]
+  ): LogicalPlan = {
     val solved =
-      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.withHorizon(ProcedureCallProjection(call)))
+      solveds.get(inner.id).asSinglePlannerQuery
+        .updateTailOrSelf(_.withHorizon(ProcedureCallProjection(call, importedSymbolsFromLastCallSubquery)))
     val solver = SubqueryExpressionSolver.solverFor(inner, context)
     val rewrittenCall = call.mapCallArguments(solver.solve(_))
     val rewrittenInner = solver.rewrittenPlan()
@@ -2534,50 +3400,109 @@ case class LogicalPlanProducer(
     if (call.optional) planOptional(_call, inner.availableSymbols, context) else _call
   }
 
-  def planCommand(inner: LogicalPlan, clause: CommandClause, context: LogicalPlanningContext): LogicalPlan = {
-    val solved = solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.withHorizon(CommandProjection(clause)))
+  def planCommand(
+    inner: LogicalPlan,
+    clause: CommandClause,
+    context: LogicalPlanningContext,
+    importedSymbolsFromLastCallSubquery: Set[LogicalVariable]
+  ): LogicalPlan = {
+    val solved = solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.withHorizon(
+      CommandProjection(clause, importedSymbolsFromLastCallSubquery)
+    ))
+
+    def removeUnneededVariables(columns: List[ShowColumn], yieldItems: List[CommandResultItem]) = {
+      val relevantVariables =
+        if (yieldItems.nonEmpty) yieldItems.map(_.aliasedVariable).toSet
+        else columns.map(_.variable).toSet
+
+      val showColumns = columns.map(sc => CommandDefaultColumn(sc.name, sc.cypherType))
+      val yieldColumns = yieldItems.map(yc => CommandYieldColumn(yc.originalName, yc.aliasedVariable.name))
+
+      (relevantVariables, showColumns, yieldColumns)
+    }
 
     val plan = clause match {
       case s: ShowIndexesClause =>
+        val (relevantVariables, showColumns, yieldColumns) =
+          removeUnneededVariables(s.unfilteredColumns.columns, s.yieldItems)
         ShowIndexes(
           s.indexType,
-          s.unfilteredColumns.columns,
-          s.yieldItems,
-          s.yieldAll
+          showColumns,
+          yieldColumns,
+          s.yieldAll,
+          relevantVariables,
+          inner.availableSymbols
         )
       case s: ShowConstraintsClause =>
+        val (relevantVariables, showColumns, yieldColumns) =
+          removeUnneededVariables(s.unfilteredColumns.columns, s.yieldItems)
         ShowConstraints(
           s.constraintType,
-          s.unfilteredColumns.columns,
-          s.yieldItems,
-          s.yieldAll
+          showColumns,
+          yieldColumns,
+          s.yieldAll,
+          relevantVariables,
+          inner.availableSymbols
+        )
+      case s: ShowCurrentGraphTypeClause =>
+        val (relevantVariables, showColumns, yieldColumns) =
+          removeUnneededVariables(s.unfilteredColumns.columns, s.yieldItems)
+        ShowCurrentGraphType(
+          s.asGraph,
+          showColumns,
+          yieldColumns,
+          s.yieldAll,
+          relevantVariables,
+          inner.availableSymbols
         )
       case s: ShowProceduresClause =>
+        val (relevantVariables, showColumns, yieldColumns) =
+          removeUnneededVariables(s.unfilteredColumns.columns, s.yieldItems)
         ShowProcedures(
           s.executable,
-          s.unfilteredColumns.columns,
-          s.yieldItems,
-          s.yieldAll
+          showColumns,
+          yieldColumns,
+          s.yieldAll,
+          relevantVariables,
+          inner.availableSymbols
         )
       case s: ShowFunctionsClause =>
+        val (relevantVariables, showColumns, yieldColumns) =
+          removeUnneededVariables(s.unfilteredColumns.columns, s.yieldItems)
         ShowFunctions(
           s.functionType,
           s.executable,
-          s.unfilteredColumns.columns,
-          s.yieldItems,
-          s.yieldAll
+          showColumns,
+          yieldColumns,
+          s.yieldAll,
+          relevantVariables,
+          inner.availableSymbols
         )
       case s: ShowTransactionsClause =>
+        val (relevantVariables, showColumns, yieldColumns) =
+          removeUnneededVariables(s.unfilteredColumns.columns, s.yieldItems)
         ShowTransactions(
           s.names,
-          s.unfilteredColumns.columns,
-          s.yieldItems,
-          s.yieldAll
+          showColumns,
+          yieldColumns,
+          s.yieldAll,
+          relevantVariables,
+          inner.availableSymbols
         )
       case s: TerminateTransactionsClause =>
-        TerminateTransactions(s.names, s.unfilteredColumns.columns, s.yieldItems, s.yieldAll)
+        val (relevantVariables, showColumns, yieldColumns) =
+          removeUnneededVariables(s.unfilteredColumns.columns, s.yieldItems)
+        TerminateTransactions(s.names, showColumns, yieldColumns, s.yieldAll, relevantVariables, inner.availableSymbols)
       case s: ShowSettingsClause =>
-        ShowSettings(s.names, s.unfilteredColumns.columns, s.yieldItems, s.yieldAll)
+        val (relevantVariables, showColumns, yieldColumns) =
+          removeUnneededVariables(s.unfilteredColumns.columns, s.yieldItems)
+        ShowSettings(s.names, showColumns, yieldColumns, s.yieldAll, relevantVariables, inner.availableSymbols)
+      // System database only commands
+      case s: ShowDatabasesClause =>
+        val (relevantVariables, showColumns, yieldColumns) =
+          removeUnneededVariables(s.unfilteredColumns.columns, s.yieldItems)
+        ShowDatabases(s.dbScope, showColumns, yieldColumns, s.yieldAll, relevantVariables, inner.availableSymbols)
+
     }
     val annotatedPlan = annotate(plan, solved, ProvidedOrder.empty, CachedProperties.empty, context)
 
@@ -2585,8 +3510,13 @@ case class LogicalPlanProducer(
     annotate(apply, solved, ProvidedOrder.empty, cachedPropertiesPerPlan.get(annotatedPlan.id), context)
   }
 
-  def planPassAll(inner: LogicalPlan, context: LogicalPlanningContext): LogicalPlan = {
-    val solved = solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.withHorizon(PassthroughAllHorizon()))
+  def planPassAll(
+    inner: LogicalPlan,
+    context: LogicalPlanningContext,
+    importedSymbolsFromLastCallSubquery: Set[LogicalVariable]
+  ): LogicalPlan = {
+    val solved = solveds.get(inner.id)
+      .asSinglePlannerQuery.updateTailOrSelf(_.withHorizon(PassthroughAllHorizon(importedSymbolsFromLastCallSubquery)))
     // Keep some attributes, but change solved
     val keptAttributes =
       Attributes(idGen, cardinalities, leveragedOrders, providedOrders, labelAndRelTypeInfos, cachedPropertiesPerPlan)
@@ -2657,14 +3587,16 @@ case class LogicalPlanProducer(
       context.plannerState.input.labelInfo,
       context.plannerState.input.relTypeInfo,
       context.semanticTable,
-      context.plannerState.indexCompatiblePredicatesProviderContext
+      context.plannerState.indexCompatiblePredicatesProviderContext,
+      context.staticComponents.graphSchemaOptimizations
     )
     val limitCardinality = cardinalityModel(
       solvedSkipAndLimit,
       context.plannerState.input.labelInfo,
       context.plannerState.input.relTypeInfo,
       context.semanticTable,
-      context.plannerState.indexCompatiblePredicatesProviderContext
+      context.plannerState.indexCompatiblePredicatesProviderContext,
+      context.staticComponents.graphSchemaOptimizations
     )
     val innerCardinality = cardinalities.get(inner.id)
     val skippedRows = innerCardinality - skipCardinality
@@ -2686,17 +3618,23 @@ case class LogicalPlanProducer(
     reportedGrouping: Map[LogicalVariable, Expression],
     reportedAggregation: Map[LogicalVariable, Expression],
     interestingOrder: InterestingOrder,
+    optionalPreprocessing: AggregatingQueryProjection.OptionalPreprocessing,
     context: LogicalPlanningContext
   ): LogicalPlan = {
     val solved = solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.withHorizon(
       AggregatingQueryProjection(
         groupingExpressions = reportedGrouping,
         aggregationExpressions = reportedAggregation,
-        importedExposedSymbols = context.plannerState.importedSubqueryVariables
+        importedExposedSymbols = context.plannerState.importedSubqueryVariables,
+        optionalPreprocessing = optionalPreprocessing
       )
     ).withInterestingOrder(interestingOrder))
     val providedOrderRule = ProvidedOrder.Left
-    val limitPlan = planLimitOnTopOf(inner, SignedDecimalIntegerLiteral("1")(InputPosition.NONE))
+    val limitPlan = planLimitOnTopOf(
+      inner,
+      SignedDecimalIntegerLiteral("1")(InputPosition.NONE),
+      context.staticComponents.expressionEvaluator
+    )
     val annotatedLimitPlan =
       annotate(limitPlan, solved, providedOrderRule, cachedPropertiesPerPlan.get(inner.id), context)
 
@@ -2818,7 +3756,7 @@ case class LogicalPlanProducer(
       predicateWithIrExpressionReferencingPath.endoRewrite(irExpressionRewriter(inner, context))
 
     val solved = solveds.get(inner.id).asSinglePlannerQuery.amendQueryGraph(
-      _.addShortestRelationship(shortestRelationship).addPredicates(solvedPredicates.toSeq: _*)
+      _.addShortestRelationship(shortestRelationship).addPredicates(solvedPredicates)
     )
 
     val (rewrittenRelationshipPredicates, rewrittenNodePredicates, rewrittenOtherPathPredicates, rewrittenSource) =
@@ -2839,7 +3777,8 @@ case class LogicalPlanProducer(
         rewrittenRelationshipPredicates.toSeq,
         rewrittenPathPredicates.toSeq,
         withFallBack,
-        if (disallowSameNode) DisallowSameNode else SkipSameNode
+        if (disallowSameNode) DisallowSameNode else SkipSameNode,
+        Trail
       ),
       solved,
       ProvidedOrder.Left,
@@ -2866,7 +3805,8 @@ case class LogicalPlanProducer(
     reverseGroupVariableProjections: Boolean,
     hints: Set[UsingStatefulShortestPathHint],
     context: LogicalPlanningContext,
-    pathLength: PathLength
+    pathLength: PathLength,
+    pathMode: TraversalPathMode
   ): StatefulShortestPath = {
     val solved = solveds.get(inner.id).asSinglePlannerQuery.amendQueryGraph(
       _.addSelectivePathPattern(solvedSpp)
@@ -2897,7 +3837,7 @@ case class LogicalPlanProducer(
       solvedExpressionAsString,
       reverseGroupVariableProjections,
       LengthBounds(pathLength.min, pathLength.maybeMax),
-      TraversalMatchMode.Trail
+      pathMode
     )
     annotate(plan, solved, ProvidedOrder.Left, cachedPropertiesPerPlan.get(inner.id), context)
   }
@@ -2933,14 +3873,16 @@ case class LogicalPlanProducer(
 
   def planProjectionForUnionMapping(
     inner: LogicalPlan,
-    expressions: Map[LogicalVariable, Expression],
+    unionMapping: Map[LogicalVariable, Expression],
     context: LogicalPlanningContext
   ): LogicalPlan = {
+    val previouslyCachedProperties = cachedPropertiesPerPlan.get(inner.id)
+    val cachedPropertiesForUnionMapping = previouslyCachedProperties.rename(renamedVariables(unionMapping))
     annotate(
-      Projection(inner, expressions),
+      Projection(inner, unionMapping),
       solveds.get(inner.id),
       ProvidedOrder.Left,
-      cachedPropertiesPerPlan.get(inner.id),
+      cachedPropertiesForUnionMapping,
       context
     )
   }
@@ -3032,7 +3974,7 @@ case class LogicalPlanProducer(
     if (returnAll.isEmpty) {
       annotate(left.copyPlanWithIdGen(idGen), solved, ProvidedOrder.Left, cachedPropertiesPerPlan.get(left.id), context)
     } else {
-      val (rewrittenExpressions, rewrittenPlan) =
+      val RemoteBatchingResult(rewrittenExpressions, rewrittenPlan) =
         context.settings.remoteBatchPropertiesStrategy.planRemoteBatchProperties(left, context, orderToLeverage)
 
       val plan = annotate(
@@ -3080,14 +4022,14 @@ case class LogicalPlanProducer(
       plan,
       solved,
       providedOrder,
-      cachedPropertiesPerPlan.get(left.id),
+      cachedPropertiesPerPlan.get(left.id).retain(accessedPropertiesInGroupingKeys(expressions)),
       context
     )
   }
 
   /**
    * Keep the left plan, but mark DISTINCT as solved.
-   * Used when DISTINCT is used but we can determine it is not really needed.
+   * Used when DISTINCT is used, but we can determine it is not really necessary.
    */
   def planEmptyDistinct(
     left: LogicalPlan,
@@ -3100,19 +4042,12 @@ case class LogicalPlanProducer(
         DistinctQueryProjection(reported, importedExposedSymbols = context.plannerState.importedSubqueryVariables)
       ))
 
-    val cardinality = cardinalityModel(
-      solved,
-      context.plannerState.input.labelInfo,
-      context.plannerState.input.relTypeInfo,
-      context.semanticTable,
-      context.plannerState.indexCompatiblePredicatesProviderContext
-    )
-    // Change solved and cardinality
+    // Change solved
     val keptAttributes =
       Attributes(idGen, providedOrders, leveragedOrders, labelAndRelTypeInfos, cachedPropertiesPerPlan)
     val newPlan = left.copyPlanWithIdGen(keptAttributes.copy(left.id))
     solveds.set(newPlan.id, solved)
-    cardinalities.set(newPlan.id, cardinality)
+    cardinalities.set(newPlan.id, cardinalities.get(left.id))
     newPlan
   }
 
@@ -3134,8 +4069,20 @@ case class LogicalPlanProducer(
         DistinctQueryProjection(reported, importedExposedSymbols = context.plannerState.importedSubqueryVariables)
       ))
 
-    planRegularProjectionHelper(left, expressions, context, solved)
+    planRegularProjectionHelper(
+      left,
+      expressions,
+      context,
+      solved,
+      cachedPropertiesPerPlan.get(left.id).retain(accessedPropertiesInGroupingKeys(expressions))
+    )
   }
+
+  private def accessedPropertiesInGroupingKeys(expressions: Map[LogicalVariable, Expression])
+    : Map[LogicalVariable, Set[PropertyKeyName]] =
+    PropertyAccessHelper.findPropertyAccesses(expressions.values).groupMap(_.variable)(propertyAccess =>
+      PropertyKeyName(propertyAccess.propertyName)(InputPosition.NONE)
+    )
 
   /**
    *
@@ -3161,7 +4108,7 @@ case class LogicalPlanProducer(
       distinct,
       solved,
       providedOrder,
-      cachedPropertiesPerPlan.get(left.id),
+      cachedPropertiesPerPlan.get(left.id).retain(accessedPropertiesInGroupingKeys(expressions)),
       context
     )
     markOrderAsLeveragedBackwardsUntilOrigin(plan, context.providedOrderFactory)
@@ -3185,7 +4132,8 @@ case class LogicalPlanProducer(
       context.plannerState.input.labelInfo,
       context.plannerState.input.relTypeInfo,
       context.semanticTable,
-      context.plannerState.indexCompatiblePredicatesProviderContext
+      context.plannerState.indexCompatiblePredicatesProviderContext,
+      context.staticComponents.graphSchemaOptimizations
     )
     // Change solved and cardinality
     val keptAttributes =
@@ -3220,15 +4168,33 @@ case class LogicalPlanProducer(
     )
   }
 
+  private def cachedPropertiesAfterMutatingPattern(
+    mutatingPattern: MutatingPattern,
+    planWithMutatingPattern: LogicalPlan
+  ): CachedProperties = {
+    if (mutatingPattern.invalidatesCachedProperties)
+      CachedProperties.empty
+    else
+      cachedPropertiesPerPlan.get(planWithMutatingPattern.id)
+  }
+
   def planCreate(inner: LogicalPlan, pattern: CreatePattern, context: LogicalPlanningContext): LogicalPlan = {
+    // Plan remoteBatchProperties when property references are used in the CREATE
+    val (innerRewrittenRBPs, patternRewrittenCachedProps) =
+      context.settings.remoteBatchPropertiesStrategy
+        .planRemoteBatchPropertiesForMutatingPattern(inner, context, pattern)
+
     val solved =
-      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.amendQueryGraph(_.addMutatingPatterns(pattern)))
+      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(
+        _.amendQueryGraph(_.addMutatingPatterns(pattern))
+          .resetQueryProjection()
+      )
     val (rewrittenPattern: CreatePattern, rewrittenInner) =
-      SubqueryExpressionSolver.ForMappable().solve(inner, pattern, context)
+      SubqueryExpressionSolver.ForMappable().solve(innerRewrittenRBPs, patternRewrittenCachedProps, context)
     val plan = plans.Create(rewrittenInner, rewrittenPattern.commands)
     val providedOrder =
       providedOrderOfUpdate(plan, rewrittenInner, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, CachedProperties.empty, context)
+    annotate(plan, solved, providedOrder, cachedPropertiesAfterMutatingPattern(pattern, innerRewrittenRBPs), context)
   }
 
   def planMerge(
@@ -3246,39 +4212,62 @@ case class LogicalPlanProducer(
     // The read, which is the `inner` plan is free to use RollUpApply, etc.
     val rewriter = irExpressionRewriter(inner, context)
 
-    val patterns =
+    val (mergePattern, innerRewrittenRBPs, patternRewrittenCachedProps) =
       if (createRelationshipPatterns.isEmpty) {
-        MergeNodePattern(
+        val mergeNodePattern = MergeNodePattern(
           createNodePatterns.head,
           solveds(inner.id).asSinglePlannerQuery.queryGraph,
           onCreatePatterns,
           onMatchPatterns
         )
+        // Plan remoteBatchProperties when property references are used in the MERGE
+        val (innerRewrittenRBPs, patternRewrittenCachedProps) =
+          context.settings.remoteBatchPropertiesStrategy
+            .planRemoteBatchPropertiesForMutatingPattern(inner, context, mergeNodePattern)
+
+        (mergeNodePattern, innerRewrittenRBPs, patternRewrittenCachedProps)
+
       } else {
-        MergeRelationshipPattern(
+        val mergeRelPattern = MergeRelationshipPattern(
           createNodePatterns,
           createRelationshipPatterns,
           solveds(inner.id).asSinglePlannerQuery.queryGraph,
           onCreatePatterns,
           onMatchPatterns
         )
-      }
-    val rewrittenNodePatterns = createNodePatterns.endoRewrite(rewriter)
-    val rewrittenRelPatterns = createRelationshipPatterns.endoRewrite(rewriter)
+        // Plan remoteBatchProperties when property references are used in the MERGE
+        val (innerRewrittenRBPs, patternRewrittenCachedProps) =
+          context.settings.remoteBatchPropertiesStrategy
+            .planRemoteBatchPropertiesForMutatingPattern(inner, context, mergeRelPattern)
 
-    val solved = RegularSinglePlannerQuery().amendQueryGraph(_.addMutatingPatterns(patterns))
+        (mergeRelPattern, innerRewrittenRBPs, patternRewrittenCachedProps)
+      }
+
+    val rewrittenNodePatterns = patternRewrittenCachedProps.createNodePatterns.endoRewrite(rewriter)
+    val rewrittenRelPatterns = patternRewrittenCachedProps.createRelationshipPatterns.endoRewrite(rewriter)
+
+    val solved =
+      RegularSinglePlannerQuery()
+        .amendQueryGraph(_.addMutatingPatterns(mergePattern))
+        .resetQueryProjection()
     val merge =
       Merge(
-        inner,
+        innerRewrittenRBPs,
         rewrittenNodePatterns,
         rewrittenRelPatterns,
-        onMatchPatterns,
-        onCreatePatterns,
+        patternRewrittenCachedProps.onMatchPatterns,
+        patternRewrittenCachedProps.onCreatePatterns,
         nodesToLock
       )
     val providedOrder =
-      providedOrderOfUpdate(merge, inner, context.settings.executionModel, context.providedOrderFactory)
-    annotate(merge, solved, providedOrder, CachedProperties.empty, context)
+      providedOrderOfUpdate(merge, innerRewrittenRBPs, context.settings.executionModel, context.providedOrderFactory)
+    annotate(
+      merge,
+      solved,
+      providedOrder,
+      cachedPropertiesAfterMutatingPattern(mergePattern, innerRewrittenRBPs),
+      context
+    )
   }
 
   def planConditionalApply(
@@ -3289,9 +4278,7 @@ case class LogicalPlanProducer(
   ): LogicalPlan = {
     val solved = solveds.get(lhs.id).asSinglePlannerQuery ++ solveds.get(rhs.id).asSinglePlannerQuery
     val plan = ConditionalApply(lhs, rhs, idNames)
-    val providedOrder =
-      providedOrderOfApply(lhs, rhs, plan, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, cachedPropertiesPerPlan.get(rhs.id), context)
+    annotateApply(plan, solved, cachedPropertiesPerPlan.get(rhs.id), context)
   }
 
   def planAntiConditionalApply(
@@ -3304,14 +4291,15 @@ case class LogicalPlanProducer(
     val solved =
       maybeSolved.getOrElse(solveds.get(lhs.id).asSinglePlannerQuery ++ solveds.get(rhs.id).asSinglePlannerQuery)
     val plan = AntiConditionalApply(lhs, rhs, idNames)
-    val providedOrder =
-      providedOrderOfApply(lhs, rhs, plan, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, cachedPropertiesPerPlan.get(rhs.id), context)
+    annotateApply(plan, solved, cachedPropertiesPerPlan.get(rhs.id), context)
   }
 
   def planDeleteNode(inner: LogicalPlan, delete: DeleteExpression, context: LogicalPlanningContext): LogicalPlan = {
     val solved =
-      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.amendQueryGraph(_.addMutatingPatterns(delete)))
+      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(
+        _.amendQueryGraph(_.addMutatingPatterns(delete))
+          .resetQueryProjection()
+      )
     val (rewrittenDelete, rewrittenInner) = SubqueryExpressionSolver.ForMappable().solve(inner, delete, context)
     val plan =
       if (delete.detachDelete) {
@@ -3321,7 +4309,7 @@ case class LogicalPlanProducer(
       }
     val providedOrder =
       providedOrderOfUpdate(plan, inner, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, CachedProperties.empty, context)
+    annotate(plan, solved, providedOrder, cachedPropertiesAfterMutatingPattern(delete, inner), context)
   }
 
   def planDeleteRelationship(
@@ -3330,18 +4318,24 @@ case class LogicalPlanProducer(
     context: LogicalPlanningContext
   ): LogicalPlan = {
     val solved =
-      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.amendQueryGraph(_.addMutatingPatterns(delete)))
+      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(
+        _.amendQueryGraph(_.addMutatingPatterns(delete))
+          .resetQueryProjection()
+      )
     val (rewrittenDelete, rewrittenInner) = SubqueryExpressionSolver.ForMappable().solve(inner, delete, context)
     val plan = DeleteRelationship(rewrittenInner, rewrittenDelete.expression)
     val providedOrder =
       providedOrderOfUpdate(plan, inner, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, CachedProperties.empty, context)
+    annotate(plan, solved, providedOrder, cachedPropertiesAfterMutatingPattern(delete, inner), context)
   }
 
   def planDeletePath(inner: LogicalPlan, delete: DeleteExpression, context: LogicalPlanningContext): LogicalPlan = {
     // `delete.expression` can only be a PathExpression, ListSubqueryExpressionSolver not needed
     val solved =
-      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.amendQueryGraph(_.addMutatingPatterns(delete)))
+      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(
+        _.amendQueryGraph(_.addMutatingPatterns(delete))
+          .resetQueryProjection()
+      )
 
     val plan =
       if (delete.detachDelete) {
@@ -3351,7 +4345,7 @@ case class LogicalPlanProducer(
       }
     val providedOrder =
       providedOrderOfUpdate(plan, inner, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, CachedProperties.empty, context)
+    annotate(plan, solved, providedOrder, cachedPropertiesAfterMutatingPattern(delete, inner), context)
   }
 
   def planDeleteExpression(
@@ -3360,7 +4354,10 @@ case class LogicalPlanProducer(
     context: LogicalPlanningContext
   ): LogicalPlan = {
     val solved =
-      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.amendQueryGraph(_.addMutatingPatterns(delete)))
+      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(
+        _.amendQueryGraph(_.addMutatingPatterns(delete))
+          .resetQueryProjection()
+      )
     val (rewrittenDelete, rewrittenInner) = SubqueryExpressionSolver.ForMappable().solve(inner, delete, context)
     val plan =
       if (delete.detachDelete) {
@@ -3370,17 +4367,32 @@ case class LogicalPlanProducer(
       }
     val providedOrder =
       providedOrderOfUpdate(plan, inner, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, CachedProperties.empty, context)
+    annotate(plan, solved, providedOrder, cachedPropertiesAfterMutatingPattern(delete, inner), context)
   }
 
   def planSetLabel(inner: LogicalPlan, pattern: SetLabelPattern, context: LogicalPlanningContext): LogicalPlan = {
+    // Plan remoteBatchProperties when property references are used to set the node label
+    val (innerRewrittenRBPs, patternRewrittenCachedProps) =
+      context.settings.remoteBatchPropertiesStrategy
+        .planRemoteBatchPropertiesForMutatingPattern(inner, context, pattern)
+
     val solved =
-      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.amendQueryGraph(_.addMutatingPatterns(pattern)))
-    val rewrittenDynamicLabels = pattern.dynamicLabels.toSet.endoRewrite(irExpressionRewriter(inner, context))
-    val plan = SetLabels(inner, pattern.variable, pattern.labels.toSet, rewrittenDynamicLabels)
+      solveds.get(innerRewrittenRBPs.id)
+        .asSinglePlannerQuery.updateTailOrSelf(
+          _.amendQueryGraph(_.addMutatingPatterns(pattern))
+            .resetQueryProjection()
+        )
+    val rewrittenDynamicLabels =
+      patternRewrittenCachedProps.dynamicLabels.toSet.endoRewrite(irExpressionRewriter(innerRewrittenRBPs, context))
+    val plan = SetLabels(
+      innerRewrittenRBPs,
+      patternRewrittenCachedProps.variable,
+      patternRewrittenCachedProps.labels.toSet,
+      rewrittenDynamicLabels
+    )
     val providedOrder =
-      providedOrderOfUpdate(plan, inner, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, CachedProperties.empty, context)
+      providedOrderOfUpdate(plan, innerRewrittenRBPs, context.settings.executionModel, context.providedOrderFactory)
+    annotate(plan, solved, providedOrder, cachedPropertiesAfterMutatingPattern(pattern, innerRewrittenRBPs), context)
   }
 
   def planSetNodeProperty(
@@ -3388,23 +4400,32 @@ case class LogicalPlanProducer(
     pattern: SetNodePropertyPattern,
     context: LogicalPlanningContext
   ): LogicalPlan = {
+    // Plan remoteBatchProperties when property references are used to set the node property
+    val (innerRewrittenRBPs, patternRewrittenCachedProps) =
+      context.settings.remoteBatchPropertiesStrategy
+        .planRemoteBatchPropertiesForMutatingPattern(inner, context, pattern)
+
     val solved =
-      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.amendQueryGraph(_.addMutatingPatterns(pattern)))
+      solveds.get(innerRewrittenRBPs.id)
+        .asSinglePlannerQuery.updateTailOrSelf(
+          _.amendQueryGraph(_.addMutatingPatterns(pattern))
+            .resetQueryProjection()
+        )
 
     // SET has currently row-by-row visibility. This could change in a major release.
     // To maintain the visibility, even with subqueries, we must use NestedPlanExpressions.
-    val rewriter = irExpressionRewriter(inner, context)
-    val rewrittenPattern = pattern.endoRewrite(rewriter)
+    val rewriter = irExpressionRewriter(innerRewrittenRBPs, context)
+    val rewrittenPattern = patternRewrittenCachedProps.endoRewrite(rewriter)
 
     val plan = SetNodeProperty(
-      inner,
+      innerRewrittenRBPs,
       rewrittenPattern.variable,
       rewrittenPattern.propertyKey,
       rewrittenPattern.expression
     )
     val providedOrder =
-      providedOrderOfUpdate(plan, inner, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, CachedProperties.empty, context)
+      providedOrderOfUpdate(plan, innerRewrittenRBPs, context.settings.executionModel, context.providedOrderFactory)
+    annotate(plan, solved, providedOrder, cachedPropertiesAfterMutatingPattern(pattern, innerRewrittenRBPs), context)
   }
 
   def planSetNodeProperties(
@@ -3412,18 +4433,27 @@ case class LogicalPlanProducer(
     pattern: SetNodePropertiesPattern,
     context: LogicalPlanningContext
   ): LogicalPlan = {
+    // Plan remoteBatchProperties when property references are used to set the node properties
+    val (innerRewrittenRBPs, patternRewrittenCachedProps) =
+      context.settings.remoteBatchPropertiesStrategy
+        .planRemoteBatchPropertiesForMutatingPattern(inner, context, pattern)
+
     val solved =
-      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.amendQueryGraph(_.addMutatingPatterns(pattern)))
+      solveds.get(innerRewrittenRBPs.id)
+        .asSinglePlannerQuery.updateTailOrSelf(
+          _.amendQueryGraph(_.addMutatingPatterns(pattern))
+            .resetQueryProjection()
+        )
 
     // SET has currently row-by-row visibility. This could change in a major release.
     // To maintain the visibility, even with subqueries, we must use NestedPlanExpressions.
-    val rewriter = irExpressionRewriter(inner, context)
-    val rewrittenPattern = pattern.endoRewrite(rewriter)
+    val rewriter = irExpressionRewriter(innerRewrittenRBPs, context)
+    val rewrittenPattern = patternRewrittenCachedProps.endoRewrite(rewriter)
 
-    val plan = SetNodeProperties(inner, rewrittenPattern.variable, rewrittenPattern.items)
+    val plan = SetNodeProperties(innerRewrittenRBPs, rewrittenPattern.variable, rewrittenPattern.items)
     val providedOrder =
-      providedOrderOfUpdate(plan, inner, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, CachedProperties.empty, context)
+      providedOrderOfUpdate(plan, innerRewrittenRBPs, context.settings.executionModel, context.providedOrderFactory)
+    annotate(plan, solved, providedOrder, cachedPropertiesAfterMutatingPattern(pattern, innerRewrittenRBPs), context)
   }
 
   def planSetNodePropertiesFromMap(
@@ -3431,23 +4461,32 @@ case class LogicalPlanProducer(
     pattern: SetNodePropertiesFromMapPattern,
     context: LogicalPlanningContext
   ): LogicalPlan = {
+    // Plan remoteBatchProperties when property references are used to set the node properties
+    val (innerRewrittenRBPs, patternRewrittenCachedProps) =
+      context.settings.remoteBatchPropertiesStrategy
+        .planRemoteBatchPropertiesForMutatingPattern(inner, context, pattern)
+
     val solved =
-      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.amendQueryGraph(_.addMutatingPatterns(pattern)))
+      solveds.get(innerRewrittenRBPs.id)
+        .asSinglePlannerQuery.updateTailOrSelf(
+          _.amendQueryGraph(_.addMutatingPatterns(pattern))
+            .resetQueryProjection()
+        )
 
     // SET has currently row-by-row visibility. This could change in a major release.
     // To maintain the visibility, even with subqueries, we must use NestedPlanExpressions.
-    val rewriter = irExpressionRewriter(inner, context)
-    val rewrittenPattern = pattern.endoRewrite(rewriter)
+    val rewriter = irExpressionRewriter(innerRewrittenRBPs, context)
+    val rewrittenPattern = patternRewrittenCachedProps.endoRewrite(rewriter)
 
     val plan = SetNodePropertiesFromMap(
-      inner,
+      innerRewrittenRBPs,
       rewrittenPattern.variable,
       rewrittenPattern.expression,
       rewrittenPattern.removeOtherProps
     )
     val providedOrder =
-      providedOrderOfUpdate(plan, inner, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, CachedProperties.empty, context)
+      providedOrderOfUpdate(plan, innerRewrittenRBPs, context.settings.executionModel, context.providedOrderFactory)
+    annotate(plan, solved, providedOrder, cachedPropertiesAfterMutatingPattern(pattern, innerRewrittenRBPs), context)
   }
 
   def planSetRelationshipProperty(
@@ -3455,23 +4494,32 @@ case class LogicalPlanProducer(
     pattern: SetRelationshipPropertyPattern,
     context: LogicalPlanningContext
   ): LogicalPlan = {
+    // Plan remoteBatchProperties when property references are used to set the relationship property
+    val (innerRewrittenRBPs, patternRewrittenCachedProps) =
+      context.settings.remoteBatchPropertiesStrategy
+        .planRemoteBatchPropertiesForMutatingPattern(inner, context, pattern)
+
     val solved =
-      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.amendQueryGraph(_.addMutatingPatterns(pattern)))
+      solveds.get(innerRewrittenRBPs.id)
+        .asSinglePlannerQuery.updateTailOrSelf(
+          _.amendQueryGraph(_.addMutatingPatterns(pattern))
+            .resetQueryProjection()
+        )
 
     // SET has currently row-by-row visibility. This could change in a major release.
     // To maintain the visibility, even with subqueries, we must use NestedPlanExpressions.
-    val rewriter = irExpressionRewriter(inner, context)
-    val rewrittenPattern = pattern.endoRewrite(rewriter)
+    val rewriter = irExpressionRewriter(innerRewrittenRBPs, context)
+    val rewrittenPattern = patternRewrittenCachedProps.endoRewrite(rewriter)
 
     val plan = SetRelationshipProperty(
-      inner,
+      innerRewrittenRBPs,
       rewrittenPattern.variable,
       rewrittenPattern.propertyKey,
       rewrittenPattern.expression
     )
     val providedOrder =
-      providedOrderOfUpdate(plan, inner, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, CachedProperties.empty, context)
+      providedOrderOfUpdate(plan, innerRewrittenRBPs, context.settings.executionModel, context.providedOrderFactory)
+    annotate(plan, solved, providedOrder, cachedPropertiesAfterMutatingPattern(pattern, innerRewrittenRBPs), context)
   }
 
   def planSetRelationshipProperties(
@@ -3479,18 +4527,27 @@ case class LogicalPlanProducer(
     pattern: SetRelationshipPropertiesPattern,
     context: LogicalPlanningContext
   ): LogicalPlan = {
+    // Plan remoteBatchProperties when property references are used to set the relationship properties
+    val (innerRewrittenRBPs, patternRewrittenCachedProps) =
+      context.settings.remoteBatchPropertiesStrategy
+        .planRemoteBatchPropertiesForMutatingPattern(inner, context, pattern)
+
     val solved =
-      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.amendQueryGraph(_.addMutatingPatterns(pattern)))
+      solveds.get(innerRewrittenRBPs.id)
+        .asSinglePlannerQuery.updateTailOrSelf(
+          _.amendQueryGraph(_.addMutatingPatterns(pattern))
+            .resetQueryProjection()
+        )
 
     // SET has currently row-by-row visibility. This could change in a major release.
     // To maintain the visibility, even with subqueries, we must use NestedPlanExpressions.
-    val rewriter = irExpressionRewriter(inner, context)
-    val rewrittenPattern = pattern.endoRewrite(rewriter)
+    val rewriter = irExpressionRewriter(innerRewrittenRBPs, context)
+    val rewrittenPattern = patternRewrittenCachedProps.endoRewrite(rewriter)
 
-    val plan = SetRelationshipProperties(inner, rewrittenPattern.variable, rewrittenPattern.items)
+    val plan = SetRelationshipProperties(innerRewrittenRBPs, rewrittenPattern.variable, rewrittenPattern.items)
     val providedOrder =
-      providedOrderOfUpdate(plan, inner, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, CachedProperties.empty, context)
+      providedOrderOfUpdate(plan, innerRewrittenRBPs, context.settings.executionModel, context.providedOrderFactory)
+    annotate(plan, solved, providedOrder, cachedPropertiesAfterMutatingPattern(pattern, innerRewrittenRBPs), context)
   }
 
   def planSetRelationshipPropertiesFromMap(
@@ -3498,23 +4555,32 @@ case class LogicalPlanProducer(
     pattern: SetRelationshipPropertiesFromMapPattern,
     context: LogicalPlanningContext
   ): LogicalPlan = {
+    // Plan remoteBatchProperties when property references are used to set the relationship properties
+    val (innerRewrittenRBPs, patternRewrittenCachedProps) =
+      context.settings.remoteBatchPropertiesStrategy
+        .planRemoteBatchPropertiesForMutatingPattern(inner, context, pattern)
+
     val solved =
-      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.amendQueryGraph(_.addMutatingPatterns(pattern)))
+      solveds.get(innerRewrittenRBPs.id)
+        .asSinglePlannerQuery.updateTailOrSelf(
+          _.amendQueryGraph(_.addMutatingPatterns(pattern))
+            .resetQueryProjection()
+        )
 
     // SET has currently row-by-row visibility. This could change in a major release.
     // To maintain the visibility, even with subqueries, we must use NestedPlanExpressions.
-    val rewriter = irExpressionRewriter(inner, context)
-    val rewrittenPattern = pattern.endoRewrite(rewriter)
+    val rewriter = irExpressionRewriter(innerRewrittenRBPs, context)
+    val rewrittenPattern = patternRewrittenCachedProps.endoRewrite(rewriter)
 
     val plan = SetRelationshipPropertiesFromMap(
-      inner,
+      innerRewrittenRBPs,
       rewrittenPattern.variable,
       rewrittenPattern.expression,
       rewrittenPattern.removeOtherProps
     )
     val providedOrder =
-      providedOrderOfUpdate(plan, inner, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, CachedProperties.empty, context)
+      providedOrderOfUpdate(plan, innerRewrittenRBPs, context.settings.executionModel, context.providedOrderFactory)
+    annotate(plan, solved, providedOrder, cachedPropertiesAfterMutatingPattern(pattern, innerRewrittenRBPs), context)
   }
 
   def planSetPropertiesFromMap(
@@ -3522,43 +4588,61 @@ case class LogicalPlanProducer(
     pattern: SetPropertiesFromMapPattern,
     context: LogicalPlanningContext
   ): LogicalPlan = {
+    // Plan remoteBatchProperties when property references are used to set the properties
+    val (innerRewrittenRBPs, patternRewrittenCachedProps) =
+      context.settings.remoteBatchPropertiesStrategy
+        .planRemoteBatchPropertiesForMutatingPattern(inner, context, pattern)
+
     val solved =
-      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.amendQueryGraph(_.addMutatingPatterns(pattern)))
+      solveds.get(innerRewrittenRBPs.id).asSinglePlannerQuery
+        .updateTailOrSelf(
+          _.amendQueryGraph(_.addMutatingPatterns(pattern))
+            .resetQueryProjection()
+        )
 
     // SET has currently row-by-row visibility. This could change in a major release.
     // To maintain the visibility, even with subqueries, we must use NestedPlanExpressions.
-    val rewriter = irExpressionRewriter(inner, context)
-    val rewrittenPattern = pattern.endoRewrite(rewriter)
+    val rewriter = irExpressionRewriter(innerRewrittenRBPs, context)
+    val rewrittenPattern = patternRewrittenCachedProps.endoRewrite(rewriter)
 
     val plan = SetPropertiesFromMap(
-      inner,
+      innerRewrittenRBPs,
       rewrittenPattern.entityExpression,
       rewrittenPattern.expression,
       rewrittenPattern.removeOtherProps
     )
     val providedOrder =
-      providedOrderOfUpdate(plan, inner, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, CachedProperties.empty, context)
+      providedOrderOfUpdate(plan, innerRewrittenRBPs, context.settings.executionModel, context.providedOrderFactory)
+    annotate(plan, solved, providedOrder, cachedPropertiesAfterMutatingPattern(pattern, innerRewrittenRBPs), context)
   }
 
   def planSetProperty(inner: LogicalPlan, pattern: SetPropertyPattern, context: LogicalPlanningContext): LogicalPlan = {
+    // Plan remoteBatchProperties when property references are used to set the property
+    val (innerRewrittenRBPs, patternRewrittenCachedProps) =
+      context.settings.remoteBatchPropertiesStrategy
+        .planRemoteBatchPropertiesForMutatingPattern(inner, context, pattern)
+
     val solved =
-      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.amendQueryGraph(_.addMutatingPatterns(pattern)))
+      solveds.get(innerRewrittenRBPs.id).asSinglePlannerQuery
+        .updateTailOrSelf(
+          _.amendQueryGraph(_.addMutatingPatterns(pattern))
+            .resetQueryProjection()
+        )
 
     // SET has currently row-by-row visibility. This could change in a major release.
     // To maintain the visibility, even with subqueries, we must use NestedPlanExpressions.
-    val rewriter = irExpressionRewriter(inner, context)
-    val rewrittenPattern = pattern.endoRewrite(rewriter)
+    val rewriter = irExpressionRewriter(innerRewrittenRBPs, context)
+    val rewrittenPattern = patternRewrittenCachedProps.endoRewrite(rewriter)
 
     val plan = SetProperty(
-      inner,
+      innerRewrittenRBPs,
       rewrittenPattern.entityExpression,
       rewrittenPattern.propertyKeyName,
       rewrittenPattern.expression
     )
     val providedOrder =
-      providedOrderOfUpdate(plan, inner, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, CachedProperties.empty, context)
+      providedOrderOfUpdate(plan, innerRewrittenRBPs, context.settings.executionModel, context.providedOrderFactory)
+    annotate(plan, solved, providedOrder, cachedPropertiesAfterMutatingPattern(pattern, innerRewrittenRBPs), context)
   }
 
   def planSetProperties(
@@ -3566,18 +4650,27 @@ case class LogicalPlanProducer(
     pattern: SetPropertiesPattern,
     context: LogicalPlanningContext
   ): LogicalPlan = {
+    // Plan remoteBatchProperties when property references are used to set the properties
+    val (innerRewrittenRBPs, patternRewrittenCachedProps) =
+      context.settings.remoteBatchPropertiesStrategy
+        .planRemoteBatchPropertiesForMutatingPattern(inner, context, pattern)
+
     val solved =
-      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.amendQueryGraph(_.addMutatingPatterns(pattern)))
+      solveds.get(innerRewrittenRBPs.id).asSinglePlannerQuery
+        .updateTailOrSelf(
+          _.amendQueryGraph(_.addMutatingPatterns(pattern))
+            .resetQueryProjection()
+        )
 
     // SET has currently row-by-row visibility. This could change in a major release.
     // To maintain the visibility, even with subqueries, we must use NestedPlanExpressions.
-    val rewriter = irExpressionRewriter(inner, context)
-    val rewrittenPattern = pattern.endoRewrite(rewriter)
+    val rewriter = irExpressionRewriter(innerRewrittenRBPs, context)
+    val rewrittenPattern = patternRewrittenCachedProps.endoRewrite(rewriter)
 
-    val plan = SetProperties(inner, rewrittenPattern.entityExpression, rewrittenPattern.items)
+    val plan = SetProperties(innerRewrittenRBPs, rewrittenPattern.entityExpression, rewrittenPattern.items)
     val providedOrder =
-      providedOrderOfUpdate(plan, inner, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, CachedProperties.empty, context)
+      providedOrderOfUpdate(plan, innerRewrittenRBPs, context.settings.executionModel, context.providedOrderFactory)
+    annotate(plan, solved, providedOrder, cachedPropertiesAfterMutatingPattern(pattern, innerRewrittenRBPs), context)
   }
 
   def planSetDynamicProperty(
@@ -3585,33 +4678,57 @@ case class LogicalPlanProducer(
     pattern: SetDynamicPropertyPattern,
     context: LogicalPlanningContext
   ): LogicalPlan = {
+    // Plan remoteBatchProperties when property references are used to set the label
+    val (innerRewrittenRBPs, patternRewrittenCachedProps) =
+      context.settings.remoteBatchPropertiesStrategy
+        .planRemoteBatchPropertiesForMutatingPattern(inner, context, pattern)
+
     val solved =
-      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.amendQueryGraph(_.addMutatingPatterns(pattern)))
+      solveds.get(innerRewrittenRBPs.id)
+        .asSinglePlannerQuery.updateTailOrSelf(
+          _.amendQueryGraph(_.addMutatingPatterns(pattern))
+            .resetQueryProjection()
+        )
 
     // SET has currently row-by-row visibility. This could change in a major release.
     // To maintain the visibility, even with subqueries, we must use NestedPlanExpressions.
-    val rewriter = irExpressionRewriter(inner, context)
-    val rewrittenPattern = pattern.endoRewrite(rewriter)
+    val rewriter = irExpressionRewriter(innerRewrittenRBPs, context)
+    val rewrittenPattern = patternRewrittenCachedProps.endoRewrite(rewriter)
 
     val plan = SetDynamicProperty(
-      inner,
+      innerRewrittenRBPs,
       rewrittenPattern.entity,
       rewrittenPattern.property,
       rewrittenPattern.expression
     )
     val providedOrder =
-      providedOrderOfUpdate(plan, inner, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, CachedProperties.empty, context)
+      providedOrderOfUpdate(plan, innerRewrittenRBPs, context.settings.executionModel, context.providedOrderFactory)
+    annotate(plan, solved, providedOrder, cachedPropertiesAfterMutatingPattern(pattern, innerRewrittenRBPs), context)
   }
 
   def planRemoveLabel(inner: LogicalPlan, pattern: RemoveLabelPattern, context: LogicalPlanningContext): LogicalPlan = {
+    // Plan remoteBatchProperties when property references are used to define the label that needs to be removed
+    val (innerRewrittenRBPs, patternRewrittenCachedProps) =
+      context.settings.remoteBatchPropertiesStrategy
+        .planRemoteBatchPropertiesForMutatingPattern(inner, context, pattern)
+
     val solved =
-      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.amendQueryGraph(_.addMutatingPatterns(pattern)))
-    val rewrittenDynamicLabels = pattern.dynamicLabels.toSet.endoRewrite(irExpressionRewriter(inner, context))
-    val plan = RemoveLabels(inner, pattern.variable, pattern.labels.toSet, rewrittenDynamicLabels)
+      solveds.get(innerRewrittenRBPs.id)
+        .asSinglePlannerQuery.updateTailOrSelf(
+          _.amendQueryGraph(_.addMutatingPatterns(pattern))
+            .resetQueryProjection()
+        )
+    val rewrittenDynamicLabels =
+      patternRewrittenCachedProps.dynamicLabels.toSet.endoRewrite(irExpressionRewriter(innerRewrittenRBPs, context))
+    val plan = RemoveLabels(
+      innerRewrittenRBPs,
+      patternRewrittenCachedProps.variable,
+      patternRewrittenCachedProps.labels.toSet,
+      rewrittenDynamicLabels
+    )
     val providedOrder =
-      providedOrderOfUpdate(plan, inner, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, CachedProperties.empty, context)
+      providedOrderOfUpdate(plan, innerRewrittenRBPs, context.settings.executionModel, context.providedOrderFactory)
+    annotate(plan, solved, providedOrder, cachedPropertiesAfterMutatingPattern(pattern, innerRewrittenRBPs), context)
   }
 
   def planForeachApply(
@@ -3622,38 +4739,43 @@ case class LogicalPlanProducer(
     expression: Expression
   ): LogicalPlan = {
     val solved =
-      solveds.get(left.id).asSinglePlannerQuery.updateTailOrSelf(_.amendQueryGraph(_.addMutatingPatterns(pattern)))
+      solveds.get(left.id).asSinglePlannerQuery.updateTailOrSelf(
+        _.amendQueryGraph(_.addMutatingPatterns(pattern))
+          .resetQueryProjection()
+      )
     val (rewrittenExpression, rewrittenLeft) = SubqueryExpressionSolver.ForSingle.solve(left, expression, context)
     val plan = ForeachApply(rewrittenLeft, innerUpdates, pattern.variable, rewrittenExpression)
-    val providedOrder = providedOrderOfApply(
-      rewrittenLeft,
-      innerUpdates,
-      plan,
-      context.settings.executionModel,
-      context.providedOrderFactory
-    )
-    annotate(plan, solved, providedOrder, CachedProperties.empty, context)
+    annotateApply(plan, solved, cachedPropertiesAfterMutatingPattern(pattern, left), context)
   }
 
   def planForeach(
     inner: LogicalPlan,
     pattern: ForeachPattern,
     context: LogicalPlanningContext,
-    expression: Expression,
-    mutations: collection.Seq[SimpleMutatingPattern]
+    expression: Expression
   ): LogicalPlan = {
+    // Plan remoteBatchProperties when property references are used in the mutating patterns
+    val (innerRewrittenRBPs, patternRewrittenCachedProps) =
+      context.settings.remoteBatchPropertiesStrategy
+        .planRemoteBatchPropertiesForMutatingPattern(inner, context, pattern)
+
     val solved =
-      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.amendQueryGraph(_.addMutatingPatterns(pattern)))
-    val (rewrittenExpression, rewrittenLeft) = SubqueryExpressionSolver.ForSingle.solve(inner, expression, context)
+      solveds.get(innerRewrittenRBPs.id).asSinglePlannerQuery
+        .updateTailOrSelf(
+          _.amendQueryGraph(_.addMutatingPatterns(pattern))
+            .resetQueryProjection()
+        )
+    val (rewrittenExpression, rewrittenLeft) = SubqueryExpressionSolver
+      .ForSingle.solve(innerRewrittenRBPs, expression, context)
     val plan = Foreach(
       rewrittenLeft,
       pattern.variable,
       rewrittenExpression,
-      mutations
+      patternRewrittenCachedProps.getSimpleMutatingPatterns
     )
     val providedOrder =
-      providedOrderOfUpdate(plan, inner, context.settings.executionModel, context.providedOrderFactory)
-    annotate(plan, solved, providedOrder, CachedProperties.empty, context)
+      providedOrderOfUpdate(plan, innerRewrittenRBPs, context.settings.executionModel, context.providedOrderFactory)
+    annotate(plan, solved, providedOrder, cachedPropertiesAfterMutatingPattern(pattern, innerRewrittenRBPs), context)
   }
 
   def planEager(
@@ -3752,11 +4874,19 @@ case class LogicalPlanProducer(
     properties: Set[CachedProperty],
     context: LogicalPlanningContext
   ): LogicalPlan = {
-    val remoteBatchProperties = RemoteBatchProperties(inner, properties.map(identity))
     val solved = solveds.get(inner.id)
     val cachedProperties = cachedPropertiesPerPlan.get(inner.id).addAll(properties)
+    val plan = inner match {
+      case RemoteBatchProperties(nestedInner, nestedProperties) =>
+        RemoteBatchProperties(nestedInner, nestedProperties ++ properties)
+      // remote batch properties with filter is restricted to a single variable, so only merge if all the next properties to cache match that variable.
+      case RemoteBatchPropertiesWithFilter(nestedInner, predicates, nestedProperties)
+        if nestedProperties.headOption.exists(_.dependencies == properties.flatMap(_.dependencies)) =>
+        RemoteBatchPropertiesWithFilter(nestedInner, predicates, nestedProperties ++ properties)
+      case _ => RemoteBatchProperties(inner, properties.map(identity))
+    }
     annotate(
-      remoteBatchProperties,
+      plan,
       solved,
       ProvidedOrder.Left,
       cachedProperties,
@@ -3764,21 +4894,181 @@ case class LogicalPlanProducer(
     )
   }
 
+  def changeSourceOnRemoteBatchProperties(
+    newInner: LogicalPlan,
+    currentRemoteBatchProperties: RemoteBatchProperties,
+    context: LogicalPlanningContext
+  ): LogicalPlan = {
+    val newRemoteBatchProperties = RemoteBatchProperties(newInner, currentRemoteBatchProperties.properties)
+
+    val solved =
+      solveds.get(newInner.id).asSinglePlannerQuery
+        .updateTailOrSelf(_.withInterestingOrder(
+          solveds.get(currentRemoteBatchProperties.id).asSinglePlannerQuery.interestingOrder
+        ))
+
+    annotate(
+      newRemoteBatchProperties,
+      solved,
+      ProvidedOrder.Left,
+      cachedPropertiesPerPlan.get(currentRemoteBatchProperties.id),
+      context
+    )
+  }
+
+  def planRemoteBatchPropertiesForHorizonFilters(
+    inner: LogicalPlan,
+    properties: Set[CachedProperty],
+    context: LogicalPlanningContext,
+    inlinablePredicates: RewrittenSubQueryPredicatesMap
+  ): LogicalPlan = {
+    val solved = solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(_.updateHorizon {
+      case p: QueryProjection => p.addPredicates(inlinablePredicates.originalExpressions)
+      case horizon            => horizon
+    })
+
+    val cachedProperties = cachedPropertiesPerPlan.get(inner.id).addAll(properties)
+    val plan =
+      mergeAndPlanRemoteBatchPropertiesWithFilter(properties, inlinablePredicates.allRewrittenExpressions, inner)
+    annotate(plan, solved, ProvidedOrder.Left, cachedProperties, context)
+  }
+
   def planRemoteBatchPropertiesWithFilter(
     inner: LogicalPlan,
     properties: Set[CachedProperty],
     context: LogicalPlanningContext,
-    inlinablePredicates: Seq[Expression],
-    solvedPredicates: Seq[Expression]
+    inlinablePredicatesToExecute: Seq[Expression],
+    inlinablePredicatesToReport: Seq[Expression]
   ): LogicalPlan = {
-    val remoteBatchPropertiesWithFilter =
-      RemoteBatchPropertiesWithFilter(inner, inlinablePredicates.toSet, properties.map(identity))
-    val solved =
-      solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(
-        _.amendQueryGraph(_.addPredicates(solvedPredicates: _*))
-      )
     val cachedProperties = cachedPropertiesPerPlan.get(inner.id).addAll(properties)
-    annotate(remoteBatchPropertiesWithFilter, solved, ProvidedOrder.empty, cachedProperties, context)
+    val solved = solveds.get(inner.id).asSinglePlannerQuery.updateTailOrSelf(
+      _.amendQueryGraph(_.addPredicates(inlinablePredicatesToReport: _*))
+    )
+    val plan = mergeAndPlanRemoteBatchPropertiesWithFilter(properties, inlinablePredicatesToExecute, inner)
+    annotate(plan, solved, ProvidedOrder.Left, cachedProperties, context)
+  }
+
+  def planShardSelections(
+    selection: RemoteBatchPropertiesWithPushdownOperators,
+    rewrittenSubQueryPredicates: RewrittenSubQueryPredicatesMap,
+    context: LogicalPlanningContext
+  ): LogicalPlan = {
+    val cachedProperties = cachedPropertiesPerPlan.get(selection.source.id).add(
+      selection.variable,
+      selection.entityType,
+      selection.properties
+    )
+    val solved = solveds.get(selection.source.id).asSinglePlannerQuery.updateTailOrSelf(
+      _.amendQueryGraph(_.addPredicates(rewrittenSubQueryPredicates.originalExpressions))
+    )
+
+    val plan = mergePushdownShardOperator(selection)
+    annotate(plan, solved, ProvidedOrder.Left, cachedProperties, context)
+  }
+
+  def planProjectionsOnShards(
+    projectionOperation: RemoteBatchPropertiesWithPushdownOperators,
+    rewrittenSubQueryPredicates: RewrittenSubQueryPredicatesMap,
+    context: LogicalPlanningContext
+  ): LogicalPlan = {
+    val cachedProperties = cachedPropertiesPerPlan.get(projectionOperation.source.id).add(
+      projectionOperation.variable,
+      projectionOperation.entityType,
+      projectionOperation.properties
+    )
+
+    val plan = mergePushdownShardOperator(
+      projectionOperation
+    )
+    val solved = solveds.get(projectionOperation.source.id).asSinglePlannerQuery.updateTailOrSelf(_.updateHorizon {
+      case p: QueryProjection => p.addPredicates(rewrittenSubQueryPredicates.originalExpressions)
+      case horizon            => horizon
+    })
+
+    annotate(plan, solved, ProvidedOrder.Left, cachedProperties, context)
+  }
+
+  private def mergePushdownShardOperator(
+    remoteBatchPropertiesWithPushdownOperators: RemoteBatchPropertiesWithPushdownOperators
+  ): LogicalPlan = remoteBatchPropertiesWithPushdownOperators.source match {
+    case RemoteBatchProperties(nestedInner, nestedProperties)
+      if nestedProperties.forall(_.dependencies == Set(remoteBatchPropertiesWithPushdownOperators.variable)) =>
+      remoteBatchPropertiesWithPushdownOperators.copy(
+        source = nestedInner,
+        properties = remoteBatchPropertiesWithPushdownOperators.properties ++ nestedProperties.map(_.propertyKey)
+      )(idGen)
+    case Apply(RemoteBatchProperties(nestedInner, nestedProperties), _: Argument)
+      if nestedProperties.forall(_.dependencies == Set(remoteBatchPropertiesWithPushdownOperators.variable)) =>
+      remoteBatchPropertiesWithPushdownOperators.copy(
+        source = nestedInner,
+        properties = remoteBatchPropertiesWithPushdownOperators.properties ++ nestedProperties.map(_.propertyKey)
+      )(idGen)
+    case innerRemoteBatchPropertiesWithPushdown: RemoteBatchPropertiesWithPushdownOperators
+      if innerRemoteBatchPropertiesWithPushdown.variable == remoteBatchPropertiesWithPushdownOperators.variable =>
+      mergeRemoteBatchPropertiesWithPushdownOperators(
+        remoteBatchPropertiesWithPushdownOperators,
+        innerRemoteBatchPropertiesWithPushdown
+      )
+    case Apply(innerRemoteBatchPropertiesWithPushdown: RemoteBatchPropertiesWithPushdownOperators, _: Argument)
+      if innerRemoteBatchPropertiesWithPushdown.variable == remoteBatchPropertiesWithPushdownOperators.variable =>
+      mergeRemoteBatchPropertiesWithPushdownOperators(
+        remoteBatchPropertiesWithPushdownOperators,
+        innerRemoteBatchPropertiesWithPushdown
+      )
+    case _ =>
+      remoteBatchPropertiesWithPushdownOperators
+  }
+
+  private def mergeRemoteBatchPropertiesWithPushdownOperators(
+    remoteBatchPropertiesWithPushdownOperators: RemoteBatchPropertiesWithPushdownOperators,
+    innerRemoteBatchPropertiesWithPushdown: RemoteBatchPropertiesWithPushdownOperators
+  ) = {
+    RemoteBatchPropertiesWithPushdownOperators(
+      source = innerRemoteBatchPropertiesWithPushdown.source,
+      variable = innerRemoteBatchPropertiesWithPushdown.variable,
+      entityType = innerRemoteBatchPropertiesWithPushdown.entityType,
+      properties =
+        innerRemoteBatchPropertiesWithPushdown.properties ++ remoteBatchPropertiesWithPushdownOperators.properties,
+      predicates =
+        innerRemoteBatchPropertiesWithPushdown.predicates ++ remoteBatchPropertiesWithPushdownOperators.predicates,
+      distinctBy = innerRemoteBatchPropertiesWithPushdown.distinctBy.orElse(
+        remoteBatchPropertiesWithPushdownOperators.distinctBy
+      ),
+      orderBy = innerRemoteBatchPropertiesWithPushdown.orderBy ++ remoteBatchPropertiesWithPushdownOperators.orderBy,
+      limit =
+        remoteBatchPropertiesWithPushdownOperators.limit.orElse(innerRemoteBatchPropertiesWithPushdown.limit),
+      importedConstantValues =
+        innerRemoteBatchPropertiesWithPushdown.importedConstantValues ++ remoteBatchPropertiesWithPushdownOperators.importedConstantValues,
+      importedPerRowValues =
+        innerRemoteBatchPropertiesWithPushdown.importedPerRowValues ++ remoteBatchPropertiesWithPushdownOperators.importedPerRowValues
+    )(idGen)
+  }
+
+  /**
+   * RemoteBatchPropertiesWithFilter will only fetch properties for a SINGLE variable.
+   * To maintain the correctness of this assumption, we can merge the current set of properties with the previous operator only if
+   * 1. the previous operator is RemoteBatchProperties where all the properties being fetched are for the same variable as the current remoteBatchProperties
+   * 2. the previous operator is a RemoteBatchPropertiesWithFilter  where all the properties being fetched are for the same variable.
+   */
+  private def mergeAndPlanRemoteBatchPropertiesWithFilter(
+    properties: Set[CachedProperty],
+    inlinablePredicates: Iterable[Expression],
+    inner: LogicalPlan
+  ): RemoteBatchPropertiesWithFilter = {
+    val logicalVariablesOfProperties = properties.map(_.entityVariable)
+    inner match {
+      case RemoteBatchProperties(nestedInner, nestedProperties)
+        if nestedProperties.forall(_.dependencies == logicalVariablesOfProperties) =>
+        RemoteBatchPropertiesWithFilter(nestedInner, inlinablePredicates.toSet, nestedProperties ++ properties)
+      case RemoteBatchPropertiesWithFilter(nestedInner, nestedPredicates, nestedProperties)
+        if nestedProperties.headOption.exists(_.dependencies == logicalVariablesOfProperties) =>
+        RemoteBatchPropertiesWithFilter(
+          nestedInner,
+          nestedPredicates ++ inlinablePredicates,
+          nestedProperties ++ properties
+        )
+      case _ => RemoteBatchPropertiesWithFilter(inner, inlinablePredicates.toSet, properties.map(identity))
+    }
   }
 
   def addMissingStandaloneArgumentPatternNodes(
@@ -3845,11 +5135,17 @@ case class LogicalPlanProducer(
     executionModel: ExecutionModel
   ): Unit = {
     if (AssertionRunner.ASSERTIONS_ENABLED) {
-      (plan.lhs, plan.rhs, providedOrder.orderOrigin) match {
-        case (Some(left), Some(right), Some(ProvidedOrder.Left))
-          if invalidatesProvidedOrderRecursive(right, executionModel) =>
+      (plan, providedOrder.orderOrigin) match {
+        case (rollUpApply: RollUpApply, _) if rollUpApply.right.readOnly =>
+          // special case for RollUpApply as it is assumed to not invalidate LHS order regardless of RHS plans
+          ()
+        case (plan: LogicalBinaryPlan, Some(ProvidedOrder.Left))
+          if invalidatesProvidedOrderRecursive(plan.right, executionModel) =>
           val msg =
-            s"LHS claims to provide an order, but RHS contains clauses that invalidates this order.\nProvided order: $providedOrder\nLHS: $left\nRHS: $right"
+            s"""LHS claims to provide an order, but RHS contains clauses that invalidates this order.
+               |Provided order: $providedOrder
+               |Plan:
+               |$plan""".stripMargin
           throw new AssertionError(msg)
         case _ =>
       }
@@ -3862,7 +5158,7 @@ case class LogicalPlanProducer(
   private def invalidatesProvidedOrder(plan: LogicalPlan, executionModel: ExecutionModel): Boolean = {
     (plan match {
       // MERGE will either be ordered by its inner plan or create a single row which by
-      // definition is ordered. However if you do ON MATCH SET ... that might invalidate the
+      // definition is ordered. However, if you do ON MATCH SET ... that might invalidate the
       // inner ordering.
       case m: Merge => m.onMatch.nonEmpty
       case _        => plan.isUpdatingPlan
@@ -3870,7 +5166,9 @@ case class LogicalPlanProducer(
   }
 
   private def invalidatesProvidedOrderRecursive(plan: LogicalPlan, executionModel: ExecutionModel): Boolean =
-    plan.folder.treeExists { case plan: LogicalPlan if invalidatesProvidedOrder(plan, executionModel) => true }
+    plan.folder.treeExists {
+      case logicalPlan: LogicalPlan if invalidatesProvidedOrder(logicalPlan, executionModel) => true
+    }
 
   /**
    * Compute cardinality for a plan. Set this cardinality in the Cardinalities attribute.
@@ -3893,11 +5191,12 @@ case class LogicalPlanProducer(
         context.plannerState.input.labelInfo,
         context.plannerState.input.relTypeInfo,
         context.semanticTable,
-        context.plannerState.indexCompatiblePredicatesProviderContext
+        context.plannerState.indexCompatiblePredicatesProviderContext,
+        context.staticComponents.graphSchemaOptimizations
       )
     solveds.set(plan.id, solved)
     cardinalities.set(plan.id, cardinality)
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(
       providedOrder.isEmpty || Set(plan.lhs, plan.lhs).flatten.forall(p => providedOrders.get(p.id) ne providedOrder),
       s"A plan must not use the same provided order instance as one of its children. Make sure to use the ProvidedOrderFactory."
     )
@@ -3950,13 +5249,33 @@ case class LogicalPlanProducer(
     annotate(selection, solved, providedOrderPropagationRule, cachedProperties, context)
   }
 
+  private def annotateApply[A <: ApplyPlan](
+    applyPlan: A,
+    solved: PlannerQuery,
+    cachedProperties: CachedProperties,
+    context: LogicalPlanningContext
+  ): A = {
+    val providedOrder = providedOrderOfApply(
+      applyPlan.left,
+      applyPlan.right,
+      applyPlan,
+      context.settings.executionModel,
+      context.providedOrderFactory
+    )
+    annotate(applyPlan, solved, providedOrder, cachedProperties, context)
+  }
+
   /**
    * There probably exists some type level way of achieving this with type safety instead of manually searching through the expression tree like this
    */
   private def assertNoBadExpressionsExists(root: Any): Unit = {
     checkOnlyWhenAssertionsAreEnabled(!root.folder.treeExists {
-      case _: PatternComprehension | _: PatternExpression | _: IRExpression | _: MapProjection =>
-        throw new InternalException(s"This expression should not be added to a logical plan:\n$root")
+      case _: PatternComprehension | _: PatternExpression | _: IRExpression | _: MapProjection | _: PartialPredicate[_]
+        | _: ImpliedLabel =>
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"This expression should not be added to a logical plan:\n$root"
+        )
       case _ =>
         false
     })
@@ -3982,7 +5301,8 @@ case class LogicalPlanProducer(
     inner: LogicalPlan,
     expressions: Map[LogicalVariable, Expression],
     context: LogicalPlanningContext,
-    solved: SinglePlannerQuery
+    solved: SinglePlannerQuery,
+    cachedPropertiesToReport: CachedProperties
   ): Projection = {
     val columnsWithRenames = renameProvidedOrderColumns(providedOrders.get(inner.id).columns, expressions)
     val plan = Projection(inner, expressions)
@@ -3991,7 +5311,7 @@ case class LogicalPlanProducer(
       plan,
       solved,
       providedOrder,
-      cachedPropertiesPerPlan.get(inner.id).rename(renamedVariables(expressions)),
+      cachedPropertiesToReport.rename(renamedVariables(expressions)),
       context
     )
   }
@@ -4027,8 +5347,8 @@ case class LogicalPlanProducer(
           case (
               newVar,
               Property(`v`, PropertyKeyName(`propName`)) | CachedProperty(
-                `v`,
                 _,
+                `v`,
                 PropertyKeyName(`propName`),
                 _,
                 _,
@@ -4124,7 +5444,7 @@ case class LogicalPlanProducer(
         // Currently, in that case we assume it is a one-child plan,
         // since at the time of writing there is no two child plan that leverages and destroys ordering
         lp.lhs.foreach(loop)
-        AssertMacros.checkOnlyWhenAssertionsAreEnabled(
+        AssertMacros3.checkOnlyWhenAssertionsAreEnabled(
           lp.rhs.isEmpty,
           "We assume that there is no two-child plan leveraging but destroying ordering."
         )
@@ -4133,6 +5453,44 @@ case class LogicalPlanProducer(
 }
 
 object LogicalPlanProducer {
+
+  /**
+   * @return whether `hintMode` accepts `planMode`
+   */
+  private def expandModeMatches(hintMode: Option[ExpandHintMode], planMode: ExpansionMode): Boolean =
+    hintMode match {
+      case Some(ExpandHintAll)  => planMode == ExpandAll
+      case Some(ExpandHintInto) => planMode == ExpandInto
+      case None                 => true
+    }
+
+  /**
+   * True iff `hint` matches the node connection from `planFrom` to `planTo` via `planRelIds` with expansion mode
+   * `planMode`, given that `claimedStepIds` are already solved.
+   */
+  private def expandHintClaims(
+    hint: UsingExpandStepHint,
+    planFrom: LogicalVariable,
+    planTo: LogicalVariable,
+    planRelIds: Set[LogicalVariable],
+    planMode: ExpansionMode,
+    claimedStepIds: Set[UsingExpandStepId]
+  ): Boolean = {
+    val UsingExpandStepHint(hintFrom, hintTo, hintVia, hintMode, _, mustFollow) = hint
+
+    val endpointsMatch =
+      hintFrom.forall(_ == planFrom) &&
+        hintTo.forall(_ == planTo)
+
+    val viaMatches = hintVia.forall(planRelIds.contains)
+
+    val mustFollowSolved = mustFollow.subsetOf(claimedStepIds)
+
+    endpointsMatch &&
+    viaMatches &&
+    expandModeMatches(hintMode, planMode) &&
+    mustFollowSolved
+  }
 
   /**
    * This method assumes that no invalidation of provided order happens on the RHS.
@@ -4183,4 +5541,5 @@ object LogicalPlanProducer {
   ): SinglePlannerQuery = {
     solveds.get(left.id).asSinglePlannerQuery.updateTailOrSelf(_.withTail(solveds.get(right.id).asSinglePlannerQuery))
   }
+
 }

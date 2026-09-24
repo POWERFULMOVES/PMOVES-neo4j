@@ -19,13 +19,13 @@
  */
 package org.neo4j.procedure.builtin;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;
 
 class SortedLabelsTest {
     @Test
+    @SuppressWarnings("SelfAssertion")
     void testEquals() {
         int[] longsA = new int[] {1, 2, 3};
         int[] longsB = new int[] {3, 2, 1};
@@ -36,15 +36,15 @@ class SortedLabelsTest {
 
         // self
         //noinspection EqualsWithItself
-        assertEquals(a, a);
+        assertThat(a).isEqualTo(a);
 
         // unordered self
-        assertEquals(a, b);
-        assertEquals(b, a);
+        assertThat(a).isEqualTo(b);
+        assertThat(b).isEqualTo(a);
 
         // other
-        assertNotEquals(a, c);
-        assertNotEquals(c, a);
+        assertThat(a).isNotEqualTo(c);
+        assertThat(c).isNotEqualTo(a);
     }
 
     @Test
@@ -56,7 +56,7 @@ class SortedLabelsTest {
         SortedLabels b = SortedLabels.from(longsB);
         SortedLabels c = SortedLabels.from(longsC);
 
-        assertEquals(a.hashCode(), b.hashCode());
-        assertNotEquals(a.hashCode(), c.hashCode());
+        assertThat(a).hasSameHashCodeAs(b);
+        assertThat(a).doesNotHaveSameHashCodeAs(c);
     }
 }

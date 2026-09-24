@@ -19,7 +19,6 @@
  */
 package org.neo4j.internal.id.indexed;
 
-import static java.util.Collections.emptySet;
 import static org.eclipse.collections.impl.block.factory.Comparators.naturalOrder;
 import static org.neo4j.collection.PrimitiveLongResourceCollections.count;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
@@ -27,6 +26,7 @@ import static org.neo4j.index.internal.gbptree.GBPTree.NO_HEADER_READER;
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
 import static org.neo4j.index.internal.gbptree.StructureWriteLog.structureWriteLog;
 import static org.neo4j.internal.id.IdValidator.assertIdWithinMaxCapacity;
+import static org.neo4j.internal.id.indexed.LockedPages.EMPTY_LOCKED_PAGES;
 import static org.neo4j.io.IOUtils.closeAllUnchecked;
 import static org.neo4j.io.pagecache.PageCacheOpenOptions.MULTI_VERSIONED;
 
@@ -38,16 +38,16 @@ import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongSupplier;
 import java.util.function.Predicate;
+import java.util.stream.IntStream;
 import org.apache.commons.lang3.mutable.MutableLong;
 import org.eclipse.collections.api.set.ImmutableSet;
+import org.eclipse.collections.api.set.primitive.LongSet;
 import org.neo4j.annotations.documented.ReporterFactory;
 import org.neo4j.collection.PrimitiveLongResourceCollections;
 import org.neo4j.collection.PrimitiveLongResourceIterator;
@@ -71,16 +71,19 @@ import org.neo4j.internal.id.IdSlotDistribution;
 import org.neo4j.internal.id.IdType;
 import org.neo4j.internal.id.IdValidator;
 import org.neo4j.internal.id.indexed.IdCache.SlotSizeFallback;
-import org.neo4j.internal.id.range.ArrayBasedRange;
 import org.neo4j.internal.id.range.ContinuousIdRange;
 import org.neo4j.internal.id.range.PageIdRange;
+import org.neo4j.io.async.AsyncBlockAccessor;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.context.OldestVisibilityHorizonFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.util.Preconditions;
+import org.neo4j.util.SimpleHistogram;
 
 /**
  * At the heart of this free-list sits a {@link GBPTree}, containing all deleted and freed ids. The tree is used as a bit-set and since it's
@@ -126,9 +129,11 @@ public class IndexedIdGenerator implements IdGenerator {
 
         default void skippedIdsAtAllocation(long firstWastedId, int numberOfIds) {}
 
-        default void scanStart(boolean startFromScratch) {}
+        default void scanStart() {}
 
         default void scanEnd(int numEntriesVisited, int[] numFoundIds, ScanEndCondition endCondition) {}
+
+        default void scanPartitionsCreated(int numPartitions) {}
     }
 
     public static final Monitor NO_MONITOR = new Monitor() {};
@@ -163,7 +168,7 @@ public class IndexedIdGenerator implements IdGenerator {
      * Id reuse fetches from cache optimistically, if we get collision (in MVCC), we retry reuse a few times to not
      * expand the id space too much
      * */
-    private static final int REUSE_RETRY_ATTEMPTS = 50;
+    private final int REUSE_RETRY_ATTEMPTS = 50;
 
     /**
      * {@link GBPTree} for storing and accessing the id states.
@@ -246,7 +251,7 @@ public class IndexedIdGenerator implements IdGenerator {
     private final AtomicLong highestWrittenId = new AtomicLong();
 
     private final FileSystemAbstraction fileSystem;
-    private final Path path;
+    private final StoreFile storeFile;
 
     /**
      * {@code false} after construction and before a call to {@link IdGenerator#start(FreeIds, CursorContext)},
@@ -268,14 +273,14 @@ public class IndexedIdGenerator implements IdGenerator {
     private final boolean strictlyPrioritizeFreelist;
     private final int biggestSlotSize;
 
-    private final Set<Long> lockedPageRanges;
+    private final LockedPages lockedPageRanges;
     private final boolean respectsReservedIds;
     private volatile SlotSizeFallback acceptableSlotSizeFallback = SlotSizeFallback.none;
 
     public IndexedIdGenerator(
             PageCache pageCache,
             FileSystemAbstraction fileSystem,
-            Path path,
+            StoreFile storeFile,
             RecoveryCleanupWorkCollector recoveryCleanupWorkCollector,
             IdType idType,
             boolean allowLargeIdCaches,
@@ -292,7 +297,7 @@ public class IndexedIdGenerator implements IdGenerator {
             boolean allocationEnabled,
             boolean useDirectToCache) {
         this.fileSystem = fileSystem;
-        this.path = path;
+        this.storeFile = storeFile;
         this.readOnly = readOnly;
         this.contextFactory = contextFactory;
         this.slotDistribution = slotDistribution;
@@ -308,14 +313,14 @@ public class IndexedIdGenerator implements IdGenerator {
                 .orElseThrow();
         this.maxId = maxId;
         this.monitor = monitor;
-        this.lockedPageRanges = isMultiVersioned(openOptions) ? ConcurrentHashMap.newKeySet() : emptySet();
+        this.lockedPageRanges = isMultiVersioned(openOptions) ? new LockedPages() : EMPTY_LOCKED_PAGES;
 
         this.idsPerEntry = slotDistribution.idsPerEntry();
         this.layout = new IdRangeLayout(idsPerEntry);
         HeaderReader header = new HeaderReader();
         this.tree = instantiateTree(
                 pageCache,
-                path,
+                storeFile,
                 header,
                 recoveryCleanupWorkCollector,
                 readOnly,
@@ -344,7 +349,7 @@ public class IndexedIdGenerator implements IdGenerator {
                     idsPerEntry);
             // Let's optimistically assume that there may be some free ids in here. This will ensure that a scan
             // is triggered on first request
-            this.freeIdFindState.notifySeenFreedId(Integer.MAX_VALUE);
+            this.freeIdFindState.bumpNotificationCount();
             this.numUnusedIds.set(header.numUnusedIds);
         } else {
             // We're creating this file, so set initial values
@@ -375,7 +380,7 @@ public class IndexedIdGenerator implements IdGenerator {
 
     private GBPTree<IdRangeKey, IdRange> instantiateTree(
             PageCache pageCache,
-            Path path,
+            StoreFile storeFile,
             HeaderReader headerReader,
             RecoveryCleanupWorkCollector recoveryCleanupWorkCollector,
             boolean readOnly,
@@ -387,7 +392,7 @@ public class IndexedIdGenerator implements IdGenerator {
             return new GBPTree<>(
                     pageCache,
                     fileSystem,
-                    path,
+                    storeFile,
                     layout,
                     MultiRootGBPTree.NO_MONITOR,
                     headerReader,
@@ -400,11 +405,11 @@ public class IndexedIdGenerator implements IdGenerator {
                     pageCacheTracer,
                     EmptyDependencyResolver.EMPTY_RESOLVER,
                     TreeNodeLayoutFactory.getInstance(),
-                    structureWriteLog(fileSystem, path, config));
+                    structureWriteLog(fileSystem, storeFile, config));
         } catch (TreeFileNotFoundException e) {
             throw new IllegalStateException(
-                    "Id generator file could not be found, most likely this database needs to be recovered, file:"
-                            + path,
+                    "Id generator file could not be found, most likely this database needs to be recovered, store path:"
+                            + storeFile,
                     e);
         }
     }
@@ -422,8 +427,12 @@ public class IndexedIdGenerator implements IdGenerator {
         do {
             // If strictly prioritizing the freelist then the method below will block on the current scan,
             // if there's any ongoing, otherwise it will not block.
-            checkRefillCache(1, cursorContext);
-            long id = cache.takeOrDefault(NO_ID);
+            long id = checkRefillCache(1, cursorContext);
+            if (id != NO_ID) {
+                monitor.allocatedFromReused(id, 1);
+                return id;
+            }
+            id = cache.takeOrDefault(NO_ID);
             if (id != NO_ID) {
                 monitor.allocatedFromReused(id, 1);
                 return id;
@@ -451,24 +460,45 @@ public class IndexedIdGenerator implements IdGenerator {
     @Override
     public PageIdRange nextPageRange(CursorContext cursorContext, int idsPerPage) {
         checkRefillCache(0, cursorContext);
-        long[] reusedIds = cache.drainRange(idsPerPage);
-        if (reusedIds.length > 0) {
+        // Reuse is turned off in the case where we wish to guarantee the range can fit consecutive ids
+        PageIdRange range = getPageIdRangeFromCache(cursorContext, idsPerPage);
+        if (range != null) {
+            return range;
+        }
+
+        // There was no usable range from cache, so we take an empty one
+        return nextContinuousPageRange(idsPerPage, cursorContext);
+    }
+
+    private PageIdRange getPageIdRangeFromCache(CursorContext cursorContext, int idsPerPage) {
+        int retryAttempts = 0;
+        while (true) {
+            long[] reusedIds = cache.drainRange(idsPerPage);
+            if (reusedIds.length == 0) {
+                return null;
+            }
             // we have some reuse ids available that we allocated from cache
             // now we need to make sure that range is not yet used by any other concurrent allocator
             // so we check if it's not yet locked before returning it, otherwise we mark those ids unallocated and
             // fallback to new range
             Arrays.sort(reusedIds);
             var range = PageIdRange.wrap(reusedIds, idsPerPage);
-            if (lockedPageRanges.add(range.pageId())) {
+            if (lockedPageRanges.add(range.pageId(), cursorContext)) {
                 return range;
-            } else {
-                // we mark optimistically allocated range as unallocated and fallback to new ids
-                try (var marker = lockAndInstantiateMarker(false, false, cursorContext)) {
-                    range.unallocate(marker);
-                }
+            }
+            // we mark optimistically allocated range as unallocated and fallback to new ids
+            try (var marker = lockAndInstantiateMarker(false, false, cursorContext)) {
+                range.unallocate(marker);
+            }
+
+            if (++retryAttempts >= REUSE_RETRY_ATTEMPTS) {
+                return null;
             }
         }
+    }
 
+    @Override
+    public PageIdRange nextContinuousPageRange(int idsPerPage, CursorContext cursorContext) {
         long currentHighId;
         long requestSize;
         do {
@@ -477,10 +507,8 @@ public class IndexedIdGenerator implements IdGenerator {
         } while (!highId.weakCompareAndSetRelease(currentHighId, currentHighId + requestSize));
         assertIdWithinMaxCapacity(idType, currentHighId + idsPerPage, maxId);
         monitor.allocatedFromHigh(currentHighId, (int) requestSize);
-        var pageIdRange = hasReservedIdInRange(currentHighId, currentHighId + idsPerPage)
-                ? rangeWithoutReservedId(idsPerPage, currentHighId)
-                : new ContinuousIdRange(currentHighId, (int) requestSize, idsPerPage);
-        lockedPageRanges.add(pageIdRange.pageId());
+        var pageIdRange = new ContinuousIdRange(currentHighId, (int) requestSize, idsPerPage);
+        lockedPageRanges.add(pageIdRange.pageId(), cursorContext);
         return pageIdRange;
     }
 
@@ -491,7 +519,12 @@ public class IndexedIdGenerator implements IdGenerator {
                 range.unallocate(marker);
             }
         }
-        lockedPageRanges.remove(range.pageId());
+        lockedPageRanges.remove(range.pageId(), context);
+    }
+
+    @Override
+    public void releasePageRangesLocks(LongSet pageIds, CursorContext cursorContext) {
+        lockedPageRanges.remove(pageIds, cursorContext);
     }
 
     @Override
@@ -504,17 +537,20 @@ public class IndexedIdGenerator implements IdGenerator {
             //  numberOfIds
             int retries = 0;
             do {
-                checkRefillCache(numberOfIds, cursorContext);
+                long idFromRefill = checkRefillCache(numberOfIds, cursorContext);
+                if (idFromRefill != NO_ID) {
+                    monitor.allocatedFromReused(idFromRefill, numberOfIds);
+                    return new ConsecutiveId(idFromRefill, numberOfIds);
+                }
                 ConsecutiveId id = cache.takeOrDefault(
                         NO_ID, numberOfIds, monitor, scanner::queueWastedCachedId, slotSizeFallback);
                 if (id.id() != NO_ID) {
                     monitor.allocatedFromReused(id.id(), id.numberOfIds());
                     return id;
                 }
-            } while (allowSmaller
-                    && strictlyPrioritizeFreelist
+            } while (strictlyPrioritizeFreelist
                     && scanner.hasMoreFreeIds(false, numberOfIds)
-                    && retries++ < REUSE_RETRY_ATTEMPTS);
+                    && (numberOfIds == 1 || (allowSmaller && retries++ < REUSE_RETRY_ATTEMPTS)));
         }
 
         boolean favorSamePage = (flags & IdSequence.FLAG_FAVOR_SAME_PAGE) != 0;
@@ -576,8 +612,8 @@ public class IndexedIdGenerator implements IdGenerator {
         }
         return new TransactionalMarker.Delegate(realMarker) {
             @Override
-            public void markDeletedAndFree(long id, int numberOfIds) {
-                realMarker.markDeleted(id, numberOfIds);
+            public void markDeletedAndFree(long id, int numberOfIds, boolean bridgeOnDelete) {
+                realMarker.markDeleted(id, numberOfIds, bridgeOnDelete);
                 feedDirectlyToCache(id, numberOfIds, realMarker);
             }
         };
@@ -655,6 +691,7 @@ public class IndexedIdGenerator implements IdGenerator {
                     freeIdFindState,
                     generation,
                     highestWrittenId,
+                    highId,
                     bridgeIdGaps,
                     deleteAlsoFrees,
                     monitor);
@@ -725,20 +762,29 @@ public class IndexedIdGenerator implements IdGenerator {
     }
 
     @Override
-    public void checkpoint(FileFlushEvent flushEvent, CursorContext cursorContext) {
+    public void checkpoint(
+            FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext) {
         tree.checkpoint(
                 new HeaderWriter(highId::get, highestWrittenId::get, generation, idsPerEntry, numUnusedIds::get),
                 flushEvent,
+                asyncBlockAccessor,
                 cursorContext);
         monitor.checkpoint(highestWrittenId.get(), highId.get());
     }
 
     @Override
-    public void maintenance(CursorContext cursorContext) {
+    public long compact(FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext) {
+        return tree.compact(flushEvent, asyncBlockAccessor, cursorContext);
+    }
+
+    @Override
+    public void maintenance(
+            CursorContext cursorContext, OldestVisibilityHorizonFactory oldestVisibilityHorizonFactory) {
         if (started && !cache.isFull() && !readOnly) {
             // We're just helping other allocation requests and avoiding unwanted sliding of highId here
             scanner.tryLoadFreeIdsIntoCache(true, true, 0, cursorContext);
         }
+        lockedPageRanges.maintenance(oldestVisibilityHorizonFactory);
 
         // For ID-generators that supports multi-ID slots and allows fragmentation in favor of 100% colocation
         // This will figure out the reasonable amount of fragmentation to accept, and eventually pass on to
@@ -762,11 +808,13 @@ public class IndexedIdGenerator implements IdGenerator {
         return SlotSizeFallback.full;
     }
 
-    private void checkRefillCache(int requestedNumberOfIds, CursorContext cursorContext) {
+    private long checkRefillCache(int requestedNumberOfIds, CursorContext cursorContext) {
         if (cache.size(requestedNumberOfIds) <= cacheOptimisticRefillThreshold) {
             // We're just helping other allocation requests and avoiding unwanted sliding of highId here
-            scanner.tryLoadFreeIdsIntoCache(strictlyPrioritizeFreelist, false, requestedNumberOfIds, cursorContext);
+            return scanner.tryLoadFreeIdsIntoCache(
+                    strictlyPrioritizeFreelist, false, requestedNumberOfIds, cursorContext);
         }
+        return NO_ID;
     }
 
     @Override
@@ -782,6 +830,10 @@ public class IndexedIdGenerator implements IdGenerator {
     @Override
     public boolean allocationEnabled() {
         return scanner.allocationEnabled();
+    }
+
+    public boolean directToCache() {
+        return useDirectToCache;
     }
 
     @Override
@@ -820,8 +872,8 @@ public class IndexedIdGenerator implements IdGenerator {
         return highestWrittenId.get();
     }
 
-    public Path path() {
-        return path;
+    public StoreFile storeFile() {
+        return storeFile;
     }
 
     /**
@@ -860,7 +912,7 @@ public class IndexedIdGenerator implements IdGenerator {
         try (GBPTree<IdRangeKey, IdRange> tree = new GBPTree<>(
                 pageCache,
                 fileSystem,
-                path,
+                new StoreFile(path),
                 layout,
                 MultiRootGBPTree.NO_MONITOR,
                 NO_HEADER_READER,
@@ -876,11 +928,27 @@ public class IndexedIdGenerator implements IdGenerator {
                 MutableLong numDeletedNotFreed = new MutableLong();
                 MutableLong numDeletedAndFreed = new MutableLong();
                 out.println("Calculating summary...");
+                SimpleHistogram freeIdsHisto = new SimpleHistogram(
+                        IntStream.range(1, layout.idsPerEntry() + 1).toArray());
                 try (var cursorContext = contextFactory.create("IndexDump")) {
                     tree.visit(
                             new GBPTreeVisitor.Adaptor<>() {
+                                private long idRangeIndex;
+
+                                @Override
+                                public void key(IdRangeKey key, boolean isLeaf, long offloadId) {
+                                    idRangeIndex = key.getIdRangeIdx();
+                                }
+
                                 @Override
                                 public void value(ValueHolder<IdRange> value) {
+                                    long baseId = idRangeIndex * layout.idsPerEntry();
+                                    value.value.visitFreeIds(
+                                            baseId, value.value.getGeneration() + 1, (id, numberOfIds) -> {
+                                                freeIdsHisto.register(numberOfIds);
+                                                return true;
+                                            });
+
                                     for (int i = 0; i < header.idsPerEntry; i++) {
                                         IdRange.IdState state = value.value.getState(i);
                                         if (state == IdRange.IdState.FREE) {
@@ -897,6 +965,7 @@ public class IndexedIdGenerator implements IdGenerator {
                 out.println();
                 out.println("Number of IDs deleted and available for reuse: " + numDeletedAndFreed);
                 out.println("Number of IDs deleted, but not yet available for reuse: " + numDeletedNotFreed);
+                out.println("Histogram of sizes of free IDs: " + freeIdsHisto);
                 out.printf(
                         "NOTE: A deleted ID not yet available for reuse is buffered until all transactions that were open%n"
                                 + "at the time of its deletion have been closed, or the database is restarted%n");
@@ -944,6 +1013,15 @@ public class IndexedIdGenerator implements IdGenerator {
     @Override
     public PrimitiveLongResourceIterator freeIdsIterator() throws IOException {
         return conditionalIdIterator(0, getHighId(), state -> IdRange.IdState.FREE == state);
+    }
+
+    @Override
+    public PrimitiveLongResourceIterator usedIdsIterator() throws IOException {
+        // We can't just iterate over the file and filter on IdRange.IdState.USED == state,
+        // as one would expect. This is because used IDs are 0's on disk and not necessarily
+        // iterated over by the seeker at all / or not even present in the tree/file at all
+        // (all-zero ranges are removed). Instead, we iterate over not used IDs and take the complement.
+        return PrimitiveLongResourceCollections.complement(notUsedIdsIterator(), getHighId());
     }
 
     private PrimitiveLongResourceCollections.AbstractPrimitiveLongBaseResourceIterator conditionalIdIterator(
@@ -1008,18 +1086,7 @@ public class IndexedIdGenerator implements IdGenerator {
     }
 
     private void assertNotReadOnly() {
-        Preconditions.checkState(!readOnly, "ID generator '%s' is read-only", path);
-    }
-
-    private static PageIdRange rangeWithoutReservedId(int idsPerPage, long currentHighId) {
-        long[] ids = new long[idsPerPage - 1];
-        for (int i = 0; i < ids.length; i++) {
-            long value = currentHighId++;
-            if (!IdValidator.isReservedId(value)) {
-                ids[i] = value;
-            }
-        }
-        return new ArrayBasedRange(ids, idsPerPage);
+        Preconditions.checkState(!readOnly, "ID generator '%s' is read-only", storeFile);
     }
 
     private static boolean isMultiVersioned(ImmutableSet<OpenOption> openOptions) {

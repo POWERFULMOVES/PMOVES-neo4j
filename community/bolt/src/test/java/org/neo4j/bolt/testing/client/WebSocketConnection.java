@@ -30,14 +30,17 @@ import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
-import org.neo4j.bolt.testing.client.error.BoltTestClientException;
+import org.neo4j.bolt.protocol.common.connector.transport.ConnectorTransport;
+import org.neo4j.bolt.testing.client.error.BoltTestClientStateException;
 import org.neo4j.bolt.testing.client.handler.WebSocketHandler;
+import org.neo4j.bolt.testing.messages.BoltWire;
 
 public sealed class WebSocketConnection extends SocketConnection permits SecureWebSocketConnection {
+
     private static final Factory factory = new Factory();
 
-    public WebSocketConnection(InetSocketAddress address) {
-        super(address);
+    public WebSocketConnection(ConnectorTransport transport, BoltWire wire, InetSocketAddress address) {
+        super(transport, wire, address);
     }
 
     public static BoltTestConnection.Factory factory() {
@@ -68,16 +71,16 @@ public sealed class WebSocketConnection extends SocketConnection permits SecureW
         try {
             return new URI("ws", null, this.address.getHostString(), this.address.getPort(), "/", null, null);
         } catch (URISyntaxException ex) {
-            throw new BoltTestClientException("Failed to construct WebSocket address", ex);
+            throw new BoltTestClientStateException("Failed to construct WebSocket address", ex);
         }
     }
 
     private static class Factory implements BoltTestConnection.Factory {
 
         @Override
-        public BoltTestConnection create(SocketAddress address) {
+        public BoltTestConnection create(ConnectorTransport transport, BoltWire wire, SocketAddress address) {
             if (address instanceof InetSocketAddress inetSocketAddress) {
-                return new WebSocketConnection(inetSocketAddress);
+                return new WebSocketConnection(transport, wire, inetSocketAddress);
             }
 
             throw new IllegalArgumentException("Cannot initialize WebSocket connection with address of type "

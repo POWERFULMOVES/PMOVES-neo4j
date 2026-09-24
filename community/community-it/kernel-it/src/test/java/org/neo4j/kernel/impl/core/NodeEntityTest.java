@@ -34,11 +34,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
-import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.exceptions.KernelException;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.graphdb.ConstraintViolationException;
 import org.neo4j.graphdb.Entity;
 import org.neo4j.graphdb.Label;
@@ -49,32 +49,34 @@ import org.neo4j.graphdb.Transaction;
 import org.neo4j.graphdb.TransientTransactionFailureException;
 import org.neo4j.internal.helpers.collection.Iterators;
 import org.neo4j.internal.kernel.api.exceptions.EntityNotFoundException;
+import org.neo4j.internal.kernel.api.exceptions.schema.TokenCapacityExceededKernelException;
 import org.neo4j.kernel.impl.coreapi.InternalTransaction;
+import org.neo4j.logging.LogAssertions;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 public class NodeEntityTest extends EntityTest {
 
     @Inject
     RandomSupport random;
 
     @Override
-    protected long createEntity(Transaction tx) {
-        return tx.createNode().getId();
+    protected String createEntity(Transaction tx) {
+        return tx.createNode().getElementId();
     }
 
     @Override
-    protected Entity lookupEntity(Transaction transaction, long id) {
-        return transaction.getNodeById(id);
+    protected Entity lookupEntity(Transaction transaction, String id) {
+        return transaction.getNodeByElementId(id);
     }
 
     @Test
     void createDropNodeLongStringProperty(TestInfo testInfo) {
         Label markerLabel = Label.label("marker_" + testInfo.getTestMethod());
         String testPropertyKey = "testProperty";
-        String propertyValue = RandomStringUtils.randomAscii(255);
+        String propertyValue = random.nextAsciiStringOfLength(255);
 
         try (Transaction tx = db.beginTx()) {
             Node node = tx.createNode(markerLabel);
@@ -135,9 +137,9 @@ public class NodeEntityTest extends EntityTest {
     @Test
     void deletionOfSameNodeTwiceInOneTransactionShouldNotRollbackIt() {
         // Given
-        Node node;
+        String nodeId;
         try (Transaction tx = db.beginTx()) {
-            node = tx.createNode();
+            nodeId = tx.createNode().getElementId();
             tx.commit();
         }
 
@@ -145,9 +147,9 @@ public class NodeEntityTest extends EntityTest {
         Exception exceptionThrownBySecondDelete = null;
 
         try (Transaction tx = db.beginTx()) {
-            tx.getNodeById(node.getId()).delete();
+            tx.getNodeByElementId(nodeId).delete();
             try {
-                tx.getNodeById(node.getId()).delete();
+                tx.getNodeByElementId(nodeId).delete();
             } catch (Exception e) {
                 exceptionThrownBySecondDelete = e;
             }
@@ -159,7 +161,7 @@ public class NodeEntityTest extends EntityTest {
 
         assertThrows(NotFoundException.class, () -> {
             try (Transaction tx = db.beginTx()) {
-                tx.getNodeById(node.getId()); // should throw NotFoundException
+                tx.getNodeByElementId(nodeId); // should throw NotFoundException
                 tx.commit();
             }
         });
@@ -168,20 +170,21 @@ public class NodeEntityTest extends EntityTest {
     @Test
     void deletionOfAlreadyDeletedNodeShouldThrow() {
         // Given
-        Node node;
+        String nodeId;
         try (Transaction tx = db.beginTx()) {
-            node = tx.createNode();
+            nodeId = tx.createNode().getElementId();
             tx.commit();
         }
         try (Transaction tx = db.beginTx()) {
-            tx.getNodeById(node.getId()).delete();
+            tx.getNodeByElementId(nodeId).delete();
             tx.commit();
         }
 
         // When
         assertThrows(NotFoundException.class, () -> {
             try (Transaction tx = db.beginTx()) {
-                tx.getNodeById(node.getId()).delete(); // should throw NotFoundException as this node is already deleted
+                tx.getNodeByElementId(nodeId)
+                        .delete(); // should throw NotFoundException as this node is already deleted
                 tx.commit();
             }
         });
@@ -190,14 +193,13 @@ public class NodeEntityTest extends EntityTest {
     @Test
     void getAllPropertiesShouldWorkFineWithConcurrentPropertyModifications() throws Exception {
         // Given
-        ExecutorService executor = Executors.newFixedThreadPool(2, named("Test-executor-thread"));
-        try {
+        try (ExecutorService executor = Executors.newFixedThreadPool(2, named("Test-executor-thread"))) {
             final int propertiesCount = 100;
 
-            final long nodeId;
+            final String nodeId;
             try (Transaction tx = db.beginTx()) {
                 Node node = tx.createNode();
-                nodeId = node.getId();
+                nodeId = node.getElementId();
                 for (int i = 0; i < propertiesCount; i++) {
                     node.setProperty("property-" + i, i);
                 }
@@ -213,7 +215,7 @@ public class NodeEntityTest extends EntityTest {
                     int propertyKey = 0;
                     while (propertyKey < propertiesCount) {
                         try (Transaction tx = db.beginTx()) {
-                            Node node = tx.getNodeById(nodeId);
+                            Node node = tx.getNodeByElementId(nodeId);
                             for (int i = 0; i < 10 && propertyKey < propertiesCount; i++, propertyKey++) {
                                 node.setProperty(
                                         "property-" + propertyKey,
@@ -228,7 +230,7 @@ public class NodeEntityTest extends EntityTest {
             };
             Runnable reader = () -> {
                 try (Transaction tx = db.beginTx()) {
-                    Node node = tx.getNodeById(nodeId);
+                    Node node = tx.getNodeByElementId(nodeId);
                     awaitLatch(start);
                     while (!writerDone.get()) {
                         int size = node.getAllProperties().size();
@@ -251,50 +253,62 @@ public class NodeEntityTest extends EntityTest {
             try (Transaction tx = db.beginTx()) {
                 assertEquals(
                         propertiesCount,
-                        tx.getNodeById(nodeId).getAllProperties().size());
+                        tx.getNodeByElementId(nodeId).getAllProperties().size());
                 tx.commit();
             }
-        } finally {
-            executor.shutdown();
         }
     }
 
     @Test
     void shouldBeAbleToForceTypeChangeOfProperty() {
         // Given
-        Node node;
+        String nodeId;
         try (Transaction tx = db.beginTx()) {
-            node = tx.createNode();
+            Node node = tx.createNode();
+            nodeId = node.getElementId();
             node.setProperty("prop", 1337);
             tx.commit();
         }
 
         // When
         try (Transaction tx = db.beginTx()) {
-            tx.getNodeById(node.getId()).setProperty("prop", 1337.0);
+            tx.getNodeByElementId(nodeId).setProperty("prop", 1337.0);
             tx.commit();
         }
 
         // Then
         try (Transaction tx = db.beginTx()) {
-            assertThat(tx.getNodeById(node.getId()).getProperty("prop")).isInstanceOf(Double.class);
+            assertThat(tx.getNodeByElementId(nodeId).getProperty("prop")).isInstanceOf(Double.class);
         }
     }
 
     @Test
     void shouldThrowCorrectExceptionOnLabelTokensExceeded() throws KernelException {
         // given
-        var transaction = mockedTransactionWithDepletedTokens();
+        var transaction = mockedTransactionWithDepletedTokens(logProvider);
         NodeEntity nodeEntity = new NodeEntity(transaction, 5);
 
         // when
-        assertThrows(ConstraintViolationException.class, () -> nodeEntity.addLabel(Label.label("Label")));
+        var exceptionAssert = ErrorGqlStatusObjectAssertions.assertThatNonGqlThrownBy(
+                        () -> nodeEntity.addLabel(Label.label("Label")))
+                .isInstanceOf(ConstraintViolationException.class)
+                .causeWithGqlStatus()
+                .isInstanceOf(TokenCapacityExceededKernelException.class)
+                .hasMessageContaining(
+                        "The maximum number of Labels available has been reached, no more can be created.")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_51N59)
+                .hasStatusDescription(
+                        "error: system configuration or operation exception - internal resource exhaustion. The DBMS is unable to handle the request, please retry later or contact the system operator. More information is present in the logs.");
+        LogAssertions.assertThat(logProvider)
+                .containsMessageWithException(
+                        "The maximum number of Labels available has been reached, no more can be created.",
+                        exceptionAssert.getActual());
     }
 
     @Test
     void shouldThrowCorrectExceptionOnPropertyKeyTokensExceeded() throws KernelException {
         // given
-        NodeEntity nodeEntity = new NodeEntity(mockedTransactionWithDepletedTokens(), 5);
+        NodeEntity nodeEntity = new NodeEntity(mockedTransactionWithDepletedTokens(logProvider), 5);
 
         // when
         assertThrows(ConstraintViolationException.class, () -> nodeEntity.setProperty("key", "value"));
@@ -303,7 +317,7 @@ public class NodeEntityTest extends EntityTest {
     @Test
     void shouldThrowCorrectExceptionOnRelationshipTypeTokensExceeded() throws KernelException {
         // given
-        InternalTransaction transaction = mockedTransactionWithDepletedTokens();
+        InternalTransaction transaction = mockedTransactionWithDepletedTokens(logProvider);
         NodeEntity nodeEntity = new NodeEntity(transaction, 5);
 
         // when

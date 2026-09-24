@@ -21,38 +21,38 @@ package org.neo4j.kernel.impl.index.schema;
 
 import static org.neo4j.index.internal.gbptree.ValueMerger.MergeResult.MERGED;
 import static org.neo4j.index.internal.gbptree.ValueMerger.MergeResult.REMOVED;
+import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_ID;
 
+import java.io.IOException;
 import java.util.Arrays;
+import java.util.Comparator;
+import java.util.List;
+import org.eclipse.collections.impl.list.mutable.FastList;
 import org.neo4j.index.internal.gbptree.GBPTree;
 import org.neo4j.index.internal.gbptree.ValueMerger;
 import org.neo4j.index.internal.gbptree.Writer;
 import org.neo4j.io.IOUtils;
 import org.neo4j.io.pagecache.context.CursorContext;
-import org.neo4j.kernel.api.exceptions.index.IndexEntryConflictException;
 import org.neo4j.kernel.api.index.IndexUpdater;
 import org.neo4j.kernel.api.index.TokenIndexReader;
-import org.neo4j.kernel.impl.index.schema.PhysicalToLogicalTokenChanges.LogicalTokenUpdates;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
 import org.neo4j.storageengine.api.TokenIndexEntryUpdate;
 
 /**
- * {@link IndexUpdater} for token index, or rather a {@link Writer} for its
- * internal {@link GBPTree}.
+ * {@link IndexUpdater} for token index, or rather a {@link Writer} for its internal {@link GBPTree}.
  * <p>
  * {@link #process(IndexEntryUpdate) updates} are queued up to a maximum batch size and, for performance,
  * applied in sorted order (by the token and entity id) when reaches batch size or on {@link #close()}.
  * <p>
  * Updates aren't visible to {@link TokenIndexReader readers} immediately, rather when queue happens to be applied.
- * <p>
- * Incoming {@link TokenIndexEntryUpdate updates} are actually modified from representing physical before/after
- * state to represent logical to-add/to-remove state. These changes are done directly inside the provided
- * {@link TokenIndexEntryUpdate#values()} and {@link TokenIndexEntryUpdate#beforeValues()} arrays,
- * relying on the fact that those arrays are returned in its essential form, instead of copies.
- * This conversion is done like so mostly to reduce garbage.
- *
- * @see PhysicalToLogicalTokenChanges
  */
 class TokenIndexUpdater implements IndexUpdater {
+
+    /**
+     * {@link Comparator} for sorting the entity id ranges, used in batches to apply updates in sorted order.
+     */
+    private static final Comparator<TokenIndexEntryUpdate> UPDATE_SORTER =
+            Comparator.comparingLong(TokenIndexEntryUpdate::getEntityId);
 
     /**
      * {@link ValueMerger} used for adding token->entity mappings, see {@link TokenScanValue#add(TokenScanValue)}.
@@ -94,7 +94,7 @@ class TokenIndexUpdater implements IndexUpdater {
      * to place new updates is {@link #pendingUpdatesCursor}. The constructor set the length of this queue
      * and the length defines the maximum batch size.
      */
-    private final LogicalTokenUpdates[] pendingUpdates;
+    private final TokenIndexEntryUpdate[] pendingUpdates;
 
     private final TokenIndexIdLayout idLayout;
 
@@ -124,22 +124,29 @@ class TokenIndexUpdater implements IndexUpdater {
     private boolean closed = true;
     private boolean parallel;
 
+    private CursorContext cursorContext;
+    private CursorContext writerCursorContext;
+    private long lastVersion;
+
     TokenIndexUpdater(int batchSize, TokenIndexIdLayout idLayout) {
-        this.pendingUpdates = new LogicalTokenUpdates[batchSize];
+        this.pendingUpdates = new TokenIndexEntryUpdate[batchSize];
         this.idLayout = idLayout;
     }
 
-    TokenIndexUpdater initialize(Writer<TokenScanKey, TokenScanValue> writer, boolean parallel) {
-        this.parallel = parallel;
+    TokenIndexUpdater initialize(TokenWriterFactory writerFactory, boolean parallel, CursorContext cursorContext)
+            throws IOException {
         if (!closed) {
             throw new IllegalStateException("Updater still open");
         }
-
-        this.writer = writer;
+        this.cursorContext = cursorContext;
+        this.writerCursorContext = cursorContext.createRelatedContext("TOKEN_INDEX_UPDATER_APPLY");
+        this.writer = writerFactory.create(writerCursorContext);
+        this.parallel = parallel;
+        this.lastVersion = cursorContext.getVersionContext().committingTransactionId();
         this.pendingUpdatesCursor = 0;
         this.addition = false;
         this.lowestTokenId = Integer.MAX_VALUE;
-        closed = false;
+        this.closed = false;
         return this;
     }
 
@@ -150,18 +157,17 @@ class TokenIndexUpdater implements IndexUpdater {
      * Calls to this method MUST be ordered by ascending entity id.
      */
     @Override
-    public void process(IndexEntryUpdate<?> update) throws IndexEntryConflictException {
+    public void process(IndexEntryUpdate update) {
         assertOpen();
-        if (pendingUpdatesCursor == pendingUpdates.length) {
-            flushPendingChanges();
+        long committingTransactionId = cursorContext.getVersionContext().committingTransactionId();
+        if (pendingUpdatesCursor == pendingUpdates.length || lastVersion != committingTransactionId) {
+            flushPendingChanges(lastVersion);
         }
-
-        TokenIndexEntryUpdate<?> tokenUpdate = asTokenUpdate(update);
-        LogicalTokenUpdates logicalTokenUpdate =
-                PhysicalToLogicalTokenChanges.convertToAdditionsAndRemovals(tokenUpdate);
-        pendingUpdates[pendingUpdatesCursor++] = logicalTokenUpdate;
-        checkNextTokenId(tokenUpdate.beforeValues());
-        checkNextTokenId(tokenUpdate.values());
+        lastVersion = committingTransactionId;
+        TokenIndexEntryUpdate tokenUpdate = asTokenUpdate(update);
+        pendingUpdates[pendingUpdatesCursor++] = tokenUpdate;
+        checkNextTokenId(tokenUpdate.removed());
+        checkNextTokenId(tokenUpdate.added());
     }
 
     @Override
@@ -170,49 +176,70 @@ class TokenIndexUpdater implements IndexUpdater {
     }
 
     private void checkNextTokenId(int[] tokens) {
-        if (tokens.length > 0 && tokens[0] != -1) {
+        if (tokens.length > 0) {
             lowestTokenId = Math.min(lowestTokenId, tokens[0]);
         }
     }
 
-    private void flushPendingChanges() {
-        Arrays.sort(pendingUpdates, 0, pendingUpdatesCursor);
+    private void flushPendingChanges(long version) {
+        if (pendingUpdatesCursor == 0) {
+            return;
+        }
+        if (version >= BASE_TX_ID) {
+            // this updater can be called from popuplating thread with no version context, this is expected, and we
+            // don't need to reset writer version in this case
+            writerCursorContext.getVersionContext().initWrite(version);
+        } else {
+            assert !writerCursorContext.getVersionContext().initializedForWrite();
+        }
+        Arrays.sort(pendingUpdates, 0, pendingUpdatesCursor, UPDATE_SORTER);
         int currentTokenId = lowestTokenId;
         value.clear();
         key.clear();
+        List<Change> changes = parallel ? FastList.newList() : null;
         while (currentTokenId != Integer.MAX_VALUE) {
             int nextTokenId = Integer.MAX_VALUE;
             for (int i = 0; i < pendingUpdatesCursor; i++) {
-                LogicalTokenUpdates update = pendingUpdates[i];
-                long entityId = update.entityId();
-                nextTokenId = extractChange(update.additions(), currentTokenId, entityId, nextTokenId, true);
-                nextTokenId = extractChange(update.removals(), currentTokenId, entityId, nextTokenId, false);
+                TokenIndexEntryUpdate update = pendingUpdates[i];
+                long entityId = update.getEntityId();
+                nextTokenId = extractChange(update.added(), currentTokenId, entityId, nextTokenId, true, changes);
+                nextTokenId = extractChange(update.removed(), currentTokenId, entityId, nextTokenId, false, changes);
             }
             currentTokenId = nextTokenId;
         }
-        flushPendingRange();
+        flushPendingRange(changes);
         pendingUpdatesCursor = 0;
-        if (parallel) {
+
+        if (changes != null) {
+            for (Change change : changes) {
+                writeChange(change.key, change.value, change.addition);
+            }
             writer.yield();
         }
     }
 
-    private int extractChange(int[] tokens, int currentTokenId, long entityId, int nextTokenId, boolean addition) {
+    private void writeChange(TokenScanKey key, TokenScanValue value, boolean addition) {
+        if (addition) {
+            writer.merge(key, value, ADD_MERGER);
+        } else {
+            writer.mergeIfExists(key, value, REMOVE_MERGER);
+        }
+    }
+
+    private int extractChange(
+            int[] tokens, int currentTokenId, long entityId, int nextTokenId, boolean addition, List<Change> changes) {
         int foundNextTokenId = nextTokenId;
         for (int li = 0; li < tokens.length; li++) {
             int tokenId = tokens[li];
-            if (tokenId == -1) {
-                break;
-            }
 
             // Have this check here so that we can pick up the next tokenId in our change set
             if (tokenId == currentTokenId) {
-                change(currentTokenId, entityId, addition);
+                change(currentTokenId, entityId, addition, changes);
 
                 // We can do a little shorter check for next tokenId here straight away,
                 // we just check the next if it's less than what we currently think is next tokenId
                 // and then break right after
-                if (li + 1 < tokens.length && tokens[li + 1] != -1) {
+                if (li + 1 < tokens.length) {
                     int nextTokenCandidate = tokens[li + 1];
                     if (nextTokenCandidate < currentTokenId) {
                         throw new IllegalArgumentException(
@@ -230,10 +257,10 @@ class TokenIndexUpdater implements IndexUpdater {
         return foundNextTokenId;
     }
 
-    private void change(int tokenId, long entityId, boolean add) {
+    private void change(int tokenId, long entityId, boolean add, List<Change> changes) {
         long idRange = idLayout.rangeOf(entityId);
         if (tokenId != key.tokenId || idRange != key.idRange || addition != add) {
-            flushPendingRange();
+            flushPendingRange(changes);
 
             // Set key to current and reset value
             key.tokenId = tokenId;
@@ -245,13 +272,14 @@ class TokenIndexUpdater implements IndexUpdater {
         value.set(offset);
     }
 
-    private void flushPendingRange() {
+    private void flushPendingRange(List<Change> changes) {
         if (value.bits != 0) {
             // There are changes in the current range, flush them
-            if (addition) {
-                writer.merge(key, value, ADD_MERGER);
+            if (parallel) {
+                changes.add(new Change(
+                        new TokenScanKey(key.tokenId, key.idRange), new TokenScanValue(value.bits), addition));
             } else {
-                writer.mergeIfExists(key, value, REMOVE_MERGER);
+                writeChange(key, value, addition);
             }
             value.clear();
         }
@@ -264,7 +292,7 @@ class TokenIndexUpdater implements IndexUpdater {
     @Override
     public void close() {
         try {
-            flushPendingChanges();
+            flushPendingChanges(lastVersion);
         } finally {
             closed = true;
             IOUtils.closeAllUnchecked(writer);
@@ -275,5 +303,12 @@ class TokenIndexUpdater implements IndexUpdater {
         if (closed) {
             throw new IllegalStateException("Updater has been closed");
         }
+    }
+
+    record Change(TokenScanKey key, TokenScanValue value, boolean addition) {}
+
+    @FunctionalInterface
+    interface TokenWriterFactory {
+        Writer<TokenScanKey, TokenScanValue> create(CursorContext cursorContext) throws IOException;
     }
 }

@@ -26,7 +26,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Predicate;
-import java.util.function.Supplier;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.function.ThrowingFunction;
 import org.neo4j.graphdb.Resource;
@@ -35,6 +34,8 @@ import org.neo4j.graphdb.TransientTransactionFailureException;
 import org.neo4j.internal.kernel.api.exceptions.ProcedureException;
 import org.neo4j.internal.kernel.api.procs.Neo4jTypes;
 import org.neo4j.internal.kernel.api.procs.QualifiedName;
+import org.neo4j.internal.kernel.api.security.AbstractSecurityLog;
+import org.neo4j.internal.kernel.api.security.CommunitySecurityLog;
 import org.neo4j.kernel.api.procedure.CallableProcedure;
 import org.neo4j.kernel.api.procedure.CallableUserAggregationFunction;
 import org.neo4j.kernel.api.procedure.CallableUserFunction;
@@ -45,7 +46,6 @@ import org.neo4j.kernel.impl.coreapi.InternalTransaction;
 import org.neo4j.kernel.lifecycle.LifecycleAdapter;
 import org.neo4j.logging.InternalLog;
 import org.neo4j.logging.NullLog;
-import org.neo4j.procedure.builtin.SpecialBuiltInProcedures;
 import org.neo4j.string.Globbing;
 import org.neo4j.util.VisibleForTesting;
 
@@ -60,9 +60,9 @@ public class GlobalProceduresRegistry extends LifecycleAdapter implements Global
     private final ComponentRegistry safeComponents = new ComponentRegistry(); // Synchronized by updater
     private final ComponentRegistry allComponents = new ComponentRegistry(); // Synchronized by updater
     private final ProcedureCompiler compiler;
-    private final Supplier<List<CallableProcedure>> builtin;
     private final Path proceduresDirectory;
     private final RegistrationUpdater updater = new RegistrationUpdater();
+    private final AbstractSecurityLog securityLog;
 
     private final ProcedureJarLoader loader;
     private final Predicate<String> isReservedNamespace;
@@ -73,15 +73,11 @@ public class GlobalProceduresRegistry extends LifecycleAdapter implements Global
 
     @VisibleForTesting
     public GlobalProceduresRegistry() {
-        this(SpecialBuiltInProcedures.from("N/A", "N/A"), null, NullLog.getInstance(), ProcedureConfig.DEFAULT);
+        this(null, NullLog.getInstance(), CommunitySecurityLog.NULL_LOG, ProcedureConfig.DEFAULT);
     }
 
     public GlobalProceduresRegistry(
-            Supplier<List<CallableProcedure>> builtin,
-            Path proceduresDirectory,
-            InternalLog log,
-            ProcedureConfig config) {
-        this.builtin = builtin;
+            Path proceduresDirectory, InternalLog log, AbstractSecurityLog securityLog, ProcedureConfig config) {
         this.proceduresDirectory = proceduresDirectory;
         this.typeCheckers = new Cypher5TypeCheckers();
         this.compiler = new ProcedureCompiler(typeCheckers, safeComponents, allComponents, log, config);
@@ -89,10 +85,11 @@ public class GlobalProceduresRegistry extends LifecycleAdapter implements Global
         // We must not allow external sources to register procedures in the reserved namespaces.
         // Thus, we restrict the allowed namespaces when loading from disk. The built-in procedure
         // classes will be able to register in any namespace with the unrestricted compiler.
-        var restrictedCompiler = compiler.withAdditionalProcedureRestrictions(
-                NamingRestrictions.rejectReservedNamespace(config.reservedProcedureNamespaces()));
-        this.loader = new ProcedureJarLoader(restrictedCompiler, log, config.procedureReloadEnabled());
-        this.isReservedNamespace = Globbing.compose(config.reservedProcedureNamespaces(), List.of());
+        var restrictedCompiler = compiler.withRestrictionsForUsers();
+        this.loader =
+                new ProcedureJarLoader(restrictedCompiler, log, config.procedureReloadEnabled(), config.preload());
+        this.isReservedNamespace = Globbing.compose(NamingRestrictions.reservedProcedureNamespaces, List.of());
+        this.securityLog = securityLog;
     }
 
     /**
@@ -102,7 +99,7 @@ public class GlobalProceduresRegistry extends LifecycleAdapter implements Global
     @Override
     public void register(CallableProcedure proc) throws ProcedureException {
         try (var ignored = updater.acquire()) {
-            registry.register(proc);
+            registry.register(proc, securityLog);
         }
     }
 
@@ -113,18 +110,18 @@ public class GlobalProceduresRegistry extends LifecycleAdapter implements Global
     @Override
     public void register(CallableUserFunction function) throws ProcedureException {
         try (var ignored = updater.acquire()) {
-            registry.register(function);
+            registry.register(function, securityLog);
         }
     }
 
     /**
-     * Register a new function.
-     * @param function the function.
+     * Register a new aggregation function.
+     * @param function the aggregation function.
      */
     @Override
     public void register(CallableUserAggregationFunction function) throws ProcedureException {
         try (var ignored = updater.acquire()) {
-            registry.register(function);
+            registry.register(function, securityLog);
         }
     }
 
@@ -136,7 +133,7 @@ public class GlobalProceduresRegistry extends LifecycleAdapter implements Global
     public void registerProcedure(Class<?> proc) throws ProcedureException {
         try (var ignored = updater.acquire()) {
             for (var procedure : compiler.compileProcedure(proc, true)) {
-                registry.register(procedure);
+                registry.register(procedure, securityLog);
             }
         }
     }
@@ -149,7 +146,7 @@ public class GlobalProceduresRegistry extends LifecycleAdapter implements Global
     public void registerFunction(Class<?> func) throws ProcedureException {
         try (var ignored = updater.acquire()) {
             for (var function : compiler.compileFunction(func, false)) {
-                registry.register(function);
+                registry.register(function, securityLog);
             }
         }
     }
@@ -162,7 +159,7 @@ public class GlobalProceduresRegistry extends LifecycleAdapter implements Global
     public void registerAggregationFunction(Class<?> func) throws ProcedureException {
         try (var ignored = updater.acquire()) {
             for (var aggregation : compiler.compileAggregationFunction(func)) {
-                registry.register(aggregation);
+                registry.register(aggregation, securityLog);
             }
         }
     }
@@ -206,9 +203,6 @@ public class GlobalProceduresRegistry extends LifecycleAdapter implements Global
     public void start() throws Exception {
         try (var ignored = updater.acquire()) {
             unguardedLoadFromDisk(registry, (name) -> true);
-            for (var procedure : builtin.get()) {
-                registry.register(procedure);
-            }
         }
     }
 
@@ -238,13 +232,13 @@ public class GlobalProceduresRegistry extends LifecycleAdapter implements Global
         ProcedureJarLoader.Callables callables =
                 loader.loadProceduresFromDir(proceduresDirectory, shouldLoadNamespaces);
         for (var procedure : callables.procedures()) {
-            registry.register(procedure);
+            registry.register(procedure, false, securityLog);
         }
         for (var function : callables.functions()) {
-            registry.register(function);
+            registry.register(function, securityLog);
         }
         for (var aggregation : callables.aggregationFunctions()) {
-            registry.register(aggregation);
+            registry.register(aggregation, securityLog);
         }
 
         return new LoadInformation(
@@ -289,7 +283,7 @@ public class GlobalProceduresRegistry extends LifecycleAdapter implements Global
          */
         @Override
         public void register(CallableProcedure proc) throws ProcedureException {
-            registry.register(proc);
+            registry.register(proc, securityLog);
         }
 
         /**
@@ -298,16 +292,16 @@ public class GlobalProceduresRegistry extends LifecycleAdapter implements Global
          */
         @Override
         public void register(CallableUserFunction function) throws ProcedureException {
-            registry.register(function);
+            registry.register(function, securityLog);
         }
 
         /**
-         * Register a new function.
-         * @param function the function.
+         * Register a new aggregation function.
+         * @param function the aggregation function.
          */
         @Override
         public void register(CallableUserAggregationFunction function) throws ProcedureException {
-            registry.register(function);
+            registry.register(function, securityLog);
         }
 
         /**
@@ -317,7 +311,7 @@ public class GlobalProceduresRegistry extends LifecycleAdapter implements Global
         @Override
         public void registerProcedure(Class<?> proc) throws ProcedureException {
             for (var procedure : compiler.compileProcedure(proc, true)) {
-                registry.register(procedure);
+                registry.register(procedure, securityLog);
             }
         }
 
@@ -328,7 +322,7 @@ public class GlobalProceduresRegistry extends LifecycleAdapter implements Global
         @Override
         public void registerFunction(Class<?> func) throws ProcedureException {
             for (var function : compiler.compileFunction(func, false)) {
-                registry.register(function);
+                registry.register(function, securityLog);
             }
         }
 
@@ -339,7 +333,7 @@ public class GlobalProceduresRegistry extends LifecycleAdapter implements Global
         @Override
         public void registerAggregationFunction(Class<?> func) throws ProcedureException {
             for (var aggregation : compiler.compileAggregationFunction(func)) {
-                registry.register(aggregation);
+                registry.register(aggregation, securityLog);
             }
         }
 

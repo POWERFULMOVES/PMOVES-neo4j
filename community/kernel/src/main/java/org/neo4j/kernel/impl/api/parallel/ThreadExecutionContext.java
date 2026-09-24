@@ -27,6 +27,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Supplier;
 import org.neo4j.collection.Dependencies;
+import org.neo4j.configuration.Config;
 import org.neo4j.internal.kernel.api.EntityLocks;
 import org.neo4j.internal.kernel.api.IndexMonitor;
 import org.neo4j.internal.kernel.api.Locks;
@@ -39,6 +40,7 @@ import org.neo4j.internal.kernel.api.security.SecurityAuthorizationHandler;
 import org.neo4j.internal.kernel.api.security.SecurityContext;
 import org.neo4j.internal.schema.SchemaState;
 import org.neo4j.io.pagecache.context.CursorContext;
+import org.neo4j.kernel.KernelVersionProvider;
 import org.neo4j.kernel.api.AccessModeProvider;
 import org.neo4j.kernel.api.ExecutionContext;
 import org.neo4j.kernel.api.KernelTransaction;
@@ -47,25 +49,24 @@ import org.neo4j.kernel.api.txstate.TransactionState;
 import org.neo4j.kernel.api.txstate.TxStateHolder;
 import org.neo4j.kernel.impl.api.ClockContext;
 import org.neo4j.kernel.impl.api.CloseableResourceManager;
+import org.neo4j.kernel.impl.api.KernelTransactionResourceFactory;
 import org.neo4j.kernel.impl.api.OverridableSecurityContext;
 import org.neo4j.kernel.impl.api.index.IndexingService;
 import org.neo4j.kernel.impl.api.index.stats.IndexStatisticsStore;
 import org.neo4j.kernel.impl.locking.LockManager.Client;
 import org.neo4j.kernel.impl.newapi.DefaultPooledCursors;
 import org.neo4j.kernel.impl.newapi.KernelProcedures;
-import org.neo4j.kernel.impl.newapi.KernelProcedures.ForThreadExecutionContextScope;
 import org.neo4j.kernel.impl.newapi.KernelRead;
-import org.neo4j.kernel.impl.newapi.KernelSchemaRead;
 import org.neo4j.lock.LockTracer;
+import org.neo4j.logging.LogProvider;
 import org.neo4j.memory.MemoryTracker;
-import org.neo4j.storageengine.api.StorageLocks;
+import org.neo4j.storageengine.api.StorageEngine;
 import org.neo4j.storageengine.api.StorageReader;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.values.ElementIdMapper;
 
 public class ThreadExecutionContext implements ExecutionContext, AutoCloseable {
-
-    public static final TxStateHolder THREAD_EXECUTION_STATE_HOLDER = new TxStateHolder() {
+    private static final TxStateHolder THREAD_EXECUTION_STATE_HOLDER = new TxStateHolder() {
         @Override
         public TransactionState txState() {
             throw new UnsupportedOperationException(
@@ -93,20 +94,18 @@ public class ThreadExecutionContext implements ExecutionContext, AutoCloseable {
     private final ElementIdMapper elementIdMapper;
     private final List<AutoCloseable> otherResources;
     private final ExecutionContextProcedureKernelTransaction ktx;
-    private final Supplier<ClockContext> clockContextSupplier;
     private final QueryContext queryContext;
     private final EntityLocks entityLocks;
     private final SchemaRead schemaRead;
     private final AccessModeProvider accessModeProvider;
 
     public ThreadExecutionContext(
-            DefaultPooledCursors cursors,
+            StorageEngine storageEngine,
             CursorContext context,
             OverridableSecurityContext overridableSecurityContext,
             ExecutionContextCursorTracer cursorTracer,
             CursorContext ktxContext,
             TokenRead tokenRead,
-            StoreCursors storageCursors,
             IndexMonitor monitor,
             MemoryTracker contextTracker,
             SecurityAuthorizationHandler securityAuthorizationHandler,
@@ -115,31 +114,36 @@ public class ThreadExecutionContext implements ExecutionContext, AutoCloseable {
             IndexingService indexingService,
             IndexStatisticsStore indexStatisticsStore,
             Dependencies databaseDependencies,
-            StorageLocks storageLocks,
             Client lockClient,
             LockTracer lockTracer,
             ElementIdMapper elementIdMapper,
             KernelTransaction ktx,
+            KernelVersionProvider kernelVersionProvider,
             Supplier<ClockContext> clockContextSupplier,
             List<AutoCloseable> otherResources,
             ProcedureView procedureView,
-            boolean multiVersioned) {
-        this.cursors = cursors;
+            boolean multiVersioned,
+            LogProvider logProvider,
+            KernelTransactionResourceFactory resourceFactory,
+            Config config) {
         this.context = context;
         this.overridableSecurityContext = overridableSecurityContext;
         this.cursorTracer = cursorTracer;
         this.ktxContext = ktxContext;
         this.tokenRead = tokenRead;
-        this.storageCursors = storageCursors;
+        this.storageCursors = storageEngine.createStorageCursors(context);
         this.contextTracker = contextTracker;
         this.securityAuthorizationHandler = securityAuthorizationHandler;
         this.otherResources = otherResources;
         this.elementIdMapper = elementIdMapper;
         this.ktx = new ExecutionContextProcedureKernelTransaction(ktx, this);
-        this.clockContextSupplier = clockContextSupplier;
-        this.queryContext = new ThreadExecutionQueryContext(this::dataRead, cursors, context, contextTracker, monitor);
-        this.entityLocks = new EntityLocks(storageLocks, singleton(lockTracer), lockClient, this.ktx);
-        this.procedures = new ForThreadExecutionContextScope(
+        this.cursors = resourceFactory.createCursors(
+                storageReader, storageCursors, config, storageEngine.indexingBehaviour(), multiVersioned, true);
+        this.queryContext = new ThreadExecutionQueryContext(
+                this::dataRead, cursors, kernelVersionProvider, context, contextTracker, monitor);
+        this.entityLocks = new EntityLocks(
+                storageEngine.createStorageLocks(lockClient), singleton(lockTracer), lockClient, this.ktx);
+        this.procedures = resourceFactory.createProcedures(
                 this,
                 databaseDependencies,
                 overridableSecurityContext,
@@ -149,7 +153,7 @@ public class ThreadExecutionContext implements ExecutionContext, AutoCloseable {
                 procedureView);
         this.accessModeProvider =
                 () -> overridableSecurityContext.currentSecurityContext().mode();
-        this.schemaRead = new KernelSchemaRead(
+        this.schemaRead = resourceFactory.createSchemaRead(
                 schemaState,
                 indexStatisticsStore,
                 storageReader,
@@ -157,8 +161,9 @@ public class ThreadExecutionContext implements ExecutionContext, AutoCloseable {
                 this.ktx,
                 indexingService,
                 this.ktx,
-                accessModeProvider);
-        this.kernelRead = new KernelRead(
+                accessModeProvider,
+                true);
+        this.kernelRead = resourceFactory.createKernelRead(
                 storageReader,
                 this.tokenRead(),
                 cursors,
@@ -172,15 +177,8 @@ public class ThreadExecutionContext implements ExecutionContext, AutoCloseable {
                 multiVersioned,
                 this.ktx,
                 accessModeProvider,
-                true);
-    }
-
-    public Supplier<ClockContext> clockContextSupplier() {
-        return clockContextSupplier;
-    }
-
-    public OverridableSecurityContext overridableSecurityContext() {
-        return overridableSecurityContext;
+                true,
+                logProvider);
     }
 
     @Override

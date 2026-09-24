@@ -25,8 +25,8 @@ import static org.neo4j.kernel.impl.store.NoStoreHeader.NO_STORE_HEADER;
 import static org.neo4j.kernel.impl.store.record.RecordLoad.NORMAL;
 
 import java.util.Collection;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.api.RepeatedTest;
+import org.junit.jupiter.params.ParameterizedClass;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.neo4j.internal.recordstorage.LogCommandSerializationV5_0Test;
 import org.neo4j.io.pagecache.PageCursor;
@@ -37,16 +37,23 @@ import org.neo4j.kernel.impl.store.record.RelationshipRecord;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
-@ExtendWith(RandomExtension.class)
+@ParameterizedClass
+@MethodSource("formats")
+@RandomSupportExtension
 class RelationshipRecordFormatTest {
     @Inject
     private RandomSupport random;
 
-    @ParameterizedTest
-    @MethodSource("formats")
-    void shouldWriteAndReadRandomRecordAndGetAnEqualRecordBack(RecordFormats formats) throws Exception {
+    private final RecordFormats formats;
+
+    public RelationshipRecordFormatTest(RecordFormats formats) {
+        this.formats = formats;
+    }
+
+    @RepeatedTest(100)
+    void shouldWriteAndReadRandomRecordAndGetAnEqualRecordBack() throws Exception {
         // GIVEN
         RecordFormat<RelationshipRecord> format = formats.relationship();
         int recordSize = format.getRecordSize(NO_STORE_HEADER);

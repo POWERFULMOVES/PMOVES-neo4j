@@ -54,16 +54,29 @@ public class TrackingIndexReader implements ValueIndexReader {
     @Override
     public void query(
             IndexProgressor.EntityValueClient client,
-            QueryContext context,
+            QueryContext queryContext,
+            CursorContext cursorContext,
             IndexQueryConstraints constraints,
             PropertyIndexQuery... query)
             throws IndexNotApplicableKernelException {
-        delegate.query(client, context, constraints, query);
+        delegate.query(client, queryContext, cursorContext, constraints, query);
+    }
+
+    @Override
+    public void reportIndexQueried(QueryContext context, PropertyIndexQuery... queries) {
+        delegate.reportIndexQueried(context, queries);
+    }
+
+    @Override
+    public void validateQuery(IndexQueryConstraints constraints, PropertyIndexQuery... query)
+            throws IndexNotApplicableKernelException {
+        delegate.validateQuery(constraints, query);
     }
 
     @Override
     public PartitionedValueSeek valueSeek(
-            int desiredNumberOfPartitions, QueryContext context, PropertyIndexQuery... query) {
+            int desiredNumberOfPartitions, QueryContext context, PropertyIndexQuery... query)
+            throws IndexNotApplicableKernelException {
         return delegate.valueSeek(desiredNumberOfPartitions, context, query);
     }
 

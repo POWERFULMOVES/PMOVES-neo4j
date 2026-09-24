@@ -1,5 +1,6 @@
 #!/usr/bin/expect -f
 
+set extra_args {"--error-format" "legacy"}
 source "common.expect"
 
 # Start long running query
@@ -8,7 +9,7 @@ sendQuery "unwind range(0,90000) as x call apoc.util.sleep(1) return sum(x) as s
 
 # Cancel query
 expect "\n"
-sleep 1
+sleep 3
 send \x03
 expect "Stopping query..."
 expect {

@@ -24,7 +24,6 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.locks.LockSupport.getBlocker;
 import static java.util.concurrent.locks.LockSupport.parkNanos;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.neo4j.lock.LockType.EXCLUSIVE;
 import static org.neo4j.lock.LockType.SHARED;
 
@@ -52,9 +51,7 @@ class ReentrantLockServiceTest {
     @Timeout(60)
     void shouldBlockOnLockedLock() {
         // given
-        var executor = Executors.newSingleThreadExecutor();
-
-        try {
+        try (var executor = Executors.newSingleThreadExecutor()) {
             var threadHolder = new AtomicReference<Thread>();
             try (var lock = locks.acquireNodeLock(17, EXCLUSIVE)) {
                 executor.execute(() -> {
@@ -72,8 +69,6 @@ class ReentrantLockServiceTest {
                     parkNanos(MILLISECONDS.toNanos(10));
                 }
             }
-        } finally {
-            executor.shutdown();
         }
     }
 
@@ -83,7 +78,7 @@ class ReentrantLockServiceTest {
         locks.acquireNodeLock(42, EXCLUSIVE).release();
 
         // then
-        assertEquals(0, locks.lockCount());
+        assertThat(locks.lockCount()).isEqualTo(0);
     }
 
     @Test
@@ -100,7 +95,7 @@ class ReentrantLockServiceTest {
             // when
             try (Lock inner = second = locks.acquireNodeLock(666, EXCLUSIVE)) {
                 assertLock(lock, 666, 2, 0);
-                assertEquals(lock.toString(), inner.toString());
+                assertThat(inner).hasToString(lock.toString());
             }
 
             // then
@@ -151,6 +146,55 @@ class ReentrantLockServiceTest {
             }
         });
         race.goUnchecked();
+    }
+
+    @Test
+    void shouldWorkWithClientAbstraction() throws Exception {
+        // given
+        try (var t2 = new OtherThreadExecutor("T2");
+                var client1 = locks.newClient()) {
+            client1.acquireNodeLock(123, EXCLUSIVE);
+            var lockFuture = t2.executeDontWait(() -> {
+                try (var client2 = locks.newClient()) {
+                    client2.acquireNodeLock(123, EXCLUSIVE);
+                }
+                return null;
+            });
+            t2.waitUntilWaiting();
+            client1.close();
+            lockFuture.get();
+        }
+    }
+
+    @Test
+    void shouldWorkWithClientAbstractionAndCustomLocks() throws Exception {
+        // given
+        try (var t2 = new OtherThreadExecutor("T2");
+                var client1 = locks.newClient()) {
+            for (int i = 0; i < 10; i++) {
+                client1.acquireCustomLock(9, 10, SHARED);
+            }
+            var lockFuture = t2.executeDontWait(() -> {
+                try (var client2 = locks.newClient()) {
+                    client2.acquireCustomLock(9, 10, EXCLUSIVE);
+                }
+                return null;
+            });
+            t2.waitUntilWaiting();
+            client1.close();
+            lockFuture.get();
+        }
+    }
+
+    @Test
+    void shouldAllowHighAcquisitionCountForLockClients() {
+        // given
+        try (var client = locks.newClient()) {
+            // when/then (not throwing an error from ReentrantReadWriteLock)
+            for (int i = 0; i < 100_000; i++) {
+                client.acquireCustomLock(23, 45, SHARED);
+            }
+        }
     }
 
     private void assertLock(Lock lock, long id, int writeLockCount, int readLockCount) {

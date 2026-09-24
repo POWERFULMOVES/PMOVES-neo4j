@@ -18,6 +18,7 @@ package org.neo4j.cypher.internal.ast.factory.ddl.privilege
 
 import org.neo4j.cypher.internal.ast.ReadAdministrationCommand
 import org.neo4j.cypher.internal.ast.ShowAllPrivileges
+import org.neo4j.cypher.internal.ast.ShowAuthRulesPrivileges
 import org.neo4j.cypher.internal.ast.ShowPrivilegeCommands
 import org.neo4j.cypher.internal.ast.ShowPrivilegeScope
 import org.neo4j.cypher.internal.ast.ShowPrivileges
@@ -29,8 +30,9 @@ import org.neo4j.cypher.internal.ast.Statement
 import org.neo4j.cypher.internal.ast.Statements
 import org.neo4j.cypher.internal.ast.factory.ddl.AdministrationAndSchemaCommandParserTestBase
 import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
 import org.neo4j.cypher.internal.expressions.Expression
+import org.neo4j.cypher.internal.util.test_helpers.GqlExceptionMatchers.gqlStatus
+import org.neo4j.gqlstatus.GqlStatusInfoCodes
 
 class ShowPrivilegesAdministrationCommandParserTest extends AdministrationAndSchemaCommandParserTestBase {
 
@@ -41,7 +43,14 @@ class ShowPrivilegesAdministrationCommandParserTest extends AdministrationAndSch
   }
 
   test("use system show supported privileges") {
-    parsesTo[Statements](ShowSupportedPrivilegeCommand(None)(pos).withGraph(Some(use(List("system")))))
+    def expected(resolveStrictly: Boolean) = {
+      ShowSupportedPrivilegeCommand(None)(pos).withGraph(Some(use(List("system"), resolveStrictly)))
+    }
+
+    parsesIn[Statement] {
+      case Cypher5 => _.toAst(expected(resolveStrictly = false))
+      case _       => _.toAst(expected(resolveStrictly = true))
+    }
   }
 
   test("show supported privileges YIELD *") {
@@ -90,8 +99,15 @@ class ShowPrivilegesAdministrationCommandParserTest extends AdministrationAndSch
   }
 
   test("use system show privileges") {
-    parsesTo[Statements](ShowPrivileges(ShowAllPrivileges()(pos), None)(pos)
-      .withGraph(Some(use(List("system")))))
+    def expected(resolveStrictly: Boolean) = {
+      ShowPrivileges(ShowAllPrivileges()(pos), None)(pos)
+        .withGraph(Some(use(List("system"), resolveStrictly)))
+    }
+
+    parsesIn[Statement] {
+      case Cypher5 => _.toAst(expected(resolveStrictly = false))
+      case _       => _.toAst(expected(resolveStrictly = true))
+    }
   }
 
   test("SHOW ALL PRIVILEGES") {
@@ -182,6 +198,41 @@ class ShowPrivilegesAdministrationCommandParserTest extends AdministrationAndSch
     )(pos))
   }
 
+  // Show auth rule privileges
+
+  test("SHOW AUTH RULE rule PRIVILEGES") {
+    parsesIn[Statement] {
+      case Cypher5 => _.withSyntaxErrorContaining("Invalid input 'AUTH'")
+      case _       => _.toAst(ShowPrivileges(ShowAuthRulesPrivileges(List(literal("rule")))(pos), None)(pos))
+    }
+  }
+
+  test("SHOW AUTH RULES $rule PRIVILEGE") {
+    parsesIn[Statement] {
+      case Cypher5 => _.withSyntaxErrorContaining("Invalid input 'AUTH'")
+      case _       => _.toAst(ShowPrivileges(ShowAuthRulesPrivileges(List(stringParam("rule")))(pos), None)(pos))
+    }
+  }
+
+  test("SHOW AUTH RULES rule, $ruleParam, `2rule`, authRule PRIVILEGES") {
+    parsesIn[Statement] {
+      case Cypher5 => _.withSyntaxErrorContaining("Invalid input 'AUTH'")
+      case _ => _.toAst(ShowPrivileges(
+          ShowAuthRulesPrivileges(
+            List(literal("rule"), stringParam("ruleParam"), literal("2rule"), literal("authRule"))
+          )(pos),
+          None
+        )(pos))
+    }
+  }
+
+  test("SHOW AUTH RULE privilege PRIVILEGE") {
+    parsesIn[Statement] {
+      case Cypher5 => _.withSyntaxErrorContaining("Invalid input 'AUTH'")
+      case _       => _.toAst(ShowPrivileges(ShowAuthRulesPrivileges(List(literal("privilege")))(pos), None)(pos))
+    }
+  }
+
   // Show role privileges
 
   test("SHOW ROLE role PRIVILEGES") {
@@ -239,107 +290,269 @@ class ShowPrivilegesAdministrationCommandParserTest extends AdministrationAndSch
   // Show privileges as commands
 
   test("SHOW PRIVILEGES AS COMMAND") {
-    parsesTo[Statements](ShowPrivilegeCommands(ShowAllPrivileges()(pos), asRevoke = false, None)(pos))
+    parsesIn[Statement] {
+      case Cypher5 =>
+        _.toAst(ShowPrivilegeCommands(ShowAllPrivileges()(pos), asRevoke = false, None, fromCypher5 = true)(pos))
+      case _ =>
+        _.toAst(ShowPrivilegeCommands(ShowAllPrivileges()(pos), asRevoke = false, None, fromCypher5 = false)(pos))
+    }
   }
 
   test("SHOW PRIVILEGES AS COMMANDS") {
-    parsesTo[Statements](ShowPrivilegeCommands(ShowAllPrivileges()(pos), asRevoke = false, None)(pos))
+    parsesIn[Statement] {
+      case Cypher5 =>
+        _.toAst(ShowPrivilegeCommands(ShowAllPrivileges()(pos), asRevoke = false, None, fromCypher5 = true)(pos))
+      case _ =>
+        _.toAst(ShowPrivilegeCommands(ShowAllPrivileges()(pos), asRevoke = false, None, fromCypher5 = false)(pos))
+    }
   }
 
   test("SHOW PRIVILEGES AS REVOKE COMMAND") {
-    parsesTo[Statements](ShowPrivilegeCommands(ShowAllPrivileges()(pos), asRevoke = true, None)(pos))
+    parsesIn[Statement] {
+      case Cypher5 =>
+        _.toAst(ShowPrivilegeCommands(ShowAllPrivileges()(pos), asRevoke = true, None, fromCypher5 = true)(pos))
+      case _ =>
+        _.toAst(ShowPrivilegeCommands(ShowAllPrivileges()(pos), asRevoke = true, None, fromCypher5 = false)(pos))
+    }
   }
 
   test("SHOW PRIVILEGES AS REVOKE COMMANDS") {
-    parsesTo[Statements](ShowPrivilegeCommands(ShowAllPrivileges()(pos), asRevoke = true, None)(pos))
+    parsesIn[Statement] {
+      case Cypher5 =>
+        _.toAst(ShowPrivilegeCommands(ShowAllPrivileges()(pos), asRevoke = true, None, fromCypher5 = true)(pos))
+      case _ =>
+        _.toAst(ShowPrivilegeCommands(ShowAllPrivileges()(pos), asRevoke = true, None, fromCypher5 = false)(pos))
+    }
   }
 
   test("SHOW ALL PRIVILEGES AS COMMAND") {
-    parsesTo[Statements](ShowPrivilegeCommands(ShowAllPrivileges()(pos), asRevoke = false, None)(pos))
+    parsesIn[Statement] {
+      case Cypher5 =>
+        _.toAst(ShowPrivilegeCommands(ShowAllPrivileges()(pos), asRevoke = false, None, fromCypher5 = true)(pos))
+      case _ =>
+        _.toAst(ShowPrivilegeCommands(ShowAllPrivileges()(pos), asRevoke = false, None, fromCypher5 = false)(pos))
+    }
   }
 
   test("SHOW ALL PRIVILEGE AS COMMAND") {
-    parsesTo[Statements](ShowPrivilegeCommands(ShowAllPrivileges()(pos), asRevoke = false, None)(pos))
+    parsesIn[Statement] {
+      case Cypher5 =>
+        _.toAst(ShowPrivilegeCommands(ShowAllPrivileges()(pos), asRevoke = false, None, fromCypher5 = true)(pos))
+      case _ =>
+        _.toAst(ShowPrivilegeCommands(ShowAllPrivileges()(pos), asRevoke = false, None, fromCypher5 = false)(pos))
+    }
   }
 
   test("SHOW ALL PRIVILEGES AS REVOKE COMMANDS") {
-    parsesTo[Statements](ShowPrivilegeCommands(ShowAllPrivileges()(pos), asRevoke = true, None)(pos))
+    parsesIn[Statement] {
+      case Cypher5 =>
+        _.toAst(ShowPrivilegeCommands(ShowAllPrivileges()(pos), asRevoke = true, None, fromCypher5 = true)(pos))
+      case _ =>
+        _.toAst(ShowPrivilegeCommands(ShowAllPrivileges()(pos), asRevoke = true, None, fromCypher5 = false)(pos))
+    }
   }
 
   test("SHOW USER user PRIVILEGES AS COMMANDS") {
-    parsesTo[Statements](ShowPrivilegeCommands(
-      ShowUsersPrivileges(List(literalUser))(pos),
-      asRevoke = false,
-      None
-    )(pos))
+    parsesIn[Statement] {
+      case Cypher5 =>
+        _.toAst(ShowPrivilegeCommands(
+          ShowUsersPrivileges(List(literalUser))(pos),
+          asRevoke = false,
+          None,
+          fromCypher5 = true
+        )(pos))
+      case _ =>
+        _.toAst(ShowPrivilegeCommands(
+          ShowUsersPrivileges(List(literalUser))(pos),
+          asRevoke = false,
+          None,
+          fromCypher5 = false
+        )(pos))
+    }
   }
 
   test("SHOW USERS $user PRIVILEGES AS REVOKE COMMAND") {
-    parsesTo[Statements](ShowPrivilegeCommands(
-      ShowUsersPrivileges(List(paramUser))(pos),
-      asRevoke = true,
-      None
-    )(pos))
+    parsesIn[Statement] {
+      case Cypher5 =>
+        _.toAst(ShowPrivilegeCommands(
+          ShowUsersPrivileges(List(paramUser))(pos),
+          asRevoke = true,
+          None,
+          fromCypher5 = true
+        )(pos))
+      case _ =>
+        _.toAst(ShowPrivilegeCommands(
+          ShowUsersPrivileges(List(paramUser))(pos),
+          asRevoke = true,
+          None,
+          fromCypher5 = false
+        )(pos))
+    }
   }
 
   test("SHOW USER `us%er` PRIVILEGES AS COMMANDS") {
-    parsesTo[Statements](ShowPrivilegeCommands(
-      ShowUsersPrivileges(List(literal("us%er")))(pos),
-      asRevoke = false,
-      None
-    )(pos))
+    parsesIn[Statement] {
+      case Cypher5 =>
+        _.toAst(ShowPrivilegeCommands(
+          ShowUsersPrivileges(List(literal("us%er")))(pos),
+          asRevoke = false,
+          None,
+          fromCypher5 = true
+        )(pos))
+      case _ =>
+        _.toAst(ShowPrivilegeCommands(
+          ShowUsersPrivileges(List(literal("us%er")))(pos),
+          asRevoke = false,
+          None,
+          fromCypher5 = false
+        )(pos))
+    }
   }
 
   test("SHOW USER `us%er` PRIVILEGE AS COMMANDS") {
-    parsesTo[Statements](ShowPrivilegeCommands(
-      ShowUsersPrivileges(List(literal("us%er")))(pos),
-      asRevoke = false,
-      None
-    )(pos))
+    parsesIn[Statement] {
+      case Cypher5 =>
+        _.toAst(ShowPrivilegeCommands(
+          ShowUsersPrivileges(List(literal("us%er")))(pos),
+          asRevoke = false,
+          None,
+          fromCypher5 = true
+        )(pos))
+      case _ =>
+        _.toAst(ShowPrivilegeCommands(
+          ShowUsersPrivileges(List(literal("us%er")))(pos),
+          asRevoke = false,
+          None,
+          fromCypher5 = false
+        )(pos))
+    }
   }
 
   test("SHOW USER user, $user PRIVILEGES AS REVOKE COMMANDS") {
-    parsesTo[Statements](ShowPrivilegeCommands(
-      ShowUsersPrivileges(List(literalUser, paramUser))(pos),
-      asRevoke = true,
-      None
-    )(pos))
+    parsesIn[Statement] {
+      case Cypher5 =>
+        _.toAst(ShowPrivilegeCommands(
+          ShowUsersPrivileges(List(literalUser, paramUser))(pos),
+          asRevoke = true,
+          None,
+          fromCypher5 = true
+        )(pos))
+      case _ =>
+        _.toAst(ShowPrivilegeCommands(
+          ShowUsersPrivileges(List(literalUser, paramUser))(pos),
+          asRevoke = true,
+          None,
+          fromCypher5 = false
+        )(pos))
+    }
   }
 
   test("SHOW USER PRIVILEGES AS COMMAND") {
-    parsesTo[Statements](ShowPrivilegeCommands(ShowUserPrivileges(None)(pos), asRevoke = false, None)(pos))
+    parsesIn[Statement] {
+      case Cypher5 =>
+        _.toAst(ShowPrivilegeCommands(ShowUserPrivileges(None)(pos), asRevoke = false, None, fromCypher5 = true)(pos))
+      case _ =>
+        _.toAst(ShowPrivilegeCommands(ShowUserPrivileges(None)(pos), asRevoke = false, None, fromCypher5 = false)(pos))
+    }
   }
 
   test("SHOW USERS PRIVILEGES AS REVOKE COMMANDS") {
-    parsesTo[Statements](ShowPrivilegeCommands(ShowUserPrivileges(None)(pos), asRevoke = true, None)(pos))
+    parsesIn[Statement] {
+      case Cypher5 =>
+        _.toAst(ShowPrivilegeCommands(ShowUserPrivileges(None)(pos), asRevoke = true, None, fromCypher5 = true)(pos))
+      case _ =>
+        _.toAst(ShowPrivilegeCommands(ShowUserPrivileges(None)(pos), asRevoke = true, None, fromCypher5 = false)(pos))
+    }
   }
 
   test("SHOW USERS PRIVILEGE AS REVOKE COMMANDS") {
-    parsesTo[Statements](ShowPrivilegeCommands(ShowUserPrivileges(None)(pos), asRevoke = true, None)(pos))
+    parsesIn[Statement] {
+      case Cypher5 =>
+        _.toAst(ShowPrivilegeCommands(ShowUserPrivileges(None)(pos), asRevoke = true, None, fromCypher5 = true)(pos))
+      case _ =>
+        _.toAst(ShowPrivilegeCommands(ShowUserPrivileges(None)(pos), asRevoke = true, None, fromCypher5 = false)(pos))
+    }
   }
 
   test("SHOW ROLE role PRIVILEGES AS COMMANDS") {
-    parsesTo[Statements](ShowPrivilegeCommands(
-      ShowRolesPrivileges(List(literalRole))(pos),
-      asRevoke = false,
-      None
-    )(pos))
+    parsesIn[Statement] {
+      case Cypher5 =>
+        _.toAst(ShowPrivilegeCommands(
+          ShowRolesPrivileges(List(literalRole))(pos),
+          asRevoke = false,
+          None,
+          fromCypher5 = true
+        )(pos))
+      case _ =>
+        _.toAst(ShowPrivilegeCommands(
+          ShowRolesPrivileges(List(literalRole))(pos),
+          asRevoke = false,
+          None,
+          fromCypher5 = false
+        )(pos))
+    }
   }
 
   test("SHOW ROLE role PRIVILEGE AS COMMANDS") {
-    parsesTo[Statements](ShowPrivilegeCommands(
-      ShowRolesPrivileges(List(literalRole))(pos),
-      asRevoke = false,
-      None
-    )(pos))
+    parsesIn[Statement] {
+      case Cypher5 =>
+        _.toAst(ShowPrivilegeCommands(
+          ShowRolesPrivileges(List(literalRole))(pos),
+          asRevoke = false,
+          None,
+          fromCypher5 = true
+        )(pos))
+      case _ =>
+        _.toAst(ShowPrivilegeCommands(
+          ShowRolesPrivileges(List(literalRole))(pos),
+          asRevoke = false,
+          None,
+          fromCypher5 = false
+        )(pos))
+    }
   }
 
   test("SHOW ROLE $role PRIVILEGES AS REVOKE COMMAND") {
-    parsesTo[Statements](ShowPrivilegeCommands(
-      ShowRolesPrivileges(List(paramRole))(pos),
-      asRevoke = true,
-      None
-    )(pos))
+    parsesIn[Statement] {
+      case Cypher5 =>
+        _.toAst(ShowPrivilegeCommands(
+          ShowRolesPrivileges(List(paramRole))(pos),
+          asRevoke = true,
+          None,
+          fromCypher5 = true
+        )(pos))
+      case _ =>
+        _.toAst(ShowPrivilegeCommands(
+          ShowRolesPrivileges(List(paramRole))(pos),
+          asRevoke = true,
+          None,
+          fromCypher5 = false
+        )(pos))
+    }
+  }
+
+  test("SHOW AUTH RULE rule PRIVILEGE AS COMMANDS") {
+    parsesIn[Statement] {
+      case Cypher5 => _.withSyntaxErrorContaining("Invalid input 'AUTH'")
+      case _ => _.toAst(ShowPrivilegeCommands(
+          ShowAuthRulesPrivileges(List(literal("rule")))(pos),
+          asRevoke = false,
+          None,
+          fromCypher5 = false
+        )(pos))
+    }
+  }
+
+  test("SHOW AUTH RULES $rule, `rule` PRIVILEGES AS REVOKE COMMAND") {
+    parsesIn[Statement] {
+      case Cypher5 => _.withSyntaxErrorContaining("Invalid input 'AUTH'")
+      case _ => _.toAst(ShowPrivilegeCommands(
+          ShowAuthRulesPrivileges(List(stringParam("rule"), literal("rule")))(pos),
+          asRevoke = true,
+          None,
+          fromCypher5 = false
+        )(pos))
+    }
   }
 
   // yield / skip / limit / order by / where
@@ -350,29 +563,40 @@ class ShowPrivilegesAdministrationCommandParserTest extends AdministrationAndSch
     ("", false)
   ).foreach { case (optionalAsRev: String, asRev) =>
     Seq(
-      ("", ShowAllPrivileges()(pos)),
-      ("ALL", ShowAllPrivileges()(pos)),
-      ("USER", ShowUserPrivileges(None)(pos)),
-      ("USER neo4j", ShowUsersPrivileges(List(literal("neo4j")))(pos)),
-      ("USERS neo4j, $user", ShowUsersPrivileges(List(literal("neo4j"), paramUser))(pos)),
-      ("ROLES $role", ShowRolesPrivileges(List(paramRole))(pos)),
-      ("ROLE $role, reader", ShowRolesPrivileges(List(paramRole, literal("reader")))(pos))
-    ).foreach { case (privType, privilege) =>
+      "PRIVILEGE",
+      "PRIVILEGES"
+    ).foreach { privilegeOrPrivileges =>
       Seq(
-        "PRIVILEGE",
-        "PRIVILEGES"
-      ).foreach { privilegeOrPrivileges =>
+        ("", ShowAllPrivileges()(pos)),
+        ("ALL", ShowAllPrivileges()(pos)),
+        ("USER", ShowUserPrivileges(None)(pos)),
+        ("USER neo4j", ShowUsersPrivileges(List(literal("neo4j")))(pos)),
+        ("USERS neo4j, $user", ShowUsersPrivileges(List(literal("neo4j"), paramUser))(pos)),
+        ("ROLES $role", ShowRolesPrivileges(List(paramRole))(pos)),
+        ("ROLE $role, reader", ShowRolesPrivileges(List(paramRole, literal("reader")))(pos))
+      ).foreach { case (privType, privilege) =>
         test(s"SHOW $privType $privilegeOrPrivileges$optionalAsRev WHERE access = 'GRANTED'") {
           if (optionalAsRev.isEmpty) {
             parsesTo[Statements](
               ShowPrivileges(privilege, Some(Right(where(equals(accessVar, grantedString)))))(pos)
             )
           } else {
-            parsesTo[Statements](ShowPrivilegeCommands(
-              privilege,
-              asRev,
-              Some(Right(where(equals(accessVar, grantedString))))
-            )(pos))
+            parsesIn[Statement] {
+              case Cypher5 =>
+                _.toAst(ShowPrivilegeCommands(
+                  privilege,
+                  asRev,
+                  Some(Right(where(equals(accessVar, grantedString)))),
+                  fromCypher5 = true
+                )(pos))
+              case _ =>
+                _.toAst(ShowPrivilegeCommands(
+                  privilege,
+                  asRev,
+                  Some(Right(where(equals(accessVar, grantedString)))),
+                  fromCypher5 = false
+                )(pos))
+            }
           }
         }
 
@@ -385,11 +609,22 @@ class ShowPrivilegesAdministrationCommandParserTest extends AdministrationAndSch
               Some(Right(where(and(accessPredicate, matchPredicate))))
             )(pos))
           } else {
-            parsesTo[Statements](ShowPrivilegeCommands(
-              privilege,
-              asRev,
-              Some(Right(where(and(accessPredicate, matchPredicate))))
-            )(pos))
+            parsesIn[Statement] {
+              case Cypher5 =>
+                _.toAst(ShowPrivilegeCommands(
+                  privilege,
+                  asRev,
+                  Some(Right(where(and(accessPredicate, matchPredicate)))),
+                  fromCypher5 = true
+                )(pos))
+              case _ =>
+                _.toAst(ShowPrivilegeCommands(
+                  privilege,
+                  asRev,
+                  Some(Right(where(and(accessPredicate, matchPredicate)))),
+                  fromCypher5 = false
+                )(pos))
+            }
           }
         }
 
@@ -399,7 +634,12 @@ class ShowPrivilegesAdministrationCommandParserTest extends AdministrationAndSch
           if (optionalAsRev.isEmpty) {
             parsesTo[Statements](ShowPrivileges(privilege, Some(Left((columns, None))))(pos))
           } else {
-            parsesTo[Statements](ShowPrivilegeCommands(privilege, asRev, Some(Left((columns, None))))(pos))
+            parsesIn[Statement] {
+              case Cypher5 =>
+                _.toAst(ShowPrivilegeCommands(privilege, asRev, Some(Left((columns, None))), fromCypher5 = true)(pos))
+              case _ =>
+                _.toAst(ShowPrivilegeCommands(privilege, asRev, Some(Left((columns, None))), fromCypher5 = false)(pos))
+            }
           }
         }
 
@@ -413,7 +653,12 @@ class ShowPrivilegesAdministrationCommandParserTest extends AdministrationAndSch
           if (optionalAsRev.isEmpty) {
             parsesTo[Statements](ShowPrivileges(privilege, Some(Left((columns, None))))(pos))
           } else {
-            parsesTo[Statements](ShowPrivilegeCommands(privilege, asRev, Some(Left((columns, None))))(pos))
+            parsesIn[Statement] {
+              case Cypher5 =>
+                _.toAst(ShowPrivilegeCommands(privilege, asRev, Some(Left((columns, None))), fromCypher5 = true)(pos))
+              case _ =>
+                _.toAst(ShowPrivilegeCommands(privilege, asRev, Some(Left((columns, None))), fromCypher5 = false)(pos))
+            }
           }
         }
 
@@ -432,7 +677,12 @@ class ShowPrivilegesAdministrationCommandParserTest extends AdministrationAndSch
           if (optionalAsRev.isEmpty) {
             parsesTo[Statements](ShowPrivileges(privilege, Some(Left((columns, None))))(pos))
           } else {
-            parsesTo[Statements](ShowPrivilegeCommands(privilege, asRev, Some(Left((columns, None))))(pos))
+            parsesIn[Statement] {
+              case Cypher5 =>
+                _.toAst(ShowPrivilegeCommands(privilege, asRev, Some(Left((columns, None))), fromCypher5 = true)(pos))
+              case _ =>
+                _.toAst(ShowPrivilegeCommands(privilege, asRev, Some(Left((columns, None))), fromCypher5 = false)(pos))
+            }
           }
         }
 
@@ -441,7 +691,12 @@ class ShowPrivilegesAdministrationCommandParserTest extends AdministrationAndSch
           if (optionalAsRev.isEmpty) {
             parsesTo[Statements](ShowPrivileges(privilege, Some(Left((columns, None))))(pos))
           } else {
-            parsesTo[Statements](ShowPrivilegeCommands(privilege, asRev, Some(Left((columns, None))))(pos))
+            parsesIn[Statement] {
+              case Cypher5 =>
+                _.toAst(ShowPrivilegeCommands(privilege, asRev, Some(Left((columns, None))), fromCypher5 = true)(pos))
+              case _ =>
+                _.toAst(ShowPrivilegeCommands(privilege, asRev, Some(Left((columns, None))), fromCypher5 = false)(pos))
+            }
           }
         }
 
@@ -457,9 +712,20 @@ class ShowPrivilegesAdministrationCommandParserTest extends AdministrationAndSch
           if (optionalAsRev.isEmpty) {
             parsesTo[Statements](ShowPrivileges(privilege, Some(Left((yieldColumns, Some(returns)))))(pos))
           } else {
-            parsesTo[Statements](
-              ShowPrivilegeCommands(privilege, asRev, Some(Left((yieldColumns, Some(returns)))))(pos)
-            )
+            parsesIn[Statement] {
+              case Cypher5 => _.toAst(ShowPrivilegeCommands(
+                  privilege,
+                  asRev,
+                  Some(Left((yieldColumns, Some(returns)))),
+                  fromCypher5 = true
+                )(pos))
+              case _ => _.toAst(ShowPrivilegeCommands(
+                  privilege,
+                  asRev,
+                  Some(Left((yieldColumns, Some(returns)))),
+                  fromCypher5 = false
+                )(pos))
+            }
           }
         }
 
@@ -473,11 +739,22 @@ class ShowPrivilegesAdministrationCommandParserTest extends AdministrationAndSch
               Some(Left((yieldClause(returnItemsPart, skip = Some(skip(1))), Some(returnClause(returnItemsPart)))))
             )(pos))
           } else {
-            parsesTo[Statements](ShowPrivilegeCommands(
-              privilege,
-              asRev,
-              Some(Left((yieldClause(returnItemsPart, skip = Some(skip(1))), Some(returnClause(returnItemsPart)))))
-            )(pos))
+            parsesIn[Statement] {
+              case Cypher5 =>
+                _.toAst(ShowPrivilegeCommands(
+                  privilege,
+                  asRev,
+                  Some(Left((yieldClause(returnItemsPart, skip = Some(skip(1))), Some(returnClause(returnItemsPart))))),
+                  fromCypher5 = true
+                )(pos))
+              case _ =>
+                _.toAst(ShowPrivilegeCommands(
+                  privilege,
+                  asRev,
+                  Some(Left((yieldClause(returnItemsPart, skip = Some(skip(1))), Some(returnClause(returnItemsPart))))),
+                  fromCypher5 = false
+                )(pos))
+            }
           }
         }
 
@@ -496,14 +773,28 @@ class ShowPrivilegesAdministrationCommandParserTest extends AdministrationAndSch
               )))
             )(pos))
           } else {
-            parsesTo[Statements](ShowPrivilegeCommands(
-              privilege,
-              asRev,
-              Some(Left((
-                yieldClause(returnItems(accessColumn, actionColumn), where = Some(whereClause)),
-                Some(returnClause(returnItems(actionColumn)))
-              )))
-            )(pos))
+            parsesIn[Statement] {
+              case Cypher5 =>
+                _.toAst(ShowPrivilegeCommands(
+                  privilege,
+                  asRev,
+                  Some(Left((
+                    yieldClause(returnItems(accessColumn, actionColumn), where = Some(whereClause)),
+                    Some(returnClause(returnItems(actionColumn)))
+                  ))),
+                  fromCypher5 = true
+                )(pos))
+              case _ =>
+                _.toAst(ShowPrivilegeCommands(
+                  privilege,
+                  asRev,
+                  Some(Left((
+                    yieldClause(returnItems(accessColumn, actionColumn), where = Some(whereClause)),
+                    Some(returnClause(returnItems(actionColumn)))
+                  ))),
+                  fromCypher5 = false
+                )(pos))
+            }
           }
         }
 
@@ -514,16 +805,28 @@ class ShowPrivilegesAdministrationCommandParserTest extends AdministrationAndSch
               Some(Left((yieldClause(returnAllItems), Some(returnClause(returnAllItems)))))
             )(pos))
           } else {
-            parsesTo[Statements](ShowPrivilegeCommands(
-              privilege,
-              asRev,
-              Some(Left((yieldClause(returnAllItems), Some(returnClause(returnAllItems)))))
-            )(pos))
+            parsesIn[Statement] {
+              case Cypher5 =>
+                _.toAst(ShowPrivilegeCommands(
+                  privilege,
+                  asRev,
+                  Some(Left((yieldClause(returnAllItems), Some(returnClause(returnAllItems))))),
+                  fromCypher5 = true
+                )(pos))
+              case _ =>
+                _.toAst(ShowPrivilegeCommands(
+                  privilege,
+                  asRev,
+                  Some(Left((yieldClause(returnAllItems), Some(returnClause(returnAllItems))))),
+                  fromCypher5 = false
+                )(pos))
+            }
           }
         }
 
         test(s"SHOW $privType $privilegeOrPrivileges$optionalAsRev YIELD `access`") {
-          def expected(accessIsEscaped: Boolean, optionalAsRevIsEmpty: Boolean): ReadAdministrationCommand =
+          def expected(fromCypher5: Boolean, optionalAsRevIsEmpty: Boolean): ReadAdministrationCommand = {
+            val accessIsEscaped = fromCypher5
             if (optionalAsRevIsEmpty) {
               ShowPrivileges(
                 privilege,
@@ -533,12 +836,142 @@ class ShowPrivilegesAdministrationCommandParserTest extends AdministrationAndSch
               ShowPrivilegeCommands(
                 privilege,
                 asRev,
-                Some(Left((yieldClause(returnItems(returnItem(varFor("access", accessIsEscaped), "`access`"))), None)))
+                Some(
+                  Left((yieldClause(returnItems(returnItem(varFor("access", accessIsEscaped), "`access`"))), None))
+                ),
+                fromCypher5
               )(pos)
             }
+          }
+
           parsesIn[Statement] {
-            case Cypher5 => _.toAst(expected(accessIsEscaped = true, optionalAsRev.isEmpty))
-            case _       => _.toAst(expected(accessIsEscaped = false, optionalAsRev.isEmpty))
+            case Cypher5 => _.toAst(expected(fromCypher5 = true, optionalAsRev.isEmpty))
+            case _       => _.toAst(expected(fromCypher5 = false, optionalAsRev.isEmpty))
+          }
+        }
+      }
+
+      // Disallowed in Cypher 5
+
+      Seq(
+        ("AUTH RULES rule", ShowAuthRulesPrivileges(List(literal("rule")))(pos)),
+        ("AUTH RULE $rule, authRule", ShowAuthRulesPrivileges(List(stringParam("rule"), literal("authRule")))(pos))
+      ).foreach { case (privType, privilege) =>
+        test(s"SHOW $privType $privilegeOrPrivileges$optionalAsRev WHERE access = 'GRANTED'") {
+          parsesIn[Statement] {
+            case Cypher5 => _.withSyntaxErrorContaining("Invalid input")
+            case _ =>
+              val expected = if (optionalAsRev.isEmpty) {
+                ShowPrivileges(privilege, Some(Right(where(equals(accessVar, grantedString)))))(pos)
+              } else {
+                ShowPrivilegeCommands(
+                  privilege,
+                  asRev,
+                  Some(Right(where(equals(accessVar, grantedString)))),
+                  fromCypher5 = false
+                )(pos)
+              }
+              _.toAst(expected)
+          }
+        }
+
+        test(s"SHOW $privType $privilegeOrPrivileges$optionalAsRev YIELD `access`") {
+          parsesIn[Statement] {
+            case Cypher5 => _.withSyntaxErrorContaining("Invalid input")
+            case _ =>
+              val columns = yieldClause(returnItems(returnItem(varFor(accessString), "`access`")))
+              val expected = if (optionalAsRev.isEmpty) {
+                ShowPrivileges(privilege, Some(Left((columns, None))))(pos)
+              } else {
+                ShowPrivilegeCommands(privilege, asRev, Some(Left((columns, None))), fromCypher5 = false)(pos)
+              }
+              _.toAst(expected)
+          }
+        }
+
+        test(s"SHOW $privType $privilegeOrPrivileges$optionalAsRev YIELD access ORDER BY access") {
+          parsesIn[Statement] {
+            case Cypher5 => _.withSyntaxErrorContaining("Invalid input")
+            case _ =>
+              val columns =
+                yieldClause(returnItems(variableReturnItem(accessString)), Some(orderBy(sortItem(accessVar))))
+              val expected = if (optionalAsRev.isEmpty) {
+                ShowPrivileges(privilege, Some(Left((columns, None))))(pos)
+              } else {
+                ShowPrivilegeCommands(privilege, asRev, Some(Left((columns, None))), fromCypher5 = false)(pos)
+              }
+              _.toAst(expected)
+          }
+        }
+
+        test(
+          s"SHOW $privType $privilegeOrPrivileges$optionalAsRev YIELD access ORDER BY access SKIP 1 LIMIT 10 WHERE access ='none'"
+        ) {
+          parsesIn[Statement] {
+            case Cypher5 => _.withSyntaxErrorContaining("Invalid input")
+            case _ =>
+              val columns = yieldClause(
+                returnItems(variableReturnItem(accessString)),
+                Some(orderBy(sortItem(accessVar))),
+                Some(skip(1)),
+                Some(limit(10)),
+                Some(where(equals(accessVar, noneString)))
+              )
+              val expected = if (optionalAsRev.isEmpty) {
+                ShowPrivileges(privilege, Some(Left((columns, None))))(pos)
+              } else {
+                ShowPrivilegeCommands(privilege, asRev, Some(Left((columns, None))), fromCypher5 = false)(pos)
+              }
+              _.toAst(expected)
+          }
+        }
+
+        test(
+          s"SHOW $privType $privilegeOrPrivileges$optionalAsRev YIELD access, action RETURN access, count(action) ORDER BY access"
+        ) {
+          parsesIn[Statement] {
+            case Cypher5 => _.withSyntaxErrorContaining("Invalid input")
+            case _ =>
+              val orderByClause = orderBy(sortItem(accessVar))
+              val accessColumn = variableReturnItem(accessString)
+              val actionColumn = variableReturnItem(actionString)
+              val countColumn = returnItem(count(varFor(actionString)), "count(action)")
+              val yieldColumns = yieldClause(returnItems(accessColumn, actionColumn))
+              val returns = returnClause(returnItems(accessColumn, countColumn), Some(orderByClause))
+              val expected = if (optionalAsRev.isEmpty) {
+                ShowPrivileges(privilege, Some(Left((yieldColumns, Some(returns)))))(pos)
+              } else {
+                ShowPrivilegeCommands(
+                  privilege,
+                  asRev,
+                  Some(Left((yieldColumns, Some(returns)))),
+                  fromCypher5 = false
+                )(pos)
+              }
+              _.toAst(expected)
+          }
+        }
+
+        test(
+          s"SHOW $privType $privilegeOrPrivileges$optionalAsRev YIELD * RETURN *"
+        ) {
+          parsesIn[Statement] {
+            case Cypher5 => _.withSyntaxErrorContaining("Invalid input")
+            case _ =>
+              val expected = if (optionalAsRev.isEmpty) {
+                ShowPrivileges(
+                  privilege,
+                  Some(Left((yieldClause(returnAllItems), Some(returnClause(returnAllItems)))))
+                )(pos)
+              } else {
+                ShowPrivilegeCommands(
+                  privilege,
+                  asRev,
+                  Some(Left((yieldClause(returnAllItems), Some(returnClause(returnAllItems))))),
+                  fromCypher5 = false
+                )(pos)
+              }
+              _.toAst(expected)
           }
         }
       }
@@ -558,105 +991,190 @@ class ShowPrivilegesAdministrationCommandParserTest extends AdministrationAndSch
       ShowRolesPrivileges(literalRoles)(pos)
     }
 
+    def authRulePrivilegeFunc(rules: List[String]): ShowPrivilegeScope = {
+      val literalRules: List[Expression] = rules.map(r => literal(r))
+      ShowAuthRulesPrivileges(literalRules)(pos)
+    }
+
     Seq(
-      ("USER", userPrivilegeFunc: privilegeFunc),
-      ("USERS", userPrivilegeFunc: privilegeFunc),
-      ("ROLE", rolePrivilegeFunc: privilegeFunc),
-      ("ROLES", rolePrivilegeFunc: privilegeFunc)
+      ("USER", userPrivilegeFunc: privilegeFunc, true),
+      ("USERS", userPrivilegeFunc: privilegeFunc, true),
+      ("ROLE", rolePrivilegeFunc: privilegeFunc, true),
+      ("ROLES", rolePrivilegeFunc: privilegeFunc, true),
+      ("AUTH RULE", authRulePrivilegeFunc: privilegeFunc, false),
+      ("AUTH RULES", authRulePrivilegeFunc: privilegeFunc, false)
     ).foreach {
-      case (privType: String, func: privilegeFunc) =>
+      case (privType: String, func: privilegeFunc, availableInCypher5: Boolean) =>
         test(s"SHOW $privType yield PRIVILEGES$optionalAsRev YIELD access RETURN *") {
           val accessColumn = returnItems(variableReturnItem(accessString))
           if (optionalAsRev.isEmpty) {
-            parsesTo[Statements](ShowPrivileges(
-              func(List("yield")),
-              Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems)))))
-            )(pos))
+            parsesIn[Statement] {
+              case Cypher5 if !availableInCypher5 => _.withSyntaxErrorContaining("Invalid input")
+              case _ => _.toAst(ShowPrivileges(
+                  func(List("yield")),
+                  Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems)))))
+                )(pos))
+            }
           } else {
-            parsesTo[Statements](ShowPrivilegeCommands(
-              func(List("yield")),
-              asRev,
-              Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems)))))
-            )(pos))
+            parsesIn[Statement] {
+              case Cypher5 if !availableInCypher5 => _.withSyntaxErrorContaining("Invalid input")
+              case Cypher5 => _.toAst(ShowPrivilegeCommands(
+                  func(List("yield")),
+                  asRev,
+                  Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems))))),
+                  fromCypher5 = true
+                )(pos))
+              case _ => _.toAst(ShowPrivilegeCommands(
+                  func(List("yield")),
+                  asRev,
+                  Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems))))),
+                  fromCypher5 = false
+                )(pos))
+            }
           }
         }
 
         test(s"SHOW $privType yield, where PRIVILEGES$optionalAsRev YIELD access RETURN *") {
           val accessColumn = returnItems(variableReturnItem(accessString))
           if (optionalAsRev.isEmpty) {
-            parsesTo[Statements](ShowPrivileges(
-              func(List("yield", "where")),
-              Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems)))))
-            )(pos))
+            parsesIn[Statement] {
+              case Cypher5 if !availableInCypher5 => _.withSyntaxErrorContaining("Invalid input")
+              case _ => _.toAst(ShowPrivileges(
+                  func(List("yield", "where")),
+                  Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems)))))
+                )(pos))
+            }
           } else {
-            parsesTo[Statements](ShowPrivilegeCommands(
-              func(List("yield", "where")),
-              asRev,
-              Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems)))))
-            )(pos))
+            parsesIn[Statement] {
+              case Cypher5 if !availableInCypher5 => _.withSyntaxErrorContaining("Invalid input")
+              case Cypher5 => _.toAst(ShowPrivilegeCommands(
+                  func(List("yield", "where")),
+                  asRev,
+                  Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems))))),
+                  fromCypher5 = true
+                )(pos))
+              case _ => _.toAst(ShowPrivilegeCommands(
+                  func(List("yield", "where")),
+                  asRev,
+                  Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems))))),
+                  fromCypher5 = false
+                )(pos))
+            }
           }
         }
 
         test(s"SHOW $privType where PRIVILEGE$optionalAsRev WHERE access = 'none'") {
           if (optionalAsRev.isEmpty) {
-            parsesTo[Statements](ShowPrivileges(
-              func(List("where")),
-              Some(Right(where(equals(accessVar, noneString))))
-            )(pos))
+            parsesIn[Statement] {
+              case Cypher5 if !availableInCypher5 => _.withSyntaxErrorContaining("Invalid input")
+              case _ => _.toAst(ShowPrivileges(
+                  func(List("where")),
+                  Some(Right(where(equals(accessVar, noneString))))
+                )(pos))
+            }
           } else {
-            parsesTo[Statements](ShowPrivilegeCommands(
-              func(List("where")),
-              asRev,
-              Some(Right(where(equals(accessVar, noneString))))
-            )(pos))
+            parsesIn[Statement] {
+              case Cypher5 if !availableInCypher5 => _.withSyntaxErrorContaining("Invalid input")
+              case Cypher5 => _.toAst(ShowPrivilegeCommands(
+                  func(List("where")),
+                  asRev,
+                  Some(Right(where(equals(accessVar, noneString)))),
+                  fromCypher5 = true
+                )(pos))
+              case _ => _.toAst(ShowPrivilegeCommands(
+                  func(List("where")),
+                  asRev,
+                  Some(Right(where(equals(accessVar, noneString)))),
+                  fromCypher5 = false
+                )(pos))
+            }
           }
         }
 
         test(s"SHOW $privType privilege PRIVILEGE$optionalAsRev YIELD access RETURN *") {
           val accessColumn = returnItems(variableReturnItem(accessString))
           if (optionalAsRev.isEmpty) {
-            parsesTo[Statements](ShowPrivileges(
-              func(List("privilege")),
-              Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems)))))
-            )(pos))
+            parsesIn[Statement] {
+              case Cypher5 if !availableInCypher5 => _.withSyntaxErrorContaining("Invalid input")
+              case _ => _.toAst(ShowPrivileges(
+                  func(List("privilege")),
+                  Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems)))))
+                )(pos))
+            }
           } else {
-            parsesTo[Statements](ShowPrivilegeCommands(
-              func(List("privilege")),
-              asRev,
-              Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems)))))
-            )(pos))
+            parsesIn[Statement] {
+              case Cypher5 if !availableInCypher5 => _.withSyntaxErrorContaining("Invalid input")
+              case Cypher5 => _.toAst(ShowPrivilegeCommands(
+                  func(List("privilege")),
+                  asRev,
+                  Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems))))),
+                  fromCypher5 = true
+                )(pos))
+              case _ => _.toAst(ShowPrivilegeCommands(
+                  func(List("privilege")),
+                  asRev,
+                  Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems))))),
+                  fromCypher5 = false
+                )(pos))
+            }
           }
         }
 
         test(s"SHOW $privType privileges PRIVILEGES$optionalAsRev YIELD access RETURN *") {
           val accessColumn = returnItems(variableReturnItem(accessString))
           if (optionalAsRev.isEmpty) {
-            parsesTo[Statements](ShowPrivileges(
-              func(List("privileges")),
-              Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems)))))
-            )(pos))
+            parsesIn[Statement] {
+              case Cypher5 if !availableInCypher5 => _.withSyntaxErrorContaining("Invalid input")
+              case _ => _.toAst(ShowPrivileges(
+                  func(List("privileges")),
+                  Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems)))))
+                )(pos))
+            }
           } else {
-            parsesTo[Statements](ShowPrivilegeCommands(
-              func(List("privileges")),
-              asRev,
-              Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems)))))
-            )(pos))
+            parsesIn[Statement] {
+              case Cypher5 if !availableInCypher5 => _.withSyntaxErrorContaining("Invalid input")
+              case Cypher5 => _.toAst(ShowPrivilegeCommands(
+                  func(List("privileges")),
+                  asRev,
+                  Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems))))),
+                  fromCypher5 = true
+                )(pos))
+              case _ => _.toAst(ShowPrivilegeCommands(
+                  func(List("privileges")),
+                  asRev,
+                  Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems))))),
+                  fromCypher5 = false
+                )(pos))
+            }
           }
         }
 
         test(s"SHOW $privType privilege, privileges PRIVILEGES$optionalAsRev YIELD access RETURN *") {
           val accessColumn = returnItems(variableReturnItem(accessString))
           if (optionalAsRev.isEmpty) {
-            parsesTo[Statements](ShowPrivileges(
-              func(List("privilege", "privileges")),
-              Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems)))))
-            )(pos))
+            parsesIn[Statement] {
+              case Cypher5 if !availableInCypher5 => _.withSyntaxErrorContaining("Invalid input")
+              case _ => _.toAst(ShowPrivileges(
+                  func(List("privilege", "privileges")),
+                  Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems)))))
+                )(pos))
+            }
           } else {
-            parsesTo[Statements](ShowPrivilegeCommands(
-              func(List("privilege", "privileges")),
-              asRev,
-              Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems)))))
-            )(pos))
+            parsesIn[Statement] {
+              case Cypher5 if !availableInCypher5 => _.withSyntaxErrorContaining("Invalid input")
+              case Cypher5 => _.toAst(ShowPrivilegeCommands(
+                  func(List("privilege", "privileges")),
+                  asRev,
+                  Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems))))),
+                  fromCypher5 = true
+                )(pos))
+              case _ => _.toAst(ShowPrivilegeCommands(
+                  func(List("privilege", "privileges")),
+                  asRev,
+                  Some(Left((yieldClause(accessColumn), Some(returnClause(returnAllItems))))),
+                  fromCypher5 = false
+                )(pos))
+            }
           }
         }
     }
@@ -665,66 +1183,14 @@ class ShowPrivilegesAdministrationCommandParserTest extends AdministrationAndSch
   // Fails to parse
 
   test("SHOW PRIVILAGES") {
-    val exceptionMessage =
-      s"""Invalid input 'PRIVILAGES': expected
-         |  "ALIAS"
-         |  "ALIASES"
-         |  "ALL"
-         |  "BTREE"
-         |  "BUILT"
-         |  "CONSTRAINT"
-         |  "CONSTRAINTS"
-         |  "CURRENT"
-         |  "DATABASE"
-         |  "DATABASES"
-         |  "DEFAULT"
-         |  "EXIST"
-         |  "EXISTENCE"
-         |  "EXISTS"
-         |  "FULLTEXT"
-         |  "FUNCTION"
-         |  "FUNCTIONS"
-         |  "HOME"
-         |  "INDEX"
-         |  "INDEXES"
-         |  "KEY"
-         |  "LOOKUP"
-         |  "NODE"
-         |  "POINT"
-         |  "POPULATED"
-         |  "PRIVILEGE"
-         |  "PRIVILEGES"
-         |  "PROCEDURE"
-         |  "PROCEDURES"
-         |  "PROPERTY"
-         |  "RANGE"
-         |  "REL"
-         |  "RELATIONSHIP"
-         |  "ROLE"
-         |  "ROLES"
-         |  "SERVER"
-         |  "SERVERS"
-         |  "SETTING"
-         |  "SETTINGS"
-         |  "SUPPORTED"
-         |  "TEXT"
-         |  "TRANSACTION"
-         |  "TRANSACTIONS"
-         |  "UNIQUE"
-         |  "UNIQUENESS"
-         |  "USER"
-         |  "USERS"
-         |  "VECTOR" (line 1, column 6 (offset: 5))""".stripMargin
-
     failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessage(exceptionMessage)
       case Cypher5 => _.withSyntaxError(
           """Invalid input 'PRIVILAGES': expected 'ALIAS', 'ALIASES', 'ALL', 'BTREE', 'CONSTRAINT', 'CONSTRAINTS', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', 'EXIST', 'EXISTENCE', 'EXISTS', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', 'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', 'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'CURRENT USER', 'USERS' or 'VECTOR' (line 1, column 6 (offset: 5))
             |"SHOW PRIVILAGES"
             |      ^""".stripMargin
         )
       case _ => _.withSyntaxError(
-          """Invalid input 'PRIVILAGES': expected 'ALIAS', 'ALIASES', 'ALL', 'CONSTRAINT', 'CONSTRAINTS', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', 'EXIST', 'EXISTENCE', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', 'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', 'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'CURRENT USER', 'USERS' or 'VECTOR' (line 1, column 6 (offset: 5))
+          """Invalid input 'PRIVILAGES': expected 'ALIAS', 'ALIASES', 'ALL', 'AUTH', 'CONSTRAINT', 'CONSTRAINTS', 'CURRENT', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', 'EXIST', 'EXISTENCE', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', 'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', 'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'USERS' or 'VECTOR' (line 1, column 6 (offset: 5))
             |"SHOW PRIVILAGES"
             |      ^""".stripMargin
         )
@@ -740,62 +1206,38 @@ class ShowPrivilegesAdministrationCommandParserTest extends AdministrationAndSch
   }
 
   test("SHOW ALL USER user PRIVILEGES") {
-    val exceptionMessage =
-      s"""Invalid input 'USER': expected
-         |  "CONSTRAINT"
-         |  "CONSTRAINTS"
-         |  "FUNCTION"
-         |  "FUNCTIONS"
-         |  "INDEX"
-         |  "INDEXES"
-         |  "PRIVILEGE"
-         |  "PRIVILEGES"
-         |  "ROLE"
-         |  "ROLES" (line 1, column 10 (offset: 9))""".stripMargin
-
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessage(exceptionMessage)
-      case _ => _.withSyntaxError(
-          """|Invalid input 'USER': expected 'CONSTRAINT', 'CONSTRAINTS', 'FUNCTION', 'FUNCTIONS', 'INDEX', 'INDEXES', 'PRIVILEGE', 'PRIVILEGES', 'ROLE' or 'ROLES' (line 1, column 10 (offset: 9))
-             |"SHOW ALL USER user PRIVILEGES"
-             |          ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """|Invalid input 'USER': expected 'CONSTRAINT', 'CONSTRAINTS', 'FUNCTION', 'FUNCTIONS', 'INDEX', 'INDEXES', 'PRIVILEGE', 'PRIVILEGES', 'ROLE' or 'ROLES' (line 1, column 10 (offset: 9))
+         |"SHOW ALL USER user PRIVILEGES"
+         |          ^""".stripMargin
+    )
   }
 
   test("SHOW USER us%er PRIVILEGES") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessage(
-          """Invalid input '%': expected ",", "PRIVILEGE" or "PRIVILEGES" (line 1, column 13 (offset: 12))"""
-        )
-      case _ => _.withSyntaxError(
-          """Invalid input '%': expected 'PRIVILEGE' or 'PRIVILEGES' (line 1, column 13 (offset: 12))
-            |"SHOW USER us%er PRIVILEGES"
-            |             ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '%': expected 'PRIVILEGE' or 'PRIVILEGES' (line 1, column 13 (offset: 12))
+        |"SHOW USER us%er PRIVILEGES"
+        |             ^""".stripMargin
+    )
   }
 
   test("SHOW ROLE PRIVILEGES") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessage(
-          """Invalid input '': expected ",", "PRIVILEGE" or "PRIVILEGES" (line 1, column 21 (offset: 20))"""
-        )
-      case _ => _.withSyntaxError(
-          """Invalid input '': expected 'PRIVILEGE' or 'PRIVILEGES' (line 1, column 21 (offset: 20))
-            |"SHOW ROLE PRIVILEGES"
-            |                     ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '': expected 'PRIVILEGE' or 'PRIVILEGES' (line 1, column 21 (offset: 20))
+        |"SHOW ROLE PRIVILEGES"
+        |                     ^""".stripMargin
+    )
   }
 
   test("SHOW ALL ROLE role PRIVILEGES") {
     failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessage(
-          s"""Invalid input 'role': expected "WHERE", "WITH", "YIELD" or <EOF> (line 1, column 15 (offset: 14))"""
+      case Cypher5 => _.withSyntaxError(
+          """Invalid input 'role': expected 'WHERE', 'WITH', 'YIELD' or <EOF> (line 1, column 15 (offset: 14))
+            |"SHOW ALL ROLE role PRIVILEGES"
+            |               ^""".stripMargin
         )
       case _ => _.withSyntaxError(
-          """Invalid input 'role': expected 'WHERE', 'WITH', 'YIELD' or <EOF> (line 1, column 15 (offset: 14))
+          """Invalid input 'role': expected 'AS', 'WHERE', 'WITH', 'YIELD' or <EOF> (line 1, column 15 (offset: 14))
             |"SHOW ALL ROLE role PRIVILEGES"
             |               ^""".stripMargin
         )
@@ -807,28 +1249,68 @@ class ShowPrivilegesAdministrationCommandParserTest extends AdministrationAndSch
   }
 
   test("SHOW USER user PRIVILEGES YIELD *, blah RETURN user") {
-    val exceptionMessage =
-      s"""Invalid input ',': expected
-         |  "LIMIT"
-         |  "OFFSET"
-         |  "ORDER"
-         |  "RETURN"
-         |  "SKIP"
-         |  "WHERE"
-         |  <EOF> (line 1, column 34 (offset: 33))""".stripMargin
-
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessage(exceptionMessage)
-      case _ => _.withSyntaxError(
-          """Invalid input ',': expected 'ORDER BY', 'LIMIT', 'OFFSET', 'RETURN', 'SKIP', 'WHERE' or <EOF> (line 1, column 34 (offset: 33))
-            |"SHOW USER user PRIVILEGES YIELD *, blah RETURN user"
-            |                                  ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input ',': expected 'ORDER BY', 'LIMIT', 'OFFSET', 'RETURN', 'SKIP', 'WHERE' or <EOF> (line 1, column 34 (offset: 33))
+        |"SHOW USER user PRIVILEGES YIELD *, blah RETURN user"
+        |                                  ^""".stripMargin
+    )
   }
 
   test("SHOW USER user PRIVILEGES YIELD # RETURN user") {
     failsParsing[Statements]
+  }
+
+  test("SHOW AUTH RULE PRIVILEGES") {
+    failsParsing[Statements].in {
+      case Cypher5 => _.withSyntaxErrorContaining("Invalid input 'AUTH'")
+      case _ => _.withSyntaxError(
+          """Invalid input '': expected 'PRIVILEGE' or 'PRIVILEGES' (line 1, column 26 (offset: 25))
+            |"SHOW AUTH RULE PRIVILEGES"
+            |                          ^""".stripMargin
+        ).withSyntaxErrorGqlStatus(
+          gqlStatus(
+            GqlStatusInfoCodes.STATUS_42I06,
+            "error: syntax error or access rule violation - invalid input. Invalid input '', expected: 'PRIVILEGE' or 'PRIVILEGES'."
+          )
+        )
+    }
+  }
+
+  test("SHOW AUTH name PRIVILEGES") {
+    failsParsing[Statements].in {
+      case Cypher5 => _.withSyntaxErrorContaining("Invalid input 'AUTH'")
+      case _ => _.withSyntaxError(
+          """Invalid input 'name': expected 'RULE' or 'RULES' (line 1, column 11 (offset: 10))
+            |"SHOW AUTH name PRIVILEGES"
+            |           ^""".stripMargin
+        ).withSyntaxErrorGqlStatus(
+          gqlStatus(
+            GqlStatusInfoCodes.STATUS_42I06,
+            "error: syntax error or access rule violation - invalid input. Invalid input 'name', expected: 'RULE' or 'RULES'."
+          )
+        )
+    }
+  }
+
+  test("SHOW RULE name PRIVILEGES") {
+    failsParsing[Statements].in {
+      case Cypher5 => _.withSyntaxErrorContaining("Invalid input 'RULE'")
+      case _ => _.withSyntaxError(
+          """Invalid input 'RULE': expected 'ALIAS', 'ALIASES', 'ALL', 'AUTH', 'CONSTRAINT', 'CONSTRAINTS', 'CURRENT', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', 'EXIST', 'EXISTENCE', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', 'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', 'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'USERS' or 'VECTOR' (line 1, column 6 (offset: 5))
+            |"SHOW RULE name PRIVILEGES"
+            |      ^""".stripMargin
+        ).withSyntaxErrorGqlStatus(
+          gqlStatus(
+            GqlStatusInfoCodes.STATUS_42I06,
+            "error: syntax error or access rule violation - invalid input. Invalid input 'RULE', expected: " +
+              "'ALIAS', 'ALIASES', 'ALL', 'AUTH', 'CONSTRAINT', 'CONSTRAINTS', 'CURRENT', 'DATABASE', 'DEFAULT DATABASE', " +
+              "'HOME DATABASE', 'DATABASES', 'EXIST', 'EXISTENCE', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', " +
+              "'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', " +
+              "'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', " +
+              "'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', 'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'USERS' or 'VECTOR'."
+          )
+        )
+    }
   }
 
   test("SHOW PRIVILEGES COMMANDS") {

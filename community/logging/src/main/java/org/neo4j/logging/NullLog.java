@@ -40,6 +40,21 @@ public final class NullLog implements InternalLog {
     }
 
     @Override
+    public boolean isWarnEnabled() {
+        return false;
+    }
+
+    @Override
+    public boolean isInfoEnabled() {
+        return false;
+    }
+
+    @Override
+    public boolean isErrorEnabled() {
+        return false;
+    }
+
+    @Override
     public void debug(String message) {}
 
     @Override
@@ -79,25 +94,13 @@ public final class NullLog implements InternalLog {
     public void debug(Neo4jLogMessage message) {}
 
     @Override
-    public void debug(Neo4jMessageSupplier supplier) {}
-
-    @Override
     public void info(Neo4jLogMessage message) {}
-
-    @Override
-    public void info(Neo4jMessageSupplier supplier) {}
 
     @Override
     public void warn(Neo4jLogMessage message) {}
 
     @Override
-    public void warn(Neo4jMessageSupplier supplier) {}
-
-    @Override
     public void error(Neo4jLogMessage message) {}
-
-    @Override
-    public void error(Neo4jMessageSupplier supplier) {}
 
     @Override
     public void error(Neo4jLogMessage message, Throwable throwable) {}

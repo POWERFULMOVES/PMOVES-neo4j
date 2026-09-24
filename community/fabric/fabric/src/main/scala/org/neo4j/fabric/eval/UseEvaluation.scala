@@ -30,6 +30,7 @@ import org.neo4j.cypher.internal.expressions.FunctionInvocation
 import org.neo4j.cypher.internal.frontend.phases.ResolvedFunctionInvocation
 import org.neo4j.cypher.internal.frontend.phases.ScopedProcedureSignatureResolver
 import org.neo4j.cypher.internal.runtime.CypherRow
+import org.neo4j.fabric.eval.Catalog.GraphWithNotification
 import org.neo4j.fabric.util.Errors
 import org.neo4j.fabric.util.Rewritten.RewritingOps
 import org.neo4j.kernel.database.DatabaseReference
@@ -66,12 +67,11 @@ object UseEvaluation {
       parameters: MapValue,
       context: java.util.Map[String, AnyValue],
       sessionDb: DatabaseReference
-    ): Catalog.Graph = Errors.errorContext(query, graphSelection) {
+    ): Catalog.GraphWithNotification = Errors.errorContext(query, graphSelection) {
 
       graphSelection.graphReference match {
         case ref: GraphDirectReference =>
-          catalog.resolveGraph(ref.catalogName)
-
+          GraphWithNotification(catalog.resolveGraph(ref.catalogName), None)
         case f: GraphFunctionReference =>
           val ctx = CypherRow(context.asScala)
           val argValues = f.functionInvocation.args
@@ -79,16 +79,21 @@ object UseEvaluation {
             .map(expr => evaluator.evaluate(expr, parameters, ctx))
           val functionName: List[String] =
             f.functionInvocation.functionName.namespace.parts :+ f.functionInvocation.functionName.name
-          catalog.resolveView(CatalogName(functionName), argValues, sessionDb: DatabaseReference)
+          catalog.resolveView(
+            CatalogName(functionName, f.resolveByDisplayName),
+            argValues,
+            sessionDb: DatabaseReference,
+            Some(f.resolveByDisplayName)
+          )
       }
     }
 
     private def resolveFunctions(expr: Expression): Expression = expr.rewritten.bottomUp {
       case f: FunctionInvocation if f.needsToBeResolved => {
-        val resolved = ResolvedFunctionInvocation(signatureResolver.functionSignature)(f).coerceArguments
+        val resolved = ResolvedFunctionInvocation.fromUnresolved(signatureResolver.functionSignature)(f).coerceArguments
 
         if (resolved.fcnSignature.isEmpty) {
-          Errors.openCypherFailure(Errors.openCypherSemantic(s"Unknown function '${resolved.qualifiedName}'", resolved))
+          Errors.unknownFunction(resolved.functionName.fullName, resolved.position)
         }
 
         return resolved
@@ -96,7 +101,7 @@ object UseEvaluation {
     }
 
     def resolveGraph(compositeName: NormalizedDatabaseName): Catalog.Graph =
-      catalog.resolveGraph(CatalogName(compositeName.name()))
+      catalog.resolveGraph(CatalogName(true, compositeName.name()))
 
     def isConstituentOrSelf(graph: Catalog.Graph, composite: Catalog.Graph): Boolean =
       (graph, composite) match {
@@ -111,15 +116,15 @@ object UseEvaluation {
       }
 
     def isSystem(graph: Catalog.Graph): Boolean =
-      qualifiedNameString(graph) == GraphDatabaseSettings.SYSTEM_DATABASE_NAME
+      simplifiedQualifiedNameString(graph) == GraphDatabaseSettings.SYSTEM_DATABASE_NAME
 
     def isDatabaseOrAliasInRoot(graph: Catalog.Graph): Boolean = graph match {
       case _: Catalog.Composite => false
       case alias: Catalog.Alias => alias.namespace.isEmpty
     }
 
-    def qualifiedNameString(graph: Catalog.Graph): String =
-      Catalog.catalogName(graph).qualifiedNameString
+    def simplifiedQualifiedNameString(graph: Catalog.Graph): String =
+      Catalog.catalogName(graph).simplifiedQualifiedNameString
   }
 
   def isStatic(graphSelection: GraphSelection): Boolean =

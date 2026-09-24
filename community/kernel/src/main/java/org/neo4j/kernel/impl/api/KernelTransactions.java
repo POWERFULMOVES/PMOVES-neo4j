@@ -19,9 +19,13 @@
  */
 package org.neo4j.kernel.impl.api;
 
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.stream.Collectors.toSet;
-import static org.neo4j.configuration.GraphDatabaseSettings.memory_transaction_database_max_size;
+import static org.neo4j.configuration.GraphDatabaseInternalSettings.shutdown_terminated_transaction_wait_timeout;
+import static org.neo4j.configuration.GraphDatabaseSettings.shutdown_transaction_end_timeout;
 import static org.neo4j.io.pagecache.PageCacheOpenOptions.MULTI_VERSIONED;
+import static org.neo4j.kernel.api.exceptions.Status.Transaction.LeaseExpired;
+import static org.neo4j.kernel.impl.api.LeaseService.NO_LEASE;
 import static org.neo4j.kernel.impl.api.transaction.serial.DatabaseSerialGuard.EMPTY_GUARD;
 
 import java.util.Set;
@@ -29,10 +33,13 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import org.neo4j.collection.Dependencies;
+import org.neo4j.collection.factory.CollectionsFactory;
+import org.neo4j.collection.factory.OnHeapCollectionsFactory;
 import org.neo4j.collection.pool.LinkedQueuePool;
 import org.neo4j.collection.pool.Pool;
 import org.neo4j.configuration.Config;
@@ -42,10 +49,8 @@ import org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker;
 import org.neo4j.dbms.identity.ServerIdentity;
 import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel;
 import org.neo4j.function.Factory;
-import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
-import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.graphdb.DatabaseShutdownException;
-import org.neo4j.graphdb.TransactionFailureException;
+import org.neo4j.graphdb.TransactionFailureHelper;
 import org.neo4j.internal.id.IdController;
 import org.neo4j.internal.kernel.api.connectioninfo.ClientConnectionInfo;
 import org.neo4j.internal.kernel.api.security.AbstractSecurityLog;
@@ -53,6 +58,7 @@ import org.neo4j.internal.kernel.api.security.DatabaseAccessMode;
 import org.neo4j.internal.kernel.api.security.LoginContext;
 import org.neo4j.internal.kernel.api.security.SecurityContext;
 import org.neo4j.internal.schema.SchemaState;
+import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.kernel.KernelVersionProvider;
 import org.neo4j.kernel.api.KernelTransaction;
@@ -62,6 +68,7 @@ import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.api.procedure.GlobalProcedures;
 import org.neo4j.kernel.api.procedure.ProcedureView;
 import org.neo4j.kernel.availability.AvailabilityGuard;
+import org.neo4j.kernel.database.DatabaseMonitors;
 import org.neo4j.kernel.database.DatabaseReferenceImpl;
 import org.neo4j.kernel.database.DatabaseReferenceRepository;
 import org.neo4j.kernel.database.DatabaseTracers;
@@ -73,6 +80,7 @@ import org.neo4j.kernel.impl.api.chunk.TransactionRollbackProcess;
 import org.neo4j.kernel.impl.api.index.IndexingService;
 import org.neo4j.kernel.impl.api.index.stats.IndexStatisticsStore;
 import org.neo4j.kernel.impl.api.state.ConstraintIndexCreator;
+import org.neo4j.kernel.impl.api.transaction.monitor.TransactionMonitoringRecord;
 import org.neo4j.kernel.impl.api.transaction.serial.DatabaseSerialGuard;
 import org.neo4j.kernel.impl.api.transaction.serial.MultiVersionDatabaseSerialGuard;
 import org.neo4j.kernel.impl.api.txid.TransactionIdGenerator;
@@ -81,14 +89,13 @@ import org.neo4j.kernel.impl.factory.AccessCapabilityFactory;
 import org.neo4j.kernel.impl.locking.LockManager;
 import org.neo4j.kernel.impl.monitoring.TransactionMonitor;
 import org.neo4j.kernel.impl.query.TransactionExecutionMonitor;
-import org.neo4j.kernel.impl.transaction.log.TransactionCommitmentFactory;
-import org.neo4j.kernel.impl.util.collection.CollectionsFactorySupplier;
 import org.neo4j.kernel.internal.event.DatabaseTransactionEventListeners;
 import org.neo4j.kernel.lifecycle.LifecycleAdapter;
+import org.neo4j.logging.Log;
 import org.neo4j.logging.LogProvider;
-import org.neo4j.memory.GlobalMemoryGroupTracker;
 import org.neo4j.memory.ScopedMemoryPool;
 import org.neo4j.monitoring.DatabaseHealth;
+import org.neo4j.monitoring.ExceptionHandlerService;
 import org.neo4j.resources.CpuClock;
 import org.neo4j.storageengine.api.StorageEngine;
 import org.neo4j.storageengine.api.TransactionId;
@@ -98,7 +105,9 @@ import org.neo4j.storageengine.api.txstate.TransactionStateBehaviour;
 import org.neo4j.storageengine.api.txstate.validation.TransactionValidatorFactory;
 import org.neo4j.time.SystemNanoClock;
 import org.neo4j.token.TokenHolders;
+import org.neo4j.util.VisibleForTesting;
 import org.neo4j.values.ElementIdMapper;
+import org.neo4j.wal.TransactionCommitmentFactory;
 
 /**
  * Central source of transactions in the database.
@@ -117,7 +126,6 @@ public class KernelTransactions extends LifecycleAdapter
     private final TransactionRollbackProcess rollbackProcess;
     private final DatabaseTransactionEventListeners eventListeners;
     private final TransactionMonitor transactionMonitor;
-    private final GlobalMemoryGroupTracker transactionsMemoryPool;
     private final TransactionExecutionMonitor transactionExecutionMonitor;
     private final AvailabilityGuard databaseAvailabilityGuard;
     private final StorageEngine storageEngine;
@@ -146,9 +154,9 @@ public class KernelTransactions extends LifecycleAdapter
     private final IndexStatisticsStore indexStatisticsStore;
     private final Dependencies databaseDependencies;
     private final Config config;
-    private final CollectionsFactorySupplier collectionsFactorySupplier;
     private final SchemaState schemaState;
     private final LeaseService leaseService;
+    private final ExceptionHandlerService exceptionHandlerService;
 
     /**
      * Used to enumerate all transactions in the system, active and idle ones.
@@ -172,8 +180,11 @@ public class KernelTransactions extends LifecycleAdapter
     private final boolean multiVersioned;
     private final TopologyGraphDbmsModel.HostedOnMode mode;
     private final DatabaseSerialGuard databaseSerialGuard;
+    private final RaftUpgradeBarrier raftUpgradeBarrier;
     private final TransactionStateBehaviour transactionStateBehaviour;
-    private ScopedMemoryPool transactionMemoryPool;
+    private final Log log;
+    private final DatabaseMonitors databaseMonitors;
+    private final ScopedMemoryPool transactionMemoryPool;
 
     /**
      * Kernel transactions component status. True when stopped, false when started.
@@ -201,7 +212,6 @@ public class KernelTransactions extends LifecycleAdapter
             AtomicReference<CpuClock> cpuClockRef,
             AccessCapabilityFactory accessCapabilityFactory,
             CursorContextFactory contextFactory,
-            CollectionsFactorySupplier collectionsFactorySupplier,
             ConstraintSemantics constraintSemantics,
             SchemaState schemaState,
             TokenHolders tokenHolders,
@@ -212,7 +222,7 @@ public class KernelTransactions extends LifecycleAdapter
             Dependencies databaseDependencies,
             DatabaseTracers tracers,
             LeaseService leaseService,
-            GlobalMemoryGroupTracker transactionsMemoryPool,
+            ScopedMemoryPool transactionMemoryPool,
             DatabaseReadOnlyChecker readOnlyDatabaseChecker,
             TransactionExecutionMonitor transactionExecutionMonitor,
             IdController.IdFreeCondition externalIdReuseCondition,
@@ -221,8 +231,11 @@ public class KernelTransactions extends LifecycleAdapter
             TransactionIdGenerator transactionIdGenerator,
             DatabaseHealth databaseHealth,
             TransactionValidatorFactory transactionValidatorFactory,
+            ExceptionHandlerService exceptionHandlerService,
             LogProvider internalLogProvider,
-            TopologyGraphDbmsModel.HostedOnMode mode) {
+            TopologyGraphDbmsModel.HostedOnMode mode,
+            DatabaseMonitors databaseMonitors,
+            RaftUpgradeBarrier raftUpgradeBarrier) {
         this.config = config;
         this.lockManager = lockManager;
         this.constraintIndexCreator = constraintIndexCreator;
@@ -230,7 +243,7 @@ public class KernelTransactions extends LifecycleAdapter
         this.rollbackProcess = rollbackProcess;
         this.eventListeners = eventListeners;
         this.transactionMonitor = transactionMonitor;
-        this.transactionsMemoryPool = transactionsMemoryPool;
+        this.transactionMemoryPool = transactionMemoryPool;
         this.transactionExecutionMonitor = transactionExecutionMonitor;
         this.databaseAvailabilityGuard = databaseAvailabilityGuard;
         this.storageEngine = storageEngine;
@@ -249,6 +262,7 @@ public class KernelTransactions extends LifecycleAdapter
         this.transactionIdGenerator = transactionIdGenerator;
         this.databaseHealth = databaseHealth;
         this.transactionValidatorFactory = transactionValidatorFactory;
+        this.exceptionHandlerService = exceptionHandlerService;
         this.internalLogProvider = internalLogProvider;
         this.namedDatabaseId = namedDatabaseId;
         this.indexingService = indexingService;
@@ -256,16 +270,16 @@ public class KernelTransactions extends LifecycleAdapter
         this.databaseDependencies = databaseDependencies;
         this.contextFactory = contextFactory;
         this.clock = clock;
-        this.collectionsFactorySupplier = collectionsFactorySupplier;
         this.constraintSemantics = constraintSemantics;
         this.schemaState = schemaState;
         this.leaseService = leaseService;
         this.transactionIdSequence = transactionIdSequence;
         this.multiVersioned = storageEngine.getOpenOptions().contains(MULTI_VERSIONED);
         this.mode = mode;
+        this.log = internalLogProvider.getLog(KernelTransactions.class);
+        this.databaseMonitors = databaseMonitors;
         this.txPool = new MonitoredTransactionPool(
-                new GlobalKernelTransactionPool(
-                        allTransactions, new KernelTransactionImplementationFactory(allTransactions, tracers)),
+                new GlobalKernelTransactionPool(allTransactions, new TransactionFactory(allTransactions, tracers)),
                 activeTransactionCounter,
                 config);
         this.enrichmentStrategy = this.databaseDependencies.resolveDependency(ApplyEnrichmentStrategy.class);
@@ -273,6 +287,8 @@ public class KernelTransactions extends LifecycleAdapter
         this.transactionStateBehaviour = new KernelTransactionsStateBehaviour(storageEngine, enrichmentStrategy);
         this.securityLog = this.databaseDependencies.resolveDependency(AbstractSecurityLog.class);
         this.databaseSerialGuard = multiVersioned ? new MultiVersionDatabaseSerialGuard(allTransactions) : EMPTY_GUARD;
+        // Created (and gated) by Database; NO_OP unless this is the raft-triggered upgrade.
+        this.raftUpgradeBarrier = raftUpgradeBarrier;
 
         doBlockNewTransactions();
     }
@@ -286,9 +302,13 @@ public class KernelTransactions extends LifecycleAdapter
         ProcedureView procedureView = globalProcedures.getCurrentView();
         BooleanSupplier isStale = () -> !globalProcedures.getCurrentView().equals(procedureView);
         PrivilegeDatabaseReference sessionDatabase = getDatabaseReference(loginContext);
+        long startTimeMillis = clock.millis();
         SecurityContext securityContext = loginContext.authorize(
-                new TokenHoldersIdLookup(tokenHolders, procedureView, isStale), sessionDatabase, securityLog);
-        var tx = newKernelTransaction(type, clientInfo, timeout, securityContext, procedureView);
+                new TokenHoldersIdLookup(tokenHolders, procedureView, isStale),
+                sessionDatabase,
+                securityLog,
+                startTimeMillis);
+        var tx = newKernelTransaction(type, clientInfo, timeout, securityContext, procedureView, startTimeMillis);
         databaseSerialGuard.acquireSerialLock(tx);
         return tx;
     }
@@ -307,12 +327,13 @@ public class KernelTransactions extends LifecycleAdapter
         return databaseReferenceRepository.getByAlias(namedDatabaseId.name()).orElseThrow();
     }
 
-    protected KernelTransaction newKernelTransaction(
+    private KernelTransaction newKernelTransaction(
             KernelTransaction.Type type,
             ClientConnectionInfo clientInfo,
             TransactionTimeout timeout,
             SecurityContext securityContext,
-            ProcedureView procedureView) {
+            ProcedureView procedureView,
+            long startTimeMillis) {
         try {
             while (!newTransactionsLock.readLock().tryLock(1, TimeUnit.SECONDS)) {
                 assertRunning();
@@ -320,7 +341,7 @@ public class KernelTransactions extends LifecycleAdapter
             try {
                 assertRunning();
                 TransactionId lastCommittedTransaction = transactionIdStore.getLastCommittedTransaction();
-                KernelTransactionImplementation tx = txPool.acquire();
+                var tx = txPool.acquire();
                 tx.initialize(
                         lastCommittedTransaction.id(),
                         type,
@@ -328,17 +349,15 @@ public class KernelTransactions extends LifecycleAdapter
                         timeout,
                         transactionIdSequence.next(),
                         clientInfo,
-                        procedureView);
+                        procedureView,
+                        startTimeMillis);
                 return tx;
             } finally {
                 newTransactionsLock.readLock().unlock();
             }
         } catch (InterruptedException ie) {
             Thread.interrupted();
-            var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_25N06)
-                    .build();
-            throw new TransactionFailureException(
-                    gql, "Fail to start new transaction.", ie, Status.Transaction.TransactionStartFailed);
+            throw TransactionFailureHelper.failToStartTransaction(ie);
         }
     }
 
@@ -357,11 +376,22 @@ public class KernelTransactions extends LifecycleAdapter
     }
 
     public long oldestActiveTransactionSequenceNumber() {
+        return oldestActiveTransaction(true);
+    }
+
+    public long earliestTransactionSequenceNumber() {
+        return oldestActiveTransaction(false);
+    }
+
+    private long oldestActiveTransaction(boolean filterTransactions) {
         long oldestTransactionSequenceNumber = Long.MAX_VALUE;
         for (KernelTransactionImplementation transaction : allTransactions) {
-            if (transaction.isOpen() && !transaction.isTerminated()) {
-                oldestTransactionSequenceNumber =
-                        Math.min(oldestTransactionSequenceNumber, transaction.getTransactionSequenceNumber());
+            if (filterTransactions && (transaction.isTerminated() || !transaction.isOpen())) {
+                continue;
+            }
+            long tsn = transaction.getTransactionSequenceNumber();
+            if (tsn != TransactionIdSequence.TRANSACTION_SEQUENCE_INITIAL_VALUE) {
+                oldestTransactionSequenceNumber = Math.min(oldestTransactionSequenceNumber, tsn);
             }
         }
         return oldestTransactionSequenceNumber;
@@ -391,24 +421,32 @@ public class KernelTransactions extends LifecycleAdapter
                 .collect(toSet());
     }
 
-    /**
-     * Dispose of all pooled transactions. This is done on shutdown.
-     */
-    public void disposeAll() {
-        terminateTransactions();
-        txPool.close();
+    public Iterable<TransactionMonitoringRecord> allTransactions() {
+        return allTransactions.stream().map(this::createMonitoringRecord).toList();
     }
 
     @Override
     public void terminateTransactions() {
-        markAllTransactionsAsTerminated();
-    }
-
-    private void markAllTransactionsAsTerminated() {
         // we mark all transactions for termination since we want to make sure these transactions
         // won't be reused, ever. Each transaction has, among other things, a Locks.Client and we
         // certainly want to keep that from being reused from this point.
         allTransactions.forEach(tx -> tx.markForTermination(Status.General.DatabaseUnavailable));
+    }
+
+    /**
+     * Terminate all transactions that are not associated with the provided current lease id.
+     */
+    public void terminateOldLeaseTransactions(long currentLeaseId) {
+        for (KernelTransactionImplementation tx : allTransactions) {
+            if (tx.isDataTransaction() && isOldLease(tx, currentLeaseId)) {
+                tx.markForTermination(LeaseExpired);
+            }
+        }
+    }
+
+    private static boolean isOldLease(KernelTransactionImplementation tx, long currentLeaseId) {
+        int txLeaseId = tx.getLeaseId();
+        return txLeaseId != NO_LEASE && currentLeaseId != txLeaseId;
     }
 
     @Override
@@ -422,16 +460,6 @@ public class KernelTransactions extends LifecycleAdapter
     }
 
     @Override
-    public void init() throws Exception {
-        this.transactionMemoryPool = transactionsMemoryPool.newDatabasePool(
-                namedDatabaseId.name(),
-                config.get(memory_transaction_database_max_size),
-                memory_transaction_database_max_size.name());
-        config.addListener(
-                memory_transaction_database_max_size, (before, after) -> transactionMemoryPool.setSize(after));
-    }
-
-    @Override
     public void start() {
         stopped = false;
         unblockNewTransactions();
@@ -441,13 +469,63 @@ public class KernelTransactions extends LifecycleAdapter
     public void stop() {
         blockNewTransactions();
         stopped = true;
+        waitAndTerminateRunningTransactions();
+    }
+
+    private void waitAndTerminateRunningTransactions() {
+        log.info("Waiting for closing transactions.");
+
+        var transactionShutdownMonitor = databaseMonitors.newMonitor(ShutdownTransactionMonitor.class);
+
+        if (!newTransactionsLock.isWriteLocked()) {
+            throw new IllegalStateException("Ability to start new transactions should be disabled.");
+        }
+
+        // give time for transactions to complete without termination
+        if (haveActiveTransaction()) {
+            transactionShutdownMonitor.awaitActiveTransactionClose();
+            long completionDeadline = clock.millis()
+                    + config.get(shutdown_transaction_end_timeout).toMillis();
+            while (haveActiveTransaction() && clock.millis() < completionDeadline) {
+                LockSupport.parkNanos(MILLISECONDS.toNanos(10));
+            }
+        }
+
+        // terminate transactions
+        terminateTransactions();
+
+        // Give transactions a short time to detect they are terminated
+        if (haveActiveTransaction()) {
+            transactionShutdownMonitor.awaitTerminatedTransactionClose();
+            long waitTime =
+                    config.get(shutdown_terminated_transaction_wait_timeout).toMillis();
+            long deadline = clock.millis() + waitTime;
+            while (haveActiveTransaction() && clock.millis() < deadline) {
+                LockSupport.parkNanos(MILLISECONDS.toNanos(10));
+            }
+        }
+
+        if (haveClosingTransaction()) {
+            transactionShutdownMonitor.awaitClosingTransactionClose();
+            while (haveClosingTransaction()) {
+                LockSupport.parkNanos(MILLISECONDS.toNanos(10));
+            }
+        }
+
+        if (haveActiveTransaction()) {
+            log.warn("Failed to close all transactions. Shutdown may be unclean.");
+        } else {
+            log.info("All transactions are closed.");
+        }
     }
 
     @Override
     public void shutdown() {
-        transactionMemoryPool.close();
-        disposeAll();
-        unblockNewTransactions(); // Release the lock before we discard this object
+        // All transaction should be terminated/awaited to complete on stop
+        try (var tempTxPool = txPool) {
+        } finally {
+            unblockNewTransactions(); // Release the lock before we discard this object
+        }
     }
 
     @Override
@@ -501,19 +579,29 @@ public class KernelTransactions extends LifecycleAdapter
 
     /**
      * Create new handle for the given transaction.
-     * <p>
-     * <b>Note:</b> this method is package-private for testing <b>only</b>.
-     *
      * @param tx transaction to wrap.
      * @return transaction handle.
      */
+    @VisibleForTesting
     KernelTransactionHandle createHandle(KernelTransactionImplementation tx) {
-        return new KernelTransactionImplementationHandle(tx, clock, tx.concurrentCursorContextLookup());
+        return new KernelTransactionImplementationHandle(tx, clock);
+    }
+
+    TransactionMonitoringRecord createMonitoringRecord(KernelTransactionImplementation tx) {
+        return new TransactionMonitoringRecord(tx, lookupInitializedContext(tx));
+    }
+
+    private static CursorContext lookupInitializedContext(KernelTransactionImplementation tx) {
+        CursorContext cursorContext;
+        do {
+            cursorContext = tx.concurrentCursorContextLookup();
+        } while (cursorContext == CursorContext.INITIALIZATION_SENTINEL_CONTEXT);
+        return cursorContext;
     }
 
     private void assertRunning() {
-        if (databaseAvailabilityGuard.isShutdown()) {
-            throw new DatabaseShutdownException();
+        if (!databaseAvailabilityGuard.isAvailable()) {
+            throw DatabaseShutdownException.databaseUnavailable(namedDatabaseId.name());
         }
         if (stopped) {
             throw new IllegalStateException("Can't start new transaction with stopped " + getClass());
@@ -527,64 +615,71 @@ public class KernelTransactions extends LifecycleAdapter
         }
     }
 
-    private class KernelTransactionImplementationFactory implements Factory<KernelTransactionImplementation> {
+    private class TransactionFactory implements Factory<KernelTransactionImplementation> {
         private final Set<KernelTransactionImplementation> transactions;
         private final DatabaseTracers tracers;
 
-        KernelTransactionImplementationFactory(
-                Set<KernelTransactionImplementation> transactions, DatabaseTracers tracers) {
+        TransactionFactory(Set<KernelTransactionImplementation> transactions, DatabaseTracers tracers) {
             this.transactions = transactions;
             this.tracers = tracers;
         }
 
         @Override
         public KernelTransactionImplementation newInstance() {
-            KernelTransactionImplementation tx = new KernelTransactionImplementation(
-                    config,
-                    eventListeners,
-                    constraintIndexCreator,
-                    transactionCommitProcess,
-                    rollbackProcess,
-                    transactionMonitor,
-                    txPool,
-                    clock,
-                    cpuClockRef,
-                    tracers,
-                    storageEngine,
-                    accessCapabilityFactory,
-                    contextFactory,
-                    collectionsFactorySupplier,
-                    constraintSemantics,
-                    schemaState,
-                    tokenHolders,
-                    elementIdMapper,
-                    indexingService,
-                    indexStatisticsStore,
-                    databaseDependencies,
-                    namedDatabaseId,
-                    leaseService,
-                    transactionMemoryPool,
-                    readOnlyDatabaseChecker,
-                    transactionExecutionMonitor,
-                    securityLog,
-                    lockManager,
-                    commitmentFactory,
-                    KernelTransactions.this,
-                    transactionIdGenerator,
-                    dbmsRuntimeVersionProvider,
-                    kernelVersionProvider,
-                    serverIdentity,
-                    enrichmentStrategy,
-                    transactionStateBehaviour,
-                    databaseHealth,
-                    internalLogProvider,
-                    transactionValidatorFactory,
-                    databaseSerialGuard,
-                    multiVersioned,
-                    mode);
+            KernelTransactionImplementation tx = ktiFactory()
+                    .createTransactionImplementation(
+                            config,
+                            eventListeners,
+                            constraintIndexCreator,
+                            transactionCommitProcess,
+                            rollbackProcess,
+                            transactionMonitor,
+                            txPool,
+                            clock,
+                            cpuClockRef,
+                            tracers,
+                            storageEngine,
+                            accessCapabilityFactory,
+                            contextFactory,
+                            OnHeapCollectionsFactory.INSTANCE,
+                            constraintSemantics,
+                            schemaState,
+                            tokenHolders,
+                            elementIdMapper,
+                            indexingService,
+                            indexStatisticsStore,
+                            databaseDependencies,
+                            namedDatabaseId,
+                            leaseService,
+                            transactionMemoryPool,
+                            readOnlyDatabaseChecker,
+                            transactionExecutionMonitor,
+                            securityLog,
+                            lockManager,
+                            commitmentFactory,
+                            KernelTransactions.this,
+                            transactionIdGenerator,
+                            dbmsRuntimeVersionProvider,
+                            kernelVersionProvider,
+                            serverIdentity,
+                            enrichmentStrategy,
+                            transactionStateBehaviour,
+                            databaseHealth,
+                            internalLogProvider,
+                            transactionValidatorFactory,
+                            databaseSerialGuard,
+                            raftUpgradeBarrier,
+                            multiVersioned,
+                            exceptionHandlerService,
+                            mode,
+                            databaseAvailabilityGuard);
             this.transactions.add(tx);
             return tx;
         }
+    }
+
+    protected KernelTransactionImplementationFactory ktiFactory() {
+        return KernelTransactionImplementation::new;
     }
 
     private static class GlobalKernelTransactionPool extends LinkedQueuePool<KernelTransactionImplementation> {
@@ -648,9 +743,58 @@ public class KernelTransactions extends LifecycleAdapter
                 activeTransactions = activeTransactionCounter.get();
                 int localTransactionMaximum = maxNumberOfTransaction;
                 if (localTransactionMaximum != 0 && activeTransactions >= localTransactionMaximum) {
-                    throw new MaximumTransactionLimitExceededException();
+                    throw MaximumTransactionLimitExceededException.maximumNumberOfTransactionsExceeded();
                 }
             } while (!activeTransactionCounter.weakCompareAndSetAcquire(activeTransactions, activeTransactions + 1));
         }
+    }
+
+    protected interface KernelTransactionImplementationFactory {
+        KernelTransactionImplementation createTransactionImplementation(
+                Config externalConfig,
+                DatabaseTransactionEventListeners transactionEventListeners,
+                ConstraintIndexCreator constraintIndexCreator,
+                TransactionCommitProcess commitProcess,
+                TransactionRollbackProcess rollbackProcess,
+                TransactionMonitor transactionMonitor,
+                Pool<KernelTransactionImplementation> pool,
+                SystemNanoClock clock,
+                AtomicReference<CpuClock> cpuClockRef,
+                DatabaseTracers tracers,
+                StorageEngine storageEngine,
+                AccessCapabilityFactory accessCapabilityFactory,
+                CursorContextFactory contextFactory,
+                CollectionsFactory collectionsFactory,
+                ConstraintSemantics constraintSemantics,
+                SchemaState schemaState,
+                TokenHolders tokenHolders,
+                ElementIdMapper elementIdMapper,
+                IndexingService indexingService,
+                IndexStatisticsStore indexStatisticsStore,
+                Dependencies dependencies,
+                NamedDatabaseId namedDatabaseId,
+                LeaseService leaseService,
+                ScopedMemoryPool dbTransactionsPool,
+                DatabaseReadOnlyChecker readOnlyDatabaseChecker,
+                TransactionExecutionMonitor transactionExecutionMonitor,
+                AbstractSecurityLog securityLog,
+                LockManager lockManager,
+                TransactionCommitmentFactory commitmentFactory,
+                KernelTransactions kernelTransactions,
+                TransactionIdGenerator transactionIdGenerator,
+                DbmsRuntimeVersionProvider dbmsRuntimeVersionProvider,
+                KernelVersionProvider kernelVersionProvider,
+                ServerIdentity serverIdentity,
+                ApplyEnrichmentStrategy enrichmentStrategy,
+                TransactionStateBehaviour transactionStateBehaviour,
+                DatabaseHealth databaseHealth,
+                LogProvider logProvider,
+                TransactionValidatorFactory transactionValidatorFactory,
+                DatabaseSerialGuard databaseSerialGuard,
+                RaftUpgradeBarrier raftUpgradeBarrier,
+                boolean multiVersioned,
+                ExceptionHandlerService exceptionHandlerService,
+                TopologyGraphDbmsModel.HostedOnMode mode,
+                AvailabilityGuard availabilityGuard);
     }
 }

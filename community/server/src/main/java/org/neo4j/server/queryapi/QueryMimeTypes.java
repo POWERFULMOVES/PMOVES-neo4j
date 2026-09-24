@@ -25,18 +25,43 @@ import javax.ws.rs.core.MediaType;
  * Holds methods related to Mime Types used in the Query API.
  */
 public final class QueryMimeTypes {
-    public static final String UNTYPED_JSON = MediaType.APPLICATION_JSON;
+    // JSON
+    public static final String PLAIN_JSON = MediaType.APPLICATION_JSON;
     public static final String TYPED_JSON = "application/vnd.neo4j.query";
     public static final String TYPED_JSON_V1x0 = "application/vnd.neo4j.query.v1.0";
-    public static final String ALL = MediaType.APPLICATION_JSON + "," + TYPED_JSON + "," + TYPED_JSON_V1x0;
+    public static final String TYPED_JSON_V1x1 = "application/vnd.neo4j.query.v1.1";
+    public static final String TYPED_JSON_V1x2 = "application/vnd.neo4j.query.v1.2";
+    // JSON LINES
+    public static final String PLAIN_JSONL = "application/jsonl";
+    public static final String TYPED_JSONL_V1x0 = TYPED_JSON_V1x0 + "+jsonl";
+    public static final String TYPED_JSONL_V1x1 = TYPED_JSON_V1x1 + "+jsonl";
+    public static final String TYPED_JSONL_V1x2 = TYPED_JSON_V1x2 + "+jsonl";
+    // AGGREGATES
+    public static final String ALL_JSON = MediaType.APPLICATION_JSON + "," + TYPED_JSON + "," + TYPED_JSON_V1x0 + ","
+            + TYPED_JSON_V1x1 + "," + TYPED_JSON_V1x2;
+    public static final String ALL_JSONL =
+            PLAIN_JSONL + "," + TYPED_JSONL_V1x0 + "," + TYPED_JSONL_V1x1 + "," + TYPED_JSONL_V1x2;
 
     private QueryMimeTypes() {}
 
     public static boolean hasTyped(String contentType) {
-        return TYPED_JSON_V1x0.equals(contentType) || TYPED_JSON.equals(contentType);
+        return TYPED_JSON_V1x2.equals(contentType)
+                || TYPED_JSON_V1x1.equals(contentType)
+                || TYPED_JSON_V1x0.equals(contentType)
+                || TYPED_JSON.equals(contentType);
+    }
+
+    public static boolean hasTypedJsonl(String contentType) {
+        return TYPED_JSONL_V1x0.equals(contentType)
+                || TYPED_JSONL_V1x1.equals(contentType)
+                || TYPED_JSONL_V1x2.equals(contentType);
     }
 
     public static boolean hasUntyped(String contentType) {
-        return UNTYPED_JSON.equals(contentType);
+        return PLAIN_JSON.equals(contentType);
+    }
+
+    public static boolean hasUntypedJsonl(String contentType) {
+        return PLAIN_JSONL.equals(contentType);
     }
 }

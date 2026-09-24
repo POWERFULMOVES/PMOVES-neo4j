@@ -19,8 +19,11 @@
  */
 package org.neo4j.bolt.test.util;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.neo4j.internal.kernel.api.procs.ProcedureSignature.procedureSignature;
 
+import java.util.concurrent.ThreadPoolExecutor;
+import org.neo4j.bolt.BoltServer;
 import org.neo4j.bolt.transport.Neo4jWithSocket;
 import org.neo4j.collection.ResourceRawIterator;
 import org.neo4j.exceptions.KernelException;
@@ -38,6 +41,7 @@ import org.neo4j.kernel.database.Database;
 import org.neo4j.kernel.database.NamedDatabaseId;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.storageengine.api.TransactionIdStore;
+import org.neo4j.test.assertion.Assert;
 import org.neo4j.values.AnyValue;
 import org.neo4j.values.storable.IntegralValue;
 
@@ -65,7 +69,7 @@ public final class ServerUtil {
     public static long getLastClosedTransactionId(Neo4jWithSocket server) {
         var resolver = ((GraphDatabaseAPI) server.graphDatabaseService()).getDependencyResolver();
         var txIdStore = resolver.resolveDependency(TransactionIdStore.class);
-        return txIdStore.getLastClosedTransactionId();
+        return txIdStore.getHighestGapFreeClosedTransactionId();
     }
 
     public static <T> T resolveDependency(Neo4jWithSocket server, Class<T> type) {
@@ -104,10 +108,33 @@ public final class ServerUtil {
                         try {
                             Thread.sleep(((IntegralValue) objects[0]).longValue());
                         } catch (InterruptedException e) {
-                            throw new ProcedureException(Status.General.UnknownError, e, "Interrupted");
+                            throw ProcedureException.internalError(
+                                    this.getClass().getSimpleName(), "Interrupted", Status.General.UnknownError, e);
                         }
                         return ResourceRawIterator.empty();
                     }
                 });
+    }
+
+    /**
+     * Suspends test execution until {@code n} threads within the Bolt thread pool are occupied.
+     *
+     * @param n the desired number of occupied threads.
+     */
+    public static void awaitPrimaryThreadPoolSaturation(BoltServer server, int n) {
+        var executor = (ThreadPoolExecutor) server.getPrimaryExecutorService();
+
+        Assert.awaitUntilAsserted(() -> assertThat(executor.getActiveCount()).isEqualTo(n));
+    }
+
+    /**
+     * Suspends test execution until {@code n} threads within the Bolt thread pool are occupied.
+     *
+     * @param n the desired number of occupied threads.
+     */
+    public static void awaitDomainSocketThreadPoolSaturation(BoltServer server, int n) {
+        var executor = (ThreadPoolExecutor) server.getDomainSocketExecutorService();
+
+        Assert.awaitUntilAsserted(() -> assertThat(executor.getActiveCount()).isEqualTo(n));
     }
 }

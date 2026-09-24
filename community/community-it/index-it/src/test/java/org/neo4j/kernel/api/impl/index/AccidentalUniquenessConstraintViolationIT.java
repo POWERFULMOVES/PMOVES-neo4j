@@ -55,29 +55,32 @@ class AccidentalUniquenessConstraintViolationIT {
             tx.schema().constraintFor(Foo).assertPropertyIsUnique(BAR).create();
             tx.commit();
         }
-        Node fourtyTwo;
-        Node fourtyOne;
+        String fourtyTwoId;
+        String fourtyOneId;
         try (Transaction tx = db.beginTx()) {
-            fourtyTwo = tx.createNode(Foo);
+            Node fourtyTwo = tx.createNode(Foo);
             fourtyTwo.setProperty(BAR, value1);
-            fourtyOne = tx.createNode(Foo);
+            fourtyTwoId = fourtyTwo.getElementId();
+            Node fourtyOne = tx.createNode(Foo);
             fourtyOne.setProperty(BAR, value2);
+            fourtyOneId = fourtyOne.getElementId();
             tx.commit();
         }
 
         // when
         try (Transaction tx = db.beginTx()) {
-            tx.getNodeById(fourtyOne.getId()).delete();
-            tx.getNodeById(fourtyTwo.getId()).setProperty(BAR, value2);
+            tx.getNodeByElementId(fourtyOneId).delete();
+            tx.getNodeByElementId(fourtyTwoId).setProperty(BAR, value2);
             tx.commit();
         }
 
         // then
         try (Transaction tx = db.beginTx()) {
-            fourtyTwo = tx.getNodeById(fourtyTwo.getId());
+            Node fourtyTwo = tx.getNodeByElementId(fourtyTwoId);
             assertEquals(value2, fourtyTwo.getProperty(BAR));
-            assertThrows(NotFoundException.class, () -> tx.getNodeById(fourtyOne.getId())
-                    .getProperty(BAR));
+            assertThrows(
+                    NotFoundException.class,
+                    () -> tx.getNodeByElementId(fourtyOneId).getProperty(BAR));
 
             assertEquals(fourtyTwo, tx.findNode(Foo, BAR, value2));
             assertNull(tx.findNode(Foo, BAR, value1));

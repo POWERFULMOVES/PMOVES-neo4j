@@ -19,8 +19,8 @@
  */
 package org.neo4j.cypher.internal.logical.generator
 
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.ASTAnnotationMap
-import org.neo4j.cypher.internal.ast.AstConstructionTestSupport
 import org.neo4j.cypher.internal.ast.generator.AstGenerator.zeroOrMore
 import org.neo4j.cypher.internal.ast.generator.SemanticAwareAstGenerator
 import org.neo4j.cypher.internal.ast.semantics.ExpressionTypeInfo
@@ -32,20 +32,22 @@ import org.neo4j.cypher.internal.ast.semantics.SemanticState.ScopeLocation
 import org.neo4j.cypher.internal.ast.semantics.SemanticState.ScopeZipper
 import org.neo4j.cypher.internal.ast.semantics.SemanticTable
 import org.neo4j.cypher.internal.compiler.ExecutionModel.Volcano
-import org.neo4j.cypher.internal.compiler.helpers.PredicateHelper
 import org.neo4j.cypher.internal.compiler.planner.logical.CardinalityCostModel
 import org.neo4j.cypher.internal.compiler.planner.logical.CostModelMonitor
 import org.neo4j.cypher.internal.compiler.planner.logical.Metrics.LabelInfo
 import org.neo4j.cypher.internal.compiler.planner.logical.Metrics.QueryGraphSolverInput
 import org.neo4j.cypher.internal.compiler.planner.logical.Metrics.RelTypeInfo
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.skipAndLimit.shouldPlanExhaustiveLimit
+import org.neo4j.cypher.internal.expressions.Equals
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.Expression.SemanticContext.Results
 import org.neo4j.cypher.internal.expressions.LabelName
+import org.neo4j.cypher.internal.expressions.ListLiteral
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.Parameter
 import org.neo4j.cypher.internal.expressions.RelTypeName
 import org.neo4j.cypher.internal.expressions.SemanticDirection
+import org.neo4j.cypher.internal.expressions.SignedDecimalIntegerLiteral
 import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.logical.generator.LogicalPlanGenerator.State
 import org.neo4j.cypher.internal.logical.generator.LogicalPlanGenerator.WithState
@@ -62,6 +64,7 @@ import org.neo4j.cypher.internal.logical.plans.Distinct
 import org.neo4j.cypher.internal.logical.plans.Eager
 import org.neo4j.cypher.internal.logical.plans.ExhaustiveLimit
 import org.neo4j.cypher.internal.logical.plans.Expand
+import org.neo4j.cypher.internal.logical.plans.Expand.ExpandAll
 import org.neo4j.cypher.internal.logical.plans.IndexOrder
 import org.neo4j.cypher.internal.logical.plans.IndexOrderAscending
 import org.neo4j.cypher.internal.logical.plans.IndexOrderNone
@@ -90,8 +93,9 @@ import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.ProvidedOrders
 import org.neo4j.cypher.internal.util.CancellationChecker
 import org.neo4j.cypher.internal.util.Cardinality
 import org.neo4j.cypher.internal.util.Cost
-import org.neo4j.cypher.internal.util.ErrorMessageProvider
+import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.LabelId
+import org.neo4j.cypher.internal.util.PredicateHelper
 import org.neo4j.cypher.internal.util.RelTypeId
 import org.neo4j.cypher.internal.util.attribution.Default
 import org.neo4j.cypher.internal.util.attribution.IdGen
@@ -102,19 +106,18 @@ import org.neo4j.cypher.messages.MessageUtilProvider
 import org.neo4j.graphdb.Node
 import org.neo4j.graphdb.Relationship
 import org.neo4j.kernel.api.StatementConstants
-import org.neo4j.kernel.database.DatabaseReference
 import org.scalacheck.Gen
 
 import scala.language.implicitConversions
 
-object LogicalPlanGenerator extends AstConstructionTestSupport {
+object LogicalPlanGenerator {
   case class WithState[+T](x: T, state: State)
 
   object State {
 
     def apply(labelsWithIds: Map[String, Int], relTypesWithIds: Map[String, Int]): State = {
-      val resolvedLabelTypes = Map(labelsWithIds.view.mapValues(LabelId).toSeq: _*)
-      val resolvedRelTypes = Map(relTypesWithIds.view.mapValues(RelTypeId).toSeq: _*)
+      val resolvedLabelTypes = Map(labelsWithIds.view.mapValues(LabelId.apply).toSeq: _*)
+      val resolvedRelTypes = Map(relTypesWithIds.view.mapValues(RelTypeId.apply).toSeq: _*)
       State(
         new SemanticTable(
           resolvedLabelNames = resolvedLabelTypes,
@@ -188,7 +191,7 @@ object LogicalPlanGenerator extends AstConstructionTestSupport {
       leafCardinalityMultipliersStack.headOption.getOrElse(Cardinality.SINGLE)
 
     def recordLabel(variable: Variable, label: String): State = {
-      val newLabels = labelInfo(variable) + LabelName(label)(pos)
+      val newLabels = labelInfo(variable) + LabelName(label)(InputPosition.NONE)
       copy(labelInfo = labelInfo.updated(variable, newLabels))
     }
   }
@@ -208,7 +211,7 @@ class LogicalPlanGenerator(
   costLimit: Cost,
   nodes: Seq[Node],
   rels: Seq[Relationship]
-) extends AstConstructionTestSupport {
+) {
 
   private val labels = labelsWithIds.keys.toVector
   private val relTypes = relTypesWithIds.keys.toVector
@@ -374,7 +377,7 @@ class LogicalPlanGenerator(
     WithState(rel, state) <- newVariable(state)
     state <- state.newRelationship(rel)
   } yield {
-    val plan = Expand(source, from, dir, relTypes, to, rel)(state.idGen)
+    val plan = Expand(source, from, dir, relTypes, to, rel, ExpandAll)(state.idGen)
     annotate(plan, state)
   }
 
@@ -387,7 +390,8 @@ class LogicalPlanGenerator(
     state <- state.newNode(right)
     relIds <- Gen.someOf(relIds ++ Seq.fill(relIds.size)(StatementConstants.NO_SUCH_RELATIONSHIP))
   } yield {
-    val seekableArgs = ManySeekableArgs(listOfInt(relIds.toSeq: _*))
+    val relIdsLiteral = ListLiteral(relIds.view.map(literalInt).toSeq)(InputPosition.NONE)
+    val seekableArgs = ManySeekableArgs(relIdsLiteral)
     val plan =
       if (directed) {
         val p = DirectedRelationshipByIdSeek(idName, seekableArgs, left, right, Set.empty)(state.idGen)
@@ -412,7 +416,7 @@ class LogicalPlanGenerator(
 
   def skip(state: State): Gen[WithState[Skip]] = for {
     WithState(source, state) <- innerLogicalPlan(state)
-    count <- Gen.chooseNum(0, Long.MaxValue, 1)
+    count <- Gen.chooseNum(0L, Long.MaxValue, 1L)
   } yield {
     val plan = Skip(source, literalInt(count))(state.idGen)
     annotate(plan, state)
@@ -420,7 +424,7 @@ class LogicalPlanGenerator(
 
   def limit(state: State): Gen[WithState[LogicalPlan]] = for {
     WithState(source, state) <- innerLogicalPlan(state)
-    count <- Gen.chooseNum(0, Long.MaxValue, 1)
+    count <- Gen.chooseNum(0L, Long.MaxValue, 1L)
   } yield {
     if (shouldPlanExhaustiveLimit(source, Some(count))) {
       annotate(ExhaustiveLimit(source, literalInt(count))(state.idGen), state)
@@ -486,7 +490,7 @@ class LogicalPlanGenerator(
   def sort(state: State): Gen[WithState[Sort]] = for {
     WithState(source, state) <- innerLogicalPlanWithAtLeastOneSymbol(state)
     columns <- Gen.atLeastOne(source.availableSymbols)
-    orderings <- Gen.listOfN(columns.size, Gen.oneOf(Ascending, Descending))
+    orderings <- Gen.listOfN(columns.size, Gen.oneOf(Ascending.apply _, Descending.apply _))
   } yield {
     val orderedColumns = columns.zip(orderings).map { case (column, order) => order(column) }
     val plan = Sort(source, orderedColumns.toSeq)(state.idGen)
@@ -496,8 +500,8 @@ class LogicalPlanGenerator(
   def top(state: State): Gen[WithState[Top]] = for {
     WithState(source, state) <- innerLogicalPlanWithAtLeastOneSymbol(state)
     columns <- Gen.atLeastOne(source.availableSymbols)
-    orderings <- Gen.listOfN(columns.size, Gen.oneOf(Ascending, Descending))
-    count <- Gen.chooseNum(0, Long.MaxValue, 1)
+    orderings <- Gen.listOfN(columns.size, Gen.oneOf(Ascending.apply _, Descending.apply _))
+    count <- Gen.chooseNum(0L, Long.MaxValue, 1L)
   } yield {
     val orderedColumns = columns.zip(orderings).map { case (column, order) => order(column) }
     val plan = Top(source, orderedColumns.toSeq, literalInt(count))(state.idGen)
@@ -582,7 +586,7 @@ class LogicalPlanGenerator(
     WithState(leftExpr, state) <- valueHashJoinExpression(left, state)
     WithState(rightExpr, state) <- valueHashJoinExpression(right, state)
   } yield {
-    val equalsExpr = equals(leftExpr, rightExpr)
+    val equalsExpr = Equals(leftExpr, rightExpr)(InputPosition.NONE)
     val plan = ValueHashJoin(left, right, equalsExpr)(state.idGen)
     annotate(plan, state)
   }
@@ -609,18 +613,19 @@ class LogicalPlanGenerator(
 
   private def label: Gen[LabelName] = for {
     name <- Gen.oneOf(labels)
-  } yield LabelName(name)(pos)
+  } yield LabelName(name)(InputPosition.NONE)
 
   private def optionalLabel: Gen[Option[LabelName]] = Gen.option(label)
 
   private def relTypeNames: Gen[Seq[RelTypeName]] = for {
     names <- zeroOrMore(relTypes)
     name <- names
-  } yield RelTypeName(name)(pos)
+  } yield RelTypeName(name)(InputPosition.NONE)
 
   def newVariable(state: State): Gen[WithState[Variable]] = {
     val name = s"var${state.varCount}"
-    Gen.const(WithState(varFor(name), state.incVarCount()))
+    val variable = Variable(name)(InputPosition.NONE, isIsolated = false)
+    Gen.const(WithState(variable, state.incVarCount()))
   }
 
   private def expressionList(
@@ -658,8 +663,8 @@ class LogicalPlanGenerator(
    * - Shares idGen with state
    */
   private def copyStateWithoutVariableInfo(state: State) = {
-    val resolvedLabelTypes = Map(labelsWithIds.mapValues(LabelId).toSeq: _*)
-    val resolvedRelTypes = Map(relTypesWithIds.mapValues(RelTypeId).toSeq: _*)
+    val resolvedLabelTypes = Map(labelsWithIds.mapValues(LabelId.apply).toSeq: _*)
+    val resolvedRelTypes = Map(relTypesWithIds.mapValues(RelTypeId.apply).toSeq: _*)
     val arguments = state.arguments
     val variables = arguments.map(_.asInstanceOf[Expression])
 
@@ -699,14 +704,8 @@ class LogicalPlanGenerator(
     for {
       expression <- expressionGen(new SemanticAwareAstGenerator(allowedVarNames = Some(availableSymbols.map(_.name))))
         .suchThat(e => {
-          val errors = SemanticExpressionCheck.check(Results, e).run(
-            semanticState,
-            new SemanticCheckContext {
-              override def errorMessageProvider: ErrorMessageProvider = MessageUtilProvider
-              override def sessionDatabaseReference: DatabaseReference = null
-            }
-          ).errors
-          errors.isEmpty
+          val context = SemanticCheckContext(CypherVersion.Legacy.legacyVersion(), MessageUtilProvider)
+          SemanticExpressionCheck.check(Results, e).run(semanticState, context).errors.isEmpty
         })
       parameters = expression.folder.findAllByClass[Parameter].map(_.name)
       state <- state.addParameters(parameters.toSet)
@@ -722,4 +721,7 @@ class LogicalPlanGenerator(
       Gen.oneOf(symbols).map(s => WithState(s, state))
     )
   }
+
+  final private def literalInt(value: Long): SignedDecimalIntegerLiteral =
+    SignedDecimalIntegerLiteral(value.toString)(InputPosition.NONE)
 }

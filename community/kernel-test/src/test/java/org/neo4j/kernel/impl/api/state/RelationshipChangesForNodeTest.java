@@ -38,15 +38,14 @@ import org.eclipse.collections.api.set.primitive.MutableLongSet;
 import org.eclipse.collections.impl.factory.primitive.IntObjectMaps;
 import org.eclipse.collections.impl.factory.primitive.LongSets;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.graphdb.Direction;
 import org.neo4j.storageengine.api.RelationshipDirection;
 import org.neo4j.storageengine.api.txstate.RelationshipModifications;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class RelationshipChangesForNodeTest {
     @Inject
     private RandomSupport random;
@@ -160,7 +159,7 @@ class RelationshipChangesForNodeTest {
                     dude) {
         if (dirMap.containsKey(direction)) {
             dude.apply(typeIds)
-                    .forEach((id, type, startNode, endNode, addedProps, changedProps, removedProps) ->
+                    .forEach((id, type, startNode, endNode, addedProps, removedProps) ->
                             assertThat(dirMap.get(direction).remove(id)).isTrue());
             assertThat(dirMap.remove(direction).size()).isEqualTo(0);
         }

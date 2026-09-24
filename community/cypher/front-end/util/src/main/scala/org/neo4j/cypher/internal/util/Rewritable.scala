@@ -20,18 +20,46 @@ import org.neo4j.cypher.internal.util.Foldable.TreeAny
 import org.neo4j.cypher.internal.util.Rewritable.RewritableAny
 import org.neo4j.cypher.internal.util.collection.immutable.ListSet
 
+import java.lang.FunctionalInterface
+
 import scala.annotation.tailrec
 import scala.collection.IterableFactory
 import scala.collection.immutable.ArraySeq
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
+import scala.language.implicitConversions
+import scala.reflect.ClassTag
+
+@FunctionalInterface
+trait Rewriter extends (AnyRef => AnyRef)
 
 object Rewriter {
 
-  def lift(f: PartialFunction[AnyRef, AnyRef]): Rewriter =
-    f.orElse({ case x => x })
+  def apply(f: AnyRef => AnyRef): Rewriter =
+    new Rewriter {
+      override def apply(v1: AnyRef): AnyRef = f(v1)
+    }
 
-  val noop: Rewriter = Rewriter.lift(PartialFunction.empty)
+  implicit def fromFunction(f: AnyRef => AnyRef): Rewriter = Rewriter(f)
+
+  /**
+   * JVM return type must be [[scala.Function1]] (erased `Lscala/Function1`) so bytecode stays link‑compatible with
+   * Scala 2.13 front‑end jars and TeaVM (`Rewriter$.lift(...)Lscala/Function1;`). The returned value still implements
+   * [[Rewriter]] at runtime.
+   */
+  def lift(f: PartialFunction[AnyRef, AnyRef]): scala.Function1[AnyRef, AnyRef] =
+    new Rewriter {
+      override def apply(v1: AnyRef): AnyRef = f.applyOrElse(v1, identity[AnyRef])
+    }
+
+  /** Bridges [[scala.Function1]] to [[Rewriter]] for APIs that still use erased `Function1` in JVM descriptors. */
+  def fromFunction1(f: scala.Function1[AnyRef, AnyRef]): Rewriter =
+    f match {
+      case r: Rewriter => r
+      case _           => Rewriter(f.apply)
+    }
+
+  val noop: Rewriter = Rewriter(identity[AnyRef])
 
   trait TopDownMergeableRewriter {
     def innerRewriter: Rewriter
@@ -41,27 +69,29 @@ object Rewriter {
     def innerRewriter: Rewriter
   }
 
-  def mergeTopDown(rewriters: TopDownMergeableRewriter*): Rewriter = {
-    new Rewriter {
-      override def apply(v1: AnyRef): AnyRef = instance.apply(v1)
+  def mergeTopDown(rewriters: TopDownMergeableRewriter*): Rewriter =
+    RewriterMergeHelpers.mergeTopDown(rewriters)
 
-      private val instance = topDown(rewriters.map(_.innerRewriter).reduce(_ andThen _))
-    }
-  }
-
-  def mergeBottomUp(rewriters: BottomUpMergeableRewriter*): Rewriter = {
-    new Rewriter {
-      override def apply(v1: AnyRef): AnyRef = instance.apply(v1)
-
-      private val instance = bottomUp(rewriters.map(_.innerRewriter).reduce(_ andThen _))
-    }
-  }
+  def mergeBottomUp(rewriters: BottomUpMergeableRewriter*): Rewriter =
+    RewriterMergeHelpers.mergeBottomUp(rewriters)
 }
+
+@FunctionalInterface
+trait RewriterWithParent extends (((AnyRef, Option[AnyRef])) => AnyRef)
 
 object RewriterWithParent {
 
+  def apply(f: ((AnyRef, Option[AnyRef])) => AnyRef): RewriterWithParent =
+    new RewriterWithParent {
+      override def apply(v1: (AnyRef, Option[AnyRef])): AnyRef = f(v1)
+    }
+
+  implicit def fromFunction(f: ((AnyRef, Option[AnyRef])) => AnyRef): RewriterWithParent = RewriterWithParent(f)
+
   def lift(f: PartialFunction[(AnyRef, Option[AnyRef]), AnyRef]): RewriterWithParent =
-    f.orElse({ case (x, _) => x })
+    new RewriterWithParent {
+      override def apply(v1: (AnyRef, Option[AnyRef])): AnyRef = f.applyOrElse(v1, { case (x, _) => x })
+    }
 }
 
 object Rewritable {
@@ -92,7 +122,7 @@ object Rewritable {
 
   implicit class IteratorEq[A <: AnyRef](val iterator: Iterator[A]) {
 
-    def eqElements[B <: AnyRef](that: Iterator[B]): Boolean = {
+    infix def eqElements[B <: AnyRef](that: Iterator[B]): Boolean = {
       while (iterator.hasNext && that.hasNext) {
         val dis = iterator.next()
         val dat = that.next()
@@ -157,17 +187,21 @@ object Rewritable {
 
   implicit class RewritableAny[T <: AnyRef](val that: T) extends AnyVal {
 
-    def rewrite(rewriter: Rewriter): AnyRef = {
-      val result = rewriter.apply(that)
-      result
-    }
+    /**
+     * Single [[scala.Function1]] parameter keeps JVM bytecode compatible with both Scala 2.13 (erased
+     * `Rewriter` alias) and Scala 3 ([[Rewriter]] extends `Function1`).
+     */
+    def rewrite(rewriter: scala.Function1[AnyRef, AnyRef]): AnyRef =
+      Rewriter.fromFunction1(rewriter).apply(that)
 
     def rewrite(rewriter: RewriterWithParent, parent: Option[AnyRef]): AnyRef = {
       val result = rewriter.apply((that, parent))
       result
     }
 
-    def endoRewrite(rewriter: Rewriter): T = rewrite(rewriter).asInstanceOf[T]
+    /** JVM `endoRewrite$extension(…, Rewriter)` is added by buildtools; no Scala `Rewriter` overload (subtyping clash). */
+    def endoRewrite(rewriter: scala.Function1[AnyRef, AnyRef]): T =
+      rewrite(rewriter).asInstanceOf[T]
   }
 }
 
@@ -234,9 +268,22 @@ trait RewriterStopper {
 
 object RewriterStopper {
   val neverStop: RewriterStopper = _ => false
+
+  def stopOn[T <: AnyRef](implicit ct: ClassTag[T]): RewriterStopper = {
+    val stopOnClass = ct.runtimeClass
+    value => stopOnClass.isAssignableFrom(value.getClass)
+  }
 }
 
 object topDown {
+
+  private def applyImpl(
+    rewriter: Rewriter,
+    stopper: RewriterStopper,
+    leftToRight: Boolean,
+    cancellation: CancellationChecker
+  ): Rewriter =
+    new TopDownRewriter(rewriter, stopper, leftToRight, cancellation)
 
   private class TopDownRewriter(
     rewriter: Rewriter,
@@ -289,13 +336,31 @@ object topDown {
     }
   }
 
+  /** No default parameters (JVM bridge for older call sites); avoids Scala 3 default-accessor clashes with the [[scala.Function1]] overload. */
   def apply(
+    rewriter: Rewriter,
+    stopper: RewriterStopper,
+    leftToRight: Boolean,
+    cancellation: CancellationChecker
+  ): Rewriter =
+    applyImpl(rewriter, stopper, leftToRight, cancellation)
+
+  def apply(
+    rewriter: scala.Function1[AnyRef, AnyRef],
+    stopper: RewriterStopper = RewriterStopper.neverStop,
+    leftToRight: Boolean = true,
+    cancellation: CancellationChecker = CancellationChecker.NeverCancelled
+  ): scala.Function1[AnyRef, AnyRef] =
+    applyImpl(Rewriter.fromFunction1(rewriter), stopper, leftToRight, cancellation)
+
+  /** Prefer over [[apply]] when Scala would otherwise not choose between the [[Rewriter]] and [[scala.Function1]] overloads. */
+  def onRewriter(
     rewriter: Rewriter,
     stopper: RewriterStopper = RewriterStopper.neverStop,
     leftToRight: Boolean = true,
     cancellation: CancellationChecker = CancellationChecker.NeverCancelled
   ): Rewriter =
-    new TopDownRewriter(rewriter, stopper, leftToRight, cancellation)
+    applyImpl(rewriter, stopper, leftToRight, cancellation)
 }
 
 trait RewriterStopperWithParent {
@@ -372,12 +437,19 @@ object topDownWithParent {
   def apply(
     rewriter: RewriterWithParent,
     stopper: RewriterStopperWithParent = RewriterStopperWithParent.neverStop,
-    cancellation: CancellationChecker
+    cancellation: CancellationChecker = CancellationChecker.NeverCancelled
   ): Rewriter =
     new TopDownWithParentRewriter(rewriter, stopper, cancellation)
 }
 
 object bottomUp {
+
+  private def applyImpl(
+    rewriter: Rewriter,
+    stopper: RewriterStopper,
+    cancellation: CancellationChecker
+  ): Rewriter =
+    new BottomUpRewriter(rewriter, stopper, cancellation)
 
   private class BottomUpRewriter(rewriter: Rewriter, stopper: RewriterStopper, cancellation: CancellationChecker)
       extends Rewriter {
@@ -424,17 +496,31 @@ object bottomUp {
 
   def apply(
     rewriter: Rewriter,
+    stopper: RewriterStopper,
+    cancellation: CancellationChecker
+  ): Rewriter =
+    applyImpl(rewriter, stopper, cancellation)
+
+  def apply(
+    rewriter: scala.Function1[AnyRef, AnyRef],
+    stopper: RewriterStopper = RewriterStopper.neverStop,
+    cancellation: CancellationChecker = CancellationChecker.NeverCancelled
+  ): scala.Function1[AnyRef, AnyRef] =
+    applyImpl(Rewriter.fromFunction1(rewriter), stopper, cancellation)
+
+  def onRewriter(
+    rewriter: Rewriter,
     stopper: RewriterStopper = RewriterStopper.neverStop,
     cancellation: CancellationChecker = CancellationChecker.NeverCancelled
   ): Rewriter =
-    new BottomUpRewriter(rewriter, stopper, cancellation)
+    applyImpl(rewriter, stopper, cancellation)
 }
 
 object bottomUpWithParent {
 
   private class BottomUpWithParentRewriter(
     rewriter: RewriterWithParent,
-    stopper: AnyRef => Boolean,
+    stopper: RewriterStopper,
     cancellation: CancellationChecker
   ) extends Rewriter {
 
@@ -473,7 +559,7 @@ object bottomUpWithParent {
         }
       } else {
         val next = currentJobs.head
-        if (stopper(next)) {
+        if (stopper.shouldStop(next)) {
           stack.pop() match {
             case (job :: jobs, doneJobs) => stack.push((jobs, doneJobs += job))
             case _                       => throw new IllegalStateException("No jobs")
@@ -488,13 +574,23 @@ object bottomUpWithParent {
 
   def apply(
     rewriter: RewriterWithParent,
-    stopper: AnyRef => Boolean = _ => false,
+    stopper: RewriterStopper = RewriterStopper.neverStop,
     cancellation: CancellationChecker
   ): Rewriter =
     new BottomUpWithParentRewriter(rewriter, stopper, cancellation)
 }
 
 object bottomUpWithRecorder {
+
+  private val noopRecorder: (AnyRef, AnyRef) => Unit = (a: AnyRef, b: AnyRef) => ()
+
+  private def applyImpl(
+    rewriter: Rewriter,
+    stopper: RewriterStopper,
+    recorder: (AnyRef, AnyRef) => Unit,
+    cancellation: CancellationChecker
+  ): Rewriter =
+    new BottomUpRewriter(rewriter, stopper, recorder, cancellation)
 
   private class BottomUpRewriter(
     rewriter: Rewriter,
@@ -547,9 +643,46 @@ object bottomUpWithRecorder {
 
   def apply(
     rewriter: Rewriter,
-    stopper: RewriterStopper = RewriterStopper.neverStop,
-    recorder: (AnyRef, AnyRef) => Unit = (_, _) => (),
+    stopper: RewriterStopper,
+    recorder: (AnyRef, AnyRef) => Unit,
     cancellation: CancellationChecker
   ): Rewriter =
-    new BottomUpRewriter(rewriter, stopper, recorder, cancellation)
+    applyImpl(rewriter, stopper, recorder, cancellation)
+
+  def apply(
+    rewriter: scala.Function1[AnyRef, AnyRef],
+    stopper: RewriterStopper = RewriterStopper.neverStop,
+    recorder: (AnyRef, AnyRef) => Unit = noopRecorder,
+    cancellation: CancellationChecker
+  ): scala.Function1[AnyRef, AnyRef] =
+    applyImpl(Rewriter.fromFunction1(rewriter), stopper, recorder, cancellation)
+
+  def onRewriter(
+    rewriter: Rewriter,
+    stopper: RewriterStopper = RewriterStopper.neverStop,
+    recorder: (AnyRef, AnyRef) => Unit = noopRecorder,
+    cancellation: CancellationChecker
+  ): Rewriter =
+    applyImpl(rewriter, stopper, recorder, cancellation)
+}
+
+private object RewriterMergeHelpers {
+
+  def mergeTopDown(rewriters: Seq[Rewriter.TopDownMergeableRewriter]): Rewriter = {
+    new Rewriter {
+      override def apply(v1: AnyRef): AnyRef = instance.apply(v1)
+
+      private val instance =
+        topDown.onRewriter(Rewriter(rewriters.map(_.innerRewriter).reduce(_ andThen _)))
+    }
+  }
+
+  def mergeBottomUp(rewriters: Seq[Rewriter.BottomUpMergeableRewriter]): Rewriter = {
+    new Rewriter {
+      override def apply(v1: AnyRef): AnyRef = instance.apply(v1)
+
+      private val instance =
+        bottomUp.onRewriter(Rewriter(rewriters.map(_.innerRewriter).reduce(_ andThen _)))
+    }
+  }
 }

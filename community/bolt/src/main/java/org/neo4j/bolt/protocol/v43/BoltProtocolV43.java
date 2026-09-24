@@ -21,15 +21,15 @@ package org.neo4j.bolt.protocol.v43;
 
 import java.util.Collections;
 import java.util.Set;
-import org.neo4j.bolt.negotiation.ProtocolVersion;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 import org.neo4j.bolt.protocol.common.connector.connection.Connection;
 import org.neo4j.bolt.protocol.common.connector.connection.Feature;
 import org.neo4j.bolt.protocol.common.message.decoder.connection.LegacyRouteMessageDecoder;
 import org.neo4j.bolt.protocol.common.message.encoder.FailureMessageEncoder;
-import org.neo4j.bolt.protocol.common.message.request.RequestMessage;
-import org.neo4j.bolt.protocol.common.message.response.ResponseMessage;
 import org.neo4j.bolt.protocol.v40.message.encoder.FailureMessageEncoderV40;
 import org.neo4j.bolt.protocol.v42.BoltProtocolV42;
+import org.neo4j.boltmessages.request.RequestMessage;
+import org.neo4j.boltmessages.response.ResponseMessage;
 import org.neo4j.packstream.struct.StructRegistry;
 
 /**

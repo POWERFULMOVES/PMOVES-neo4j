@@ -22,8 +22,7 @@ import org.neo4j.cypher.internal.ast.Match
 import org.neo4j.cypher.internal.ast.Statement
 import org.neo4j.cypher.internal.ast.Statements
 import org.neo4j.cypher.internal.ast.UnaliasedReturnItem
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher25
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
+import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
 import org.neo4j.cypher.internal.ast.test.util.AstParsingTestBase
 import org.neo4j.cypher.internal.ast.test.util.LegacyAstParsingTestSupport
 import org.neo4j.cypher.internal.expressions.AllIterablePredicate
@@ -35,7 +34,7 @@ import org.neo4j.cypher.internal.expressions.MatchMode
 import org.neo4j.cypher.internal.expressions.NamedPatternPart
 import org.neo4j.cypher.internal.expressions.Pattern
 import org.neo4j.cypher.internal.expressions.PatternPart
-import org.neo4j.cypher.internal.expressions.PatternPartWithSelector
+import org.neo4j.cypher.internal.expressions.PrefixedPatternPart
 import org.neo4j.cypher.internal.expressions.SemanticDirection.INCOMING
 import org.neo4j.cypher.internal.expressions.SemanticDirection.OUTGOING
 import org.neo4j.cypher.internal.expressions.SignedDecimalIntegerLiteral
@@ -343,7 +342,7 @@ class CollectExpressionParserTest extends AstParsingTestBase with LegacyAstParsi
           optional = false,
           matchMode = MatchMode.default(pos),
           Pattern.ForMatch(Seq(
-            PatternPartWithSelector(
+            PrefixedPatternPart(
               PatternPart.AllPaths()(pos),
               NamedPatternPart(
                 varFor("pt"),
@@ -358,6 +357,7 @@ class CollectExpressionParserTest extends AstParsingTestBase with LegacyAstParsi
             )
           ))(InputPosition(32, 1, 33)),
           Seq.empty,
+          None,
           None
         )(pos),
         return_(returnItem(
@@ -421,35 +421,19 @@ class CollectExpressionParserTest extends AstParsingTestBase with LegacyAstParsi
       return_(aliasedReturnItem(prop("p", "prop"), "a"))
     )
 
-    parsesIn[Statement] {
-      case Cypher25 => _.toAst(
-          singleQuery(
-            match_(
-              nodePat(name = Some("m")),
-              where = Some(where(eq(
-                CollectExpression(
-                  union(lhs, rhs)
-                )(InputPosition(16, 2, 7), None, None),
-                listOfInt(1, 2, 3)
-              )))
-            ),
-            return_(variableReturnItem("m"))
-          )
-        )
-      case _ => _.toAst(
-          singleQuery(
-            match_(
-              nodePat(name = Some("m")),
-              where = Some(where(eq(
-                CollectExpression(
-                  union(lhs, rhs)
-                )(InputPosition(16, 2, 7), None, None),
-                listOfInt(1, 2, 3)
-              )))
-            ),
-            return_(variableReturnItem("m"))
-          )
-        )
+    parsesTo[Statement] {
+      singleQuery(
+        match_(
+          nodePat(name = Some("m")),
+          where = Some(where(eq(
+            CollectExpression(
+              union(lhs, rhs)
+            )(InputPosition(16, 2, 7), None, None),
+            listOfInt(1, 2, 3)
+          )))
+        ),
+        return_(variableReturnItem("m"))
+      )
     }
   }
 
@@ -589,10 +573,14 @@ class CollectExpressionParserTest extends AstParsingTestBase with LegacyAstParsi
       |WHERE COLLECT { MATCH (b) RETURN b WHERE true } = [1, 2, 3]
       |RETURN m""".stripMargin
   ) {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => identity
-      case _ => _.withSyntaxError(
+    parseIn[Statements] {
+      case Cypher5 => _.withSyntaxError(
           """Invalid input 'WHERE': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or '}' (line 2, column 36 (offset: 45))
+            |"WHERE COLLECT { MATCH (b) RETURN b WHERE true } = [1, 2, 3]"
+            |                                    ^""".stripMargin
+        )
+      case _ => _.withSyntaxError(
+          """Invalid input 'WHERE': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or '}' (line 2, column 36 (offset: 45))
             |"WHERE COLLECT { MATCH (b) RETURN b WHERE true } = [1, 2, 3]"
             |                                    ^""".stripMargin
         )

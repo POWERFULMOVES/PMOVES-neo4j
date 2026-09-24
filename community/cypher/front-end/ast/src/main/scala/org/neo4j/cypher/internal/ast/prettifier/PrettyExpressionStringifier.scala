@@ -17,7 +17,6 @@
 package org.neo4j.cypher.internal.ast.prettifier
 
 import org.neo4j.cypher.internal.expressions.Expression
-import org.neo4j.cypher.internal.expressions.Namespace
 import org.neo4j.cypher.internal.expressions.NodePattern
 import org.neo4j.cypher.internal.expressions.ParenthesizedPath
 import org.neo4j.cypher.internal.expressions.PathConcatenation
@@ -29,10 +28,11 @@ import org.neo4j.cypher.internal.expressions.PatternPart
 import org.neo4j.cypher.internal.expressions.QuantifiedPath
 import org.neo4j.cypher.internal.expressions.RelationshipChain
 import org.neo4j.cypher.internal.expressions.RelationshipPattern
-import org.neo4j.cypher.internal.expressions.SymbolicName
 import org.neo4j.cypher.internal.label_expressions.LabelExpression
+import org.neo4j.cypher.internal.util.Namespace
 import org.neo4j.cypher.internal.util.Rewritable.RewritableAny
 import org.neo4j.cypher.internal.util.Rewriter.lift
+import org.neo4j.cypher.internal.util.SymbolicName
 import org.neo4j.cypher.internal.util.helpers.LineBreakRemover.removeLineBreaks
 import org.neo4j.cypher.internal.util.helpers.NameDeduplicator.eraseGeneratedNamesOnTree
 import org.neo4j.cypher.internal.util.helpers.NameDeduplicator.removeGeneratedNamesAndParams
@@ -57,11 +57,23 @@ private class PrettyExpressionStringifier(inner: ExpressionStringifier) extends 
     }
   }
 
-  override def apply(expression: Expression): String = inner.apply(expression.endoRewrite(simplify))
+  override def apply(expression: Expression, shouldBacktickEmpty: Boolean): String =
+    inner.apply(expression.endoRewrite(simplify), shouldBacktickEmpty)
 
-  override def apply(name: SymbolicName): String = inner.apply(name.endoRewrite(simplify))
+  override def apply(expression: Expression): String =
+    inner.apply(expression.endoRewrite(simplify))
 
-  override def apply(namespace: Namespace): String = inner.apply(namespace.endoRewrite(simplify))
+  override def apply(name: SymbolicName, shouldBacktickEmpty: Boolean): String =
+    inner.apply(name.endoRewrite(simplify), shouldBacktickEmpty)
+
+  override def apply(name: SymbolicName): String =
+    inner.apply(name.endoRewrite(simplify))
+
+  override def apply(namespace: Namespace, shouldBacktickEmpty: Boolean): String =
+    inner.apply(namespace.endoRewrite(simplify), shouldBacktickEmpty)
+
+  override def apply(namespace: Namespace): String =
+    inner.apply(namespace.endoRewrite(simplify))
 
   override def patterns: PatternStringifier = new PatternStringifier {
     private val innerPatterns = inner.patterns
@@ -95,6 +107,8 @@ private class PrettyExpressionStringifier(inner: ExpressionStringifier) extends 
   }
 
   override def backtick(in: String): String = inner.backtick(in)
+
+  override def backtick(in: String, shouldBacktickEmpty: Boolean): String = inner.backtick(in, shouldBacktickEmpty)
 
   override def quote(txt: String): String = inner.quote(txt)
 

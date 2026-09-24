@@ -27,11 +27,11 @@ import java.io.IOException;
 import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
 import org.neo4j.io.fs.FileSystemAbstraction;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
-import org.neo4j.kernel.impl.transaction.log.files.LogFilesMatcher;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.test.extension.DbmsExtension;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.files.LogFilesMatcher;
 
 @DbmsExtension
 public class LogFileMatcherIT {
@@ -50,8 +50,7 @@ public class LogFileMatcherIT {
 
         LogFilesMatcher logFilesMatcher = new LogFilesMatcher(fs, logsDirectory);
         assertTrue(logFilesMatcher.hasAnyLogFiles());
-        assertThat(logFiles.getCheckpointFile().getDetachedCheckpointFiles())
-                .isEqualTo(logFilesMatcher.getCheckpointLogFiles());
+        assertThat(logFiles.getCheckpointFile().getMatchedFiles()).isEqualTo(logFilesMatcher.getCheckpointLogFiles());
         assertThat(logFiles.getLogFile().getMatchedFiles()).isEqualTo(logFilesMatcher.getTransactionLogFiles());
     }
 
@@ -61,7 +60,7 @@ public class LogFileMatcherIT {
 
         LogFilesMatcher logFilesMatcher = new LogFilesMatcher(fs, logsDirectory);
         assertFalse(logFilesMatcher.hasAnyLogFiles());
-        assertThat(logFiles.getCheckpointFile().getDetachedCheckpointFiles())
+        assertThat(logFiles.getCheckpointFile().getMatchedFiles())
                 .isNotEqualTo(logFilesMatcher.getCheckpointLogFiles());
         assertThat(logFiles.getLogFile().getMatchedFiles()).isNotEqualTo(logFilesMatcher.getTransactionLogFiles());
     }
@@ -74,6 +73,7 @@ public class LogFileMatcherIT {
         assertFalse(logFilesMatcher.isLogFile(Path.of("foo")));
         assertFalse(logFilesMatcher.isLogFile(logsDirectory));
         assertTrue(logFilesMatcher.isLogFile(logFiles.getCheckpointFile().getCurrentFile()));
-        assertTrue(logFilesMatcher.isLogFile(logFiles.getLogFile().getHighestLogFile()));
+        assertTrue(logFilesMatcher.isLogFile(
+                logFiles.getLogFile().getLogRangeInfo().highestFile()));
     }
 }

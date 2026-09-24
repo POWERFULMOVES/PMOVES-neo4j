@@ -16,6 +16,7 @@
  */
 package org.neo4j.cypher.internal.ast.factory.ddl
 
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.AlterLocalDatabaseAlias
 import org.neo4j.cypher.internal.ast.AlterRemoteDatabaseAlias
 import org.neo4j.cypher.internal.ast.CreateLocalDatabaseAlias
@@ -25,13 +26,19 @@ import org.neo4j.cypher.internal.ast.IfExistsDoNothing
 import org.neo4j.cypher.internal.ast.IfExistsInvalidSyntax
 import org.neo4j.cypher.internal.ast.IfExistsReplace
 import org.neo4j.cypher.internal.ast.IfExistsThrowError
+import org.neo4j.cypher.internal.ast.NamespacedName
+import org.neo4j.cypher.internal.ast.OidcCredentialForwarding
+import org.neo4j.cypher.internal.ast.RemoteAliasStoredCredentials
 import org.neo4j.cypher.internal.ast.ShowAliases
 import org.neo4j.cypher.internal.ast.Statements
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
-import org.neo4j.cypher.internal.parser.common.ast.factory.ASTExceptionFactory
+import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
 import org.neo4j.cypher.internal.util.symbols.CTMap
+import org.neo4j.cypher.internal.util.test_helpers.GqlExceptionMatchers.gqlStatus
+import org.neo4j.gqlstatus.GqlStatusInfoCodes
 
 class AliasAdministrationCommandParserTest extends AdministrationAndSchemaCommandParserTestBase {
+
+  override protected def ignorePrettifier: Boolean = true
 
   // CREATE ALIAS
 
@@ -60,106 +67,124 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
   }
 
   test("CREATE OR REPLACE ALIAS alias IF NOT EXISTS FOR DATABASE target") {
-    assertAst(CreateLocalDatabaseAlias(
-      namespacedName("alias"),
-      namespacedName("target"),
-      IfExistsInvalidSyntax
-    )(defaultPos))
+    assertAstVersionBased(fromCypher5 =>
+      CreateLocalDatabaseAlias(
+        namespacedName(fromCypher5, "alias"),
+        namespacedName(fromCypher5, "target"),
+        IfExistsInvalidSyntax
+      )(defaultPos)
+    )
   }
 
   test("CREATE ALIAS alias.name FOR DATABASE db.name") {
-    assertAst(
+    assertAstVersionBased(fromCypher5 =>
       CreateLocalDatabaseAlias(
-        namespacedName("alias", "name"),
-        namespacedName("db", "name"),
+        namespacedName(fromCypher5, "alias", "name"),
+        namespacedName(fromCypher5, "db", "name"),
         IfExistsThrowError
       )(defaultPos)
     )
   }
 
   test("CREATE ALIAS alias . name FOR DATABASE db.name") {
-    assertAst(
+    assertAstVersionBased(fromCypher5 =>
       CreateLocalDatabaseAlias(
-        namespacedName("alias", "name"),
-        namespacedName("db", "name"),
+        namespacedName(fromCypher5, "alias", "name"),
+        namespacedName(fromCypher5, "db", "name"),
         IfExistsThrowError
       )(defaultPos)
     )
   }
 
   test("CREATE ALIAS IF FOR DATABASE db.name") {
-    assertAst(CreateLocalDatabaseAlias(
-      namespacedName("IF"),
-      namespacedName("db", "name"),
-      IfExistsThrowError
-    )(defaultPos))
+    assertAstVersionBased(fromCypher5 =>
+      CreateLocalDatabaseAlias(
+        namespacedName(fromCypher5, "IF"),
+        namespacedName(fromCypher5, "db", "name"),
+        IfExistsThrowError
+      )(defaultPos)
+    )
   }
 
   test("CREATE ALIAS composite.alias FOR DATABASE db") {
-    assertAst(
+    assertAstVersionBased(fromCypher5 =>
       CreateLocalDatabaseAlias(
-        namespacedName("composite", "alias"),
-        namespacedName("db"),
+        namespacedName(fromCypher5, "composite", "alias"),
+        namespacedName(fromCypher5, "db"),
         IfExistsThrowError
       )(defaultPos)
     )
   }
 
   test("CREATE ALIAS alias.alias FOR DATABASE db") {
-    assertAst(
+    assertAstVersionBased(fromCypher5 =>
       CreateLocalDatabaseAlias(
-        namespacedName("alias", "alias"),
-        namespacedName("db"),
+        namespacedName(fromCypher5, "alias", "alias"),
+        namespacedName(fromCypher5, "db"),
         IfExistsThrowError
       )(defaultPos)
     )
   }
 
   test("CREATE ALIAS alias.if IF NOT EXISTS FOR DATABASE db") {
-    assertAst(
+    assertAstVersionBased(fromCypher5 =>
       CreateLocalDatabaseAlias(
-        namespacedName("alias", "if"),
-        namespacedName("db"),
+        namespacedName(fromCypher5, "alias", "if"),
+        namespacedName(fromCypher5, "db"),
         IfExistsDoNothing
       )(defaultPos)
     )
   }
 
   test("CREATE ALIAS very.long.alias IF NOT EXISTS FOR DATABASE db") {
-    assertAst(
+    assertAstVersionBased(fromCypher5 =>
       CreateLocalDatabaseAlias(
-        namespacedName("very", "long", "alias"),
-        namespacedName("db"),
+        namespacedName(fromCypher5, "very", "long", "alias"),
+        namespacedName(fromCypher5, "db"),
         IfExistsDoNothing
       )(defaultPos)
     )
   }
 
   test("CREATE ALIAS `a`.b.c.d IF NOT EXISTS FOR DATABASE db") {
-    assertAst(
-      CreateLocalDatabaseAlias(
-        namespacedName("a", "b", "c", "d"),
-        namespacedName("db"),
-        IfExistsDoNothing
-      )(defaultPos)
-    )
+    parsesIn[Statements] {
+      case Cypher5 => _.toAstPositioned(
+          CreateLocalDatabaseAlias(
+            NamespacedName(List("b", "c", "d"), Some("a"))(pos),
+            NamespacedName(List("db"), None)(pos),
+            IfExistsDoNothing
+          )(defaultPos)
+        )
+      case _ => _.withSyntaxError(
+          """Incorrectly formatted graph reference '`a`.b.c.d'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 14 (offset: 13))
+            |"CREATE ALIAS `a`.b.c.d IF NOT EXISTS FOR DATABASE db"
+            |              ^""".stripMargin
+        )
+    }
   }
 
   test("CREATE ALIAS a.b.c.`d` IF NOT EXISTS FOR DATABASE db") {
-    assertAst(
-      CreateLocalDatabaseAlias(
-        namespacedName("a", "b", "c", "d"),
-        namespacedName("db"),
-        IfExistsDoNothing
-      )(defaultPos)
-    )
+    parsesIn[Statements] {
+      case Cypher5 => _.toAstPositioned(
+          CreateLocalDatabaseAlias(
+            namespacedName("a", "b", "c", "d"),
+            namespacedName("db"),
+            IfExistsDoNothing
+          )(defaultPos)
+        )
+      case _ => _.withSyntaxError(
+          """Incorrectly formatted graph reference 'a.b.c.`d`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 14 (offset: 13))
+            |"CREATE ALIAS a.b.c.`d` IF NOT EXISTS FOR DATABASE db"
+            |              ^""".stripMargin
+        )
+    }
   }
 
   test("CREATE ALIAS alias.for FOR DATABASE db") {
-    assertAst(
+    assertAstVersionBased(fromCypher5 =>
       CreateLocalDatabaseAlias(
-        namespacedName("alias", "for"),
-        namespacedName("db"),
+        namespacedName(fromCypher5, "alias", "for"),
+        namespacedName(fromCypher5, "db"),
         IfExistsThrowError
       )(defaultPos)
     )
@@ -241,133 +266,298 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
   }
 
   test("CREATE ALIAS IF") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.withMessage("""Invalid input '': expected ".", "FOR" or "IF" (line 1, column 16 (offset: 15))""")
-      case _ => _.withMessage(
-          """Invalid input '': expected a database name, 'FOR DATABASE' or 'IF NOT EXISTS' (line 1, column 16 (offset: 15))
-            |"CREATE ALIAS IF"
-            |                ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withMessage(
+      """Invalid input '': expected a database name, 'FOR DATABASE' or 'IF NOT EXISTS' (line 1, column 16 (offset: 15))
+        |"CREATE ALIAS IF"
+        |                ^""".stripMargin
+    )
   }
 
   test("CREATE ALIAS") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          """Invalid input '': expected a parameter or an identifier (line 1, column 13 (offset: 12))"""
-        )
-      case _ => _.withSyntaxError(
-          """Invalid input '': expected a database name, a graph pattern or a parameter (line 1, column 13 (offset: 12))
-            |"CREATE ALIAS"
-            |             ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '': expected a database name, a graph pattern or a parameter (line 1, column 13 (offset: 12))
+        |"CREATE ALIAS"
+        |             ^""".stripMargin
+    )
   }
 
   test("CREATE ALIAS #Malmö FOR DATABASE db1") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          s"""Invalid input '#': expected a parameter or an identifier (line 1, column 14 (offset: 13))""".stripMargin
-        )
-      case _ => _.withMessage(
-          """Invalid input '#': expected a database name, a graph pattern or a parameter (line 1, column 14 (offset: 13))
-            |"CREATE ALIAS #Malmö FOR DATABASE db1"
-            |              ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withMessage(
+      """Invalid input '#': expected a database name, a graph pattern or a parameter (line 1, column 14 (offset: 13))
+        |"CREATE ALIAS #Malmö FOR DATABASE db1"
+        |              ^""".stripMargin
+    )
   }
 
   test("CREATE ALIAS Mal#mö FOR DATABASE db1") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.withMessageStart(s"""Invalid input '#': expected ".", "FOR" or "IF" (line 1, column 17 (offset: 16))""")
-      case _ => _.withMessage(
-          """Invalid input '#': expected a database name, 'FOR DATABASE' or 'IF NOT EXISTS' (line 1, column 17 (offset: 16))
-            |"CREATE ALIAS Mal#mö FOR DATABASE db1"
-            |                 ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withMessage(
+      """Invalid input '#': expected a database name, 'FOR DATABASE' or 'IF NOT EXISTS' (line 1, column 17 (offset: 16))
+        |"CREATE ALIAS Mal#mö FOR DATABASE db1"
+        |                 ^""".stripMargin
+    )
   }
 
   test("CREATE ALIAS name FOR DATABASE") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          s"""Invalid input '': expected a parameter or an identifier (line 1, column 31 (offset: 30))"""
-        )
-      case _ => _.withSyntaxError(
-          """Invalid input '': expected a database name or a parameter (line 1, column 31 (offset: 30))
-            |"CREATE ALIAS name FOR DATABASE"
-            |                               ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '': expected a database name or a parameter (line 1, column 31 (offset: 30))
+        |"CREATE ALIAS name FOR DATABASE"
+        |                               ^""".stripMargin
+    )
   }
 
   test("""CREATE ALIAS name FOR DATABASE target PROPERTY { key: 'val' }""") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          """Invalid input 'PROPERTY': expected ".", "AT", "PROPERTIES" or <EOF> (line 1, column 39 (offset: 38))"""
-        )
-      case _ => _.withSyntaxError(
-          """Invalid input 'PROPERTY': expected a database name, 'AT', 'PROPERTIES' or <EOF> (line 1, column 39 (offset: 38))
-            |"CREATE ALIAS name FOR DATABASE target PROPERTY { key: 'val' }"
-            |                                       ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'PROPERTY': expected a database name, 'AT', 'PROPERTIES' or <EOF> (line 1, column 39 (offset: 38))
+        |"CREATE ALIAS name FOR DATABASE target PROPERTY { key: 'val' }"
+        |                                       ^""".stripMargin
+    )
   }
 
   test("""CREATE ALIAS name FOR DATABASE target PROPERTIES""") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.withMessageStart("Invalid input '': expected \"{\" or a parameter (line 1, column 49 (offset: 48))")
-      case _ => _.withSyntaxError(
-          """Invalid input '': expected a parameter or '{' (line 1, column 49 (offset: 48))
-            |"CREATE ALIAS name FOR DATABASE target PROPERTIES"
-            |                                                 ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '': expected a parameter or '{' (line 1, column 49 (offset: 48))
+        |"CREATE ALIAS name FOR DATABASE target PROPERTIES"
+        |                                                 ^""".stripMargin
+    )
   }
 
   test("CREATE ALIAS `a`.`b`.`c` FOR DATABASE db") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input ``a`.`b`.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 14 (offset: 13))"
-    )
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input ``a`.`b`.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 14 (offset: 13))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input '`a`.`b`.`c`' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          "Incorrectly formatted graph reference '`a`.`b`.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 14 (offset: 13))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference '`a`.`b`.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 
   test("CREATE ALIAS `a`.b.`c` FOR DATABASE db") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input ``a`.b.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 14 (offset: 13))"
-    )
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input ``a`.b.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 14 (offset: 13))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input '`a`.b.`c`' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          "Incorrectly formatted graph reference '`a`.b.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 14 (offset: 13))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference '`a`.b.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 
   test("CREATE ALIAS `a`.b.c.`d` FOR DATABASE db") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input ``a`.b.c.`d`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 14 (offset: 13))"
-    )
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input ``a`.b.c.`d`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 14 (offset: 13))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input '`a`.b.c.`d`' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          "Incorrectly formatted graph reference '`a`.b.c.`d`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 14 (offset: 13))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference '`a`.b.c.`d`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 
   test("CREATE ALIAS a.`b`.`c` FOR DATABASE db") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input `a.`b`.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 14 (offset: 13))"
-    )
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input `a.`b`.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 14 (offset: 13))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input 'a.`b`.`c`' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          "Incorrectly formatted graph reference 'a.`b`.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 14 (offset: 13))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference 'a.`b`.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 
   test("CREATE ALIAS `a`.`b`.c FOR DATABASE db") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input ``a`.`b`.c` for name. Expected name to contain at most two components separated by `.`. (line 1, column 14 (offset: 13))"
-    )
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input ``a`.`b`.c` for name. Expected name to contain at most two components separated by `.`. (line 1, column 14 (offset: 13))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input '`a`.`b`.c' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          "Incorrectly formatted graph reference '`a`.`b`.c'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 14 (offset: 13))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference '`a`.`b`.c'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 
   test("CREATE ALIAS a.`b`.c FOR DATABASE db") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input `a.`b`.c` for name. Expected name to contain at most two components separated by `.`. (line 1, column 14 (offset: 13))"
-    )
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input `a.`b`.c` for name. Expected name to contain at most two components separated by `.`. (line 1, column 14 (offset: 13))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input 'a.`b`.c' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          "Incorrectly formatted graph reference 'a.`b`.c'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 14 (offset: 13))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference 'a.`b`.c'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 
   test("CREATE ALIAS `a`.`b` FOR DATABASE `db.cd`.`ef.gh`.d") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input ``db.cd`.`ef.gh`.d` for name. Expected name to contain at most two components separated by `.`. (line 1, column 35 (offset: 34))"
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input ``db.cd`.`ef.gh`.d` for name. Expected name to contain at most two components separated by `.`. (line 1, column 35 (offset: 34))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input '`db.cd`.`ef.gh`.d' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          """Incorrectly formatted graph reference '`a`.`b`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 14 (offset: 13))
+            |"CREATE ALIAS `a`.`b` FOR DATABASE `db.cd`.`ef.gh`.d"
+            |              ^""".stripMargin
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference '`a`.`b`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
+  }
+
+  test("CREATE ALIAS name FOR DATABASE target DEFAULT LANGUAGE CYPHER 5") {
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'DEFAULT': expected a database name, 'AT', 'PROPERTIES' or <EOF> (line 1, column 39 (offset: 38))
+        |"CREATE ALIAS name FOR DATABASE target DEFAULT LANGUAGE CYPHER 5"
+        |                                       ^""".stripMargin
     )
+  }
+
+  test("CREATE ALIAS name FOR DATABASE target PROPERTIES {} DEFAULT LANGUAGE CYPHER 25") {
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'DEFAULT': expected <EOF> (line 1, column 53 (offset: 52))
+        |"CREATE ALIAS name FOR DATABASE target PROPERTIES {} DEFAULT LANGUAGE CYPHER 25"
+        |                                                     ^""".stripMargin
+    )
+  }
+
+  test("CREATE ALIAS name FOR DATABASE target SET DEFAULT LANGUAGE CYPHER 25") {
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'SET': expected a database name, 'AT', 'PROPERTIES' or <EOF> (line 1, column 39 (offset: 38))
+        |"CREATE ALIAS name FOR DATABASE target SET DEFAULT LANGUAGE CYPHER 25"
+        |                                       ^""".stripMargin
+    )
+  }
+
+  test("CREATE ALIAS alias FOR DATABASE target USER user PASSWORD 'password'") {
+    failsParsing[Statements]
+      .withSyntaxError(
+        """Invalid input 'USER': expected a database name, 'AT', 'PROPERTIES' or <EOF> (line 1, column 40 (offset: 39))
+          |"CREATE ALIAS alias FOR DATABASE target USER user PASSWORD 'password'"
+          |                                        ^""".stripMargin
+      ).withSyntaxErrorGqlStatus(gqlStatus(
+        GqlStatusInfoCodes.STATUS_42I06,
+        "error: syntax error or access rule violation - invalid input. Invalid input 'USER', expected: a database name, 'AT', 'PROPERTIES' or <EOF>."
+      ))
+  }
+
+  test("CREATE ALIAS alias FOR DATABASE target OIDC CREDENTIAL FORWARDING") {
+    failsParsing[Statements]
+      .withSyntaxError(
+        """Invalid input 'OIDC': expected a database name, 'AT', 'PROPERTIES' or <EOF> (line 1, column 40 (offset: 39))
+          |"CREATE ALIAS alias FOR DATABASE target OIDC CREDENTIAL FORWARDING"
+          |                                        ^""".stripMargin
+      ).withSyntaxErrorGqlStatus(gqlStatus(
+        GqlStatusInfoCodes.STATUS_42I06,
+        "error: syntax error or access rule violation - invalid input. Invalid input 'OIDC', expected: a database name, 'AT', 'PROPERTIES' or <EOF>."
+      ))
   }
 
   // CREATE REMOTE ALIAS
@@ -378,22 +568,155 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
       namespacedName("target"),
       IfExistsThrowError,
       Left("neo4j://serverA:7687"),
-      literalString("user"),
-      sensitiveLiteral("password")
+      RemoteAliasStoredCredentials(
+        literalString("user"),
+        sensitiveLiteral("password")
+      )(pos)
     )(defaultPos))
+  }
+
+  test("""CREATE ALIAS name FOR DATABASE target AT "neo4j://serverA:7687" OIDC CREDENTIAL FORWARDING""") {
+    parsesIn[Statements] {
+      case Cypher5 => _.withSyntaxError(
+          """Invalid input 'OIDC': expected 'USER' (line 1, column 65 (offset: 64))
+            |"CREATE ALIAS name FOR DATABASE target AT "neo4j://serverA:7687" OIDC CREDENTIAL FORWARDING"
+            |                                                                 ^""".stripMargin
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42I06,
+              "error: syntax error or access rule violation - invalid input. Invalid input 'OIDC', expected: 'USER'."
+            )
+          )
+      case _ => _.toAstPositioned(
+          CreateRemoteDatabaseAlias(
+            namespacedName("name"),
+            namespacedName("target"),
+            IfExistsThrowError,
+            Left("neo4j://serverA:7687"),
+            OidcCredentialForwarding()(pos)
+          )(defaultPos)
+        )
+    }
+  }
+
+  test("""CREATE ALIAS name FOR DATABASE target AT "neo4j://serverA:7687"""") {
+    parsesIn[Statements] {
+      case Cypher5 => _.withSyntaxError(
+          """Invalid input '': expected 'USER' (line 1, column 64 (offset: 63))
+            |"CREATE ALIAS name FOR DATABASE target AT "neo4j://serverA:7687""
+            |                                                                ^""".stripMargin
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42I06,
+              "error: syntax error or access rule violation - invalid input. Invalid input '', expected: 'USER'."
+            )
+          )
+      case _ => _.withSyntaxError(
+          """Invalid input '': expected 'OIDC CREDENTIAL FORWARDING' or 'USER' (line 1, column 64 (offset: 63))
+            |"CREATE ALIAS name FOR DATABASE target AT "neo4j://serverA:7687""
+            |                                                                ^""".stripMargin
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42I06,
+              "error: syntax error or access rule violation - invalid input. Invalid input '', expected: 'OIDC CREDENTIAL FORWARDING' or 'USER'."
+            )
+          )
+    }
+  }
+
+  test(
+    """CREATE ALIAS name FOR DATABASE target AT "neo4j://serverA:7687" USER user PASSWORD 'password'
+      |OIDC CREDENTIAL FORWARDING""".stripMargin
+  ) {
+    val offset = if (testName.contains("\r")) 95 else 94
+    parsesIn[Statements] {
+      case Cypher5 => _.withSyntaxError(
+          s"""Invalid input 'OIDC': expected 'DEFAULT LANGUAGE CYPHER', 'DRIVER', 'PROPERTIES' or <EOF> (line 2, column 1 (offset: $offset))
+             |"OIDC CREDENTIAL FORWARDING"
+             | ^""".stripMargin
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42I06,
+              "error: syntax error or access rule violation - invalid input. Invalid input 'OIDC', expected: 'DEFAULT LANGUAGE CYPHER', 'DRIVER', 'PROPERTIES' or <EOF>."
+            )
+          )
+      case _ => _.withSyntaxError(
+          s"""Invalid input 'OIDC': expected 'DEFAULT LANGUAGE CYPHER', 'DRIVER', 'PROPERTIES' or <EOF> (line 2, column 1 (offset: $offset))
+             |"OIDC CREDENTIAL FORWARDING"
+             | ^""".stripMargin
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42I06,
+              "error: syntax error or access rule violation - invalid input. Invalid input 'OIDC', expected: 'DEFAULT LANGUAGE CYPHER', 'DRIVER', 'PROPERTIES' or <EOF>."
+            )
+          )
+    }
+  }
+
+  test(
+    """CREATE ALIAS name FOR DATABASE target AT "neo4j://serverA:7687" OIDC CREDENTIAL FORWARDING
+      |USER user PASSWORD 'password'""".stripMargin
+  ) {
+    val offsetForLine2 = if (testName.contains("\r")) 92 else 91
+    parsesIn[Statements] {
+      case Cypher5 => _.withSyntaxError(
+          """Invalid input 'OIDC': expected 'USER' (line 1, column 65 (offset: 64))
+            |"CREATE ALIAS name FOR DATABASE target AT "neo4j://serverA:7687" OIDC CREDENTIAL FORWARDING"
+            |                                                                 ^""".stripMargin
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42I06,
+              "error: syntax error or access rule violation - invalid input. Invalid input 'OIDC', expected: 'USER'."
+            )
+          )
+      case _ => _.withSyntaxError(
+          s"""Invalid input 'USER': expected 'DEFAULT LANGUAGE CYPHER', 'DRIVER', 'PROPERTIES' or <EOF> (line 2, column 1 (offset: $offsetForLine2))
+             |"USER user PASSWORD 'password'"
+             | ^""".stripMargin
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42I06,
+              "error: syntax error or access rule violation - invalid input. Invalid input 'USER', expected: 'DEFAULT LANGUAGE CYPHER', 'DRIVER', 'PROPERTIES' or <EOF>."
+            )
+          )
+    }
   }
 
   test(
     """CREATE ALIAS namespace.`name.illegal` FOR DATABASE target AT "neo4j://serverA:7687" USER user PASSWORD 'password'"""
   ) {
-    assertAst(CreateRemoteDatabaseAlias(
-      namespacedName("namespace", "name.illegal"),
-      namespacedName("target"),
-      IfExistsThrowError,
-      Left("neo4j://serverA:7687"),
-      literalString("user"),
-      sensitiveLiteral("password")
-    )(defaultPos))
+    parsesIn[Statements] {
+      case Cypher5 => _.toAstPositioned(
+          CreateRemoteDatabaseAlias(
+            namespacedName("namespace", "name.illegal"),
+            namespacedName("target"),
+            IfExistsThrowError,
+            Left("neo4j://serverA:7687"),
+            RemoteAliasStoredCredentials(
+              literalString("user"),
+              sensitiveLiteral("password")
+            )(pos)
+          )(defaultPos)
+        )
+      case _ => _.withSyntaxError(
+          """Incorrectly formatted graph reference 'namespace.`name.illegal`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 14 (offset: 13))
+            |"CREATE ALIAS namespace.`name.illegal` FOR DATABASE target AT "neo4j://serverA:7687" USER user PASSWORD 'password'"
+            |              ^""".stripMargin
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference 'namespace.`name.illegal`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 
   test(
@@ -404,8 +727,10 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
       namespacedName("target"),
       IfExistsThrowError,
       Left("neo4j://serverA:7687"),
-      literalString("user"),
-      sensitiveLiteral("password")
+      RemoteAliasStoredCredentials(
+        literalString("user"),
+        sensitiveLiteral("password")
+      )(pos)
     )(defaultPos))
   }
 
@@ -415,8 +740,10 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
       namespacedName("target"),
       IfExistsThrowError,
       Left("neo4j://serverA:7687"),
-      literalString("user"),
-      sensitiveLiteral("password")
+      RemoteAliasStoredCredentials(
+        literalString("user"),
+        sensitiveLiteral("password")
+      )(pos)
     )(defaultPos))
   }
 
@@ -426,8 +753,10 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
       namespacedName("target"),
       IfExistsThrowError,
       Left(""),
-      literalString(""),
-      sensitiveLiteral("")
+      RemoteAliasStoredCredentials(
+        literalString(""),
+        sensitiveLiteral("")
+      )(pos)
     )(defaultPos))
   }
 
@@ -437,8 +766,10 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
       stringParamName("target"),
       IfExistsThrowError,
       Right(stringParam("url")),
-      stringParam("user"),
-      pwParam("password")
+      RemoteAliasStoredCredentials(
+        stringParam("user"),
+        pwParam("password")
+      )(pos)
     )(defaultPos))
   }
 
@@ -450,8 +781,10 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
       namespacedName("target"),
       IfExistsDoNothing,
       Left("neo4j://serverA:7687"),
-      literalString("user"),
-      sensitiveLiteral("password")
+      RemoteAliasStoredCredentials(
+        literalString("user"),
+        sensitiveLiteral("password")
+      )(pos)
     )(defaultPos))
   }
 
@@ -459,16 +792,20 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
     """CREATE ALIAS composite.name IF NOT EXISTS FOR DATABASE target AT "neo4j://serverA:7687" USER user PASSWORD 'password'
       |PROPERTIES { key:'value', anotherkey:'anotherValue' }""".stripMargin
   ) {
-    assertAst(CreateRemoteDatabaseAlias(
-      namespacedName("composite", "name"),
-      namespacedName("target"),
-      IfExistsDoNothing,
-      Left("neo4j://serverA:7687"),
-      literalString("user"),
-      sensitiveLiteral("password"),
-      None,
-      Some(Left(Map("key" -> literalString("value"), "anotherkey" -> literalString("anotherValue"))))
-    )(defaultPos))
+    assertAstVersionBased(fromCypher5 =>
+      CreateRemoteDatabaseAlias(
+        namespacedName(fromCypher5, "composite", "name"),
+        namespacedName(fromCypher5, "target"),
+        IfExistsDoNothing,
+        Left("neo4j://serverA:7687"),
+        RemoteAliasStoredCredentials(
+          literalString("user"),
+          sensitiveLiteral("password")
+        )(pos),
+        None,
+        Some(Left(Map("key" -> literalString("value"), "anotherkey" -> literalString("anotherValue"))))
+      )(defaultPos)
+    )
   }
 
   test(
@@ -481,8 +818,10 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
         namespacedName("target"),
         IfExistsThrowError,
         Left("neo4j://serverA:7687"),
-        literalString("user"),
-        sensitiveLiteral("password"),
+        RemoteAliasStoredCredentials(
+          literalString("user"),
+          sensitiveLiteral("password")
+        )(pos),
         None,
         properties =
           Some(Left(Map(
@@ -503,8 +842,10 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
         namespacedName("target"),
         IfExistsThrowError,
         Left("neo4j://serverA:7687"),
-        literalString("user"),
-        sensitiveLiteral("password"),
+        RemoteAliasStoredCredentials(
+          literalString("user"),
+          sensitiveLiteral("password")
+        )(pos),
         None,
         properties =
           Some(Left(Map()))
@@ -521,13 +862,43 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
         namespacedName("target"),
         IfExistsThrowError,
         Left("neo4j://serverA:7687"),
-        literalString("user"),
-        sensitiveLiteral("password"),
+        RemoteAliasStoredCredentials(
+          literalString("user"),
+          sensitiveLiteral("password")
+        )(pos),
         None,
         properties =
           Some(Right(parameter("props", CTMap)))
       )(defaultPos)
     )
+  }
+
+  test(
+    """CREATE ALIAS alias FOR DATABASE target AT "neo4j://serverA:7687" OIDC CREDENTIAL FORWARDING PROPERTIES $props"""
+  ) {
+    parsesIn[Statements] {
+      case Cypher5 => _.withSyntaxError(
+          """Invalid input 'OIDC': expected 'USER' (line 1, column 66 (offset: 65))
+            |"CREATE ALIAS alias FOR DATABASE target AT "neo4j://serverA:7687" OIDC CREDENTIAL FORWARDING PROPERTIES $props"
+            |                                                                  ^""".stripMargin
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42I06,
+              "error: syntax error or access rule violation - invalid input. Invalid input 'OIDC', expected: 'USER'."
+            )
+          )
+      case _ => _.toAstPositioned(CreateRemoteDatabaseAlias(
+          namespacedName("alias"),
+          namespacedName("target"),
+          IfExistsThrowError,
+          Left("neo4j://serverA:7687"),
+          OidcCredentialForwarding()(pos),
+          None,
+          properties =
+            Some(Right(parameter("props", CTMap)))
+        )(defaultPos))
+    }
   }
 
   test("CREATE OR REPLACE ALIAS name FOR DATABASE target AT 'neo4j://serverA:7687' USER user PASSWORD 'password'") {
@@ -536,8 +907,10 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
       namespacedName("target"),
       IfExistsReplace,
       Left("neo4j://serverA:7687"),
-      literalString("user"),
-      sensitiveLiteral("password")
+      RemoteAliasStoredCredentials(
+        literalString("user"),
+        sensitiveLiteral("password")
+      )(pos)
     )(defaultPos))
   }
 
@@ -549,8 +922,10 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
       namespacedName("target"),
       IfExistsInvalidSyntax,
       Left("neo4j://serverA:7687"),
-      literalString("user"),
-      sensitiveLiteral("password")
+      RemoteAliasStoredCredentials(
+        literalString("user"),
+        sensitiveLiteral("password")
+      )(pos)
     )(defaultPos))
   }
 
@@ -562,12 +937,42 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
       namespacedName("target"),
       IfExistsThrowError,
       Left("neo4j://serverA:7687"),
-      literalString("user"),
-      sensitiveLiteral("password"),
+      RemoteAliasStoredCredentials(
+        literalString("user"),
+        sensitiveLiteral("password")
+      )(pos),
       Some(Left(Map(
         "ssl_enforced" -> trueLiteral
       )))
     )(defaultPos))
+  }
+
+  test(
+    """CREATE ALIAS name FOR DATABASE target AT "neo4j://serverA:7687" OIDC CREDENTIAL FORWARDING DRIVER { ssl_enforced: true }"""
+  ) {
+    parsesIn[Statements] {
+      case Cypher5 => _.withSyntaxError(
+          """Invalid input 'OIDC': expected 'USER' (line 1, column 65 (offset: 64))
+            |"CREATE ALIAS name FOR DATABASE target AT "neo4j://serverA:7687" OIDC CREDENTIAL FORWARDING DRIVER { ssl_enforced: true }"
+            |                                                                 ^""".stripMargin
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42I06,
+              "error: syntax error or access rule violation - invalid input. Invalid input 'OIDC', expected: 'USER'."
+            )
+          )
+      case _ => _.toAstPositioned(CreateRemoteDatabaseAlias(
+          namespacedName("name"),
+          namespacedName("target"),
+          IfExistsThrowError,
+          Left("neo4j://serverA:7687"),
+          OidcCredentialForwarding()(pos),
+          Some(Left(Map(
+            "ssl_enforced" -> trueLiteral
+          )))
+        )(defaultPos))
+    }
   }
 
   test(
@@ -578,8 +983,10 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
       namespacedName("target"),
       IfExistsDoNothing,
       Left("neo4j://serverA:7687"),
-      literalString("user"),
-      sensitiveLiteral("password"),
+      RemoteAliasStoredCredentials(
+        literalString("user"),
+        sensitiveLiteral("password")
+      )(pos),
       Some(Left(Map(
         "ssl_enforced" -> trueLiteral
       )))
@@ -608,8 +1015,10 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
       namespacedName("target"),
       IfExistsThrowError,
       Left("neo4j://serverA:7687"),
-      literalString("user"),
-      sensitiveLiteral("password"),
+      RemoteAliasStoredCredentials(
+        literalString("user"),
+        sensitiveLiteral("password")
+      )(pos),
       Some(Left(Map(
         "ssl_enforced" -> trueLiteral,
         "connection_timeout" -> durationExpression,
@@ -628,8 +1037,10 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
       namespacedName("target"),
       IfExistsThrowError,
       Left("bar"),
-      literalString("user"),
-      sensitiveLiteral("password"),
+      RemoteAliasStoredCredentials(
+        literalString("user"),
+        sensitiveLiteral("password")
+      )(pos),
       Some(Left(Map(
         "foo" -> literalFloat(1.0)
       )))
@@ -644,8 +1055,10 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
       namespacedName("target"),
       IfExistsThrowError,
       Left("bar"),
-      literalString("user"),
-      sensitiveLiteral("password"),
+      RemoteAliasStoredCredentials(
+        literalString("user"),
+        sensitiveLiteral("password")
+      )(pos),
       Some(Left(Map(
         "foo" -> literalFloat(1.0)
       ))),
@@ -659,8 +1072,10 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
       namespacedName("target"),
       IfExistsThrowError,
       Left("bar"),
-      literalString("user"),
-      sensitiveLiteral("password"),
+      RemoteAliasStoredCredentials(
+        literalString("user"),
+        sensitiveLiteral("password")
+      )(pos),
       Some(Left(Map.empty))
     )(defaultPos))
   }
@@ -671,8 +1086,10 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
       stringParamName("target"),
       IfExistsThrowError,
       Right(stringParam("url")),
-      stringParam("user"),
-      pwParam("password"),
+      RemoteAliasStoredCredentials(
+        stringParam("user"),
+        pwParam("password")
+      )(pos),
       Some(Right(parameter("driver", CTMap)))
     )(defaultPos))
   }
@@ -683,31 +1100,119 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
       namespacedName("at"),
       IfExistsThrowError,
       Left("driver"),
-      literalString("driver"),
-      sensitiveLiteral("driver"),
+      RemoteAliasStoredCredentials(
+        literalString("driver"),
+        sensitiveLiteral("driver")
+      )(pos),
       Some(Left(Map.empty))
+    )(defaultPos))
+  }
+
+  test("""CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD 'password' DEFAULT LANGUAGE CYPHER 5""") {
+    assertAst(CreateRemoteDatabaseAlias(
+      namespacedName("name"),
+      namespacedName("target"),
+      IfExistsThrowError,
+      Left("url"),
+      RemoteAliasStoredCredentials(
+        literalString("user"),
+        sensitiveLiteral("password")
+      )(pos),
+      defaultLanguage = Some(CypherVersion.Cypher5)
+    )(defaultPos))
+  }
+
+  test(
+    """CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD 'password' DRIVER {} DEFAULT LANGUAGE CYPHER 25"""
+  ) {
+    assertAst(CreateRemoteDatabaseAlias(
+      namespacedName("name"),
+      namespacedName("target"),
+      IfExistsThrowError,
+      Left("url"),
+      RemoteAliasStoredCredentials(
+        literalString("user"),
+        sensitiveLiteral("password")
+      )(pos),
+      Some(Left(Map.empty)),
+      defaultLanguage = Some(CypherVersion.Cypher25)
+    )(defaultPos))
+  }
+
+  test(
+    """CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD 'password' DEFAULT LANGUAGE CYPHER 25 PROPERTIES {}"""
+  ) {
+    assertAst(CreateRemoteDatabaseAlias(
+      namespacedName("name"),
+      namespacedName("target"),
+      IfExistsThrowError,
+      Left("url"),
+      RemoteAliasStoredCredentials(
+        literalString("user"),
+        sensitiveLiteral("password")
+      )(pos),
+      properties = Some(Left(Map.empty)),
+      defaultLanguage = Some(CypherVersion.Cypher25)
+    )(defaultPos))
+  }
+
+  test(
+    """CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD 'password' DRIVER {} DEFAULT LANGUAGE CYPHER 5 PROPERTIES {}"""
+  ) {
+    assertAst(CreateRemoteDatabaseAlias(
+      namespacedName("name"),
+      namespacedName("target"),
+      IfExistsThrowError,
+      Left("url"),
+      RemoteAliasStoredCredentials(
+        literalString("user"),
+        sensitiveLiteral("password")
+      )(pos),
+      Some(Left(Map.empty)),
+      Some(Left(Map.empty)),
+      defaultLanguage = Some(CypherVersion.Cypher5)
     )(defaultPos))
   }
 
   test(
     """CREATE ALIAS namespace.name.illegal FOR DATABASE target AT "neo4j://serverA:7687" USER user PASSWORD 'password'"""
   ) {
-    failsParsing[Statements].withMessageStart(
-      "'.' is not a valid character in the remote alias name 'namespace.name.illegal'. Remote alias names using '.' must be quoted with backticks e.g. `remote.alias`. (line 1, column 14 (offset: 13))"
-    )
+    parsesIn[Statements] {
+      case Cypher5 => _.withMessageStart(
+          "'.' is not a valid character in the remote alias name 'namespace.name.illegal'. Remote alias names using '.' must be quoted with backticks e.g. `remote.alias`. (line 1, column 14 (offset: 13))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input 'namespace.name.illegal' for remote alias name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N82,
+                "error: data exception - input contains invalid characters. Input 'namespace.name.illegal' contains invalid characters for remote alias name. Special characters may require that the input is quoted using backticks."
+              )
+          )
+      case _ => _.toAstPositioned(
+          CreateRemoteDatabaseAlias(
+            NamespacedName(List("namespace.name.illegal"), None)(pos),
+            NamespacedName(List("target"), None)(pos),
+            ifExistsDo = IfExistsThrowError,
+            url = Left("neo4j://serverA:7687"),
+            RemoteAliasStoredCredentials(
+              literalString("user"),
+              sensitiveLiteral("password")
+            )(pos)
+          )(defaultPos)
+        )
+    }
+
   }
 
   test("""CREATE ALIAS name FOR DATABASE target AT neo4j://serverA:7687" USER user PASSWORD 'password'""") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          "Invalid input 'neo4j': expected \"\\\"\", \"\\'\" or a parameter (line 1, column 42 (offset: 41))"
-        )
-      case _ => _.withSyntaxError(
-          """Invalid input 'neo4j': expected a parameter or a string (line 1, column 42 (offset: 41))
-            |"CREATE ALIAS name FOR DATABASE target AT neo4j://serverA:7687" USER user PASSWORD 'password'"
-            |                                          ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'neo4j': expected a parameter or a string (line 1, column 42 (offset: 41))
+        |"CREATE ALIAS name FOR DATABASE target AT neo4j://serverA:7687" USER user PASSWORD 'password'"
+        |                                          ^""".stripMargin
+    )
   }
 
   test(
@@ -715,13 +1220,15 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
       |PROPERTIES { key:'value', anotherkey:'anotherValue' }
       |USER user PASSWORD 'password'""".stripMargin
   ) {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("""Invalid input 'PROPERTIES': expected "USER" (line 2, column 1""")
-      case _             =>
-        // Windows line endings changes the offset...
-        val offset = if (testName.contains("\r\n")) "75" else "74"
-        _.withSyntaxError(
+    val offset = if (testName.contains("\r\n")) "75" else "74" // Windows line endings changes the offset...
+    parsesIn[Statements] {
+      case Cypher5 => _.withSyntaxError(
           s"""Invalid input 'PROPERTIES': expected 'USER' (line 2, column 1 (offset: $offset))
+             |"PROPERTIES { key:'value', anotherkey:'anotherValue' }"
+             | ^""".stripMargin
+        )
+      case _ => _.withSyntaxError(
+          s"""Invalid input 'PROPERTIES': expected 'OIDC CREDENTIAL FORWARDING' or 'USER' (line 2, column 1 (offset: $offset))
              |"PROPERTIES { key:'value', anotherkey:'anotherValue' }"
              | ^""".stripMargin
         )
@@ -731,35 +1238,30 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
   test(
     """CREATE ALIAS name FOR DATABASE target AT "bar" USER user PASSWORD "password" PROPERTIES { bar: true } DRIVER { foo: 1.0 }"""
   ) {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("""Invalid input 'DRIVER': expected <EOF>""")
-      case _ => _.withSyntaxError(
-          """Invalid input 'DRIVER': expected <EOF> (line 1, column 103 (offset: 102))
-            |"CREATE ALIAS name FOR DATABASE target AT "bar" USER user PASSWORD "password" PROPERTIES { bar: true } DRIVER { foo: 1.0 }"
-            |                                                                                                       ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'DRIVER': expected <EOF> (line 1, column 103 (offset: 102))
+        |"CREATE ALIAS name FOR DATABASE target AT "bar" USER user PASSWORD "password" PROPERTIES { bar: true } DRIVER { foo: 1.0 }"
+        |                                                                                                       ^""".stripMargin
+    )
   }
 
   test("Should fail to parse CREATE ALIAS with driver settings but no remote url") {
-    "CREATE ALIAS name FOR DATABASE target DRIVER { ssl_enforced: true }" should notParse[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          "Invalid input 'DRIVER': expected \".\", \"AT\", \"PROPERTIES\" or <EOF> (line 1, column 39 (offset: 38))"
-        )
-      case _ => _.withSyntaxError(
-          """Invalid input 'DRIVER': expected a database name, 'AT', 'PROPERTIES' or <EOF> (line 1, column 39 (offset: 38))
-            |"CREATE ALIAS name FOR DATABASE target DRIVER { ssl_enforced: true }"
-            |                                       ^""".stripMargin
-        )
-    }
+    "CREATE ALIAS name FOR DATABASE target DRIVER { ssl_enforced: true }" should notParse[Statements].withSyntaxError(
+      """Invalid input 'DRIVER': expected a database name, 'AT', 'PROPERTIES' or <EOF> (line 1, column 39 (offset: 38))
+        |"CREATE ALIAS name FOR DATABASE target DRIVER { ssl_enforced: true }"
+        |                                       ^""".stripMargin
+    )
   }
 
   test("""CREATE ALIAS name FOR DATABASE target AT "bar" OPTIONS { foo: 1.0 }""") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.withMessageStart("Invalid input 'OPTIONS': expected \"USER\" (line 1, column 48 (offset: 47))")
-      case _ => _.withSyntaxError(
+    parsesIn[Statements] {
+      case Cypher5 => _.withSyntaxError(
           """Invalid input 'OPTIONS': expected 'USER' (line 1, column 48 (offset: 47))
+            |"CREATE ALIAS name FOR DATABASE target AT "bar" OPTIONS { foo: 1.0 }"
+            |                                                ^""".stripMargin
+        )
+      case _ => _.withSyntaxError(
+          """Invalid input 'OPTIONS': expected 'OIDC CREDENTIAL FORWARDING' or 'USER' (line 1, column 48 (offset: 47))
             |"CREATE ALIAS name FOR DATABASE target AT "bar" OPTIONS { foo: 1.0 }"
             |                                                ^""".stripMargin
         )
@@ -767,40 +1269,122 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
   }
 
   test("""CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD "password" DRIVER""") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.withMessageStart("Invalid input '': expected \"{\" or a parameter (line 1, column 84 (offset: 83))")
-      case _ => _.withSyntaxError(
-          """Invalid input '': expected a parameter or '{' (line 1, column 84 (offset: 83))
-            |"CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD "password" DRIVER"
-            |                                                                                    ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '': expected a parameter or '{' (line 1, column 84 (offset: 83))
+        |"CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD "password" DRIVER"
+        |                                                                                    ^""".stripMargin
+    )
   }
 
   test("""CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD "password" PROPERTY { key: 'val' }""") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          """Invalid input 'PROPERTY': expected "DRIVER", "PROPERTIES" or <EOF> (line 1, column 78 (offset: 77))"""
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'PROPERTY': expected 'DEFAULT LANGUAGE CYPHER', 'DRIVER', 'PROPERTIES' or <EOF> (line 1, column 78 (offset: 77))
+        |"CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD "password" PROPERTY { key: 'val' }"
+        |                                                                              ^""".stripMargin
+    )
+  }
+
+  test("""CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD "password" PROPERTIES""") {
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '': expected a parameter or '{' (line 1, column 88 (offset: 87))
+        |"CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD "password" PROPERTIES"
+        |                                                                                        ^""".stripMargin
+    )
+  }
+
+  test(
+    """CREATE ALIAS name FOR DATABASE target AT "url" DEFAULT LANGUAGE CYPHER 5 USER user PASSWORD 'password' DRIVER {} PROPERTIES {}"""
+  ) {
+    parsesIn[Statements] {
+      case Cypher5 => _.withSyntaxError(
+          """Invalid input 'DEFAULT': expected 'USER' (line 1, column 48 (offset: 47))
+            |"CREATE ALIAS name FOR DATABASE target AT "url" DEFAULT LANGUAGE CYPHER 5 USER user PASSWORD 'password' DRIVER {} PROPERTIES {}"
+            |                                                ^""".stripMargin
         )
       case _ => _.withSyntaxError(
-          """Invalid input 'PROPERTY': expected 'DRIVER', 'PROPERTIES' or <EOF> (line 1, column 78 (offset: 77))
-            |"CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD "password" PROPERTY { key: 'val' }"
-            |                                                                              ^""".stripMargin
+          """Invalid input 'DEFAULT': expected 'OIDC CREDENTIAL FORWARDING' or 'USER' (line 1, column 48 (offset: 47))
+            |"CREATE ALIAS name FOR DATABASE target AT "url" DEFAULT LANGUAGE CYPHER 5 USER user PASSWORD 'password' DRIVER {} PROPERTIES {}"
+            |                                                ^""".stripMargin
         )
     }
   }
 
-  test("""CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD "password" PROPERTIES""") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.withMessageStart("Invalid input '': expected \"{\" or a parameter (line 1, column 88 (offset: 87))")
-      case _ => _.withSyntaxError(
-          """Invalid input '': expected a parameter or '{' (line 1, column 88 (offset: 87))
-            |"CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD "password" PROPERTIES"
-            |                                                                                        ^""".stripMargin
-        )
-    }
+  test(
+    """CREATE ALIAS name FOR DATABASE target AT "url" USER user DEFAULT LANGUAGE CYPHER 5 PASSWORD 'password' DRIVER {} PROPERTIES {}"""
+  ) {
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'DEFAULT': expected 'PASSWORD' (line 1, column 58 (offset: 57))
+        |"CREATE ALIAS name FOR DATABASE target AT "url" USER user DEFAULT LANGUAGE CYPHER 5 PASSWORD 'password' DRIVER {} PROPERTIES {}"
+        |                                                          ^""".stripMargin
+    )
+  }
+
+  test(
+    """CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD 'password' DEFAULT LANGUAGE CYPHER 5 DRIVER {} PROPERTIES {}"""
+  ) {
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'DRIVER': expected 'PROPERTIES' or <EOF> (line 1, column 104 (offset: 103))
+        |"CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD 'password' DEFAULT LANGUAGE CYPHER 5 DRIVER {} PROPERTIES {}"
+        |                                                                                                        ^""".stripMargin
+    )
+  }
+
+  test(
+    """CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD 'password' DRIVER {} PROPERTIES {} DEFAULT LANGUAGE CYPHER 5"""
+  ) {
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'DEFAULT': expected <EOF> (line 1, column 102 (offset: 101))
+        |"CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD 'password' DRIVER {} PROPERTIES {} DEFAULT LANGUAGE CYPHER 5"
+        |                                                                                                      ^""".stripMargin
+    )
+  }
+
+  test(
+    """CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD 'password' SET DEFAULT LANGUAGE CYPHER 5"""
+  ) {
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'SET': expected 'DEFAULT LANGUAGE CYPHER', 'DRIVER', 'PROPERTIES' or <EOF> (line 1, column 78 (offset: 77))
+        |"CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD 'password' SET DEFAULT LANGUAGE CYPHER 5"
+        |                                                                              ^""".stripMargin
+    )
+  }
+
+  test(
+    """CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD 'password' DRIVER {} SET DEFAULT LANGUAGE CYPHER 5"""
+  ) {
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'SET': expected 'DEFAULT LANGUAGE CYPHER', 'PROPERTIES' or <EOF> (line 1, column 88 (offset: 87))
+        |"CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD 'password' DRIVER {} SET DEFAULT LANGUAGE CYPHER 5"
+        |                                                                                        ^""".stripMargin
+    )
+  }
+
+  test("""CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD 'password' DEFAULT LANGUAGE CYPHER 42""") {
+    failsParsing[Statements]
+      .withSyntaxErrorGqlStatus(gqlStatus(
+        GqlStatusInfoCodes.STATUS_22N04,
+        "error: data exception - invalid input value. Invalid input '42' for Cypher version. Expected 'CYPHER 5' or 'CYPHER 25'."
+      ))
+      .withSyntaxError(
+        """Invalid Cypher version '42'. Valid Cypher versions are: 5, 25 (line 1, column 102 (offset: 101))
+          |"CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD 'password' DEFAULT LANGUAGE CYPHER 42"
+          |                                                                                                      ^""".stripMargin
+      )
+  }
+
+  test(
+    """CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD 'password' DEFAULT LANGUAGE CYPHER 42*10"""
+  ) {
+    failsParsing[Statements]
+      .withSyntaxErrorGqlStatus(gqlStatus(
+        GqlStatusInfoCodes.STATUS_22N04,
+        "error: data exception - invalid input value. Invalid input '42' for Cypher version. Expected 'CYPHER 5' or 'CYPHER 25'."
+      ))
+      .withSyntaxError(
+        """Invalid Cypher version '42'. Valid Cypher versions are: 5, 25 (line 1, column 102 (offset: 101))
+          |"CREATE ALIAS name FOR DATABASE target AT "url" USER user PASSWORD 'password' DEFAULT LANGUAGE CYPHER 42*10"
+          |                                                                                                      ^""".stripMargin
+      )
   }
 
   // DROP ALIAS
@@ -826,73 +1410,186 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
   }
 
   test("DROP ALIAS composite.name FOR DATABASE") {
-    assertAst(DropDatabaseAlias(namespacedName("composite", "name"), ifExists = false)(defaultPos))
+    assertAstVersionBased(fromCypher5 =>
+      DropDatabaseAlias(namespacedName(fromCypher5, "composite", "name"), ifExists = false)(defaultPos)
+    )
   }
 
   test("DROP ALIAS composite.`dotted.name` FOR DATABASE") {
-    assertAst(
-      DropDatabaseAlias(namespacedName("composite", "dotted.name"), ifExists = false)(defaultPos)
-    )
+    parsesIn[Statements] {
+      case Cypher5 => _.toAstPositioned(
+          DropDatabaseAlias(namespacedName("composite", "dotted.name"), ifExists = false)(defaultPos)
+        )
+      case _ => _.withSyntaxError(
+          """Incorrectly formatted graph reference 'composite.`dotted.name`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 12 (offset: 11))
+            |"DROP ALIAS composite.`dotted.name` FOR DATABASE"
+            |            ^""".stripMargin
+        )
+    }
   }
 
   test("DROP ALIAS `dotted.composite`.name FOR DATABASE") {
-    assertAst(
-      DropDatabaseAlias(namespacedName("dotted.composite", "name"), ifExists = false)(defaultPos)
-    )
+    parsesIn[Statements] {
+      case Cypher5 => _.toAstPositioned(
+          DropDatabaseAlias(namespacedName("dotted.composite", "name"), ifExists = false)(defaultPos)
+        )
+      case _ => _.withSyntaxError(
+          """Incorrectly formatted graph reference '`dotted.composite`.name'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 12 (offset: 11))
+            |"DROP ALIAS `dotted.composite`.name FOR DATABASE"
+            |            ^""".stripMargin
+        )
+    }
   }
 
   test("DROP ALIAS name") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.withMessageStart("Invalid input '': expected \".\", \"FOR\" or \"IF\" (line 1, column 16 (offset: 15))")
-      case _ => _.withSyntaxError(
-          """Invalid input '': expected a database name, 'FOR DATABASE' or 'IF EXISTS' (line 1, column 16 (offset: 15))
-            |"DROP ALIAS name"
-            |                ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '': expected a database name, 'FOR DATABASE' or 'IF EXISTS' (line 1, column 16 (offset: 15))
+        |"DROP ALIAS name"
+        |                ^""".stripMargin
+    )
   }
 
   test("DROP ALIAS name IF EXISTS") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.withMessageStart("Invalid input '': expected \"FOR\" (line 1, column 26 (offset: 25))")
-      case _ => _.withSyntaxError(
-          """Invalid input '': expected 'FOR DATABASE' (line 1, column 26 (offset: 25))
-            |"DROP ALIAS name IF EXISTS"
-            |                          ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '': expected 'FOR DATABASE' (line 1, column 26 (offset: 25))
+        |"DROP ALIAS name IF EXISTS"
+        |                          ^""".stripMargin
+    )
   }
 
   test("DROP ALIAS `a`.`b`.`c` FOR DATABASE") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input ``a`.`b`.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 12 (offset: 11))"
-    )
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input ``a`.`b`.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 12 (offset: 11))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input '`a`.`b`.`c`' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          "Incorrectly formatted graph reference '`a`.`b`.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 12 (offset: 11))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference '`a`.`b`.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 
   test("DROP ALIAS `a`.b.`c` FOR DATABASE") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input ``a`.b.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 12 (offset: 11))"
-    )
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input ``a`.b.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 12 (offset: 11))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input '`a`.b.`c`' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          "Incorrectly formatted graph reference '`a`.b.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 12 (offset: 11))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference '`a`.b.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 
   test("DROP ALIAS a.`b`.`c` FOR DATABASE") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input `a.`b`.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 12 (offset: 11))"
-    )
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input `a.`b`.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 12 (offset: 11))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input 'a.`b`.`c`' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          "Incorrectly formatted graph reference 'a.`b`.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 12 (offset: 11))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference 'a.`b`.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 
   test("DROP ALIAS `a`.`b`.c FOR DATABASE") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input ``a`.`b`.c` for name. Expected name to contain at most two components separated by `.`. (line 1, column 12 (offset: 11))"
-    )
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input ``a`.`b`.c` for name. Expected name to contain at most two components separated by `.`. (line 1, column 12 (offset: 11))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input '`a`.`b`.c' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          "Incorrectly formatted graph reference '`a`.`b`.c'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 12 (offset: 11))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference '`a`.`b`.c'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 
   test("DROP ALIAS a.`b`.c FOR DATABASE") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input `a.`b`.c` for name. Expected name to contain at most two components separated by `.`. (line 1, column 12 (offset: 11))"
-    )
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input `a.`b`.c` for name. Expected name to contain at most two components separated by `.`. (line 1, column 12 (offset: 11))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input 'a.`b`.c' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          "Incorrectly formatted graph reference 'a.`b`.c'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 12 (offset: 11))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference 'a.`b`.c'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 
   // ALTER ALIAS
@@ -914,21 +1611,45 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
   }
 
   test("ALTER ALIAS name.hej SET DATABASE TARGET db") {
-    parsesTo[Statements](Statements(Seq(AlterLocalDatabaseAlias(
-      namespacedName("name", "hej"),
-      Some(namespacedName("db")),
-      ifExists = false,
-      None
-    )(pos))))
+    parsesIn[Statements] {
+      case Cypher5 => _.toAstPositioned(
+          AlterLocalDatabaseAlias(
+            NamespacedName(List("hej"), Some("name"))(pos),
+            Some(NamespacedName(List("db"), None)(pos)),
+            ifExists = false,
+            None
+          )(pos)
+        )
+      case _ => _.toAstPositioned(
+          AlterLocalDatabaseAlias(
+            NamespacedName(List("name.hej"), None)(pos),
+            Some(NamespacedName(List("db"), None)(pos)),
+            ifExists = false,
+            None
+          )(pos)
+        )
+    }
   }
 
   test("ALTER ALIAS name.hej.a SET DATABASE TARGET db") {
-    parsesTo[Statements](Statements(Seq(AlterLocalDatabaseAlias(
-      namespacedName("name", "hej", "a"),
-      Some(namespacedName("db")),
-      ifExists = false,
-      None
-    )(pos))))
+    parsesIn[Statements] {
+      case Cypher5 => _.toAstPositioned(
+          AlterLocalDatabaseAlias(
+            NamespacedName(List("hej", "a"), Some("name"))(pos),
+            Some(NamespacedName(List("db"), None)(pos)),
+            ifExists = false,
+            None
+          )(pos)
+        )
+      case _ => _.toAstPositioned(
+          AlterLocalDatabaseAlias(
+            NamespacedName(List("name.hej.a"), None)(pos),
+            Some(NamespacedName(List("db"), None)(pos)),
+            ifExists = false,
+            None
+          )(pos)
+        )
+    }
   }
 
   test("ALTER ALIAS $name if exists SET DATABASE TARGET $db") {
@@ -951,72 +1672,46 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
   }
 
   test("ALTER ALIAS name if exists SET db TARGET") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.withMessageStart("""Invalid input 'db': expected "DATABASE" (line 1, column 32 (offset: 31))""")
-      case _ => _.withSyntaxError(
-          """Invalid input 'db': expected 'DATABASE' (line 1, column 32 (offset: 31))
-            |"ALTER ALIAS name if exists SET db TARGET"
-            |                                ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'db': expected 'DATABASE' (line 1, column 32 (offset: 31))
+        |"ALTER ALIAS name if exists SET db TARGET"
+        |                                ^""".stripMargin
+    )
   }
 
   test("ALTER ALIAS name SET TARGET db") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.withMessageStart("""Invalid input 'TARGET': expected "DATABASE" (line 1, column 22 (offset: 21))""")
-      case _ => _.withSyntaxError(
-          """Invalid input 'TARGET': expected 'DATABASE' (line 1, column 22 (offset: 21))
-            |"ALTER ALIAS name SET TARGET db"
-            |                      ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'TARGET': expected 'DATABASE' (line 1, column 22 (offset: 21))
+        |"ALTER ALIAS name SET TARGET db"
+        |                      ^""".stripMargin
+    )
   }
 
   test("ALTER DATABASE ALIAS name SET TARGET db") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          """Invalid input 'name': expected ".", "IF", "REMOVE" or "SET" (line 1, column 22 (offset: 21))"""
-        )
-      case _ => _.withSyntaxError(
-          """Invalid input 'name': expected a database name, 'IF EXISTS', 'REMOVE OPTION' or 'SET' (line 1, column 22 (offset: 21))
-            |"ALTER DATABASE ALIAS name SET TARGET db"
-            |                      ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'name': expected a database name, 'IF EXISTS', 'REMOVE OPTION' or 'SET' (line 1, column 22 (offset: 21))
+        |"ALTER DATABASE ALIAS name SET TARGET db"
+        |                      ^""".stripMargin
+    )
   }
 
   test("ALTER ALIAS name SET DATABASE") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          """Invalid input '': expected
-            |  "DRIVER"
-            |  "PASSWORD"
-            |  "PROPERTIES"
-            |  "TARGET"
-            |  "USER" (line 1, column 30 (offset: 29))""".stripMargin
-        )
-      case _ => _.withSyntaxError(
-          """Invalid input '': expected 'DRIVER', 'PASSWORD', 'PROPERTIES', 'TARGET' or 'USER' (line 1, column 30 (offset: 29))
-            |"ALTER ALIAS name SET DATABASE"
-            |                              ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '': expected 'DEFAULT LANGUAGE CYPHER', 'DRIVER', 'PASSWORD', 'PROPERTIES', 'TARGET' or 'USER' (line 1, column 30 (offset: 29))
+        |"ALTER ALIAS name SET DATABASE"
+        |                              ^""".stripMargin
+    )
   }
 
   test("ALTER RANDOM name") {
     failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          """Invalid input 'RANDOM': expected
-            |  "ALIAS"
-            |  "CURRENT"
-            |  "DATABASE"
-            |  "SERVER"
-            |  "USER" (line 1, column 7 (offset: 6))""".stripMargin
+      case Cypher5 => _.withSyntaxError(
+          """Invalid input 'RANDOM': expected 'ALIAS', 'DATABASE', 'CURRENT USER SET PASSWORD FROM', 'SERVER' or 'USER' (line 1, column 7 (offset: 6))
+            |"ALTER RANDOM name"
+            |       ^""".stripMargin
         )
       case _ => _.withSyntaxError(
-          """Invalid input 'RANDOM': expected 'ALIAS', 'DATABASE', 'CURRENT USER SET PASSWORD FROM', 'SERVER' or 'USER' (line 1, column 7 (offset: 6))
+          """Invalid input 'RANDOM': expected 'ALIAS', 'CURRENT', 'DATABASE', 'AUTH RULE', 'SERVER', 'USER' or 'USERS' (line 1, column 7 (offset: 6))
             |"ALTER RANDOM name"
             |       ^""".stripMargin
         )
@@ -1024,39 +1719,165 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
   }
 
   test("ALTER ALIAS `a`.`b`.`c` SET DATABASE TARGET db") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input ``a`.`b`.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 13 (offset: 12))"
-    )
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input ``a`.`b`.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 13 (offset: 12))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input '`a`.`b`.`c`' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          "Incorrectly formatted graph reference '`a`.`b`.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 13 (offset: 12))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference '`a`.`b`.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 
   test("ALTER ALIAS `a`.b.`c` SET DATABASE TARGET db") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input ``a`.b.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 13 (offset: 12))"
-    )
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input ``a`.b.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 13 (offset: 12))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input '`a`.b.`c`' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          "Incorrectly formatted graph reference '`a`.b.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 13 (offset: 12))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference '`a`.b.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 
   test("ALTER ALIAS a.`b`.`c` SET DATABASE TARGET db") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input `a.`b`.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 13 (offset: 12))"
-    )
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input `a.`b`.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 13 (offset: 12))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input 'a.`b`.`c`' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          "Incorrectly formatted graph reference 'a.`b`.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 13 (offset: 12))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference 'a.`b`.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 
   test("ALTER ALIAS `a`.`b`.c SET DATABASE TARGET db") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input ``a`.`b`.c` for name. Expected name to contain at most two components separated by `.`. (line 1, column 13 (offset: 12))"
-    )
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input ``a`.`b`.c` for name. Expected name to contain at most two components separated by `.`. (line 1, column 13 (offset: 12))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input '`a`.`b`.c' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          "Incorrectly formatted graph reference '`a`.`b`.c'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 13 (offset: 12))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference '`a`.`b`.c'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 
   test("ALTER ALIAS a.`b`.c SET DATABASE TARGET db") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input `a.`b`.c` for name. Expected name to contain at most two components separated by `.`. (line 1, column 13 (offset: 12))"
-    )
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input `a.`b`.c` for name. Expected name to contain at most two components separated by `.`. (line 1, column 13 (offset: 12))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input 'a.`b`.c' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          "Incorrectly formatted graph reference 'a.`b`.c'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 13 (offset: 12))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference 'a.`b`.c'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 
   test("ALTER ALIAS `a`.`b` SET DATABASE TARGET `db.cd`.`ef.gh`.d") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input ``db.cd`.`ef.gh`.d` for name. Expected name to contain at most two components separated by `.`. (line 1, column 41 (offset: 40))"
-    )
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input ``db.cd`.`ef.gh`.d` for name. Expected name to contain at most two components separated by `.`. (line 1, column 41 (offset: 40))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input '`db.cd`.`ef.gh`.d' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          "Incorrectly formatted graph reference '`a`.`b`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 13 (offset: 12))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference '`a`.`b`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 
   private val localAliasClauses = Seq(
@@ -1079,13 +1900,9 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
 
   localAliasClauses.foreach(clause => {
     test(s"""ALTER ALIAS name SET DATABASE $clause $clause""") {
-      failsParsing[Statements].in {
-        case Cypher5JavaCc =>
-          _.withMessageStart(s"Duplicate SET DATABASE ${clause.substring(0, clause.indexOf(" "))} clause")
-        case _ => _.withSyntaxErrorContaining(
-            s"Duplicate ${clause.substring(0, clause.indexOf(" "))} clause"
-          )
-      }
+      failsParsing[Statements].withSyntaxErrorContaining(
+        s"Duplicate ${clause.substring(0, clause.indexOf(" "))} clause"
+      )
     }
   })
 
@@ -1131,12 +1948,24 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
   }
 
   test("ALTER ALIAS name.hej SET DATABASE TARGET db AT 'heja'") {
-    parsesTo[Statements](Statements(Seq(AlterRemoteDatabaseAlias(
-      namespacedName("name", "hej"),
-      Some(namespacedName("db")),
-      ifExists = false,
-      Some(Left("heja"))
-    )(pos))))
+    parsesIn[Statements] {
+      case Cypher5 => _.toAstPositioned(
+          AlterRemoteDatabaseAlias(
+            NamespacedName(List("hej"), Some("name"))(pos),
+            Some(NamespacedName(List("db"), None)(pos)),
+            ifExists = false,
+            Some(Left("heja"))
+          )(pos)
+        )
+      case _ => _.toAstPositioned(
+          AlterRemoteDatabaseAlias(
+            NamespacedName(List("name.hej"), None)(pos),
+            Some(NamespacedName(List("db"), None)(pos)),
+            ifExists = false,
+            Some(Left("heja"))
+          )(pos)
+        )
+    }
   }
 
   test("""ALTER ALIAS name SET DATABASE USER foo PROPERTIES { key:'value', anotherkey:'anothervalue' }""") {
@@ -1194,7 +2023,8 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
     "PROPERTIES { key:'value', yetAnotherKey:'yetAnotherValue' }",
     "USER user",
     "PASSWORD 'password'",
-    "DRIVER { ssl_enforced: true }"
+    "DRIVER { ssl_enforced: true }",
+    "DEFAULT LANGUAGE CYPHER 25"
   )
 
   remoteAliasClauses.permutations.foreach(clauses => {
@@ -1208,7 +2038,8 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
           password = Some(sensitiveLiteral("password")),
           driverSettings = Some(Left(Map("ssl_enforced" -> trueLiteral))),
           properties =
-            Some(Left(Map("key" -> literalString("value"), "yetAnotherKey" -> literalString("yetAnotherValue"))))
+            Some(Left(Map("key" -> literalString("value"), "yetAnotherKey" -> literalString("yetAnotherValue")))),
+          defaultLanguage = Some(CypherVersion.Cypher25)
         )(defaultPos)
       )
     }
@@ -1216,22 +2047,42 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
 
   remoteAliasClauses.foreach(clause => {
     test(s"""ALTER ALIAS name SET DATABASE $clause $clause""") {
-      failsParsing[Statements].in {
-        case Cypher5JavaCc =>
-          _.withMessageStart(s"Duplicate SET DATABASE ${clause.substring(0, clause.indexOf(" "))} clause")
-        case _ => _.withSyntaxErrorContaining(
-            s"Duplicate ${clause.substring(0, clause.indexOf(" "))} clause"
-          )
-      }
+      // 'Default language' contains space so cannot split on space to find the clause name
+      val clauseName = if (clause.contains("DEFAULT LANGUAGE")) "DEFAULT LANGUAGE"
+      else clause.substring(0, clause.indexOf(' '))
+      failsParsing[Statements].withSyntaxErrorContaining(s"Duplicate $clauseName clause")
     }
   })
 
   test(
     """ALTER ALIAS namespace.name.illegal SET DATABASE TARGET target AT "neo4j://serverA:7687" USER user PASSWORD "password" DRIVER { ssl_enforced: true }"""
   ) {
-    failsParsing[Statements].withMessageStart(
-      ASTExceptionFactory.invalidDotsInRemoteAliasName("namespace.name.illegal") + " (line 1, column 13 (offset: 12))"
-    )
+    parsesIn[Statements] {
+      case Cypher5 => _.withMessageStart(
+          "'.' is not a valid character in the remote alias name 'namespace.name.illegal'. Remote alias names using '.' must be quoted with backticks e.g. `remote.alias`. (line 1, column 13 (offset: 12))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input 'namespace.name.illegal' for remote alias name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N82,
+                "error: data exception - input contains invalid characters. Input 'namespace.name.illegal' contains invalid characters for remote alias name. Special characters may require that the input is quoted using backticks."
+              )
+          )
+      case _ => _.toAstPositioned(
+          AlterRemoteDatabaseAlias(
+            NamespacedName(List("namespace.name.illegal"), None)(pos),
+            Some(NamespacedName(List("target"), None)(pos)),
+            ifExists = false,
+            Some(Left("neo4j://serverA:7687")),
+            Some("user"),
+            Some(sensitiveLiteral("password")),
+            Some(Left(Map("ssl_enforced" -> trueLiteral)))
+          )(defaultPos)
+        )
+    }
   }
 
   // this will instead fail in semantic checking
@@ -1248,53 +2099,55 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
   test(
     "ALTER ALIAS $name IF EXISTS SET DATABASE TARGET $target AT $url USER $user PASSWORD $password TARGET $target DRIVER $driver"
   ) {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.withMessageStart("Duplicate SET DATABASE TARGET clause (line 1, column 95 (offset: 94))")
-      case _ => _.withSyntaxError(
-          """Duplicate TARGET clause (line 1, column 95 (offset: 94))
-            |"ALTER ALIAS $name IF EXISTS SET DATABASE TARGET $target AT $url USER $user PASSWORD $password TARGET $target DRIVER $driver"
-            |                                                                                               ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Duplicate TARGET clause (line 1, column 95 (offset: 94))
+        |"ALTER ALIAS $name IF EXISTS SET DATABASE TARGET $target AT $url USER $user PASSWORD $password TARGET $target DRIVER $driver"
+        |                                                                                               ^""".stripMargin
+    )
   }
 
   test("ALTER ALIAS name SET DATABASE TARGET AT 'url'") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.withMessageStart("Invalid input 'url': expected")
-      case _ => _.withSyntaxError(
-          """Invalid input ''url'': expected a database name, 'AT', 'DRIVER', 'PASSWORD', 'PROPERTIES', 'TARGET', 'USER' or <EOF> (line 1, column 41 (offset: 40))
-            |"ALTER ALIAS name SET DATABASE TARGET AT 'url'"
-            |                                         ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input ''url'': expected a database name, 'AT', 'DEFAULT LANGUAGE CYPHER', 'DRIVER', 'PASSWORD', 'PROPERTIES', 'TARGET', 'USER' or <EOF> (line 1, column 41 (offset: 40))
+        |"ALTER ALIAS name SET DATABASE TARGET AT 'url'"
+        |                                         ^""".stripMargin
+    )
   }
 
   test("ALTER ALIAS name SET DATABASE AT 'url'") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          """Invalid input 'AT': expected
-            |  "DRIVER"
-            |  "PASSWORD"
-            |  "PROPERTIES"
-            |  "TARGET"
-            |  "USER" (line 1, column 31 (offset: 30))""".stripMargin
-        )
-      case _ => _.withSyntaxError(
-          """Invalid input 'AT': expected 'DRIVER', 'PASSWORD', 'PROPERTIES', 'TARGET' or 'USER' (line 1, column 31 (offset: 30))
-            |"ALTER ALIAS name SET DATABASE AT 'url'"
-            |                               ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'AT': expected 'DEFAULT LANGUAGE CYPHER', 'DRIVER', 'PASSWORD', 'PROPERTIES', 'TARGET' or 'USER' (line 1, column 31 (offset: 30))
+        |"ALTER ALIAS name SET DATABASE AT 'url'"
+        |                               ^""".stripMargin
+    )
   }
 
   test("ALTER ALIAS name.hej.a SET DATABASE TARGET db AT 'heja'") {
-    failsParsing[Statements].withMessageStart(
-      "'.' is not a valid character in the remote alias name 'name.hej.a'. " +
-        "Remote alias names using '.' must be quoted with backticks " +
-        "e.g. `remote.alias`. (line 1, column 13 (offset: 12))"
-    )
+    parsesIn[Statements] {
+      case Cypher5 => _.withMessageStart(
+          "'.' is not a valid character in the remote alias name 'name.hej.a'. " +
+            "Remote alias names using '.' must be quoted with backticks " +
+            "e.g. `remote.alias`. (line 1, column 13 (offset: 12))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input 'name.hej.a' for remote alias name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N82,
+                "error: data exception - input contains invalid characters. Input 'name.hej.a' contains invalid characters for remote alias name. Special characters may require that the input is quoted using backticks."
+              )
+          )
+      case _ => _.toAstPositioned(
+          AlterRemoteDatabaseAlias(
+            NamespacedName(List("name.hej.a"), None)(pos),
+            Some(NamespacedName(List("db"), None)(pos)),
+            ifExists = false,
+            Some(Left("heja"))
+          )(defaultPos)
+        )
+    }
   }
 
   // set target
@@ -1328,15 +2181,11 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
   test(
     "ALTER ALIAS name SET DATABASE TARGET target AT 'neo4j://serverA:7687' TARGET target AT 'neo4j://serverA:7687'"
   ) {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.withMessageStart("Duplicate SET DATABASE TARGET clause (line 1, column 71 (offset: 70))")
-      case _ => _.withSyntaxError(
-          """Duplicate TARGET clause (line 1, column 71 (offset: 70))
-            |"ALTER ALIAS name SET DATABASE TARGET target AT 'neo4j://serverA:7687' TARGET target AT 'neo4j://serverA:7687'"
-            |                                                                       ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Duplicate TARGET clause (line 1, column 71 (offset: 70))
+        |"ALTER ALIAS name SET DATABASE TARGET target AT 'neo4j://serverA:7687' TARGET target AT 'neo4j://serverA:7687'"
+        |                                                                       ^""".stripMargin
+    )
   }
 
   // set user
@@ -1354,14 +2203,11 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
   }
 
   test("ALTER ALIAS name SET DATABASE USER $user USER $user") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Duplicate SET DATABASE USER clause (line 1, column 42 (offset: 41))")
-      case _ => _.withSyntaxError(
-          """Duplicate USER clause (line 1, column 42 (offset: 41))
-            |"ALTER ALIAS name SET DATABASE USER $user USER $user"
-            |                                          ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Duplicate USER clause (line 1, column 42 (offset: 41))
+        |"ALTER ALIAS name SET DATABASE USER $user USER $user"
+        |                                          ^""".stripMargin
+    )
   }
 
   // set password
@@ -1383,28 +2229,29 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
   }
 
   test("ALTER ALIAS name IF EXISTS SET DATABASE PASSWORD password") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          "Invalid input 'password': expected \"\\\"\", \"\\'\" or a parameter (line 1, column 50 (offset: 49))"
-        )
-      case _ => _.withSyntaxError(
-          """Invalid input 'password': expected a parameter or a string (line 1, column 50 (offset: 49))
-            |"ALTER ALIAS name IF EXISTS SET DATABASE PASSWORD password"
-            |                                                  ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'password': expected a parameter or a string (line 1, column 50 (offset: 49))
+        |"ALTER ALIAS name IF EXISTS SET DATABASE PASSWORD password"
+        |                                                  ^""".stripMargin
+    )
   }
 
   test("ALTER ALIAS name SET DATABASE PASSWORD $password PASSWORD $password") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.withMessageStart("Duplicate SET DATABASE PASSWORD clause (line 1, column 50 (offset: 49))")
-      case _ => _.withSyntaxError(
-          """Duplicate PASSWORD clause (line 1, column 50 (offset: 49))
-            |"ALTER ALIAS name SET DATABASE PASSWORD $password PASSWORD $password"
-            |                                                  ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Duplicate PASSWORD clause (line 1, column 50 (offset: 49))
+        |"ALTER ALIAS name SET DATABASE PASSWORD $password PASSWORD $password"
+        |                                                  ^""".stripMargin
+    )
+  }
+
+  // set OIDC credential forwarding
+
+  test("ALTER ALIAS name SET DATABASE OIDC CREDENTIAL FORWARDING") {
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'OIDC': expected 'DEFAULT LANGUAGE CYPHER', 'DRIVER', 'PASSWORD', 'PROPERTIES', 'TARGET' or 'USER' (line 1, column 31 (offset: 30))
+        |"ALTER ALIAS name SET DATABASE OIDC CREDENTIAL FORWARDING"
+        |                               ^""".stripMargin
+    )
   }
 
   // set driver
@@ -1455,109 +2302,205 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
   }
 
   test("""ALTER ALIAS name SET DATABASE DRIVER $driver DRIVER $driver""") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.withMessageStart("Duplicate SET DATABASE DRIVER clause (line 1, column 46 (offset: 45))")
-      case _ => _.withSyntaxError(
-          """Duplicate DRIVER clause (line 1, column 46 (offset: 45))
-            |"ALTER ALIAS name SET DATABASE DRIVER $driver DRIVER $driver"
-            |                                              ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Duplicate DRIVER clause (line 1, column 46 (offset: 45))
+        |"ALTER ALIAS name SET DATABASE DRIVER $driver DRIVER $driver"
+        |                                              ^""".stripMargin
+    )
   }
 
   test("""ALTER ALIAS name SET DATABASE PROPERTY { key: 'val' }""") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          """Invalid input 'PROPERTY': expected
-            |  "DRIVER"
-            |  "PASSWORD"
-            |  "PROPERTIES"
-            |  "TARGET"
-            |  "USER" (line 1, column 31 (offset: 30))""".stripMargin
-        )
-      case _ => _.withSyntaxError(
-          """Invalid input 'PROPERTY': expected 'DRIVER', 'PASSWORD', 'PROPERTIES', 'TARGET' or 'USER' (line 1, column 31 (offset: 30))
-            |"ALTER ALIAS name SET DATABASE PROPERTY { key: 'val' }"
-            |                               ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'PROPERTY': expected 'DEFAULT LANGUAGE CYPHER', 'DRIVER', 'PASSWORD', 'PROPERTIES', 'TARGET' or 'USER' (line 1, column 31 (offset: 30))
+        |"ALTER ALIAS name SET DATABASE PROPERTY { key: 'val' }"
+        |                               ^""".stripMargin
+    )
   }
 
   test("""ALTER ALIAS name SET DATABASE PROPERTIES""") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.withMessageStart("Invalid input '': expected \"{\" or a parameter (line 1, column 41 (offset: 40))")
-      case _ => _.withSyntaxError(
-          """Invalid input '': expected a parameter or '{' (line 1, column 41 (offset: 40))
-            |"ALTER ALIAS name SET DATABASE PROPERTIES"
-            |                                         ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '': expected a parameter or '{' (line 1, column 41 (offset: 40))
+        |"ALTER ALIAS name SET DATABASE PROPERTIES"
+        |                                         ^""".stripMargin
+    )
+  }
+
+  // set default language
+
+  test("""ALTER ALIAS name SET DATABASE DEFAULT LANGUAGE CYPHER 5""") {
+    assertAst(
+      AlterRemoteDatabaseAlias(
+        namespacedName("name"),
+        defaultLanguage = Some(CypherVersion.Cypher5)
+      )(defaultPos)
+    )
+  }
+
+  test("ALTER ALIAS $name IF EXISTS SET DATABASE DEFAULT LANGUAGE CYPHER 25") {
+    assertAst(AlterRemoteDatabaseAlias(
+      stringParamName("name"),
+      ifExists = true,
+      defaultLanguage = Some(CypherVersion.Cypher25)
+    )(defaultPos))
+  }
+
+  test(
+    """ALTER ALIAS name SET DATABASE TARGET target AT "url" SET DEFAULT LANGUAGE CYPHER 5"""
+  ) {
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'SET': expected 'DEFAULT LANGUAGE CYPHER', 'DRIVER', 'PASSWORD', 'PROPERTIES', 'TARGET', 'USER' or <EOF> (line 1, column 54 (offset: 53))
+        |"ALTER ALIAS name SET DATABASE TARGET target AT "url" SET DEFAULT LANGUAGE CYPHER 5"
+        |                                                      ^""".stripMargin
+    )
+  }
+
+  test("ALTER ALIAS name SET DATABASE DEFAULT LANGUAGE CYPHER 42") {
+    failsParsing[Statements]
+      .withSyntaxErrorGqlStatus(gqlStatus(
+        GqlStatusInfoCodes.STATUS_22N04,
+        "error: data exception - invalid input value. Invalid input '42' for Cypher version. Expected 'CYPHER 5' or 'CYPHER 25'."
+      ))
+      .withSyntaxError(
+        """Invalid Cypher version '42'. Valid Cypher versions are: 5, 25 (line 1, column 55 (offset: 54))
+          |"ALTER ALIAS name SET DATABASE DEFAULT LANGUAGE CYPHER 42"
+          |                                                       ^""".stripMargin
+      )
+  }
+
+  test("ALTER ALIAS name SET DATABASE DEFAULT LANGUAGE CYPHER 42*10") {
+    failsParsing[Statements]
+      .withSyntaxErrorGqlStatus(gqlStatus(
+        GqlStatusInfoCodes.STATUS_22N04,
+        "error: data exception - invalid input value. Invalid input '42' for Cypher version. Expected 'CYPHER 5' or 'CYPHER 25'."
+      ))
+      .withSyntaxError(
+        """Invalid Cypher version '42'. Valid Cypher versions are: 5, 25 (line 1, column 55 (offset: 54))
+          |"ALTER ALIAS name SET DATABASE DEFAULT LANGUAGE CYPHER 42*10"
+          |                                                       ^""".stripMargin
+      )
   }
 
   // SHOW ALIAS
 
   test("SHOW ALIASES FOR DATABASE") {
-    assertAst(ShowAliases(None)(defaultPos))
+    assertAstVersionBased(fromCypher5 =>
+      ShowAliases(None, fromCypher5, false)(defaultPos)
+    )
   }
 
   test("SHOW ALIAS FOR DATABASES") {
-    assertAst(ShowAliases(None)(defaultPos))
+    assertAstVersionBased(fromCypher5 =>
+      ShowAliases(None, fromCypher5, false)(defaultPos)
+    )
   }
 
   test("SHOW ALIAS db FOR DATABASE") {
-    assertAst(ShowAliases(Some(namespacedName("db")), None)(defaultPos))
+    assertAstVersionBased(fromCypher5 =>
+      ShowAliases(Some(namespacedName("db")), None, fromCypher5, false)(defaultPos)
+    )
   }
 
   test("SHOW ALIASES db FOR DATABASE YIELD *") {
-    assertAst(
-      ShowAliases(Some(namespacedName("db")), Some(Left((yieldClause(returnAllItems), None))))(defaultPos)
+    assertAstVersionBased(fromCypher5 =>
+      ShowAliases(
+        Some(namespacedName("db")),
+        Some(Left((yieldClause(returnAllItems), None))),
+        fromCypher5,
+        false
+      )(defaultPos)
     )
   }
 
   test("SHOW ALIAS ns.db FOR DATABASES") {
-    assertAst(ShowAliases(Some(namespacedName("ns", "db")), None)(defaultPos))
+    assertAstVersionBased(fromCypher5 =>
+      ShowAliases(Some(namespacedName(fromCypher5, "ns", "db")), None, fromCypher5, false)(defaultPos)
+    )
   }
 
   test("SHOW ALIAS `ns.db` FOR DATABASE") {
-    assertAst(ShowAliases(Some(namespacedName("ns.db")), None)(defaultPos))
+    assertAstVersionBased(fromCypher5 =>
+      ShowAliases(Some(namespacedName("ns.db")), None, fromCypher5, false)(defaultPos)
+    )
   }
 
   test("SHOW ALIAS ns.`db.db` FOR DATABASE") {
-    assertAst(ShowAliases(Some(namespacedName("ns", "db.db")), None)(defaultPos))
+    parsesIn[Statements] {
+      case Cypher5 => _.toAstPositioned(
+          ShowAliases(Some(namespacedName("ns", "db.db")), None, true, false)(defaultPos)
+        )
+      case _ => _.withSyntaxError(
+          """Incorrectly formatted graph reference 'ns.`db.db`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 12 (offset: 11))
+            |"SHOW ALIAS ns.`db.db` FOR DATABASE"
+            |            ^""".stripMargin
+        )
+    }
   }
 
   test("SHOW ALIAS ns.`db.db` FOR DATABASE YIELD * RETURN *") {
-    assertAst(ShowAliases(
-      Some(namespacedName("ns", "db.db")),
-      Some(Left((yieldClause(returnAllItems), Some(returnAll))))
-    )(defaultPos))
+    parsesIn[Statements] {
+      case Cypher5 => _.toAstPositioned(
+          ShowAliases(
+            Some(namespacedName("ns", "db.db")),
+            Some(Left((yieldClause(returnAllItems), Some(returnAll)))),
+            true,
+            false
+          )(defaultPos)
+        )
+      case _ => _.withSyntaxError(
+          """Incorrectly formatted graph reference 'ns.`db.db`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 12 (offset: 11))
+            |"SHOW ALIAS ns.`db.db` FOR DATABASE YIELD * RETURN *"
+            |            ^""".stripMargin
+        )
+    }
   }
 
   test("SHOW ALIAS `ns.db`.`db` FOR DATABASE") {
-    assertAst(ShowAliases(Some(namespacedName("ns.db", "db")), None)(defaultPos))
+    parsesIn[Statements] {
+      case Cypher5 => _.toAstPositioned(
+          ShowAliases(Some(namespacedName("ns.db", "db")), None, true, false)(defaultPos)
+        )
+      case _ => _.withSyntaxError(
+          """Incorrectly formatted graph reference '`ns.db`.`db`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 12 (offset: 11))
+            |"SHOW ALIAS `ns.db`.`db` FOR DATABASE"
+            |            ^""".stripMargin
+        )
+    }
   }
 
   test("SHOW ALIAS `ns.db`.db FOR DATABASE") {
-    assertAst(ShowAliases(Some(namespacedName("ns.db", "db")), None)(defaultPos))
+    parsesIn[Statements] {
+      case Cypher5 => _.toAstPositioned(
+          ShowAliases(Some(namespacedName("ns.db", "db")), None, true, false)(defaultPos)
+        )
+      case _ => _.withSyntaxError(
+          """Incorrectly formatted graph reference '`ns.db`.db'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 12 (offset: 11))
+            |"SHOW ALIAS `ns.db`.db FOR DATABASE"
+            |            ^""".stripMargin
+        )
+    }
   }
 
   test("SHOW ALIASES FOR DATABASE WHERE name = 'alias1'") {
-    assertAst(ShowAliases(Some(Right(where(equals(varFor("name"), literalString("alias1"))))))(defaultPos))
+    assertAstVersionBased(fromCypher5 =>
+      ShowAliases(Some(Right(where(equals(varFor("name"), literalString("alias1"))))), fromCypher5, false)(defaultPos)
+    )
   }
 
   test("SHOW ALIASES FOR DATABASE YIELD location") {
     val columns = yieldClause(returnItems(variableReturnItem("location")), None)
     val yieldOrWhere = Some(Left((columns, None)))
-    assertAst(ShowAliases(yieldOrWhere)(defaultPos))
+    assertAstVersionBased(fromCypher5 =>
+      ShowAliases(yieldOrWhere, fromCypher5, false)(defaultPos)
+    )
   }
 
   test("SHOW ALIASES FOR DATABASE YIELD location ORDER BY database") {
     val orderByClause = orderBy(sortItem(varFor("database")))
     val columns = yieldClause(returnItems(variableReturnItem("location")), Some(orderByClause))
     val yieldOrWhere = Some(Left((columns, None)))
-    assertAst(ShowAliases(yieldOrWhere)(defaultPos))
+    assertAstVersionBased(fromCypher5 =>
+      ShowAliases(yieldOrWhere, fromCypher5, false)(defaultPos)
+    )
   }
 
   test("SHOW ALIASES FOR DATABASE YIELD location ORDER BY database SKIP 1 LIMIT 2 WHERE name = 'alias1' RETURN *") {
@@ -1571,7 +2514,9 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
       Some(whereClause)
     )
     val yieldOrWhere = Some(Left((columns, Some(returnAll))))
-    assertAst(ShowAliases(yieldOrWhere)(defaultPos))
+    assertAstVersionBased(fromCypher5 =>
+      ShowAliases(yieldOrWhere, fromCypher5, false)(defaultPos)
+    )
   }
 
   test("SHOW ALIASES FOR DATABASE YIELD location ORDER BY database OFFSET 1 LIMIT 2 WHERE name = 'alias1' RETURN *") {
@@ -1585,111 +2530,197 @@ class AliasAdministrationCommandParserTest extends AdministrationAndSchemaComman
       Some(whereClause)
     )
     val yieldOrWhere = Some(Left((columns, Some(returnAll))))
-    assertAst(ShowAliases(yieldOrWhere)(defaultPos))
+    assertAstVersionBased(fromCypher5 =>
+      ShowAliases(yieldOrWhere, fromCypher5, false)(defaultPos)
+    )
   }
 
   test("SHOW ALIASES FOR DATABASE YIELD *") {
-    assertAst(ShowAliases(Some(Left((yieldClause(returnAllItems), None))))(defaultPos))
+    assertAstVersionBased(fromCypher5 =>
+      ShowAliases(Some(Left((yieldClause(returnAllItems), None))), fromCypher5, false)(defaultPos)
+    )
   }
 
   test("SHOW ALIASES FOR DATABASE RETURN *") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          "Invalid input 'RETURN': expected \"WHERE\", \"YIELD\" or <EOF> (line 1, column 27 (offset: 26))"
-        )
-      case _ => _.withSyntaxError(
-          """Invalid input 'RETURN': expected 'WHERE', 'YIELD' or <EOF> (line 1, column 27 (offset: 26))
-            |"SHOW ALIASES FOR DATABASE RETURN *"
-            |                           ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'RETURN': expected 'WHERE', 'YIELD' or <EOF> (line 1, column 27 (offset: 26))
+        |"SHOW ALIASES FOR DATABASE RETURN *"
+        |                           ^""".stripMargin
+    )
   }
 
   test("SHOW ALIASES FOR DATABASE YIELD") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.withMessageStart("Invalid input '': expected \"*\" or an identifier (line 1, column 32 (offset: 31))")
-      case _ => _.withSyntaxError(
-          """Invalid input '': expected a variable name or '*' (line 1, column 32 (offset: 31))
-            |"SHOW ALIASES FOR DATABASE YIELD"
-            |                                ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '': expected a variable name or '*' (line 1, column 32 (offset: 31))
+        |"SHOW ALIASES FOR DATABASE YIELD"
+        |                                ^""".stripMargin
+    )
   }
 
   test("SHOW ALIASES FOR DATABASE YIELD (123 + xyz)") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.withMessageStart("Invalid input '(': expected \"*\" or an identifier (line 1, column 33 (offset: 32))")
-      case _ => _.withSyntaxError(
-          """Invalid input '(': expected a variable name or '*' (line 1, column 33 (offset: 32))
-            |"SHOW ALIASES FOR DATABASE YIELD (123 + xyz)"
-            |                                 ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '(': expected a variable name or '*' (line 1, column 33 (offset: 32))
+        |"SHOW ALIASES FOR DATABASE YIELD (123 + xyz)"
+        |                                 ^""".stripMargin
+    )
   }
 
   test("SHOW ALIASES FOR DATABASE YIELD (123 + xyz) AS foo") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.withMessageStart("Invalid input '(': expected \"*\" or an identifier (line 1, column 33 (offset: 32))")
-      case _ => _.withSyntaxError(
-          """Invalid input '(': expected a variable name or '*' (line 1, column 33 (offset: 32))
-            |"SHOW ALIASES FOR DATABASE YIELD (123 + xyz) AS foo"
-            |                                 ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '(': expected a variable name or '*' (line 1, column 33 (offset: 32))
+        |"SHOW ALIASES FOR DATABASE YIELD (123 + xyz) AS foo"
+        |                                 ^""".stripMargin
+    )
   }
 
   test("SHOW ALIAS") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '': expected \"FOR\" (line 1, column 11 (offset: 10))")
-      case _ => _.withMessage(
-          """Invalid input '': expected a database name, a parameter or 'FOR' (line 1, column 11 (offset: 10))
-            |"SHOW ALIAS"
-            |           ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withMessage(
+      """Invalid input '': expected a database name, a parameter or 'FOR' (line 1, column 11 (offset: 10))
+        |"SHOW ALIAS"
+        |           ^""".stripMargin
+    )
   }
 
   test("SHOW ALIAS foo, bar FOR DATABASES") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'foo': expected \"FOR\"")
-      case _ => _.withSyntaxError(
-          """Invalid input ',': expected a database name or 'FOR' (line 1, column 15 (offset: 14))
-            |"SHOW ALIAS foo, bar FOR DATABASES"
-            |               ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input ',': expected a database name or 'FOR' (line 1, column 15 (offset: 14))
+        |"SHOW ALIAS foo, bar FOR DATABASES"
+        |               ^""".stripMargin
+    )
   }
 
   test("SHOW ALIAS `a`.`b`.`c` FOR DATABASE") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input ``a`.`b`.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 12 (offset: 11))"
-    )
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input ``a`.`b`.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 12 (offset: 11))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input '`a`.`b`.`c`' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          "Incorrectly formatted graph reference '`a`.`b`.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 12 (offset: 11))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference '`a`.`b`.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 
   test("SHOW ALIAS `a`.b.`c` FOR DATABASE") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input ``a`.b.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 12 (offset: 11))"
-    )
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input ``a`.b.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 12 (offset: 11))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input '`a`.b.`c`' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          "Incorrectly formatted graph reference '`a`.b.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 12 (offset: 11))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference '`a`.b.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 
   test("SHOW ALIAS a.`b`.`c` FOR DATABASE") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input `a.`b`.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 12 (offset: 11))"
-    )
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input `a.`b`.`c`` for name. Expected name to contain at most two components separated by `.`. (line 1, column 12 (offset: 11))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input 'a.`b`.`c`' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          "Incorrectly formatted graph reference 'a.`b`.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 12 (offset: 11))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference 'a.`b`.`c`'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 
   test("SHOW ALIAS `a`.`b`.c FOR DATABASE") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input ``a`.`b`.c` for name. Expected name to contain at most two components separated by `.`. (line 1, column 12 (offset: 11))"
-    )
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input ``a`.`b`.c` for name. Expected name to contain at most two components separated by `.`. (line 1, column 12 (offset: 11))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input '`a`.`b`.c' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          "Incorrectly formatted graph reference '`a`.`b`.c'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 12 (offset: 11))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference '`a`.`b`.c'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 
   test("SHOW ALIAS a.`b`.c FOR DATABASE") {
-    failsParsing[Statements].withMessageStart(
-      "Invalid input `a.`b`.c` for name. Expected name to contain at most two components separated by `.`. (line 1, column 12 (offset: 11))"
-    )
+    failsParsing[Statements].in {
+      case Cypher5 => _.withMessageStart(
+          "Invalid input `a.`b`.c` for name. Expected name to contain at most two components separated by `.`. (line 1, column 12 (offset: 11))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_22N05,
+              "error: data exception - input failed validation. Invalid input 'a.`b`.c' for name."
+            )
+              .withCause(
+                GqlStatusInfoCodes.STATUS_22N83,
+                "error: data exception - input consists of too many components. Expected name to contain at most 2 components separated by '.'."
+              )
+          )
+      case _ => _.withMessageStart(
+          "Incorrectly formatted graph reference 'a.`b`.c'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually. (line 1, column 12 (offset: 11))"
+        )
+          .withSyntaxErrorGqlStatus(
+            gqlStatus(
+              GqlStatusInfoCodes.STATUS_42NAA,
+              "error: syntax error or access rule violation - incorrectly formatted graph reference. Incorrectly formatted graph reference 'a.`b`.c'. Expected a single quoted or unquoted identifier. Separate name parts should not be quoted individually."
+            )
+          )
+    }
   }
 }

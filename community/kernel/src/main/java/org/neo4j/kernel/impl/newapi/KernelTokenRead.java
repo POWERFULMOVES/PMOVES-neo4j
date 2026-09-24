@@ -84,7 +84,7 @@ public abstract class KernelTokenRead implements TokenRead {
         try {
             return tokenHolders.labelTokens().getTokenById(labelId).name();
         } catch (TokenNotFoundException e) {
-            throw new LabelNotFoundKernelException(labelId, e);
+            throw LabelNotFoundKernelException.labelNotFound(labelId, e);
         }
     }
 
@@ -103,7 +103,7 @@ public abstract class KernelTokenRead implements TokenRead {
                     .getTokenById(relationshipTypeId)
                     .name();
         } catch (TokenNotFoundException e) {
-            throw new RelationshipTypeIdNotFoundKernelException(relationshipTypeId, e);
+            throw RelationshipTypeIdNotFoundKernelException.relationshipTypeNotFound(relationshipTypeId, e);
         }
     }
 
@@ -119,7 +119,7 @@ public abstract class KernelTokenRead implements TokenRead {
         try {
             return tokenHolders.propertyKeyTokens().getTokenById(propertyKeyId).name();
         } catch (TokenNotFoundException e) {
-            throw new PropertyKeyIdNotFoundKernelException(propertyKeyId, e);
+            throw PropertyKeyIdNotFoundKernelException.propertyKeyIdNotFound(propertyKeyId, e);
         }
     }
 
@@ -128,7 +128,7 @@ public abstract class KernelTokenRead implements TokenRead {
         performCheckBeforeOperation();
         return Iterators.stream(tokenHolders.labelTokens().getAllTokens().iterator())
                 .filter(label -> getAccessMode().allowsTraverseNode(label.id())
-                        || getAccessMode().hasApplicableTraverseAllowPropertyRules(label.id()))
+                        || getAccessMode().hasApplicableTraverseNodeAllowPropertyRules(label.id()))
                 .iterator();
     }
 
@@ -145,7 +145,8 @@ public abstract class KernelTokenRead implements TokenRead {
         performCheckBeforeOperation();
         return Iterators.stream(
                         tokenHolders.relationshipTypeTokens().getAllTokens().iterator())
-                .filter(relType -> getAccessMode().allowsTraverseRelType(relType.id()))
+                .filter(relType -> getAccessMode().allowsTraverseRelType(relType.id())
+                        || getAccessMode().hasApplicableTraverseRelAllowPropertyRules(relType.id()))
                 .iterator();
     }
 

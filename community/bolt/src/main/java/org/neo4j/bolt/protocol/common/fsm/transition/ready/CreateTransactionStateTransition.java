@@ -27,9 +27,9 @@ import org.neo4j.bolt.protocol.common.fsm.States;
 import org.neo4j.bolt.protocol.common.fsm.error.AuthenticationStateTransitionException;
 import org.neo4j.bolt.protocol.common.fsm.error.TransactionStateTransitionException;
 import org.neo4j.bolt.protocol.common.fsm.response.ResponseHandler;
-import org.neo4j.bolt.protocol.common.message.request.transaction.BeginMessage;
 import org.neo4j.bolt.security.error.AuthenticationException;
 import org.neo4j.bolt.tx.error.TransactionException;
+import org.neo4j.boltmessages.request.transaction.BeginMessage;
 
 /**
  * Handles the creation of transactions.
@@ -54,7 +54,7 @@ public final class CreateTransactionStateTransition extends AbstractStateTransit
             try {
                 ctx.connection().impersonate(message.impersonatedUser());
             } catch (AuthenticationException ex) {
-                throw new AuthenticationStateTransitionException(ex);
+                throw AuthenticationStateTransitionException.wrapError(ex);
             }
         }
 

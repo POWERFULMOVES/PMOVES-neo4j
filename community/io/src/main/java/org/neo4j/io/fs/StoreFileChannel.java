@@ -30,14 +30,14 @@ import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
+import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import org.neo4j.function.ThrowingFunction;
-import org.neo4j.io.pagecache.impl.SingleFilePageSwapper;
 
 public class StoreFileChannel implements StoreChannel {
     private static final boolean PRINT_REFLECTION_EXCEPTIONS =
-            flag(SingleFilePageSwapper.class, "printReflectionExceptions", false);
+            flag(StoreFileChannel.class, "printReflectionExceptions", false);
     private static final Class<?> CLS_FILE_CHANNEL_IMPL = getInternalFileChannelClass();
     private static final MethodHandle POSITION_LOCK_GETTER = getPositionLockGetter();
     private static final MethodHandle MAKE_CHANNEL_UNINTERRUPTIBLE = getUninterruptibleSetter();
@@ -279,5 +279,10 @@ public class StoreFileChannel implements StoreChannel {
     @Override
     public void flush() throws IOException {
         force(false);
+    }
+
+    @Override
+    public MappedByteBuffer map(FileChannel.MapMode mode, long position, long size) throws IOException {
+        return channel.map(mode, position, size);
     }
 }

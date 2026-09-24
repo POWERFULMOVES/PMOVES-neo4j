@@ -22,33 +22,37 @@ package org.neo4j.kernel.api;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.time.Duration.ofDays;
 import static java.util.OptionalLong.empty;
-import static org.apache.commons.lang3.RandomStringUtils.randomAscii;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.neo4j.collection.Dependencies.dependenciesOf;
 import static org.neo4j.configuration.GraphDatabaseSettings.CheckpointPolicy.PERIODIC;
-import static org.neo4j.configuration.GraphDatabaseSettings.SYSTEM_DATABASE_NAME;
+import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
 import static org.neo4j.io.ByteUnit.kibiBytes;
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
 import static org.neo4j.storageengine.AppendIndexProvider.UNKNOWN_APPEND_INDEX;
 import static org.neo4j.storageengine.api.LogVersionRepository.UNKNOWN_LOG_OFFSET;
 import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_CHECKSUM;
 import static org.neo4j.test.LatestVersions.LATEST_KERNEL_VERSION;
+import static org.neo4j.test.LatestVersions.LATEST_KERNEL_VERSION_WITHOUT_ENVELOPES;
 import static org.neo4j.test.LatestVersions.LATEST_LOG_FORMAT;
+import static org.neo4j.test.LatestVersions.LATEST_RUNTIME_VERSION_WITHOUT_ENVELOPES;
+import static org.neo4j.test.extension.SkipOnSpd.Note.incompatible;
+import static org.neo4j.wal.entry.LogSegments.DEFAULT_LOG_SEGMENT_SIZE;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.ClosedChannelException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -57,36 +61,27 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.stream.LongStream;
 import org.junit.jupiter.api.Test;
+import org.neo4j.configuration.Config;
+import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.configuration.GraphDatabaseSettings;
-import org.neo4j.dbms.api.DatabaseManagementService;
+import org.neo4j.dbms.database.DbmsRuntimeVersion;
 import org.neo4j.graphdb.Node;
+import org.neo4j.internal.helpers.collection.LongRange;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.fs.StoreChannel;
 import org.neo4j.io.memory.ByteBuffers;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.io.pagecache.tracing.version.VersionStorageTracer;
+import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.api.database.transaction.LogChannel;
 import org.neo4j.kernel.api.database.transaction.TransactionLogChannels;
 import org.neo4j.kernel.api.database.transaction.TransactionLogService;
+import org.neo4j.kernel.availability.AvailabilityRequirement;
 import org.neo4j.kernel.availability.DatabaseAvailabilityGuard;
-import org.neo4j.kernel.availability.DescriptiveAvailabilityRequirement;
-import org.neo4j.kernel.database.Database;
 import org.neo4j.kernel.database.DatabaseTracers;
 import org.neo4j.kernel.database.NamedDatabaseId;
 import org.neo4j.kernel.impl.api.tracer.DefaultDatabaseTracer;
-import org.neo4j.kernel.impl.transaction.log.LogAppendEvent;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
-import org.neo4j.kernel.impl.transaction.log.LogicalTransactionStore;
-import org.neo4j.kernel.impl.transaction.log.ReadableLogChannel;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
-import org.neo4j.kernel.impl.transaction.log.files.LogFile;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
-import org.neo4j.kernel.impl.transaction.log.files.LogTailInformation;
-import org.neo4j.kernel.impl.transaction.log.files.TransactionLogFile;
-import org.neo4j.kernel.impl.transaction.log.files.checkpoint.CheckpointLogFile;
-import org.neo4j.kernel.impl.transaction.log.rotation.monitor.LogRotationMonitorAdapter;
 import org.neo4j.kernel.impl.transaction.tracing.DatabaseTracer;
 import org.neo4j.kernel.impl.transaction.tracing.StoreApplyEvent;
 import org.neo4j.kernel.impl.transaction.tracing.TransactionEvent;
@@ -96,26 +91,46 @@ import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.kernel.monitoring.tracing.Tracers;
 import org.neo4j.lock.LockTracer;
 import org.neo4j.monitoring.Monitors;
-import org.neo4j.storageengine.api.MetadataProvider;
-import org.neo4j.storageengine.api.StorageEngineFactory;
+import org.neo4j.storageengine.api.LogMetadataProvider;
 import org.neo4j.storageengine.api.TransactionId;
 import org.neo4j.storageengine.api.TransactionIdStore;
 import org.neo4j.test.OtherThreadExecutor;
+import org.neo4j.test.RandomSupport;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.DbmsExtension;
 import org.neo4j.test.extension.ExtensionCallback;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.test.extension.SkipOnSpd;
+import org.neo4j.test.utils.TestDirectory;
 import org.neo4j.util.concurrent.BinaryLatch;
+import org.neo4j.wal.LogAppendEvent;
+import org.neo4j.wal.LogFile;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.LogPosition;
+import org.neo4j.wal.LogicalTransactionStore;
+import org.neo4j.wal.ReadableLogChannel;
+import org.neo4j.wal.TransactionMetadataCache;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
+import org.neo4j.wal.entry.LogFormat;
+import org.neo4j.wal.entry.LogHeader;
+import org.neo4j.wal.files.LogRangeInfo;
+import org.neo4j.wal.files.LogTailInformation;
+import org.neo4j.wal.files.TransactionLogFile;
+import org.neo4j.wal.files.checkpoint.CheckpointLogFile;
+import org.neo4j.wal.rotation.monitor.LogRotationMonitorAdapter;
 
 @DbmsExtension(configurationCallback = "configure")
+@RandomSupportExtension
 class TransactionLogServiceIT {
     private static final long THRESHOLD = kibiBytes(256);
 
     @Inject
-    private GraphDatabaseAPI databaseAPI;
+    private TestDirectory testDirectory;
 
     @Inject
-    private DatabaseManagementService managementService;
+    private GraphDatabaseAPI databaseAPI;
 
     @Inject
     private TransactionLogService logService;
@@ -133,10 +148,13 @@ class TransactionLogServiceIT {
     private FileSystemAbstraction fs;
 
     @Inject
-    private MetadataProvider metadataProvider;
+    private LogMetadataProvider metadataProvider;
 
     @Inject
     private DatabaseAvailabilityGuard availabilityGuard;
+
+    @Inject
+    private RandomSupport random;
 
     @ExtensionCallback
     void configure(TestDatabaseManagementServiceBuilder builder) {
@@ -153,7 +171,7 @@ class TransactionLogServiceIT {
 
     @Test
     void rotationDuringTransactionLogReadingKeepNonAffectedChannelsOpen() throws IOException {
-        var propertyValue = randomAscii((int) THRESHOLD);
+        var propertyValue = random.nextAsciiStringOfLength((int) THRESHOLD);
 
         // execute test transaction to create any tokens to avoid tx ids tricks
         createNodeInIsolatedTransaction("any");
@@ -163,14 +181,20 @@ class TransactionLogServiceIT {
             createNodeInIsolatedTransaction(propertyValue);
         }
 
-        try (TransactionLogChannels logReaders = logService.logFilesChannels(lastAppendIndexBeforeWorkload + 29)) {
+        try (TransactionLogChannels logReaders = logService.logFilesChannels(lastAppendIndexBeforeWorkload + 30)) {
             List<LogChannel> logFileChannels = logReaders.getChannels();
-            assertThat(logFileChannels).hasSize(2);
+            // Tx split over several files with envelopes
+            int expectedLogChannelsSize = LogFormat.fromConfigAndKernelVersion(Config.defaults(), LATEST_KERNEL_VERSION)
+                            .usesSegments()
+                    ? 3
+                    : 1;
+            assertThat(logFileChannels).hasSize(expectedLogChannelsSize);
             assertThat(logFiles.logFiles()).hasSizeGreaterThanOrEqualTo(numberOfTransactions);
 
             checkPointer.forceCheckPoint(new SimpleTriggerInfo("Test checkpoint"));
 
             // 2 desired non-empty tx log files + 1 newly rotated empty, 1 checkpoint log
+            // or in the case of envelopes: 3 non-empty files to get at least one whole chunk, and 1 checkpoint log
             assertThat(logFiles.logFiles()).hasSize(4);
 
             for (LogChannel logChannel : logFileChannels) {
@@ -183,7 +207,7 @@ class TransactionLogServiceIT {
 
     @Test
     void rotationDuringTransactionLogReading() throws IOException {
-        var propertyValue = randomAscii((int) THRESHOLD);
+        var propertyValue = random.nextAsciiStringOfLength((int) THRESHOLD);
 
         int numberOfTransactions = 30;
         for (int i = 0; i < numberOfTransactions; i++) {
@@ -198,9 +222,14 @@ class TransactionLogServiceIT {
             checkPointer.forceCheckPoint(new SimpleTriggerInfo("Test checkpoint"));
 
             // 2 desired non-empty tx log files + 1 newly rotated empty, 1 checkpoint log
+            // or in the case of envelopes: 3 non-empty files to get at least one whole chunk, and 1 checkpoint log
             int txLogsAfterCheckpoint = 3;
             // the transaction log service did not return the last (empty) transaction log file
-            var visibleTxLogsAfterCheckpoints = txLogsAfterCheckpoint - 1;
+            var visibleTxLogsAfterCheckpoints =
+                    LogFormat.fromConfigAndKernelVersion(Config.defaults(), LATEST_KERNEL_VERSION)
+                                    .usesSegments()
+                            ? txLogsAfterCheckpoint
+                            : txLogsAfterCheckpoint - 1;
             int checkpointLogs = 1;
 
             assertThat(logFiles.logFiles()).hasSize(txLogsAfterCheckpoint + checkpointLogs);
@@ -225,7 +254,7 @@ class TransactionLogServiceIT {
 
     @Test
     void closingReadersDoesAutomaticCleanup() throws Exception {
-        var propertyValue = randomAscii((int) THRESHOLD);
+        var propertyValue = random.nextAsciiStringOfLength((int) THRESHOLD);
 
         int numberOfTransactions = 30;
         for (int i = 0; i < numberOfTransactions; i++) {
@@ -253,7 +282,7 @@ class TransactionLogServiceIT {
 
     @Test
     void requireDirectByteBufferForLogFileAppending() {
-        availabilityGuard.require(new DescriptiveAvailabilityRequirement("Database unavailable"));
+        availabilityGuard.require(new AvailabilityRequirement("Database unavailable"));
 
         assertThrows(
                 IllegalArgumentException.class,
@@ -262,7 +291,8 @@ class TransactionLogServiceIT {
                         empty(),
                         Optional.of(LATEST_KERNEL_VERSION.version()),
                         BASE_TX_CHECKSUM,
-                        UNKNOWN_LOG_OFFSET));
+                        UNKNOWN_LOG_OFFSET,
+                        Optional.of(LATEST_LOG_FORMAT.getVersionByte())));
     }
 
     @Test
@@ -274,14 +304,15 @@ class TransactionLogServiceIT {
                         empty(),
                         Optional.of(LATEST_KERNEL_VERSION.version()),
                         BASE_TX_CHECKSUM,
-                        UNKNOWN_LOG_OFFSET));
+                        UNKNOWN_LOG_OFFSET,
+                        Optional.of(LATEST_LOG_FORMAT.getVersionByte())));
     }
 
     @Test
     void bulkAppendToTransactionLogsDoesNotChangeLastCommittedTransactionOffset() throws IOException {
-        availabilityGuard.require(new DescriptiveAvailabilityRequirement("Database unavailable"));
+        availabilityGuard.require(new AvailabilityRequirement("Database unavailable"));
 
-        var metadataBefore = metadataProvider.getLastClosedTransaction();
+        var metadataBefore = metadataProvider.getHighestGapFreeClosedTransaction();
         var buffer = createBuffer().put(new byte[] {1, 2, 3, 4, 5});
         try {
             for (int i = 0; i < 100; i++) {
@@ -291,24 +322,26 @@ class TransactionLogServiceIT {
                         empty(),
                         Optional.of(LATEST_KERNEL_VERSION.version()),
                         BASE_TX_CHECKSUM,
-                        UNKNOWN_LOG_OFFSET);
+                        UNKNOWN_LOG_OFFSET,
+                        Optional.of(LATEST_LOG_FORMAT.getVersionByte()));
             }
         } finally {
             ByteBuffers.releaseBuffer(buffer, INSTANCE);
         }
 
-        assertEquals(metadataBefore, metadataProvider.getLastClosedTransaction());
+        assertEquals(metadataBefore, metadataProvider.getHighestGapFreeClosedTransaction());
     }
 
     @Test
     void bulkAppendWithRotationDoesNotChangeLastClosedMetadata() throws IOException {
-        availabilityGuard.require(new DescriptiveAvailabilityRequirement("Database unavailable"));
+        availabilityGuard.require(new AvailabilityRequirement("Database unavailable"));
 
-        var metadataBefore = metadataProvider.getLastClosedTransaction();
+        var metadataBefore = metadataProvider.getHighestGapFreeClosedTransaction();
         long logVersionBefore = metadataProvider.getCurrentLogVersion();
 
         int appendIterations = 100;
-        var appendData = createBuffer().put(randomAscii((int) (THRESHOLD + 1)).getBytes(UTF_8));
+        var appendData = createBuffer()
+                .put(random.nextAsciiStringOfLength((int) (THRESHOLD + 1)).getBytes(UTF_8));
         try {
             for (int i = 0; i < appendIterations; i++) {
                 logService.append(
@@ -316,14 +349,15 @@ class TransactionLogServiceIT {
                         OptionalLong.of(i + 7),
                         Optional.of(LATEST_KERNEL_VERSION.version()),
                         BASE_TX_CHECKSUM,
-                        UNKNOWN_LOG_OFFSET);
+                        UNKNOWN_LOG_OFFSET,
+                        Optional.of(LATEST_LOG_FORMAT.getVersionByte()));
                 appendData.rewind();
             }
         } finally {
             ByteBuffers.releaseBuffer(appendData, INSTANCE);
         }
 
-        assertEquals(metadataBefore, metadataProvider.getLastClosedTransaction());
+        assertEquals(metadataBefore, metadataProvider.getHighestGapFreeClosedTransaction());
 
         // pruning is also not here since metadata store is not upgraded
         Path[] matchedFiles = logFiles.getLogFile().getMatchedFiles();
@@ -332,12 +366,13 @@ class TransactionLogServiceIT {
 
     @Test
     void bulkAppendWithRotationUpdatesMetadataProviderLogVersion() throws IOException {
-        availabilityGuard.require(new DescriptiveAvailabilityRequirement("Database unavailable"));
+        availabilityGuard.require(new AvailabilityRequirement("Database unavailable"));
 
         long logVersionBefore = metadataProvider.getCurrentLogVersion();
 
         int appendIterations = 100;
-        var appendData = createBuffer().put(randomAscii((int) (THRESHOLD + 1)).getBytes(UTF_8));
+        var appendData = createBuffer()
+                .put(random.nextAsciiStringOfLength((int) (THRESHOLD + 1)).getBytes(UTF_8));
         try {
             for (int i = 0; i < appendIterations; i++) {
                 logService.append(
@@ -345,7 +380,8 @@ class TransactionLogServiceIT {
                         OptionalLong.of(i + 7),
                         Optional.of(LATEST_KERNEL_VERSION.version()),
                         BASE_TX_CHECKSUM,
-                        UNKNOWN_LOG_OFFSET);
+                        UNKNOWN_LOG_OFFSET,
+                        Optional.of(LATEST_LOG_FORMAT.getVersionByte()));
                 appendData.rewind();
             }
         } finally {
@@ -360,13 +396,14 @@ class TransactionLogServiceIT {
 
     @Test
     void bulkAppendRotatedLogFilesHaveCorrectSupplierTransactionsFromHeader() throws IOException {
-        availabilityGuard.require(new DescriptiveAvailabilityRequirement("Database unavailable"));
+        availabilityGuard.require(new AvailabilityRequirement("Database unavailable"));
 
         long logVersionBefore = metadataProvider.getCurrentLogVersion();
 
         int appendIterations = 100;
         int indexShift = 10;
-        var appendData = createBuffer().put(randomAscii((int) (THRESHOLD + 1)).getBytes(UTF_8));
+        var appendData = createBuffer()
+                .put(random.nextAsciiStringOfLength((int) (THRESHOLD + 1)).getBytes(UTF_8));
         try {
             for (int i = 0; i < appendIterations; i++) {
                 logService.append(
@@ -374,7 +411,8 @@ class TransactionLogServiceIT {
                         OptionalLong.of(indexShift + i),
                         Optional.of(LATEST_KERNEL_VERSION.version()),
                         BASE_TX_CHECKSUM,
-                        UNKNOWN_LOG_OFFSET);
+                        UNKNOWN_LOG_OFFSET,
+                        Optional.of(LATEST_LOG_FORMAT.getVersionByte()));
                 appendData.rewind();
             }
         } finally {
@@ -382,77 +420,101 @@ class TransactionLogServiceIT {
         }
 
         LogFile logFile = logFiles.getLogFile();
-        var logFileInformation = logFile.getLogFileInformation();
         for (int version = (int) logVersionBefore + 1; version < logVersionBefore + appendIterations; version++) {
-            assertEquals(indexShift + version, logFileInformation.getFirstEntryAppendIndex(version));
             assertEquals(
                     indexShift - 1 + version, logFile.extractHeader(version).getLastAppendIndex());
         }
     }
 
     @Test
-    void replayTransactionAfterBulkAppendOnNextRestart() throws IOException {
-        // so we will write data to system db and will mimic catchup by transfer in bulk logs from system db to test db
-        var systemDatabase = (GraphDatabaseAPI) managementService.database(SYSTEM_DATABASE_NAME);
+    void bulkAppendForEnvelopesRotatesOnNewFileOnSender() throws IOException {
+        // Only interesting for envelopes
+        assumeTrue(LATEST_LOG_FORMAT.usesSegments());
+        // Currently calls with append index represent first append or new file
+        availabilityGuard.require(new AvailabilityRequirement("Database unavailable"));
 
-        assumeThat(systemDatabase.getDependencyResolver().resolveDependency(StorageEngineFactory.class))
-                .isEqualTo(databaseAPI.getDependencyResolver().resolveDependency(StorageEngineFactory.class));
+        LogFile logFile = logFiles.getLogFile();
+        LogPosition startPosition = logFile.getTransactionLogWriter().getCurrentPosition();
 
-        var systemMetadata = systemDatabase.getDependencyResolver().resolveDependency(MetadataProvider.class);
-        var positionBeforeTransaction =
-                systemMetadata.getLastClosedTransaction().logPosition();
-        for (int i = 0; i < 3; i++) {
-            try (var transaction = systemDatabase.beginTx()) {
-                transaction.createNode();
-                transaction.commit();
-            }
-        }
-        var positionAfterTransaction = systemMetadata.getLastClosedTransaction().logPosition();
-        long systemLastClosedTransactionId = systemMetadata.getLastClosedTransactionId();
-        var buffer = readTransactionIntoBuffer(systemDatabase, positionBeforeTransaction, positionAfterTransaction);
-        LogPosition positionBeforeRecovery;
+        int dataSize = DEFAULT_LOG_SEGMENT_SIZE / 2;
+        var appendData = ByteBuffers.allocateDirect(dataSize, ByteOrder.LITTLE_ENDIAN, INSTANCE)
+                .put(random.nextAsciiStringOfLength(dataSize).getBytes(UTF_8))
+                .rewind();
         try {
-            availabilityGuard.require(new DescriptiveAvailabilityRequirement("Database unavailable"));
-            long lastTransactionBeforeBufferAppend =
-                    metadataProvider.getLastClosedTransaction().transactionId().id();
+            logService.append(
+                    appendData,
+                    OptionalLong.of(1),
+                    Optional.of(LATEST_KERNEL_VERSION.version()),
+                    BASE_TX_CHECKSUM,
+                    UNKNOWN_LOG_OFFSET,
+                    Optional.of(LATEST_LOG_FORMAT.getVersionByte()));
+            appendData.rewind();
 
-            positionBeforeRecovery = metadataProvider.getLastClosedTransaction().logPosition();
-
-            for (int i = 0; i < 3; i++) {
-                logService.append(
-                        buffer,
-                        OptionalLong.of(lastTransactionBeforeBufferAppend + i + 1),
-                        Optional.of(LATEST_KERNEL_VERSION.version()),
-                        BASE_TX_CHECKSUM,
-                        UNKNOWN_LOG_OFFSET);
-                buffer.rewind();
-            }
+            logService.append(
+                    appendData,
+                    OptionalLong.of(2),
+                    Optional.of(LATEST_KERNEL_VERSION.version()),
+                    BASE_TX_CHECKSUM,
+                    DEFAULT_LOG_SEGMENT_SIZE,
+                    Optional.of(LATEST_LOG_FORMAT.getVersionByte()));
         } finally {
-            ByteBuffers.releaseBuffer(buffer, INSTANCE);
+            ByteBuffers.releaseBuffer(appendData, INSTANCE);
         }
 
-        // restart db and trigger shutdown checkpoint and recovery
-        Database database = databaseAPI.getDependencyResolver().resolveDependency(Database.class);
-        database.stop();
-        database.start();
+        LogRangeInfo logRangeInfo = logFile.getLogRangeInfo();
+        assertThat(logRangeInfo.highestVersion()).isEqualTo(logRangeInfo.lowestVersion() + 1);
+        assertThat(Files.size(logFile.getLogFileForVersion(logRangeInfo.lowestVersion())))
+                .isEqualTo(startPosition.getByteOffset() + dataSize);
+        assertThat(logFile.getTransactionLogWriter().getCurrentPosition())
+                .isEqualTo(new LogPosition(logRangeInfo.highestVersion(), DEFAULT_LOG_SEGMENT_SIZE + dataSize));
+    }
 
-        var restartedProvider = database.getDependencyResolver().resolveDependency(MetadataProvider.class);
-        assertEquals(systemLastClosedTransactionId, restartedProvider.getLastClosedTransactionId());
-        assertNotEquals(
-                positionBeforeRecovery,
-                restartedProvider.getLastClosedTransaction().logPosition());
+    @Test
+    void bulkAppendForEnvelopesDoesntRotateOnNewFileOnSenderIfAlreadyRotated() throws IOException {
+        // Only interesting for envelopes
+        assumeTrue(LATEST_LOG_FORMAT.usesSegments());
+        // Currently calls with append index represent first append or new file
+        availabilityGuard.require(new AvailabilityRequirement("Database unavailable"));
+
+        LogFile logFile = logFiles.getLogFile();
+        logFile.rotate();
+
+        LogRangeInfo logRangeInfo = logFile.getLogRangeInfo();
+        assertThat(logRangeInfo.highestVersion()).isEqualTo(logRangeInfo.lowestVersion() + 1);
+
+        int dataSize = DEFAULT_LOG_SEGMENT_SIZE / 2;
+        var appendData = ByteBuffers.allocateDirect(dataSize, ByteOrder.LITTLE_ENDIAN, INSTANCE)
+                .put(random.nextAsciiStringOfLength(dataSize).getBytes(UTF_8))
+                .rewind();
+        try {
+            logService.append(
+                    appendData,
+                    OptionalLong.of(1),
+                    Optional.of(LATEST_KERNEL_VERSION.version()),
+                    BASE_TX_CHECKSUM,
+                    DEFAULT_LOG_SEGMENT_SIZE,
+                    Optional.of(LATEST_LOG_FORMAT.getVersionByte()));
+        } finally {
+            ByteBuffers.releaseBuffer(appendData, INSTANCE);
+        }
+
+        logRangeInfo = logFile.getLogRangeInfo();
+        assertThat(logRangeInfo.highestVersion()).isEqualTo(logRangeInfo.lowestVersion() + 1);
+        assertThat(logFile.getTransactionLogWriter().getCurrentPosition())
+                .isEqualTo(new LogPosition(logRangeInfo.highestVersion(), DEFAULT_LOG_SEGMENT_SIZE + dataSize));
     }
 
     @Test
     void bulkAppendRotatedLogFilesMonitorEvents() throws IOException {
-        availabilityGuard.require(new DescriptiveAvailabilityRequirement("Database unavailable"));
+        availabilityGuard.require(new AvailabilityRequirement("Database unavailable"));
 
         BulkAppendLogRotationMonitor monitorListener = new BulkAppendLogRotationMonitor();
         databaseAPI.getDependencyResolver().resolveDependency(Monitors.class).addMonitorListener(monitorListener);
 
         int appendIterations = 100;
         int transactionalShift = 10;
-        var appendData = createBuffer().put(randomAscii((int) (THRESHOLD + 1)).getBytes(UTF_8));
+        var appendData = createBuffer()
+                .put(random.nextAsciiStringOfLength((int) (THRESHOLD + 1)).getBytes(UTF_8));
         try {
             for (int i = 0; i < appendIterations; i++) {
                 logService.append(
@@ -460,7 +522,8 @@ class TransactionLogServiceIT {
                         OptionalLong.of(transactionalShift + i),
                         Optional.of(LATEST_KERNEL_VERSION.version()),
                         BASE_TX_CHECKSUM,
-                        UNKNOWN_LOG_OFFSET);
+                        UNKNOWN_LOG_OFFSET,
+                        Optional.of(LATEST_LOG_FORMAT.getVersionByte()));
                 appendData.rewind();
             }
         } finally {
@@ -475,14 +538,15 @@ class TransactionLogServiceIT {
 
     @Test
     void bulkAppendRotatedLogFilesTracingEvents() throws IOException {
-        availabilityGuard.require(new DescriptiveAvailabilityRequirement("Database unavailable"));
+        availabilityGuard.require(new AvailabilityRequirement("Database unavailable"));
 
         DatabaseTracers databaseTracers = databaseAPI.getDependencyResolver().resolveDependency(DatabaseTracers.class);
         assertEquals(0, databaseTracers.getDatabaseTracer().numberOfLogRotations());
 
         int appendIterations = 100;
         int transactionalShift = 10;
-        var appendData = createBuffer().put(randomAscii((int) (THRESHOLD + 1)).getBytes(UTF_8));
+        var appendData = createBuffer()
+                .put(random.nextAsciiStringOfLength((int) (THRESHOLD + 1)).getBytes(UTF_8));
         try {
             for (int i = 0; i < appendIterations; i++) {
                 logService.append(
@@ -490,7 +554,8 @@ class TransactionLogServiceIT {
                         OptionalLong.of(transactionalShift + i),
                         Optional.of(LATEST_KERNEL_VERSION.version()),
                         BASE_TX_CHECKSUM,
-                        UNKNOWN_LOG_OFFSET);
+                        UNKNOWN_LOG_OFFSET,
+                        Optional.of(LATEST_LOG_FORMAT.getVersionByte()));
                 appendData.rewind();
             }
         } finally {
@@ -504,12 +569,13 @@ class TransactionLogServiceIT {
 
     @Test
     void restoreOnCurrentLogVersion() throws IOException {
-        availabilityGuard.require(new DescriptiveAvailabilityRequirement("Database unavailable"));
+        availabilityGuard.require(new AvailabilityRequirement("Database unavailable"));
         long logVersionBefore = metadataProvider.getCurrentLogVersion();
 
         int appendIterations = 100;
         LogPosition previousPosition = null;
-        var appendData = createBuffer().put(randomAscii((int) (THRESHOLD + 1)).getBytes(UTF_8));
+        var appendData = createBuffer()
+                .put(random.nextAsciiStringOfLength((int) (THRESHOLD + 1)).getBytes(UTF_8));
         try {
             for (int i = 0; i < appendIterations; i++) {
                 var position = logService.append(
@@ -517,7 +583,8 @@ class TransactionLogServiceIT {
                         OptionalLong.empty(),
                         Optional.of(LATEST_KERNEL_VERSION.version()),
                         BASE_TX_CHECKSUM,
-                        UNKNOWN_LOG_OFFSET);
+                        UNKNOWN_LOG_OFFSET,
+                        Optional.of(LATEST_LOG_FORMAT.getVersionByte()));
                 if (previousPosition != null) {
                     assertEquals(previousPosition, position);
                 }
@@ -529,15 +596,16 @@ class TransactionLogServiceIT {
             ByteBuffers.releaseBuffer(appendData, INSTANCE);
         }
 
-        assertEquals(logVersionBefore, logFiles.getLogFile().getHighestLogVersion());
+        assertEquals(logVersionBefore, logFiles.getLogFile().getLogRangeInfo().highestVersion());
     }
 
     @Test
     void restoreInitialLogVersionAndAppend() throws IOException {
-        availabilityGuard.require(new DescriptiveAvailabilityRequirement("Database unavailable"));
+        availabilityGuard.require(new AvailabilityRequirement("Database unavailable"));
         long logVersionBefore = metadataProvider.getCurrentLogVersion();
 
-        var appendData = createBuffer().put(randomAscii((int) (THRESHOLD + 1)).getBytes(UTF_8));
+        var appendData = createBuffer()
+                .put(random.nextAsciiStringOfLength((int) (THRESHOLD + 1)).getBytes(UTF_8));
         try {
             int appendIterations = 100;
             LogPosition firstPosition = null;
@@ -547,13 +615,14 @@ class TransactionLogServiceIT {
                         OptionalLong.of(i + 5),
                         Optional.of(LATEST_KERNEL_VERSION.version()),
                         BASE_TX_CHECKSUM,
-                        UNKNOWN_LOG_OFFSET);
+                        UNKNOWN_LOG_OFFSET,
+                        Optional.of(LATEST_LOG_FORMAT.getVersionByte()));
                 if (firstPosition == null) {
                     firstPosition = position;
                 }
                 appendData.rewind();
             }
-            assertThat(logFiles.getLogFile().getHighestLogVersion())
+            assertThat(logFiles.getLogFile().getLogRangeInfo().highestVersion())
                     .isGreaterThanOrEqualTo(firstPosition.getLogVersion());
             logService.restore(firstPosition);
 
@@ -564,8 +633,10 @@ class TransactionLogServiceIT {
                             OptionalLong.of(5),
                             Optional.of(LATEST_KERNEL_VERSION.version()),
                             BASE_TX_CHECKSUM,
-                            UNKNOWN_LOG_OFFSET));
-            assertEquals(logVersionBefore, logFiles.getLogFile().getHighestLogVersion());
+                            UNKNOWN_LOG_OFFSET,
+                            Optional.of(LATEST_LOG_FORMAT.getVersionByte())));
+            assertEquals(
+                    logVersionBefore, logFiles.getLogFile().getLogRangeInfo().highestVersion());
         } finally {
             ByteBuffers.releaseBuffer(appendData, INSTANCE);
         }
@@ -581,7 +652,7 @@ class TransactionLogServiceIT {
             List<LogChannel> logFileChannels = logReaders.getChannels();
             assertThat(logFileChannels).hasSize(1);
 
-            LogChannel channel = logFileChannels.get(0);
+            LogChannel channel = logFileChannels.getFirst();
             assertEquals(2, channel.startAppendIndex());
 
             StoreChannel storeChannel = channel.channel();
@@ -602,7 +673,7 @@ class TransactionLogServiceIT {
 
     @Test
     void setsStartingTransactionIdCorrectlyForAllFiles() throws IOException {
-        var propertyValue = randomAscii((int) THRESHOLD / 2);
+        var propertyValue = random.nextAsciiStringOfLength((int) THRESHOLD / 2);
 
         int numberOfTransactions = 40;
         for (int i = 0; i < numberOfTransactions; i++) {
@@ -612,7 +683,14 @@ class TransactionLogServiceIT {
         int initialAppendIndex = 17;
         try (TransactionLogChannels logReaders = logService.logFilesChannels(initialAppendIndex)) {
             List<LogChannel> logFileChannels = logReaders.getChannels();
-            assertThat(logFileChannels).hasSize(14);
+            assertThat(logFileChannels).hasSizeGreaterThanOrEqualTo(14);
+            checkChannelsCoverage(
+                    logFileChannels,
+                    initialAppendIndex,
+                    databaseAPI
+                            .getDependencyResolver()
+                            .resolveDependency(TransactionIdStore.class)
+                            .getLastCommittedTransactionId());
 
             long prevLastTxId = -1;
             for (LogChannel logChannel : logFileChannels) {
@@ -626,7 +704,7 @@ class TransactionLogServiceIT {
 
     @Test
     void setsLastTransactionIdCorrectlyForAllFiles() throws IOException {
-        var propertyValue = randomAscii((int) THRESHOLD / 2);
+        var propertyValue = random.nextAsciiStringOfLength((int) THRESHOLD / 2);
 
         int numberOfTransactions = 40;
         for (int i = 0; i < numberOfTransactions; i++) {
@@ -636,7 +714,14 @@ class TransactionLogServiceIT {
         int initialAppendIndex = 17;
         try (TransactionLogChannels logReaders = logService.logFilesChannels(initialAppendIndex)) {
             List<LogChannel> logFileChannels = logReaders.getChannels();
-            assertThat(logFileChannels).hasSize(14);
+            assertThat(logFileChannels).hasSizeGreaterThanOrEqualTo(14);
+            checkChannelsCoverage(
+                    logFileChannels,
+                    initialAppendIndex,
+                    databaseAPI
+                            .getDependencyResolver()
+                            .resolveDependency(TransactionIdStore.class)
+                            .getLastCommittedTransactionId());
 
             long prevLastTxId = -1;
             for (LogChannel logChannel : logFileChannels) {
@@ -650,7 +735,7 @@ class TransactionLogServiceIT {
 
     @Test
     void endOffsetPositionedToEndOfFile() throws IOException {
-        var propertyValue = randomAscii((int) THRESHOLD);
+        var propertyValue = random.nextAsciiStringOfLength((int) THRESHOLD);
 
         int numberOfTransactions = 30;
         for (int i = 0; i < numberOfTransactions; i++) {
@@ -669,6 +754,7 @@ class TransactionLogServiceIT {
     }
 
     @Test
+    @SkipOnSpd(notes = incompatible, reason = "Incompatible running on a cluster")
     void endOffsetPositionedToLastCommittedTransaction() throws Exception {
         createNodeInIsolatedTransaction("some prop value");
         // This test ensures that we return the use the last committed transaction, not the last closed transaction as
@@ -686,7 +772,7 @@ class TransactionLogServiceIT {
             });
 
             var initialLastCommittedTx = metadataProvider.getLastCommittedTransactionId();
-            var initialLastClosedTx = metadataProvider.getLastClosedTransactionId();
+            var initialLastClosedTx = metadataProvider.getHighestGapFreeClosedTransactionId();
 
             var hasAppliedTx = e1.executeDontWait(() -> {
                 try (var tx = databaseAPI.beginTx()) {
@@ -705,7 +791,7 @@ class TransactionLogServiceIT {
                 // then we should have the last committed after the last closed:
                 var lastCommittedTransaction = metadataProvider.getLastCommittedTransactionId();
                 var lastAppendIndex = metadataProvider.getLastAppendIndex();
-                var lastClosedTx = metadataProvider.getLastClosedTransactionId();
+                var lastClosedTx = metadataProvider.getHighestGapFreeClosedTransactionId();
                 assertThat(lastClosedTx).isEqualTo(initialLastClosedTx);
                 assertThat(lastAppendIndex).isEqualTo(initialLastCommittedTx + 2);
 
@@ -713,7 +799,7 @@ class TransactionLogServiceIT {
                 try (TransactionLogChannels logReaders = logService.logFilesChannels(lastAppendIndex)) {
                     var channels = logReaders.getChannels();
                     assertThat(channels).hasSize(1);
-                    var channel = channels.get(0);
+                    var channel = channels.getFirst();
                     // they should include only the last committed transaction (not the last closed)
                     assertThat(channel.lastAppendIndex()).isEqualTo(lastCommittedTransaction);
                     assertThat(channel.startAppendIndex()).isEqualTo(lastCommittedTransaction);
@@ -741,13 +827,122 @@ class TransactionLogServiceIT {
     }
 
     @Test
+    void setsPreviousChecksumCorrectlyForEnvelopedLogs() throws IOException {
+        Path directory = testDirectory.directory("home-dir");
+        try (var dbms = new TestDatabaseManagementServiceBuilder(directory)
+                .setConfig(Map.of(
+                        GraphDatabaseInternalSettings.latest_kernel_version,
+                        KernelVersion.GLORIOUS_FUTURE.version(),
+                        GraphDatabaseInternalSettings.latest_runtime_version,
+                        DbmsRuntimeVersion.GLORIOUS_FUTURE.getVersion(),
+                        GraphDatabaseInternalSettings.envelope_log_format_on_future,
+                        true))
+                .build()) {
+
+            GraphDatabaseAPI database = (GraphDatabaseAPI) dbms.database(DEFAULT_DATABASE_NAME);
+            var propertyValue = random.nextAsciiStringOfLength((int) THRESHOLD / 16);
+
+            int numberOfTransactions = 32;
+            for (int i = 0; i < numberOfTransactions; i++) {
+                try (var tx = database.beginTx()) {
+                    Node node = tx.createNode();
+                    node.setProperty("a", propertyValue);
+                    tx.commit();
+                }
+            }
+
+            TransactionLogService logService =
+                    database.getDependencyResolver().resolveDependency(TransactionLogService.class);
+            LogFiles logFiles = database.getDependencyResolver().resolveDependency(LogFiles.class);
+            TransactionMetadataCache metadataCache =
+                    database.getDependencyResolver().resolveDependency(TransactionMetadataCache.class);
+            int initialAppendIndex = 17;
+
+            TransactionMetadataCache.TransactionMetadata transactionMetadata =
+                    metadataCache.getTransactionMetadata(initialAppendIndex);
+            LogPosition logPosition = transactionMetadata.startPosition();
+            long logVersion = logPosition.getLogVersion();
+
+            try (TransactionLogChannels logReaders = logService.logFilesChannels(initialAppendIndex)) {
+                List<LogChannel> logFileChannels = logReaders.getChannels();
+                assertThat(logFileChannels).hasSize(4);
+
+                for (LogChannel logChannel : logFileChannels) {
+                    LogHeader logHeader = logFiles.getLogFile().extractHeader(logVersion);
+                    int expectedChecksum = logVersion != logPosition.getLogVersion()
+                            ? logHeader.getPreviousLogFileChecksum()
+                            : getPrevChecksumFromPosition(logPosition, logFiles);
+                    assertThat(logChannel.previousChecksum()).isEqualTo(expectedChecksum);
+                    assertThat(logChannel.kernelVersion()).isEqualTo(logHeader.getKernelVersion());
+                    logVersion++;
+                }
+            }
+        }
+    }
+
+    @Test
+    void setsPreviousChecksumCorrectlyForNonEnvelopedLogs() throws IOException {
+        Path directory = testDirectory.directory("home-dir2");
+        try (var dbms = new TestDatabaseManagementServiceBuilder(directory)
+                .setConfig(Map.of(
+                        GraphDatabaseInternalSettings.latest_kernel_version,
+                        LATEST_KERNEL_VERSION_WITHOUT_ENVELOPES.version(),
+                        GraphDatabaseInternalSettings.latest_runtime_version,
+                        LATEST_RUNTIME_VERSION_WITHOUT_ENVELOPES.getVersion(),
+                        GraphDatabaseInternalSettings.allow_new_log_format_on_upgrade_or_create,
+                        false,
+                        GraphDatabaseInternalSettings.merged_log,
+                        false))
+                .build()) {
+
+            GraphDatabaseAPI database = (GraphDatabaseAPI) dbms.database(DEFAULT_DATABASE_NAME);
+
+            var propertyValue = random.nextAsciiStringOfLength((int) THRESHOLD / 16);
+
+            int numberOfTransactions = 35;
+            for (int i = 0; i < numberOfTransactions; i++) {
+                try (var tx = database.beginTx()) {
+                    Node node = tx.createNode();
+                    node.setProperty("a", propertyValue);
+                    tx.commit();
+                }
+            }
+
+            TransactionLogService logService =
+                    database.getDependencyResolver().resolveDependency(TransactionLogService.class);
+
+            int initialAppendIndex = 17;
+            try (TransactionLogChannels logReaders = logService.logFilesChannels(initialAppendIndex)) {
+                List<LogChannel> logFileChannels = logReaders.getChannels();
+                assertThat(logFileChannels).hasSize(3);
+
+                boolean first = true;
+                for (LogChannel logChannel : logFileChannels) {
+                    // Non-enveloped format doesn't care about checksum because it doesn't use that header field
+                    // For now it will send UNKNOWN when starting in the middle of a file, and BASE for any other
+                    // file since it is taken from the header.
+                    int expectedChecksum = first ? TransactionIdStore.UNKNOWN_TX_CHECKSUM : BASE_TX_CHECKSUM;
+                    assertThat(logChannel.previousChecksum()).isEqualTo(expectedChecksum);
+                    first = false;
+                }
+            }
+        }
+    }
+
+    int getPrevChecksumFromPosition(LogPosition logPosition, LogFiles logFiles) throws IOException {
+        try (ReadableLogChannel reader = logFiles.getLogFile().getReader(logPosition)) {
+            return reader.getChecksum();
+        }
+    }
+
+    @Test
     void restoreRequireNonAvailableDatabase() {
         assertThrows(IllegalStateException.class, () -> logService.restore(LogPosition.UNSPECIFIED));
     }
 
     @Test
     void failToRestoreWithLogPositionInHigherLogFile() {
-        availabilityGuard.require(new DescriptiveAvailabilityRequirement("Database unavailable"));
+        availabilityGuard.require(new AvailabilityRequirement("Database unavailable"));
 
         assertThatThrownBy(() -> logService.restore(new LogPosition(metadataProvider.getCurrentLogVersion() + 5, 100)))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -758,7 +953,7 @@ class TransactionLogServiceIT {
 
     @Test
     void failToRestoreWithLogPositionInCommittedFile() throws IOException {
-        availabilityGuard.require(new DescriptiveAvailabilityRequirement("Database unavailable"));
+        availabilityGuard.require(new AvailabilityRequirement("Database unavailable"));
 
         LogFile logFile = logFiles.getLogFile();
         logFile.rotate();
@@ -780,7 +975,7 @@ class TransactionLogServiceIT {
 
     @Test
     void checkpointAtEndOfFileWhenAppendingToLastAvailableTransaction() throws IOException {
-        availabilityGuard.require(new DescriptiveAvailabilityRequirement("Database unavailable"));
+        availabilityGuard.require(new AvailabilityRequirement("Database unavailable"));
 
         TransactionId lastTransactionId = metadataProvider.getLastCommittedTransaction();
         String testReason = "Should checkpoint at end of file";
@@ -811,7 +1006,7 @@ class TransactionLogServiceIT {
 
         createNodeInIsolatedTransaction("foo");
 
-        availabilityGuard.require(new DescriptiveAvailabilityRequirement("Database unavailable"));
+        availabilityGuard.require(new AvailabilityRequirement("Database unavailable"));
         String testReason = "My unique last checkpoint2.";
         logService.appendCheckpoint(lastTransactionId, lastTransactionId.appendIndex(), testReason);
 
@@ -850,8 +1045,11 @@ class TransactionLogServiceIT {
             logVersion--;
         }
 
-        var eofPosition = new LogPosition(logFile.getHighestLogVersion(), LATEST_LOG_FORMAT.getHeaderSize());
-        availabilityGuard.require(new DescriptiveAvailabilityRequirement("Database unavailable"));
+        long highestVersion = logFile.getLogRangeInfo().highestVersion();
+        var eofPosition = new LogPosition(
+                highestVersion,
+                logFile.extractHeader(highestVersion).getStartPosition().getByteOffset());
+        availabilityGuard.require(new AvailabilityRequirement("Database unavailable"));
 
         String testReason = "Checkpoint on empty log files should work since its full story copy.";
         logService.appendCheckpoint(lastTransactionId, lastTransactionId.appendIndex(), testReason);
@@ -887,9 +1085,12 @@ class TransactionLogServiceIT {
             logVersion--;
         }
 
-        var eofPosition = new LogPosition(logFile.getHighestLogVersion(), LATEST_LOG_FORMAT.getHeaderSize());
+        long highestVersion = logFile.getLogRangeInfo().highestVersion();
+        var eofPosition = new LogPosition(
+                highestVersion,
+                logFile.extractHeader(highestVersion).getStartPosition().getByteOffset());
 
-        availabilityGuard.require(new DescriptiveAvailabilityRequirement("Database unavailable"));
+        availabilityGuard.require(new AvailabilityRequirement("Database unavailable"));
 
         String testReason = "Checkpoint at EOF when tx is rotated out";
         logService.appendCheckpoint(lastTransactionId, lastTransactionId.appendIndex(), testReason);
@@ -922,7 +1123,7 @@ class TransactionLogServiceIT {
         logFile.rotate();
         var expectedPosition = findEndOfTransaction(lastTransactionId.id());
 
-        availabilityGuard.require(new DescriptiveAvailabilityRequirement("Database unavailable"));
+        availabilityGuard.require(new AvailabilityRequirement("Database unavailable"));
 
         String testReason = "Find position for tx even when it has been rotated";
         logService.appendCheckpoint(lastTransactionId, lastTransactionId.appendIndex(), testReason);
@@ -944,7 +1145,7 @@ class TransactionLogServiceIT {
         }
         TransactionId lastTransactionId = metadataProvider.getLastCommittedTransaction();
         var eofPosition = findEndOfFile(lastTransactionId.id());
-        availabilityGuard.require(new DescriptiveAvailabilityRequirement("Database unavailable"));
+        availabilityGuard.require(new AvailabilityRequirement("Database unavailable"));
         String testReason = "Checkpoint at end of file when tx doesn't exist";
         var transactionId = new TransactionId(789, 798, LATEST_KERNEL_VERSION, 7, 8, 9);
         logService.appendCheckpoint(transactionId, transactionId.appendIndex(), testReason);
@@ -958,22 +1159,6 @@ class TransactionLogServiceIT {
                 .isEqualTo(eofPosition);
     }
 
-    private ByteBuffer readTransactionIntoBuffer(
-            GraphDatabaseAPI db, LogPosition positionBeforeTransaction, LogPosition positionAfterTransaction)
-            throws IOException {
-        int length = (int) (positionAfterTransaction.getByteOffset() - positionBeforeTransaction.getByteOffset());
-        var data = new byte[length];
-        LogFiles systemLogFiles = db.getDependencyResolver().resolveDependency(LogFiles.class);
-        try (ReadableLogChannel reader = systemLogFiles.getLogFile().getReader(positionBeforeTransaction)) {
-            reader.get(data, length);
-        }
-        return createBuffer(length).put(data);
-    }
-
-    private static ByteBuffer createBuffer(int length) {
-        return ByteBuffers.allocateDirect(length, ByteOrder.LITTLE_ENDIAN, INSTANCE);
-    }
-
     private static ByteBuffer createBuffer() {
         return ByteBuffers.allocateDirect((int) (THRESHOLD << 1), ByteOrder.LITTLE_ENDIAN, INSTANCE);
     }
@@ -984,7 +1169,9 @@ class TransactionLogServiceIT {
         @Override
         public void finishLogRotation(
                 Path logFile,
+                LogType type,
                 long logVersion,
+                LogHeader logHeader,
                 long lastAppendIndex,
                 long rotationMillis,
                 long millisSinceLastRotation) {
@@ -1020,20 +1207,23 @@ class TransactionLogServiceIT {
     }
 
     private long getTxStartOffset(long txId) throws IOException {
-        return transactionStore.getCommandBatches(txId).position().getByteOffset();
+        try (var commandBatches = transactionStore.getCommandBatches(txId)) {
+            return commandBatches.position().getByteOffset();
+        }
     }
 
     private long getTxEndOffset(long txId) throws IOException {
-        var commandBatches = transactionStore.getCommandBatches(txId);
-        commandBatches.next();
-        return commandBatches.position().getByteOffset();
+        try (var commandBatches = transactionStore.getCommandBatches(txId)) {
+            commandBatches.next();
+            return commandBatches.position().getByteOffset();
+        }
     }
 
     private void verifyReportedPositions(int txId, long expectedOffset) throws IOException {
         try (TransactionLogChannels logReaders = logService.logFilesChannels(txId)) {
             List<LogChannel> logFileChannels = logReaders.getChannels();
             assertThat(logFileChannels).hasSize(1);
-            assertEquals(expectedOffset, logFileChannels.get(0).channel().position());
+            assertEquals(expectedOffset, logFileChannels.getFirst().channel().position());
         }
     }
 
@@ -1043,6 +1233,30 @@ class TransactionLogServiceIT {
             node.setProperty("a", propertyValue);
             tx.commit();
         }
+    }
+
+    private static void checkChannelsCoverage(
+            List<LogChannel> channels, long expectedFirstIndex, long expectedLastAppendIndex) {
+        LongRange totalRange = null;
+        for (LogChannel channel : channels) {
+            var channelRange = LongRange.range(channel.startAppendIndex(), channel.lastAppendIndex());
+            if (totalRange == null) {
+                totalRange = channelRange;
+            } else if (channelRange == LongRange.EMPTY_RANGE) {
+                // This can happen for envelope channels where one chunk can stretch over more than one file
+                // The start append index is always last append from header + 1 which isn't always true for envelopes,
+                // not if one chunk is continuing from a previous file.
+                // But the receiver always uses the start index - 1 so it does not matter for the protocol.
+                // The range (x, x-1) should therefore be accepted as long as it is not the first file
+                assertThat(channel).isNotEqualTo(channels.getFirst());
+                assertThat(channel.startAppendIndex()).isEqualTo(channel.lastAppendIndex() + 1);
+            } else {
+                totalRange = LongRange.join(totalRange, channelRange);
+            }
+        }
+
+        assertEquals(expectedFirstIndex, totalRange.from());
+        assertEquals(expectedLastAppendIndex, totalRange.to());
     }
 
     /**
@@ -1105,7 +1319,8 @@ class TransactionLogServiceIT {
             }
 
             @Override
-            public void chunkAppended(int chunkNumber, long transactionSequenceNumber, long transactionId) {}
+            public void chunkAppended(
+                    int chunkNumber, long transactionSequenceNumber, long transactionId, long appendIndex) {}
         }
 
         private static class InjectableBeforeApplyTransactionEvent implements TransactionEvent {

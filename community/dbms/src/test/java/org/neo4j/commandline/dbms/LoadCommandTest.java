@@ -20,8 +20,7 @@
 package org.neo4j.commandline.dbms;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.doReturn;
@@ -46,6 +45,7 @@ import org.neo4j.cli.CommandFailedException;
 import org.neo4j.cli.ExecutionContext;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
+import org.neo4j.dbms.archive.ArchiveInput;
 import org.neo4j.dbms.archive.IncorrectFormat;
 import org.neo4j.dbms.archive.Loader;
 import org.neo4j.dbms.archive.Loader.SizeMeta;
@@ -98,9 +98,7 @@ class LoadCommandTest {
         try (var out = new PrintStream(baos)) {
             CommandLine.usage(command, new PrintStream(out), CommandLine.Help.Ansi.OFF);
         }
-        assertThat(baos.toString().trim())
-                .isEqualToIgnoringNewLines(
-                        """
+        assertThat(baos.toString().trim()).isEqualToIgnoringNewLines("""
                 Load a database from an archive created with the dump command or from full
                 Neo4j Enterprise backup.
 
@@ -112,16 +110,15 @@ class LoadCommandTest {
 
                 DESCRIPTION
 
-                Load a database from an archive. <archive-path> must be a directory containing
-                an archive(s). Archive can be a database dump created with the dump command, or
-                can be a full backup artifact created by the backup command from Neo4j
-                Enterprise. If neither --from-path or --from-stdin is supplied `server.
-                directories.dumps.root` setting will be searched for the archive. Existing
-                databases can be replaced by specifying --overwrite-destination. It is not
-                possible to replace a database that is mounted in a running Neo4j server. If
-                --info is specified, then the database is not loaded, but information (i.e.
-                file count, byte count, and format of load file) about the archive is printed
-                instead.
+                Load a database from an archive. --from-path must be a directory containing an
+                archive(s). An archive can be a database dump created with the dump command, or
+                a full backup artifact created by the backup command in Neo4j Enterprise. If
+                neither --from-path nor --from-stdin is supplied, the `server.directories.dumps.
+                root` setting will be searched for the archive. Existing databases can be
+                replaced by specifying --overwrite-destination. It is not possible to replace a
+                database mounted on a running Neo4j server. The --info argument does not load
+                the database. Instead, it prints information about the archive, such as file
+                count, byte count, and format of the load file.
 
                 PARAMETERS
 
@@ -150,12 +147,12 @@ class LoadCommandTest {
     }
 
     @Test
-    void shouldGiveAClearMessageIfTheArchiveDoesntExist() throws IOException, IncorrectFormat {
+    void shouldGiveAClearMessageIfTheArchiveDoesntExist() {
         String dumpName = archive.resolve("foo.dump").toString();
-        CommandFailedException commandFailed =
-                assertThrows(CommandFailedException.class, () -> execute("foo", archive));
-        assertEquals("Load failed for databases: 'foo'", commandFailed.getMessage());
-        assertEquals("No matching archives found", commandFailed.getCause().getMessage());
+        assertThatThrownBy(() -> execute("foo", archive))
+                .isInstanceOf(CommandFailedException.class)
+                .hasMessageContaining("Load failed for databases: 'foo'")
+                .hasMessageContaining("No matching archives ('foo.dump' or a full backup of 'foo') found in");
     }
 
     @Test
@@ -163,23 +160,23 @@ class LoadCommandTest {
         createDummyDump("foo", archive);
         doThrow(FileAlreadyExistsException.class)
                 .when(loader)
-                .load(any(), anyBoolean(), anyBoolean(), any(), any(), any());
-        CommandFailedException commandFailed =
-                assertThrows(CommandFailedException.class, () -> execute("foo", archive));
-        assertEquals("Load failed for databases: 'foo'", commandFailed.getMessage());
-        assertEquals("Database already exists: foo", commandFailed.getCause().getMessage());
+                .load(any(), anyBoolean(), anyBoolean(), any(), any(ArchiveInput.class));
+        assertThatThrownBy(() -> execute("foo", archive))
+                .isInstanceOf(CommandFailedException.class)
+                .hasMessageContaining("Load failed for databases: 'foo'")
+                .hasMessageContaining("Database already exists: foo");
     }
 
     @Test
     void shouldGiveAClearMessageIfTheDatabasesDirectoryIsNotWritable() throws IOException, IncorrectFormat {
         createDummyDump("foo", archive);
-        doThrow(AccessDeniedException.class).when(loader).load(any(), anyBoolean(), anyBoolean(), any(), any(), any());
-        CommandFailedException commandFailed =
-                assertThrows(CommandFailedException.class, () -> execute("foo", archive));
-        assertEquals("Load failed for databases: 'foo'", commandFailed.getMessage());
-        assertEquals(
-                "You do not have permission to load the database 'foo'.",
-                commandFailed.getCause().getMessage());
+        doThrow(AccessDeniedException.class)
+                .when(loader)
+                .load(any(), anyBoolean(), anyBoolean(), any(), any(ArchiveInput.class));
+        assertThatThrownBy(() -> execute("foo", archive))
+                .isInstanceOf(CommandFailedException.class)
+                .hasMessageContaining("Load failed for databases: 'foo'")
+                .hasMessageContaining("You do not have permission to load the database 'foo'.");
     }
 
     @Test
@@ -188,24 +185,25 @@ class LoadCommandTest {
         createDummyDump("foo", archive);
         doThrow(new FileSystemException("the-message"))
                 .when(loader)
-                .load(any(), anyBoolean(), anyBoolean(), any(), any(), any());
-        CommandFailedException commandFailed =
-                assertThrows(CommandFailedException.class, () -> execute("foo", archive));
-        assertEquals("Load failed for databases: 'foo'", commandFailed.getMessage());
-        assertEquals(
-                "Unable to load database: FileSystemException: the-message",
-                commandFailed.getCause().getMessage());
+                .load(any(), anyBoolean(), anyBoolean(), any(), any(ArchiveInput.class));
+        assertThatThrownBy(() -> execute("foo", archive))
+                .isInstanceOf(CommandFailedException.class)
+                .hasMessageContaining("Load failed for databases: 'foo'")
+                .hasMessageContaining("Unable to load database: FileSystemException: the-message");
     }
 
     @Test
     void shouldThrowIfTheArchiveFormatIsInvalid() throws IOException, IncorrectFormat {
         createDummyDump("foo", archive);
-        doThrow(IncorrectFormat.class).when(loader).load(any(), anyBoolean(), anyBoolean(), any(), any(), any());
-        CommandFailedException commandFailed =
-                assertThrows(CommandFailedException.class, () -> execute("foo", archive));
-        assertEquals("Load failed for databases: 'foo'", commandFailed.getMessage());
-        assertThat(commandFailed.getCause().getMessage()).contains(archive.toString());
-        assertThat(commandFailed.getCause().getMessage()).contains("valid Neo4j archive");
+        doThrow(IncorrectFormat.class)
+                .when(loader)
+                .load(any(), anyBoolean(), anyBoolean(), any(), any(ArchiveInput.class));
+        assertThatThrownBy(() -> execute("foo", archive))
+                .isInstanceOf(CommandFailedException.class)
+                .hasMessageContaining("Load failed for databases: 'foo'")
+                .cause()
+                .hasMessageContaining(archive.toString())
+                .hasMessageContaining("valid Neo4j archive");
     }
 
     @Test
@@ -239,7 +237,7 @@ class LoadCommandTest {
         createDummyDump(SYSTEM_DATABASE_NAME, archive);
         execute(SYSTEM_DATABASE_NAME, archive);
 
-        assertThat(output.toString()).isEqualTo(String.format(LoadCommand.SYSTEM_ERR_MESSAGE));
+        assertThat(output).hasToString(String.format(LoadCommand.SYSTEM_ERR_MESSAGE));
     }
 
     private void execute(String database, Path archive) {

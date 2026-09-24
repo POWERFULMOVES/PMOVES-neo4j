@@ -19,7 +19,7 @@
  */
 package org.neo4j.internal.batchimport.input.csv;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;
 import org.neo4j.csv.reader.Configuration;
@@ -27,7 +27,8 @@ import org.neo4j.csv.reader.Extractors;
 
 class StringDeserializationTest {
     private final Configuration configuration = Configuration.COMMAS;
-    private final Extractors extractors = new Extractors(configuration.arrayDelimiter());
+    private final Extractors extractors =
+            new Extractors(configuration.arrayDelimiter(), configuration.vectorDelimiter());
     private final Header.Entry entry1 = new Header.Entry(null, Type.START_ID, null, extractors.int_());
     private final Header.Entry entry2 = new Header.Entry(null, Type.TYPE, null, extractors.string());
     private final Header.Entry entry3 = new Header.Entry(null, Type.END_ID, null, extractors.int_());
@@ -44,7 +45,7 @@ class StringDeserializationTest {
         String line = deserialization.materialize();
 
         // then
-        assertEquals(line, ",MyType,123");
+        assertThat(line).isEqualTo(",MyType,123");
     }
 
     @Test
@@ -59,6 +60,6 @@ class StringDeserializationTest {
         String line = deserialization.materialize();
 
         // then
-        assertEquals(line, "123,MyType,");
+        assertThat(line).isEqualTo("123,MyType,");
     }
 }

@@ -27,10 +27,12 @@ import static org.mockito.Mockito.when;
 
 import org.junit.jupiter.api.Test;
 import org.neo4j.kernel.KernelVersion;
-import org.neo4j.kernel.KernelVersionRepository;
+import org.neo4j.kernel.database.MetadataCache;
 import org.neo4j.kernel.impl.store.record.MetaDataRecord;
+import org.neo4j.logging.NullLogProvider;
 import org.neo4j.storageengine.api.StorageEngineTransaction;
 import org.neo4j.test.LatestVersions;
+import org.neo4j.wal.entry.LogFormat;
 
 public class KernelVersionTransactionApplierTest {
 
@@ -40,11 +42,11 @@ public class KernelVersionTransactionApplierTest {
         final var to = LatestVersions.LATEST_KERNEL_VERSION;
         assumeThat(to).isGreaterThan(from);
 
-        final var kernelVersionRepository = mock(KernelVersionRepository.class);
-        when(kernelVersionRepository.kernelVersion()).thenReturn(from);
+        final var metadataCache = mock(MetadataCache.class);
+        when(metadataCache.kernelVersion()).thenReturn(from);
 
         // given  a command to update the kernel version
-        final var applier = new KernelVersionTransactionApplierFactory(kernelVersionRepository);
+        final var applier = new KernelVersionTransactionApplierFactory(metadataCache, NullLogProvider.getInstance());
         final var command = createMetaDataCommand(from, to);
         final var txToApply = mock(StorageEngineTransaction.class);
 
@@ -53,7 +55,7 @@ public class KernelVersionTransactionApplierTest {
 
         // then   it is successful (false) and the version updated
         assertThat(result).isFalse();
-        verify(kernelVersionRepository).setKernelVersion(LatestVersions.LATEST_KERNEL_VERSION);
+        verify(metadataCache).setKernelVersion(LatestVersions.LATEST_KERNEL_VERSION);
     }
 
     private static Command.MetaDataCommand createMetaDataCommand(KernelVersion from, KernelVersion to) {
@@ -61,7 +63,10 @@ public class KernelVersionTransactionApplierTest {
         before.initialize(true, from.version());
 
         MetaDataRecord after = new MetaDataRecord();
-        after.initialize(true, to.version());
+        long versionLong = to.version();
+        // Add logformat the way it is done in extract commands
+        versionLong |= ((long) LogFormat.V9.getVersionByte()) << Byte.SIZE;
+        after.initialize(true, versionLong);
 
         return new Command.MetaDataCommand(RecordStorageCommandReaderFactory.INSTANCE.get(to), before, after);
     }

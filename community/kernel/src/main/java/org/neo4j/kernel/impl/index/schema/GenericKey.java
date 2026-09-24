@@ -24,9 +24,17 @@ import static org.neo4j.kernel.impl.index.schema.NativeIndexKey.Inclusion.LOW;
 import static org.neo4j.kernel.impl.index.schema.NativeIndexKey.Inclusion.NEUTRAL;
 import static org.neo4j.kernel.impl.index.schema.Type.booleanOf;
 
+import java.nio.ByteBuffer;
+import java.nio.DoubleBuffer;
+import java.nio.FloatBuffer;
+import java.nio.IntBuffer;
+import java.nio.LongBuffer;
+import java.nio.ShortBuffer;
 import org.neo4j.gis.spatial.index.curves.SpaceFillingCurve;
+import org.neo4j.graphdb.Vector;
 import org.neo4j.io.pagecache.PageCursor;
 import org.neo4j.string.UTF8;
+import org.neo4j.values.storable.Float16Format;
 import org.neo4j.values.storable.PrimitiveArrayWriting;
 import org.neo4j.values.storable.TextValue;
 import org.neo4j.values.storable.TimeZones;
@@ -479,6 +487,109 @@ public abstract class GenericKey<KEY extends GenericKey<KEY>> extends NativeInde
             DurationType.write(this, months, days, totalAvgSeconds, nanos);
         } else {
             DurationArrayType.write(this, currentArrayOffset++, months, days, totalAvgSeconds, nanos);
+        }
+    }
+
+    @Override
+    public void writeInt8Vector(byte[] values) {
+        if (!isArray) {
+            setType(Types.VECTOR_INT8);
+            Types.VECTOR_INT8.write(this, values);
+        } else {
+            VectorArrayType.write(this, currentArrayOffset++, Vector.CoordinateType.INTEGER8, values.length, values);
+        }
+    }
+
+    @Override
+    public void writeInt16Vector(short[] values) throws RuntimeException {
+        if (!isArray) {
+            setType(Types.VECTOR_INT16);
+            Types.VECTOR_INT16.write(this, values);
+        } else {
+            byte[] data = new byte[values.length * Short.BYTES];
+            ShortBuffer buffer = ByteBuffer.wrap(data).asShortBuffer();
+            buffer.put(values);
+            VectorArrayType.write(this, currentArrayOffset++, Vector.CoordinateType.INTEGER16, values.length, data);
+        }
+    }
+
+    @Override
+    public void writeInt32Vector(int[] values) throws RuntimeException {
+        if (!isArray) {
+            setType(Types.VECTOR_INT32);
+            Types.VECTOR_INT32.write(this, values);
+        } else {
+            byte[] data = new byte[values.length * Integer.BYTES];
+            IntBuffer buffer = ByteBuffer.wrap(data).asIntBuffer();
+            buffer.put(values);
+            VectorArrayType.write(this, currentArrayOffset++, Vector.CoordinateType.INTEGER32, values.length, data);
+        }
+    }
+
+    @Override
+    public void writeInt64Vector(long[] values) throws RuntimeException {
+        if (!isArray) {
+            setType(Types.VECTOR_INT64);
+            Types.VECTOR_INT64.write(this, values);
+        } else {
+            byte[] data = new byte[values.length * Long.BYTES];
+            LongBuffer buffer = ByteBuffer.wrap(data).asLongBuffer();
+            buffer.put(values);
+            VectorArrayType.write(this, currentArrayOffset++, Vector.CoordinateType.INTEGER64, values.length, data);
+        }
+    }
+
+    @Override
+    public void writeFloat16Vector(Float16Format format, short[] values) throws RuntimeException {
+        if (!isArray) {
+            var type =
+                    switch (format) {
+                        case FLOAT16 -> Types.VECTOR_FLOAT16;
+                        case BFLOAT16 -> Types.VECTOR_BFLOAT16;
+                    };
+            setType(type);
+            type.write(this, values);
+        } else {
+            byte[] data = new byte[values.length * Short.BYTES];
+            ShortBuffer buffer = ByteBuffer.wrap(data).asShortBuffer();
+            buffer.put(values);
+            VectorArrayType.write(this, currentArrayOffset++, format.coordinateType(), values.length, data);
+        }
+    }
+
+    @Override
+    public void writeFloat32Vector(float[] values) throws RuntimeException {
+        if (!isArray) {
+            setType(Types.VECTOR_FLOAT32);
+            Types.VECTOR_FLOAT32.write(this, values);
+        } else {
+            byte[] data = new byte[values.length * Float.BYTES];
+            FloatBuffer buffer = ByteBuffer.wrap(data).asFloatBuffer();
+            buffer.put(values);
+            VectorArrayType.write(this, currentArrayOffset++, Vector.CoordinateType.FLOAT32, values.length, data);
+        }
+    }
+
+    @Override
+    public void writeFloat64Vector(double[] values) throws RuntimeException {
+        if (!isArray) {
+            setType(Types.VECTOR_FLOAT64);
+            Types.VECTOR_FLOAT64.write(this, values);
+        } else {
+            byte[] data = new byte[values.length * Double.BYTES];
+            DoubleBuffer buffer = ByteBuffer.wrap(data).asDoubleBuffer();
+            buffer.put(values);
+            VectorArrayType.write(this, currentArrayOffset++, Vector.CoordinateType.FLOAT64, values.length, data);
+        }
+    }
+
+    @Override
+    public void writeUUID(long msb, long lsb) throws RuntimeException {
+        if (!isArray) {
+            setType(Types.UUID);
+            UUIDType.write(this, msb, lsb);
+        } else {
+            UUIDArrayType.write(this, currentArrayOffset++, msb, lsb);
         }
     }
 

@@ -68,7 +68,6 @@ import org.neo4j.cypher.internal.runtime.slotted.pipes.SlottedGroupingExpression
 import org.neo4j.cypher.internal.runtime.slotted.pipes.SlottedGroupingExpression1
 import org.neo4j.cypher.internal.runtime.slotted.pipes.SlottedGroupingExpression2
 import org.neo4j.cypher.internal.runtime.slotted.pipes.SlottedGroupingExpression3
-import org.neo4j.cypher.internal.util.NonEmptyList
 import org.neo4j.cypher.internal.util.attribution.Id
 
 object SlottedExpressionConverters {
@@ -292,9 +291,11 @@ case class SlottedExpressionConverters(physicalPlan: PhysicalPlan, maybeOwningPi
       case physicalplanning.ast.PropertyProjection(map, properties) =>
         Some(slotted.expressions.PropertyProjection(self.toCommandExpression(id, map), properties))
       case physicalplanning.ast.PrimitiveEquals(a, b) =>
-        val lhs = self.toCommandExpression(id, a)
-        val rhs = self.toCommandExpression(id, b)
-        Some(slotted.expressions.PrimitiveEquals(lhs, rhs))
+        Some(slotted.expressions.PrimitiveEquals(a, b))
+      case physicalplanning.ast.PrimitiveNotEquals(a, b) =>
+        Some(slotted.expressions.PrimitiveNotEquals(a, b))
+      case physicalplanning.ast.PrimitiveAnds(predicates) =>
+        Some(slotted.expressions.PrimitiveAnds.create(predicates))
       case physicalplanning.ast.GetDegreePrimitive(offset, typ, direction) =>
         typ match {
           case None               => Some(slotted.expressions.GetDegreePrimitive(offset, direction))
@@ -454,6 +455,11 @@ case class SlottedExpressionConverters(physicalPlan: PhysicalPlan, maybeOwningPi
           physicalPlan.slotConfigurations(id).metaDataOffset(e.trailStateMetadataSlotKey, Id(e.trailId))
         val innerRelSlot = physicalPlan.slotConfigurations(id)(e.innerRelationship).slot
         Some(TrailRelationshipsUniqueExpression(trailStateMetadataSlotOffset, innerRelSlot))
+      case e: physicalplanning.ast.NodeUniqueness =>
+        val acyclicStateMetadataSlotOffest =
+          physicalPlan.slotConfigurations(id).metaDataOffset(e.acyclicStateMetadataSlotKey, Id(e.acyclicId))
+        val innerNodeSlot = physicalPlan.slotConfigurations(id)(e.innerNode).slot
+        Some(NodeUniquenessExpression(acyclicStateMetadataSlotOffest, innerNodeSlot))
       case _ =>
         None
     }
@@ -466,7 +472,7 @@ case class SlottedExpressionConverters(physicalPlan: PhysicalPlan, maybeOwningPi
         e.lateLabels.map { labelName =>
           HasLabelFromSlotLate(e.offset, labelName): Predicate
         }
-    commands.predicates.Ands(preds.toSeq: _*)
+    commands.predicates.Ands(preds.toArray)
   }
 
   private def hasAnyLabelsFromSlot(e: physicalplanning.ast.HasAnyLabelFromSlot): Predicate = {
@@ -475,7 +481,7 @@ case class SlottedExpressionConverters(physicalPlan: PhysicalPlan, maybeOwningPi
 
     if (e.lateLabels.isEmpty) fromToken
     else if (e.resolvedLabelTokens.isEmpty) late
-    else commands.predicates.Ors(NonEmptyList.from(Seq(fromToken, late)))
+    else commands.predicates.Ors(Array(fromToken, late))
   }
 
   private def hasTypesFromSlot(e: physicalplanning.ast.HasTypesFromSlot): Predicate = {
@@ -486,7 +492,7 @@ case class SlottedExpressionConverters(physicalPlan: PhysicalPlan, maybeOwningPi
         e.lateTypes.map { typeName =>
           HasTypeFromSlotLate(e.offset, typeName): Predicate
         }
-    commands.predicates.Ands(preds.toSeq: _*)
+    commands.predicates.Ands(preds.toArray)
   }
 
   def toCommandProjectedPath(

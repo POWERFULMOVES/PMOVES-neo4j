@@ -19,21 +19,25 @@
  */
 package org.neo4j.cypher.internal
 
+import org.neo4j.codegen.CodeGenerator
 import org.neo4j.cypher.internal.InterpretedRuntime.InterpretedExecutionPlan
 import org.neo4j.cypher.internal.InterpretedRuntime.calculateTransactionMode
 import org.neo4j.cypher.internal.SlottedRuntime.NO_METADATA
 import org.neo4j.cypher.internal.SlottedRuntime.NO_WARNINGS
+import org.neo4j.cypher.internal.notification.InternalNotification
 import org.neo4j.cypher.internal.options.CypherRuntimeOption
 import org.neo4j.cypher.internal.physicalplanning.PhysicalPlan
 import org.neo4j.cypher.internal.physicalplanning.PhysicalPlanner
 import org.neo4j.cypher.internal.plandescription.Argument
 import org.neo4j.cypher.internal.runtime.QueryIndexRegistrator
 import org.neo4j.cypher.internal.runtime.SelectivityTrackerRegistrator
+import org.neo4j.cypher.internal.runtime.interpreted.ExecutionResultBuilderFactory
 import org.neo4j.cypher.internal.runtime.interpreted.InterpretedPipeMapper
 import org.neo4j.cypher.internal.runtime.interpreted.commands.convert.CommunityExpressionConverter
 import org.neo4j.cypher.internal.runtime.interpreted.commands.convert.ExpressionConverter
 import org.neo4j.cypher.internal.runtime.interpreted.commands.convert.ExpressionConverters
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.NestedPipeExpressions
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.PipeMapper
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.PipeTreeBuilder
 import org.neo4j.cypher.internal.runtime.slotted.SlottedExecutionResultBuilderFactory
 import org.neo4j.cypher.internal.runtime.slotted.SlottedPipeMapper
@@ -42,8 +46,8 @@ import org.neo4j.cypher.internal.runtime.slotted.expressions.MaterializedEntitie
 import org.neo4j.cypher.internal.runtime.slotted.expressions.SlottedExpressionConverters
 import org.neo4j.cypher.internal.util.CancellationChecker
 import org.neo4j.cypher.internal.util.CypherException
-import org.neo4j.cypher.internal.util.InternalNotification
 import org.neo4j.exceptions.CantCompileQueryException
+import org.neo4j.kernel.api.query.RuntimeName
 import org.neo4j.kernel.impl.query.TransactionalContext.DatabaseMode
 
 trait SlottedRuntime[-CONTEXT <: RuntimeContext] extends CypherRuntime[CONTEXT] with DebugPrettyPrinter {
@@ -69,9 +73,38 @@ trait SlottedRuntime[-CONTEXT <: RuntimeContext] extends CypherRuntime[CONTEXT] 
     context: CONTEXT,
     physicalPlan: PhysicalPlan,
     query: LogicalQuery,
-    selectivityTrackerRegistrator: SelectivityTrackerRegistrator
+    selectivityTrackerRegistrator: SelectivityTrackerRegistrator,
+    codeGenStats: CodeGenerator.Stats,
+    queryIndexRegistrator: QueryIndexRegistrator
   ): (Option[ExpressionConverter], List[ExpressionConverter], () => Seq[Argument], () => Set[InternalNotification]) = {
     (None, baseConverters, NO_METADATA, NO_WARNINGS)
+  }
+
+  protected def createExpressionConverters(
+    baseConverters: List[ExpressionConverter],
+    context: CONTEXT,
+    physicalPlan: PhysicalPlan,
+    query: LogicalQuery,
+    selectivityTrackerRegistrator: SelectivityTrackerRegistrator,
+    codeGenStats: CodeGenerator.Stats,
+    queryIndexRegistrator: QueryIndexRegistrator
+  ): (Option[ExpressionConverter], List[ExpressionConverter], () => Seq[Argument], () => Set[InternalNotification]) = {
+    if (context.materializedEntitiesMode) {
+      val converters = MaterializedEntitiesExpressionConverter(context.tokenContext) +: baseConverters
+      (None, converters, NO_METADATA, NO_WARNINGS)
+    } else if (context.compileExpressions) {
+      compileExpressions(
+        baseConverters,
+        context,
+        physicalPlan,
+        query,
+        selectivityTrackerRegistrator,
+        codeGenStats,
+        queryIndexRegistrator
+      )
+    } else {
+      (None, baseConverters, NO_METADATA, NO_WARNINGS)
+    }
   }
 
   @throws[CantCompileQueryException]
@@ -101,45 +134,53 @@ trait SlottedRuntime[-CONTEXT <: RuntimeContext] extends CypherRuntime[CONTEXT] 
       }
 
       val selectivityTrackerRegistrator = new SelectivityTrackerRegistrator()
+      val queryIndexRegistrator = QueryIndexRegistrator(context.schemaRead)
       val baseConverters = List(
         SlottedExpressionConverters(physicalPlan),
         CommunityExpressionConverter(
           context.tokenContext,
           context.anonymousVariableNameGenerator,
           selectivityTrackerRegistrator,
-          context.config
+          context.config,
+          context.cypherVersion,
+          queryIndexRegistrator
         )
       )
 
-      val (mainConverter, fallbackConverters, metadataGen, warningsGen) =
-        if (context.materializedEntitiesMode) {
-          val converters = MaterializedEntitiesExpressionConverter(context.tokenContext) +: baseConverters
-          (None, converters, NO_METADATA, NO_WARNINGS)
-        } else if (context.compileExpressions) {
-          compileExpressions(baseConverters, context, physicalPlan, query, selectivityTrackerRegistrator)
-        } else {
-          (None, baseConverters, NO_METADATA, NO_WARNINGS)
-        }
-
+      val codeGenStats = new CodeGenerator.Stats
+      val (mainConverter, fallbackConverters, metadataGen, warningsGen) = createExpressionConverters(
+        baseConverters = baseConverters,
+        context = context,
+        physicalPlan = physicalPlan,
+        query = query,
+        selectivityTrackerRegistrator = selectivityTrackerRegistrator,
+        codeGenStats = codeGenStats,
+        queryIndexRegistrator = queryIndexRegistrator
+      )
       val converters = new ExpressionConverters(mainConverter, fallbackConverters: _*)
 
-      val queryIndexRegistrator = new QueryIndexRegistrator(context.schemaRead)
-      val fallback = InterpretedPipeMapper(
-        context.cypherVersion,
-        query.readOnly,
-        converters,
-        context.tokenContext,
-        queryIndexRegistrator,
-        context.anonymousVariableNameGenerator,
-        context.isCommunity,
-        physicalPlan.parameterMapping
-      )(query.semanticTable)
+      val fallback = getFallbackPipeMapper(
+        InterpretedPipeMapper(
+          context.cypherVersion,
+          query.readOnly,
+          converters,
+          context.tokenContext,
+          queryIndexRegistrator,
+          context.anonymousVariableNameGenerator,
+          context.isCommunity,
+          physicalPlan.parameterMapping,
+          query.stableLeafPlans
+        )(query.semanticTable),
+        physicalPlan,
+        converters
+      )
       val pipeBuilder = new SlottedPipeMapper(
         fallback,
         converters,
         physicalPlan,
         query.readOnly,
-        queryIndexRegistrator
+        queryIndexRegistrator,
+        query.stableLeafPlans
       )(query.semanticTable)
       val pipeTreeBuilder = PipeTreeBuilder(pipeBuilder)
       val logicalPlanWithConvertedNestedPlans = NestedPipeExpressions.build(
@@ -153,7 +194,7 @@ trait SlottedRuntime[-CONTEXT <: RuntimeContext] extends CypherRuntime[CONTEXT] 
 
       val transactionMode = calculateTransactionMode(query)
 
-      val resultBuilderFactory =
+      val resultBuilderFactory = extendResultBuilderFactory(
         new SlottedExecutionResultBuilderFactory(
           pipe,
           queryIndexRegistrator.result(),
@@ -165,8 +206,10 @@ trait SlottedRuntime[-CONTEXT <: RuntimeContext] extends CypherRuntime[CONTEXT] 
           context.config.memoryTrackingController,
           query.hasLoadCSV,
           transactionMode,
-          context.config.warnOnAggregationSkipNull
+          context.config.warnOnAggregationSkipNull,
+          context.indexComparatorFactory
         )
+      )
 
       if (ENABLE_DEBUG_PRINTS) {
         if (!PRINT_PLAN_INFO_EARLY) {
@@ -179,11 +222,12 @@ trait SlottedRuntime[-CONTEXT <: RuntimeContext] extends CypherRuntime[CONTEXT] 
 
       new InterpretedExecutionPlan(
         resultBuilderFactory,
-        SlottedRuntimeName,
+        RuntimeName.SLOTTED,
         query.readOnly,
         transactionMode.startsTransactions,
         metadataGen(),
-        warningsGen()
+        warningsGen(),
+        codeGenStats.stagedByteCodeSize
       )
     } catch {
       case e: CypherException =>
@@ -196,6 +240,17 @@ trait SlottedRuntime[-CONTEXT <: RuntimeContext] extends CypherRuntime[CONTEXT] 
         throw e
     }
   }
+
+  protected def extendResultBuilderFactory(factory: ExecutionResultBuilderFactory): ExecutionResultBuilderFactory =
+    factory
+
+  // Method to be able to wrap the fallback from enterprise
+  protected def getFallbackPipeMapper(
+    initialFallback: PipeMapper,
+    physicalPlan: PhysicalPlan,
+    expressionConverters: ExpressionConverters
+  ): PipeMapper =
+    initialFallback
 }
 
 object SlottedRuntime {

@@ -19,9 +19,7 @@
  */
 package org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands
 
-import org.neo4j.cypher.internal.ast.CommandResultItem
 import org.neo4j.cypher.internal.ast.ExecutableBy
-import org.neo4j.cypher.internal.ast.ShowColumn
 import org.neo4j.cypher.internal.ast.ShowProceduresClause.adminColumn
 import org.neo4j.cypher.internal.ast.ShowProceduresClause.argumentDescriptionColumn
 import org.neo4j.cypher.internal.ast.ShowProceduresClause.deprecatedByColumn
@@ -35,9 +33,12 @@ import org.neo4j.cypher.internal.ast.ShowProceduresClause.rolesBoostedExecutionC
 import org.neo4j.cypher.internal.ast.ShowProceduresClause.rolesExecutionColumn
 import org.neo4j.cypher.internal.ast.ShowProceduresClause.signatureColumn
 import org.neo4j.cypher.internal.ast.ShowProceduresClause.worksOnSystemColumn
+import org.neo4j.cypher.internal.logical.plans.CommandDefaultColumn
+import org.neo4j.cypher.internal.logical.plans.CommandYieldColumn
 import org.neo4j.cypher.internal.runtime.ClosingIterator
 import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.QueryState
+import org.neo4j.exceptions.InternalException
 import org.neo4j.internal.kernel.api.procs.FieldSignature
 import org.neo4j.internal.kernel.api.procs.ProcedureSignature
 import org.neo4j.internal.kernel.api.security.AdminActionOnResource
@@ -58,8 +59,8 @@ import scala.jdk.CollectionConverters.IteratorHasAsScala
 // SHOW PROCEDURE[S] [EXECUTABLE [BY {CURRENT USER | username}]] [WHERE clause | YIELD clause]
 case class ShowProceduresCommand(
   executableBy: Option[ExecutableBy],
-  columns: List[ShowColumn],
-  yieldColumns: List[CommandResultItem],
+  columns: List[CommandDefaultColumn],
+  yieldColumns: List[CommandYieldColumn],
   isCommunity: Boolean,
   scope: QueryLanguage
 ) extends Command(columns, yieldColumns) {
@@ -113,8 +114,7 @@ case class ShowProceduresCommand(
       }
     }.filter(m => m.nonEmpty)
 
-    val updatedRows = updateRowsWithPotentiallyRenamedColumns(rows)
-    ClosingIterator.apply(updatedRows.iterator)
+    ClosingIterator.apply(rows.iterator)
   }
 
   private def getResultMap(
@@ -167,7 +167,11 @@ case class ShowProceduresCommand(
       case unknown        =>
         // This match should cover all existing columns but we get scala warnings
         // on non-exhaustive match due to it being string values
-        throw new IllegalStateException(s"Missing case for column: $unknown")
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"Unknown column for show procedures. Missing case for column: $unknown.",
+          s"Missing case for column: $unknown"
+        )
     }.toMap[String, AnyValue]
   }
 

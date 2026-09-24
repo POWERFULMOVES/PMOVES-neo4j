@@ -19,6 +19,8 @@
  */
 package org.neo4j.bolt.test.extension.db;
 
+import static org.assertj.core.api.Assertions.fail;
+
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Constructor;
@@ -27,29 +29,37 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
-import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.extension.ExtensionContext;
 import org.junit.platform.commons.util.AnnotationUtils;
 import org.junit.platform.commons.util.ReflectionUtils.HierarchyTraversalMode;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
+import org.neo4j.bolt.protocol.common.BoltProtocol;
+import org.neo4j.bolt.test.annotation.setup.CustomizeConfig;
 import org.neo4j.bolt.test.annotation.setup.FactoryFunction;
-import org.neo4j.bolt.test.annotation.setup.SettingsFunction;
+import org.neo4j.bolt.test.connection.resolver.property.MutableTestPropertyContext;
+import org.neo4j.bolt.test.connection.setup.SettingBuilder;
+import org.neo4j.bolt.test.connection.setup.SettingCustomizer.Context;
+import org.neo4j.bolt.testing.util.AnnotationUtil;
 import org.neo4j.bolt.transport.Neo4jWithSocket;
 import org.neo4j.bolt.transport.Neo4jWithSocketSupportExtension;
-import org.neo4j.graphdb.config.Setting;
+import org.neo4j.configuration.connectors.BoltConnectorInternalSettings;
+import org.neo4j.configuration.connectors.BoltConnectorInternalSettings.ConfiguredProtocolVersion;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 
 public class ServerInstanceContext {
+    private final MutableTestPropertyContext properties;
     private final Function<ExtensionContext, TestDatabaseManagementServiceBuilder> databaseFactory;
     private final List<BiConsumer<ExtensionContext, TestDatabaseManagementServiceBuilder>> factoryCustomizers;
-    private final List<BiConsumer<ExtensionContext, Map<Setting<?>, Object>>> settingsCustomizers;
+    private final List<SettingConsumer> settingsCustomizers;
 
     public ServerInstanceContext(
+            MutableTestPropertyContext properties,
             Function<ExtensionContext, TestDatabaseManagementServiceBuilder> databaseFactory,
             List<BiConsumer<ExtensionContext, TestDatabaseManagementServiceBuilder>> factoryCustomizers,
-            List<BiConsumer<ExtensionContext, Map<Setting<?>, Object>>> settingsCustomizers) {
+            List<SettingConsumer> settingsCustomizers) {
+        this.properties = properties;
         this.databaseFactory = databaseFactory;
         this.factoryCustomizers = factoryCustomizers;
         this.settingsCustomizers = settingsCustomizers;
@@ -57,14 +67,16 @@ public class ServerInstanceContext {
 
     public static ServerInstanceContext forExtensionContext(
             ExtensionContext context,
+            MutableTestPropertyContext properties,
             Class<? extends TestDatabaseManagementServiceBuilder> fallbackType,
             List<BiConsumer<ExtensionContext, TestDatabaseManagementServiceBuilder>> factoryCustomizers,
-            List<BiConsumer<ExtensionContext, Map<Setting<?>, Object>>> settingsCustomizers) {
+            List<SettingConsumer> settingsCustomizers) {
         var databaseFactory = findDatabaseFactory(context, fallbackType);
         var discoveredSettingsCustomizers = new ArrayList<>(settingsCustomizers);
         discoveredSettingsCustomizers.addAll(findSettingsFunctions(context));
 
-        return new ServerInstanceContext(databaseFactory, factoryCustomizers, discoveredSettingsCustomizers);
+        return new ServerInstanceContext(
+                properties, databaseFactory, factoryCustomizers, discoveredSettingsCustomizers);
     }
 
     public static Function<ExtensionContext, TestDatabaseManagementServiceBuilder> findDatabaseFactory(
@@ -92,7 +104,7 @@ public class ServerInstanceContext {
 
                     return (TestDatabaseManagementServiceBuilder) handle.invoke();
                 } catch (Throwable ex) {
-                    Assertions.fail("Failed to invoke @FactoryFunction " + function.getName(), ex);
+                    fail("Failed to invoke @FactoryFunction " + function.getName(), ex);
                     return null; // make the compiler happy
                 }
             };
@@ -111,7 +123,7 @@ public class ServerInstanceContext {
                 // we'll also ensure that the constructed instance is within expected bounds in
                 // order to prevent any obscure method handle errors from failing the test
                 if (!expectedFactoryType.isInstance(factory)) {
-                    Assertions.fail("Failed to invoke @FactoryFunction " + function.getName()
+                    fail("Failed to invoke @FactoryFunction " + function.getName()
                             + ": Expected factory of type " + expectedFactoryType.getName() + " but got "
                             + factory.getClass().getName());
                 }
@@ -123,7 +135,7 @@ public class ServerInstanceContext {
                         handle.invoke(factory);
                     }
                 } catch (Throwable ex) {
-                    Assertions.fail("Failed to invoke @FactoryFunction " + function.getName(), ex);
+                    fail("Failed to invoke @FactoryFunction " + function.getName(), ex);
                 }
 
                 return factory;
@@ -144,7 +156,7 @@ public class ServerInstanceContext {
             try {
                 factoryConstructor = fallbackType.getDeclaredConstructor();
             } catch (NoSuchMethodException ex) {
-                Assertions.fail(
+                fail(
                         "Illegal database factory type " + fallbackType.getName()
                                 + ": Missing default no-args constructor - Try creating a @FactoryFunction method instead",
                         ex);
@@ -154,13 +166,13 @@ public class ServerInstanceContext {
             try {
                 return factoryConstructor.newInstance();
             } catch (IllegalAccessException ex) {
-                Assertions.fail(
+                fail(
                         "Illegal database factory type " + fallbackType.getName()
                                 + ": Inaccessible default no-args constructor - Try creationg a @FactoryFunction method instead",
                         ex);
                 return null; // make the compiler happy
             } catch (InstantiationException | InvocationTargetException ex) {
-                Assertions.fail("Failed to instantiate database factory type " + fallbackType.getName(), ex);
+                fail("Failed to instantiate database factory type " + fallbackType.getName(), ex);
                 return null; // make the compiler happy
             }
         });
@@ -181,31 +193,21 @@ public class ServerInstanceContext {
         return handle;
     }
 
-    public static List<BiConsumer<ExtensionContext, Map<Setting<?>, Object>>> findSettingsFunctions(
-            ExtensionContext context) {
-        return AnnotationUtils.findAnnotatedMethods(
-                        context.getRequiredTestClass(), SettingsFunction.class, HierarchyTraversalMode.BOTTOM_UP)
-                .stream()
-                .map(method -> wrapSettingsFunction(method))
+    public static List<SettingConsumer> findSettingsFunctions(ExtensionContext context) {
+        return AnnotationUtil.findAllAnnotationsWithContext(context, CustomizeConfig.class).stream()
+                .map(ctx -> {
+                    var provider = AnnotationUtil.instantiateProvider(ctx.annotation(), CustomizeConfig::value);
+
+                    return (SettingConsumer) (properties, settings) -> {
+                        var c = new Context(
+                                context,
+                                properties,
+                                context.getRequiredTestClass(),
+                                ctx.targetMethod().orElseGet(context::getRequiredTestMethod));
+                        provider.customize(c, settings);
+                    };
+                })
                 .toList();
-    }
-
-    private static BiConsumer<ExtensionContext, Map<Setting<?>, Object>> wrapSettingsFunction(Method function) {
-        // we'll allocate a method handle for the target function, bind it to the test instance (if
-        // applicable) and append it to the base function to permit overriding of additional settings
-        var handle = unreflectMethodHandle(function);
-
-        return (context, settings) -> {
-            try {
-                if (!Modifier.isStatic(function.getModifiers())) {
-                    handle.bindTo(context.getRequiredTestInstance()).invoke(settings);
-                } else {
-                    handle.invoke(settings);
-                }
-            } catch (Throwable ex) {
-                Assertions.fail("Failed to invoke settings function", ex);
-            }
-        };
     }
 
     public Neo4jWithSocket configure(ExtensionContext context) {
@@ -216,8 +218,17 @@ public class ServerInstanceContext {
         }
 
         neo4j.setGraphDatabaseFactory(this.databaseFactory.apply(context));
-        neo4j.setConfigure(
-                config -> this.settingsCustomizers.forEach(customizer -> customizer.accept(context, config)));
+        neo4j.setConfigure(config -> {
+            BoltProtocol.installed().stream()
+                    .map(BoltProtocol::version)
+                    .max(ProtocolVersion::compareTo)
+                    .ifPresent(latest -> config.put(
+                            BoltConnectorInternalSettings.max_protocol_version,
+                            new ConfiguredProtocolVersion((int) latest.major(), (int) latest.minor())));
+
+            var settings = SettingBuilder.wrap(config);
+            this.settingsCustomizers.forEach(customizer -> customizer.accept(properties, settings));
+        });
 
         return neo4j;
     }
@@ -227,5 +238,11 @@ public class ServerInstanceContext {
         if (neo4j != null) {
             neo4j.shutdownDatabase();
         }
+    }
+
+    @FunctionalInterface
+    public interface SettingConsumer {
+
+        void accept(MutableTestPropertyContext properties, SettingBuilder settings);
     }
 }

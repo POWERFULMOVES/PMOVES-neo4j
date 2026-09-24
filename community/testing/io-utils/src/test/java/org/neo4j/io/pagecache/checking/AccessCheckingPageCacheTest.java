@@ -19,8 +19,7 @@
  */
 package org.neo4j.io.pagecache.checking;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -35,6 +34,7 @@ import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.PageCursor;
 import org.neo4j.io.pagecache.PagedFile;
 import org.neo4j.io.pagecache.context.CursorContext;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 
 class AccessCheckingPageCacheTest {
     private PageCache pageCache;
@@ -46,10 +46,10 @@ class AccessCheckingPageCacheTest {
         PagedFile mockedPagedFile = mock(PagedFile.class);
         PageCursor mockedCursor = mock(PageCursor.class);
         when(mockedPagedFile.io(anyLong(), anyInt(), any())).thenReturn(mockedCursor);
-        when(mockedPageCache.map(any(Path.class), anyInt(), any(), any(), any(), any(), any()))
+        when(mockedPageCache.map(any(StoreFile.class), anyInt(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(mockedPagedFile);
         pageCache = new AccessCheckingPageCache(mockedPageCache);
-        PagedFile file = pageCache.map(Path.of("some file"), 512, "database");
+        PagedFile file = pageCache.map(new StoreFile(Path.of("some file")), 512, "database");
         cursor = file.io(0, PagedFile.PF_SHARED_READ_LOCK, CursorContext.NULL_CONTEXT);
     }
 
@@ -136,8 +136,9 @@ class AccessCheckingPageCacheTest {
         // GIVEN
         cursor.getByte();
 
-        AssertionError assertionError = assertThrows(AssertionError.class, () -> cursor.close());
-        assertThat(assertionError.getMessage()).contains("shouldRetry");
+        assertThatThrownBy(() -> cursor.close())
+                .isInstanceOf(AssertionError.class)
+                .hasMessageContaining("shouldRetry");
     }
 
     @Test
@@ -145,8 +146,9 @@ class AccessCheckingPageCacheTest {
         // GIVEN
         cursor.getByte(0);
 
-        AssertionError assertionError = assertThrows(AssertionError.class, () -> cursor.next());
-        assertThat(assertionError.getMessage()).contains("shouldRetry");
+        assertThatThrownBy(() -> cursor.next())
+                .isInstanceOf(AssertionError.class)
+                .hasMessageContaining("shouldRetry");
     }
 
     @Test
@@ -154,8 +156,9 @@ class AccessCheckingPageCacheTest {
         // GIVEN
         cursor.getShort();
 
-        AssertionError assertionError = assertThrows(AssertionError.class, () -> cursor.next(1));
-        assertThat(assertionError.getMessage()).contains("shouldRetry");
+        assertThatThrownBy(() -> cursor.next(1))
+                .isInstanceOf(AssertionError.class)
+                .hasMessageContaining("shouldRetry");
     }
 
     @Test
@@ -165,8 +168,9 @@ class AccessCheckingPageCacheTest {
         cursor.shouldRetry();
         cursor.getInt();
 
-        AssertionError assertionError = assertThrows(AssertionError.class, () -> cursor.close());
-        assertThat(assertionError.getMessage()).contains("shouldRetry");
+        assertThatThrownBy(() -> cursor.close())
+                .isInstanceOf(AssertionError.class)
+                .hasMessageContaining("shouldRetry");
     }
 
     @Test
@@ -176,8 +180,9 @@ class AccessCheckingPageCacheTest {
         cursor.shouldRetry();
         cursor.getLong();
 
-        AssertionError assertionError = assertThrows(AssertionError.class, () -> cursor.next());
-        assertThat(assertionError.getMessage()).contains("shouldRetry");
+        assertThatThrownBy(() -> cursor.next())
+                .isInstanceOf(AssertionError.class)
+                .hasMessageContaining("shouldRetry");
     }
 
     @Test
@@ -187,7 +192,8 @@ class AccessCheckingPageCacheTest {
         cursor.shouldRetry();
         cursor.getBytes(new byte[2]);
 
-        AssertionError assertionError = assertThrows(AssertionError.class, () -> cursor.next(1));
-        assertThat(assertionError.getMessage()).contains("shouldRetry");
+        assertThatThrownBy(() -> cursor.next(1))
+                .isInstanceOf(AssertionError.class)
+                .hasMessageContaining("shouldRetry");
     }
 }

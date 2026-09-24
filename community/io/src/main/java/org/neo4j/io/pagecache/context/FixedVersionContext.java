@@ -43,7 +43,15 @@ public class FixedVersionContext implements VersionContext {
     }
 
     @Override
-    public long lastClosedTransactionId() {
+    public void initChunkId(long committingChunkId) {}
+
+    @Override
+    public long committingChunkId() {
+        return committingTransactionId;
+    }
+
+    @Override
+    public long highestGapFree() {
         return Long.MAX_VALUE;
     }
 
@@ -66,7 +74,7 @@ public class FixedVersionContext implements VersionContext {
     }
 
     @Override
-    public long oldestVisibleTransactionNumber() {
+    public long oldestVisibilityHorizon() {
         return INVALID_TRANSACTION_ID;
     }
 
@@ -95,5 +103,20 @@ public class FixedVersionContext implements VersionContext {
     @Override
     public boolean initializedForWrite() {
         return committingTransactionId != INVALID_TRANSACTION_ID;
+    }
+
+    @Override
+    public int stamp() {
+        return 0;
+    }
+
+    @Override
+    public boolean validateStamp(int stamp) {
+        return true;
+    }
+
+    @Override
+    public String toString() {
+        return "FixedVersionContext{" + "transactionId=" + committingTransactionId + '}';
     }
 }

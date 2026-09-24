@@ -20,7 +20,6 @@
 package org.neo4j.kernel.api.impl.schema.reader;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.List;
 import org.neo4j.internal.kernel.api.IndexQueryConstraints;
 import org.neo4j.internal.kernel.api.PropertyIndexQuery;
@@ -58,7 +57,8 @@ public class PartitionedValueIndexReader implements ValueIndexReader {
     @Override
     public void query(
             IndexProgressor.EntityValueClient client,
-            QueryContext context,
+            QueryContext queryContext,
+            CursorContext cursorContext,
             IndexQueryConstraints constraints,
             PropertyIndexQuery... query)
             throws IndexNotApplicableKernelException {
@@ -67,16 +67,29 @@ public class PartitionedValueIndexReader implements ValueIndexReader {
                     new BridgingIndexProgressor(client, descriptor.schema().getPropertyIds());
             indexReaders.parallelStream().forEach(reader -> {
                 try {
-                    reader.query(bridgingIndexProgressor, context, constraints, query);
+                    reader.query(bridgingIndexProgressor, queryContext, cursorContext, constraints, query);
                 } catch (IndexNotApplicableKernelException e) {
                     throw new InnerException(e);
                 }
             });
-            usageTracker.queried();
+            reportIndexQueried(queryContext, query);
             boolean needStoreFilter = bridgingIndexProgressor.needStoreFilter();
             client.initializeQuery(descriptor, bridgingIndexProgressor, false, needStoreFilter, constraints, query);
         } catch (InnerException e) {
             throw e.getCause();
+        }
+    }
+
+    @Override
+    public void reportIndexQueried(QueryContext context, PropertyIndexQuery... queries) {
+        usageTracker.queried();
+    }
+
+    @Override
+    public void validateQuery(IndexQueryConstraints constraints, PropertyIndexQuery... query)
+            throws IndexNotApplicableKernelException {
+        for (ValueIndexReader reader : indexReaders) {
+            reader.validateQuery(constraints, query);
         }
     }
 
@@ -117,8 +130,7 @@ public class PartitionedValueIndexReader implements ValueIndexReader {
     @Override
     public void close() {
         try {
-            List<AutoCloseable> resources = new ArrayList<>(indexReaders);
-            IOUtils.closeAll(resources);
+            IOUtils.closeAll(indexReaders);
         } catch (IOException e) {
             throw new IndexReaderCloseException(e);
         }

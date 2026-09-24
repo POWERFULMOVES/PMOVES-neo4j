@@ -19,14 +19,15 @@
  */
 package org.neo4j.cypher.internal.runtime.interpreted.pipes
 
-import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour
+import org.neo4j.cypher.internal.logical.plans.TransactionalPlan.RecoveryMode
 import org.neo4j.cypher.internal.runtime.ClosingIterator
 import org.neo4j.cypher.internal.runtime.ClosingIterator.JavaIteratorAsClosingIterator
 import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Expression
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.TransactionForeachPipe.toStatusMap
-import org.neo4j.cypher.internal.runtime.interpreted.pipes.TransactionPipeWrapper.evaluateBatchSize
 import org.neo4j.cypher.internal.util.attribution.Id
+import org.neo4j.kernel.impl.util.collection.EagerBuffer
+import org.neo4j.memory.MemoryTracker
 import org.neo4j.values.AnyValue
 import org.neo4j.values.storable.NoValue.NO_VALUE
 import org.neo4j.values.storable.Values.booleanValue
@@ -38,42 +39,39 @@ abstract class AbstractTransactionForeachPipe(
   source: Pipe,
   inner: Pipe,
   batchSize: Expression,
-  onErrorBehaviour: InTransactionsOnErrorBehaviour
-) extends PipeWithSource(source) {
+  recoveryMode: RecoveryMode,
+  retryPolicy: TransactionRetryPolicy
+) extends AbstractSerialTransactionsPipe(source, inner, batchSize, recoveryMode, retryPolicy) {
 
-  protected def withStatus(output: ClosingIterator[CypherRow], status: TransactionStatus): ClosingIterator[CypherRow]
-
-  final override protected def internalCreateResults(
-    input: ClosingIterator[CypherRow],
+  override protected def produceOutput(
+    eagerBuffer: EagerBuffer[CypherRow],
+    result: TransactionResult,
+    batch: TransactionBatch,
     state: QueryState
   ): ClosingIterator[CypherRow] = {
-    val innerInTx = TransactionPipeWrapper(onErrorBehaviour, id, inner, concurrentAccess = false)
-    val batchSizeLong = evaluateBatchSize(batchSize, state)
-    val memoryTracker = state.memoryTrackerForOperatorProvider.memoryTrackerForOperator(id.x)
-
-    input
-      .eagerGrouped(batchSizeLong, memoryTracker)
-      .flatMap { batch =>
-        val status = innerInTx.consume(state, batch)
-        val statistics = status.queryStatistics
-        if (statistics != null) {
-          state.query.addStatistics(statistics)
-        }
-        val output = batch.autoClosingIterator().asClosingIterator
-        withStatus(output, status)
-      }
+    val output = eagerBuffer.autoClosingIterator().asClosingIterator
+    withStatus(output, result.status)
   }
+
+  override protected def getResult(
+    innerPipeInTx: TransactionPipeWrapper,
+    state: QueryState,
+    batch: TransactionBatch,
+    memoryTracker: MemoryTracker
+  ): TransactionResult =
+    innerPipeInTx.consume(state, batch)
 }
 
 case class TransactionForeachPipe(
   source: Pipe,
   inner: Pipe,
   batchSize: Expression,
-  onErrorBehaviour: InTransactionsOnErrorBehaviour,
-  statusVariableOpt: Option[String]
+  recoveryMode: RecoveryMode,
+  statusVariableOpt: Option[String],
+  retryPolicy: TransactionRetryPolicy
 )(
   val id: Id = Id.INVALID_ID
-) extends AbstractTransactionForeachPipe(source, inner, batchSize, onErrorBehaviour) {
+) extends AbstractTransactionForeachPipe(source, inner, batchSize, recoveryMode, retryPolicy) {
 
   override protected def withStatus(
     output: ClosingIterator[CypherRow],
@@ -93,7 +91,10 @@ object TransactionForeachPipe {
         statusMap(Some(transactionId), started = true, committed = true, None)
       case Rollback(transactionId, failure, _, _) =>
         statusMap(Some(transactionId), started = true, committed = false, Some(failure.getMessage))
-      case NotRun => notRunStatus
+      case NotRun              => notRunStatus
+      case NonRecoverableError =>
+        // Non-recoverable exception types are not expected to be caught and handled at this level
+        throw new IllegalArgumentException("Unexpected handling of non-recoverable error status")
     }
   }
 

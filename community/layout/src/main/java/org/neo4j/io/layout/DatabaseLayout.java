@@ -19,15 +19,15 @@
  */
 package org.neo4j.io.layout;
 
+import static org.neo4j.io.layout.DatabaseFile.ID_FILE_SUFFIX;
+
 import java.nio.file.Path;
 import java.util.Optional;
-import java.util.Set;
-import java.util.function.Predicate;
 import java.util.stream.Stream;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
-import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.fs.FileUtils;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 
 /**
  * File layout representation of the particular database. Facade for any kind of file lookup for a particular database storage implementation.
@@ -47,7 +47,11 @@ public interface DatabaseLayout {
     }
 
     static DatabaseLayout of(Config config) {
-        return Neo4jLayout.of(config).databaseLayout(config.get(GraphDatabaseSettings.initial_default_database));
+        return of(config, config.get(GraphDatabaseSettings.initial_default_database));
+    }
+
+    static DatabaseLayout of(Config config, String dbName) {
+        return Neo4jLayout.of(config).databaseLayout(dbName);
     }
 
     static DatabaseLayout of(Neo4jLayout neo4jLayout, String databaseName) {
@@ -68,32 +72,34 @@ public interface DatabaseLayout {
 
     Path databaseDirectory();
 
-    Path backupToolsFolder();
+    Path backupToolsDirectory();
 
-    Path metadataStore();
+    Path vectorStoresDirectory();
 
-    Path indexStatisticsStore();
+    StoreFile metadataStore();
+
+    StoreFile indexStatisticsStore();
 
     Path pathForExistsMarker();
 
-    Path pathForStore(CommonDatabaseStores store);
+    Path segmentsMetadata();
 
-    Set<Path> idFiles();
+    StoreFile pathForStore(CommonDatabaseStores store);
 
-    Set<Path> storeFiles();
+    Optional<StoreFile> idFile(DatabaseFile file);
 
     /**
-     * @return the store files required to be present for a database to be able to be recovered
+     * Resolves the file path against the database directory and returns that path.
      */
-    Set<Path> mandatoryStoreFiles();
+    StoreFile file(String name);
 
-    Optional<Path> idFile(DatabaseFile file);
+    Path path(String name);
 
-    Path file(String fileName);
+    StoreFile file(DatabaseFile databaseFile);
 
-    Path file(DatabaseFile databaseFile);
+    Stream<StoreFile> allFiles(DatabaseFile databaseFile);
 
-    Stream<Path> allFiles(DatabaseFile databaseFile);
-
-    Path[] listDatabaseFiles(FileSystemAbstraction fs, Predicate<? super Path> filter);
+    default boolean isIdFile(Path file) {
+        return file.getFileName().toString().endsWith(ID_FILE_SUFFIX);
+    }
 }

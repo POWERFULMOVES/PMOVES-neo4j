@@ -266,9 +266,7 @@ class ShellParameterService implements ParameterService {
         }
 
         /*
-         * Converts JavaCC parser output to driver values.
-         * JavaCC returns std lib java classes most of the time,
-         * but there are some exceptions where it returns neo4j values.
+         * Converts some AST literals to driver values.
          */
         private static org.neo4j.driver.Value toDriverValue(Object input) {
             if (input == null) {
@@ -314,7 +312,7 @@ class ShellParameterService implements ParameterService {
                 // Feels very wrong to execute user data unescaped...
                 final var query = "RETURN " + expression + " AS `result`";
 
-                return db.runCypher(query, parameters(), USER_TRANSPILED)
+                return db.runCypher5(query, parameters(), USER_TRANSPILED)
                         .map(r -> r.iterate().next().get("result"))
                         .orElseThrow();
             } catch (Exception e) {

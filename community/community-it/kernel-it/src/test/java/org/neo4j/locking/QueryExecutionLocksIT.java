@@ -34,9 +34,9 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.jupiter.api.Test;
 import org.neo4j.common.EntityType;
+import org.neo4j.cypher.internal.DefaultQueryLanguageScope;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.graphdb.Label;
 import org.neo4j.graphdb.Node;
@@ -44,6 +44,7 @@ import org.neo4j.graphdb.Relationship;
 import org.neo4j.graphdb.RelationshipType;
 import org.neo4j.graphdb.Transaction;
 import org.neo4j.graphdb.schema.IndexType;
+import org.neo4j.graphdb.schema.Schema;
 import org.neo4j.internal.kernel.api.CursorFactory;
 import org.neo4j.internal.kernel.api.ExecutionStatistics;
 import org.neo4j.internal.kernel.api.Locks;
@@ -84,6 +85,7 @@ import org.neo4j.kernel.api.query.ExecutingQuery;
 import org.neo4j.kernel.database.NamedDatabaseId;
 import org.neo4j.kernel.impl.api.ClockContext;
 import org.neo4j.kernel.impl.coreapi.InternalTransaction;
+import org.neo4j.kernel.impl.coreapi.schema.SchemaImpl;
 import org.neo4j.kernel.impl.query.ConstituentTransactionFactory;
 import org.neo4j.kernel.impl.query.Neo4jTransactionalContextFactory;
 import org.neo4j.kernel.impl.query.QueryExecutionConfiguration;
@@ -97,13 +99,17 @@ import org.neo4j.lock.ResourceType;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.memory.HeapEstimatorCacheConfig;
 import org.neo4j.memory.MemoryTracker;
-import org.neo4j.storageengine.api.StorageEngineCostCharacteristics;
+import org.neo4j.monitoring.ExceptionHandlerService;
+import org.neo4j.storageengine.api.StorageEngineCharacteristics;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
+import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.ImpermanentDbmsExtension;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.values.ElementIdMapper;
 
 @ImpermanentDbmsExtension
+@RandomSupportExtension
 class QueryExecutionLocksIT {
     @Inject
     private GraphDatabaseAPI db;
@@ -113,6 +119,9 @@ class QueryExecutionLocksIT {
 
     @Inject
     private QueryExecutionEngine executionEngine;
+
+    @Inject
+    private RandomSupport random;
 
     @Test
     void noLocksTakenForQueryWithoutAnyIndexesUsage() throws Exception {
@@ -132,7 +141,7 @@ class QueryExecutionLocksIT {
 
         try (Transaction transaction = db.beginTx()) {
             Node node = transaction.createNode(human);
-            node.setProperty(propertyKey, RandomStringUtils.randomAscii(10));
+            node.setProperty(propertyKey, random.nextAsciiStringOfLength(10));
             transaction.commit();
         }
 
@@ -143,7 +152,7 @@ class QueryExecutionLocksIT {
                 .as("Observed list of lock operations is: " + lockOperationRecords)
                 .hasSize(1);
 
-        LockOperationRecord operationRecord = lockOperationRecords.get(0);
+        LockOperationRecord operationRecord = lockOperationRecords.getFirst();
         assertTrue(operationRecord.acquisition);
         assertFalse(operationRecord.exclusive);
         assertEquals(ResourceType.LABEL, operationRecord.resourceType);
@@ -169,7 +178,7 @@ class QueryExecutionLocksIT {
                 .as("Observed list of lock operations is: " + lockOperationRecords)
                 .hasSize(1);
 
-        LockOperationRecord operationRecord = lockOperationRecords.get(0);
+        LockOperationRecord operationRecord = lockOperationRecords.getFirst();
         assertTrue(operationRecord.acquisition);
         assertFalse(operationRecord.exclusive);
         assertEquals(ResourceType.RELATIONSHIP_TYPE, operationRecord.resourceType);
@@ -195,7 +204,7 @@ class QueryExecutionLocksIT {
                 .as("Observed list of lock operations is: " + lockOperationRecords)
                 .hasSize(1);
 
-        LockOperationRecord operationRecord = lockOperationRecords.get(0);
+        LockOperationRecord operationRecord = lockOperationRecords.getFirst();
         assertTrue(operationRecord.acquisition);
         assertFalse(operationRecord.exclusive);
         assertEquals(ResourceType.RELATIONSHIP_TYPE, operationRecord.resourceType);
@@ -221,7 +230,7 @@ class QueryExecutionLocksIT {
                 .as("Observed list of lock operations is: " + lockOperationRecords)
                 .hasSize(1);
 
-        LockOperationRecord operationRecord = lockOperationRecords.get(0);
+        LockOperationRecord operationRecord = lockOperationRecords.getFirst();
         assertTrue(operationRecord.acquisition);
         assertFalse(operationRecord.exclusive);
         assertEquals(ResourceType.RELATIONSHIP_TYPE, operationRecord.resourceType);
@@ -247,7 +256,7 @@ class QueryExecutionLocksIT {
                 .as("Observed list of lock operations is: " + lockOperationRecords)
                 .hasSize(1);
 
-        LockOperationRecord operationRecord = lockOperationRecords.get(0);
+        LockOperationRecord operationRecord = lockOperationRecords.getFirst();
         assertTrue(operationRecord.acquisition);
         assertFalse(operationRecord.exclusive);
         assertEquals(ResourceType.RELATIONSHIP_TYPE, operationRecord.resourceType);
@@ -262,7 +271,7 @@ class QueryExecutionLocksIT {
 
         try (Transaction transaction = db.beginTx()) {
             Node node = transaction.createNode(robot);
-            node.setProperty(propertyKey, RandomStringUtils.randomAscii(10));
+            node.setProperty(propertyKey, random.nextAsciiStringOfLength(10));
             transaction.commit();
         }
 
@@ -274,7 +283,7 @@ class QueryExecutionLocksIT {
                 .as("Observed list of lock operations is: " + lockOperationRecords)
                 .hasSize(3);
 
-        LockOperationRecord operationRecord = lockOperationRecords.get(0);
+        LockOperationRecord operationRecord = lockOperationRecords.getFirst();
         assertTrue(operationRecord.acquisition);
         assertFalse(operationRecord.exclusive);
         assertEquals(ResourceType.LABEL, operationRecord.resourceType);
@@ -298,7 +307,7 @@ class QueryExecutionLocksIT {
 
         try (Transaction transaction = db.beginTx()) {
             Node node = transaction.createNode(robot);
-            node.setProperty(propertyKey, RandomStringUtils.randomAscii(10));
+            node.setProperty(propertyKey, random.nextAsciiStringOfLength(10));
             transaction.commit();
         }
 
@@ -311,7 +320,7 @@ class QueryExecutionLocksIT {
                 .as("Observed list of lookup lock operations is: " + lookupLockOperationRecords)
                 .hasSize(3);
 
-        LookupLockOperationRecord operationRecord = lookupLockOperationRecords.get(0);
+        LookupLockOperationRecord operationRecord = lookupLockOperationRecords.getFirst();
         assertTrue(operationRecord.acquisition);
         assertFalse(operationRecord.exclusive);
         assertEquals(EntityType.NODE, operationRecord.entityType);
@@ -768,8 +777,8 @@ class QueryExecutionLocksIT {
         }
 
         @Override
-        public long commit(KernelTransactionMonitor kernelTransactionMonitor) throws TransactionFailureException {
-            return internal.commit(kernelTransactionMonitor);
+        public long commit(Monitor monitor) throws TransactionFailureException {
+            return internal.commit(monitor);
         }
 
         @Override
@@ -838,8 +847,8 @@ class QueryExecutionLocksIT {
         }
 
         @Override
-        public StorageEngineCostCharacteristics storageEngineCostCharacteristics() {
-            return internal.storageEngineCostCharacteristics();
+        public StorageEngineCharacteristics storageEngineCharacteristics() {
+            return internal.storageEngineCharacteristics();
         }
 
         @Override
@@ -1080,6 +1089,21 @@ class QueryExecutionLocksIT {
         @Override
         public InnerTransactionHandler getInnerTransactionHandler() {
             return internal.getInnerTransactionHandler();
+        }
+
+        @Override
+        public DefaultQueryLanguageScope defaultQueryLanguageScope() {
+            return internal.defaultQueryLanguageScope();
+        }
+
+        @Override
+        public ExceptionHandlerService exceptionHandlerService() {
+            return internal.exceptionHandlerService();
+        }
+
+        @Override
+        public Schema schema() {
+            return new SchemaImpl(this);
         }
     }
 }

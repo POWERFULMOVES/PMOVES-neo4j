@@ -19,17 +19,16 @@
  */
 package org.neo4j.internal.batchimport.cache.idmapping.string;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
 
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.internal.batchimport.cache.NumberArrayFactories;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class BigIdTrackerTest {
     @Inject
     private RandomSupport random;
@@ -39,7 +38,7 @@ class BigIdTrackerTest {
         // given
         int length = 10_000;
         try (BigIdTracker tracker = new BigIdTracker(
-                NumberArrayFactories.HEAP.newByteArray(length, BigIdTracker.DEFAULT_VALUE, INSTANCE))) {
+                NumberArrayFactories.OFF_HEAP.newByteArray(length, BigIdTracker.DEFAULT_VALUE, INSTANCE))) {
             // when
             long[] values = new long[length];
             boolean[] marks = new boolean[length];
@@ -53,8 +52,8 @@ class BigIdTrackerTest {
 
             // then
             for (int i = 0; i < length; i++) {
-                assertEquals(values[i], tracker.get(i));
-                assertEquals(marks[i], tracker.isMarkedAsDuplicate(i));
+                assertThat(tracker.get(i)).isEqualTo(values[i]);
+                assertThat(tracker.isMarkedAsDuplicate(i)).isEqualTo(marks[i]);
             }
         }
     }

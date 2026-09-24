@@ -34,7 +34,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.common.EntityType;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.graphdb.schema.IndexDefinition;
@@ -44,7 +43,6 @@ import org.neo4j.internal.kernel.api.IndexReadSession;
 import org.neo4j.internal.kernel.api.InternalIndexState;
 import org.neo4j.internal.kernel.api.RelationshipValueIndexCursor;
 import org.neo4j.internal.kernel.api.exceptions.schema.IndexNotFoundKernelException;
-import org.neo4j.internal.schema.AnyTokenSchemaDescriptor;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.fs.StoreChannel;
@@ -53,19 +51,19 @@ import org.neo4j.kernel.impl.api.index.IndexProxy;
 import org.neo4j.kernel.impl.api.index.IndexingService;
 import org.neo4j.kernel.impl.coreapi.InternalTransaction;
 import org.neo4j.kernel.impl.coreapi.schema.IndexDefinitionImpl;
-import org.neo4j.kernel.impl.transaction.log.CheckpointInfo;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
-import org.neo4j.kernel.impl.transaction.log.files.LogFilesBuilder;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.TestLabels;
 import org.neo4j.test.extension.DbmsController;
 import org.neo4j.test.extension.DbmsExtension;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.wal.CheckpointInfo;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.files.LogFilesBuilder;
 
 @DbmsExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class RelationshipTypeIndexIT {
     private static final RelationshipType REL_TYPE = RelationshipType.withName("REL_TYPE");
     private static final RelationshipType OTHER_REL_TYPE = RelationshipType.withName("OTHER_REL_TYPE");
@@ -233,7 +231,7 @@ class RelationshipTypeIndexIT {
         try (Transaction tx = db.beginTx()) {
             for (IndexDefinition indexDef : tx.schema().getIndexes()) {
                 IndexDescriptor index = ((IndexDefinitionImpl) indexDef).getIndexReference();
-                if (index.schema().isSchemaDescriptorType(AnyTokenSchemaDescriptor.class)
+                if (index.schema().isAnyTokenSchemaDescriptor()
                         && index.schema().entityType() == EntityType.RELATIONSHIP
                         && index.getIndexType() == org.neo4j.internal.schema.IndexType.LOOKUP) {
                     return index;

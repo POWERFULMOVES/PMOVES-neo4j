@@ -33,6 +33,9 @@ import org.neo4j.cypher.internal.expressions.LabelOrRelTypeName
 import org.neo4j.cypher.internal.expressions.ListLiteral
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.MapExpression
+import org.neo4j.cypher.internal.expressions.MatchMode
+import org.neo4j.cypher.internal.expressions.MatchMode.DifferentRelationships
+import org.neo4j.cypher.internal.expressions.MatchMode.MatchMode
 import org.neo4j.cypher.internal.expressions.NODE_TYPE
 import org.neo4j.cypher.internal.expressions.NamedPatternPart
 import org.neo4j.cypher.internal.expressions.NodePattern
@@ -41,6 +44,7 @@ import org.neo4j.cypher.internal.expressions.Parameter
 import org.neo4j.cypher.internal.expressions.ParenthesizedPath
 import org.neo4j.cypher.internal.expressions.PathConcatenation
 import org.neo4j.cypher.internal.expressions.PathFactor
+import org.neo4j.cypher.internal.expressions.PathLengthQuantifier
 import org.neo4j.cypher.internal.expressions.PathPatternPart
 import org.neo4j.cypher.internal.expressions.Pattern
 import org.neo4j.cypher.internal.expressions.Pattern.SemanticContext
@@ -51,7 +55,7 @@ import org.neo4j.cypher.internal.expressions.PatternElement
 import org.neo4j.cypher.internal.expressions.PatternPart
 import org.neo4j.cypher.internal.expressions.PatternPart.CountedSelector
 import org.neo4j.cypher.internal.expressions.PatternPart.ShortestGroups
-import org.neo4j.cypher.internal.expressions.PatternPartWithSelector
+import org.neo4j.cypher.internal.expressions.PrefixedPatternPart
 import org.neo4j.cypher.internal.expressions.Property
 import org.neo4j.cypher.internal.expressions.PropertyKeyName
 import org.neo4j.cypher.internal.expressions.QuantifiedPath
@@ -64,50 +68,91 @@ import org.neo4j.cypher.internal.expressions.RelationshipsPattern
 import org.neo4j.cypher.internal.expressions.SemanticDirection
 import org.neo4j.cypher.internal.expressions.ShortestPathsPatternPart
 import org.neo4j.cypher.internal.expressions.StringLiteral
-import org.neo4j.cypher.internal.expressions.SymbolicName
-import org.neo4j.cypher.internal.expressions.UnsignedDecimalIntegerLiteral
 import org.neo4j.cypher.internal.label_expressions.LabelExpression
 import org.neo4j.cypher.internal.label_expressions.LabelExpression.ColonDisjunction
 import org.neo4j.cypher.internal.label_expressions.LabelExpressionDynamicLeafExpression
 import org.neo4j.cypher.internal.label_expressions.SolvableLabelExpression
+import org.neo4j.cypher.internal.notification.RepeatedRelationshipReference
+import org.neo4j.cypher.internal.notification.RepeatedVarLengthRelationshipReference
+import org.neo4j.cypher.internal.notification.UnboundedShortestPathNotification
+import org.neo4j.cypher.internal.notification.UnsatisfiableRelationshipTypeExpression
 import org.neo4j.cypher.internal.util.ASTNode
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.cypher.internal.util.Foldable.SkipChildren
 import org.neo4j.cypher.internal.util.InputPosition
-import org.neo4j.cypher.internal.util.RepeatedRelationshipReference
-import org.neo4j.cypher.internal.util.RepeatedVarLengthRelationshipReference
 import org.neo4j.cypher.internal.util.Rewriter
-import org.neo4j.cypher.internal.util.UnboundedShortestPathNotification
-import org.neo4j.cypher.internal.util.UnsatisfiableRelationshipTypeExpression
+import org.neo4j.cypher.internal.util.SymbolicName
 import org.neo4j.cypher.internal.util.symbols.CTList
 import org.neo4j.cypher.internal.util.symbols.CTMap
 import org.neo4j.cypher.internal.util.symbols.CTNode
 import org.neo4j.cypher.internal.util.symbols.CTPath
 import org.neo4j.cypher.internal.util.symbols.CTRelationship
 import org.neo4j.cypher.internal.util.symbols.CTString
+import org.neo4j.cypher.internal.util.symbols.invariantTypeSpec
 import org.neo4j.cypher.internal.util.topDown
 
 object SemanticPatternCheck extends SemanticAnalysisTooling {
 
+  // Clauses like CREATE, MERGE, patternComprehension call this method.
+  // Explicit match modes is not supported for them, therefore they always have the default: DIFFERENT RELATIONSHIPS
   def check(ctx: SemanticContext, pattern: Pattern): SemanticCheck =
-    semanticCheckFold(pattern.patternParts)(declareVariables(ctx)) chain
+    check(ctx, pattern, MatchMode.default())
+
+  def check(ctx: SemanticContext, pattern: Pattern, matchMode: MatchMode): SemanticCheck =
+    declareVariablesInSeparateScope(ctx, pattern.patternParts) chain
       semanticCheckFold(pattern.patternParts)(check(ctx)) ifOkChain
       semanticCheckFold(pattern.patternParts)(checkMinimumNodeCount) ifOkChain
       when(ctx != SemanticContext.Create && ctx != SemanticContext.Insert) {
-        ensureNoIllegalReferencesOut(pattern) chain
-          ensureNoRepeatedRelationships(pattern) chain
-          ensureNoRepeatedVarLengthRelationships(pattern)
+        ensureNoOutOfScopePathReferences(pattern) chain
+          ensureDifferentRelationships(pattern, matchMode)
       }
 
+  private def declareVariablesInSeparateScope(ctx: SemanticContext, parts: Seq[PatternPart]): SemanticCheck = {
+    when(parts.folder.findAllByClass[FullSubqueryExpression].nonEmpty) {
+      withScopedState {
+        collectDeclaredVariables(ctx, parts)
+      }
+    } chain semanticCheckFold(parts)(declareVariables(ctx))
+  }
+
+  private def collectDeclaredVariables(ctx: SemanticContext, parts: Seq[PatternPart]): SemanticCheck =
+    for {
+      declared <- parts.foldSemanticCheck(declareVariables(ctx))
+      sibling <- SemanticCheck.setState(declared.state.newSiblingScope)
+      _ <- SemanticCheck.setState(sibling.state.importValuesFromScope(
+        declared.state.currentScope.scope,
+        sibling.state.currentScope.parent.get.symbolNames.intersect(
+          declared.state.currentScope.symbolNames
+        )
+      ))
+      recordedScopes <- parts.folder.findAllByClass[FullSubqueryExpression].foldSemanticCheck(recordCurrentScope(_))
+    } yield recordedScopes
+
   def check(ctx: SemanticContext, pattern: RelationshipsPattern): SemanticCheck =
-    declareVariables(ctx, pattern.element) chain
-      check(ctx, pattern.element) chain
-      ensureNoRepeatedRelationships(pattern) chain
-      ensureNoRepeatedVarLengthRelationships(pattern)
+    check(ctx, pattern, MatchMode.default())
+
+  def check(
+    ctx: SemanticContext,
+    pattern: RelationshipsPattern,
+    matchMode: MatchMode
+  ): SemanticCheck = {
+    val checkPipeline =
+      declareVariables(ctx, pattern.element) chain
+        check(ctx, pattern.element)
+
+    matchMode match {
+      case _: DifferentRelationships =>
+        checkPipeline chain
+          ensureNoRepeatedRelationships(pattern) chain
+          ensureNoRepeatedVarLengthRelationships(pattern)
+      case _ =>
+        checkPipeline
+    }
+  }
 
   def declareVariables(ctx: SemanticContext)(part: PatternPart): SemanticCheck =
     part match {
-      case PatternPartWithSelector(_, part) =>
+      case PrefixedPatternPart(_, _, part) =>
         declareVariables(ctx)(part)
 
       case x: NamedPatternPart =>
@@ -131,7 +176,7 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
 
   def check(ctx: SemanticContext)(part: PatternPart): SemanticCheck =
     part match {
-      case x: PatternPartWithSelector =>
+      case x: PrefixedPatternPart =>
         checkSelectorCount(x.selector) ifOkChain {
           val normalised = x.modifyElement {
             // sub-path assignment is fair game in selective path patterns, we can check it as if it was anonymous
@@ -139,11 +184,13 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
               if x.isSelective => normalizeParenthesizedPath(parenthesizedPath)
             case element => element
           }
+          val selector = normalised.selector.prettified
           check(ctx)(normalised.part) chain
             when(normalised.isSelective) {
               checkContext(
                 ctx,
-                s"Path selectors such as `${normalised.selector.prettified}`",
+                selector,
+                s"Path selectors such as `$selector`",
                 normalised.selector.position
               )
             } chain
@@ -161,11 +208,7 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
           x.element match {
             case RelationshipChain(_: NodePattern, r, _: NodePattern) =>
               r.properties.map {
-                props =>
-                  SemanticError(
-                    s"${x.name}(...) contains properties $props. This is currently not supported.",
-                    x.position
-                  )
+                props => SemanticError.unsupportedUseOfProperties(props, x.name, x.position)
               }
             case _ => SemanticError.singleRelationshipPatternRequired(x.name, x.position)
           }
@@ -174,10 +217,8 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
           (ctx, x.element) match {
             case (Match, _) => None
             case (_, RelationshipChain(l: NodePattern, _, r: NodePattern)) =>
-              if (l.variable.isEmpty)
-                SemanticError(s"A ${x.name}(...) requires bound nodes when not part of a MATCH clause.", x.position)
-              else if (r.variable.isEmpty)
-                SemanticError(s"A ${x.name}(...) requires bound nodes when not part of a MATCH clause.", x.position)
+              if (l.variable.isEmpty || r.variable.isEmpty)
+                SemanticError.nodeVariableNotBound(x.name, x.position)
               else
                 None
             case (_, _) =>
@@ -189,10 +230,7 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
             case RelationshipChain(_, rel, _) =>
               rel.length match {
                 case Some(Some(Range(Some(min), _))) if min.value < 0 || min.value > 1 =>
-                  error(
-                    s"${x.name}(...) does not support a minimal length different from 0 or 1",
-                    min.position
-                  )
+                  error(SemanticError.invalidLowerBound(x.name, min.position))
 
                 case Some(None) =>
                   val expressionStringifier = ExpressionStringifier(preferSingleQuotes = true)
@@ -204,47 +242,25 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
             case _ => success
           }
 
-        def checkRelVariablesUnknown: SemanticCheck =
-          (state: SemanticState) => {
-            x.element match {
-              case RelationshipChain(_, rel, _) =>
-                rel.variable.flatMap(id => state.symbol(id.name)) match {
-                  case Some(symbol) if symbol.references.size > 1 =>
-                    SemanticCheckResult.error(
-                      state,
-                      SemanticError(s"Bound relationships not allowed in ${x.name}(...)", rel.position)
-                    )
-                  case _ =>
-                    SemanticCheckResult.success(state)
-                }
-              case _ =>
-                SemanticCheckResult.success(state)
-            }
-          }
-
         def checkNoQuantifiedPatterns: SemanticCheck = {
           x.element.folder.treeCollect {
-            case qp: QuantifiedPath =>
-              SemanticError(
-                s"${x.name}(...) contains quantified pattern. This is currently not supported.",
-                qp.position
-              )
+            case qp: QuantifiedPath => SemanticError.qppInShortestPath(x.name, qp.position)
           }
         }
 
-        checkContext(ctx, s"${x.name}(...)", x.position) chain
+        val patternStringifier = PatternStringifier(stringifier)
+        checkContext(ctx, patternStringifier.apply(x), s"${x.name}(...)", x.position) chain
           checkNoQuantifiedPatterns chain
           checkContainsSingle chain
           checkKnownEnds chain
           checkLength chain
-          checkRelVariablesUnknown chain
           check(ctx, x.element)
     }
 
-  private def checkContext(ctx: SemanticContext, name: String, pos: InputPosition): SemanticCheck =
+  private def checkContext(ctx: SemanticContext, expr: String, name: String, pos: InputPosition): SemanticCheck =
     ctx match {
       case SemanticContext.Merge | SemanticContext.Create =>
-        SemanticError(s"$name cannot be used in ${ctx.description}, but only in a MATCH clause.", pos)
+        SemanticError.expressionCanOnlyBeUsedInMatch(name, expr, ctx.name, pos)
       case _ => success
     }
 
@@ -258,24 +274,20 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
         _ => SkipChildren(false)
     }) {
       val fixedZeroQuantifier =
-        FixedQuantifier(UnsignedDecimalIntegerLiteral("0")(InputPosition.NONE))(InputPosition.NONE)
+        FixedQuantifier(PathLengthQuantifier("0")(InputPosition.NONE))(InputPosition.NONE)
       val minimalPatternPart = x.element.endoRewrite {
         topDown(Rewriter.lift {
           case q: QuantifiedPath => q.copy(quantifier = fixedZeroQuantifier)(InputPosition.NONE)
         })
       }
       val stringifiedMinimalPatternPart = stringifier.patterns(minimalPatternPart)
-      error(
-        s"""A top-level path pattern in a `MATCH` clause must be written such that it always evaluates to at least one node pattern.
-           |In this case, `$stringifiedMinimalPatternPart` would result in an empty pattern.""".stripMargin,
-        x.position
-      )
+      error(SemanticError.pathPatternNeedsAtLeastOnePattern(stringifiedMinimalPatternPart, x.position))
     }
   }
 
   def check(selector: PatternPart.Selector): SemanticCheck = selector match {
-    case ShortestGroups(countOfGroups) if countOfGroups.value <= 0 =>
-      specifiedNumberOutOfRangeError(
+    case ShortestGroups(Left(countOfGroups)) if countOfGroups.value <= 0 =>
+      SemanticAnalysisToolingErrorWithGqlInfo.specifiedNumberOutOfRangeError(
         "group count",
         "INTEGER",
         1,
@@ -284,23 +296,29 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
         "The group count needs to be greater than 0.",
         countOfGroups.position
       )
-    case sel: CountedSelector if sel.count.value <= 0 =>
-      specifiedNumberOutOfRangeError(
-        "path count",
-        "INTEGER",
-        1,
-        Long.MaxValue,
-        String.valueOf(sel.count.value),
-        "The path count needs to be greater than 0.",
-        sel.count.position
-      )
+    case sel: CountedSelector => sel.count match {
+        case Left(count) if count.value <= 0 =>
+          SemanticAnalysisToolingErrorWithGqlInfo.specifiedNumberOutOfRangeError(
+            "path count",
+            "INTEGER",
+            1,
+            Long.MaxValue,
+            String.valueOf(count.value),
+            "The path count needs to be greater than 0.",
+            count.position
+          )
+        case _ => success
+      }
     case _ => success
   }
 
   private def checkSelectorCount(selector: PatternPart.Selector): SemanticCheck =
     selector match {
-      case sel: CountedSelector => SemanticExpressionCheck.simple(sel.count)
-      case _                    => success
+      case sel: CountedSelector => sel.count match {
+          case Left(count)       => SemanticExpressionCheck.simple(count)
+          case Right(countParam) => SemanticExpressionCheck.simple(countParam)
+        }
+      case _ => success
     }
 
   def check(ctx: SemanticContext, element: PatternElement): SemanticCheck =
@@ -325,17 +343,14 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
         def checkContainedPatterns: SemanticCheck =
           pattern.folder.treeFold(SemanticCheck.success) {
             case quant: QuantifiedPath => acc =>
-                SkipChildren(acc chain SemanticError(
-                  "Quantified path patterns are not allowed to be nested.",
+                SkipChildren(acc chain SemanticError.nestedQPP(
                   quant.position
                 ))
             case shortestPaths: ShortestPathsPatternPart => acc =>
-                SkipChildren(acc chain SemanticError(
-                  "shortestPath(...) is only allowed as a top-level element and not inside a quantified path pattern",
-                  shortestPaths.position
-                ))
+                SkipChildren(acc chain SemanticError.shortestPathInsideQPP(shortestPaths.position))
             case rel @ RelationshipPattern(_, _, Some(_), _, _, _) => acc =>
-                SkipChildren(acc chain SemanticError(
+                SkipChildren(acc chain SemanticError.invalidUseOfVariableLengthRelationship(
+                  "a quantified path pattern",
                   "Variable length relationships cannot be part of a quantified path pattern.",
                   rel.position
                 ))
@@ -350,14 +365,10 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
               case 1 => "one node"
               case _ => s"nodes"
             }
-            error(
-              s"""A quantified path pattern needs to have at least one relationship.
-                 |In this case, the quantified path pattern $patternStringified consists of only $nodeCountDescription.""".stripMargin,
-              q.position
-            )
+            error(SemanticError.qppNeedsAtLeastOneRelationship(patternStringified, nodeCountDescription, q.position))
           }
-
-        checkContext(ctx, "Quantified path patterns", element.position) chain
+        val patternStringifier = PatternStringifier(stringifier)
+        checkContext(ctx, patternStringifier.apply(q), "Quantified path patterns", element.position) chain
           checkContainedPatterns chain
           checkRelCount chain
           checkQuantifier(quantifier) chain
@@ -373,13 +384,10 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
       case p @ ParenthesizedPath(patternPart, where) =>
         def checkContainedPatterns: SemanticCheck =
           // patternPart at this point is known to be an AnonymousPatternPart, as we have matched NamedPatternPart above
-          // An AnonymousPatternPart can currently only be a ShortestPathsPatternPart or a PatternPartWithSelector.
+          // An AnonymousPatternPart can currently only be a ShortestPathsPatternPart or a PrefixedPatternPart.
           patternPart match {
             case shortestPaths: ShortestPathsPatternPart =>
-              SemanticError(
-                s"${shortestPaths.name}(...) is only allowed as a top-level element and not inside a parenthesized path pattern",
-                shortestPaths.position
-              )
+              SemanticError.shortestPathInsideParenthesizedPathPattern(shortestPaths.name, shortestPaths.position)
             case _ => success
           }
 
@@ -414,12 +422,7 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
           } else {
             s"In this case, $aString is a $aTypeString and $bString is a $bTypeString."
           }
-        error(
-          s"""Juxtaposition is currently only supported for quantified path patterns.
-             |$inThisCase
-             |That is, neither of these is a quantified path pattern.""".stripMargin,
-          b.position
-        )
+        error(SemanticError.invalidNodePatternPair(inThisCase, b.position))
       case _ => SemanticCheck.success // we could get here with only one element in factors
     }.reduce(_ chain _)
   }
@@ -427,8 +430,8 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
   private def checkQuantifier(quantifier: GraphPatternQuantifier): SemanticCheck =
     checkQuantifierValue(quantifier) ifOkChain {
       quantifier match {
-        case FixedQuantifier(UnsignedDecimalIntegerLiteral("0")) =>
-          specifiedNumberOutOfRangeError(
+        case FixedQuantifier(PathLengthQuantifier("0")) =>
+          SemanticAnalysisToolingErrorWithGqlInfo.specifiedNumberOutOfRangeError(
             "quantifier for a path pattern",
             "INTEGER",
             1,
@@ -438,13 +441,9 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
             quantifier.position
           )
         case IntervalQuantifier(Some(lower), Some(upper)) if upper.value < lower.value =>
-          error(
-            s"""A quantifier for a path pattern must not have a lower bound which exceeds its upper bound.
-               |In this case, the lower bound ${lower.value} is greater than the upper bound ${upper.value}.""".stripMargin,
-            quantifier.position
-          )
-        case IntervalQuantifier(_, Some(UnsignedDecimalIntegerLiteral("0"))) =>
-          specifiedNumberOutOfRangeError(
+          error(SemanticError.invalidQuantifier(lower.value, upper.value, quantifier.position))
+        case IntervalQuantifier(_, Some(PathLengthQuantifier("0"))) =>
+          SemanticAnalysisToolingErrorWithGqlInfo.specifiedNumberOutOfRangeError(
             "quantifier upperbound for a path pattern",
             "INTEGER",
             1,
@@ -469,7 +468,7 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
     def checkNotUndirectedWhenCreating: SemanticCheck = {
       ctx match {
         case SemanticContext.Create | SemanticContext.Insert if x.direction == SemanticDirection.BOTH =>
-          error(s"Only directed relationships are supported in ${name(ctx)}", x.position)
+          SemanticError.onlyDirectedRelationshipAllowed(name(ctx), x.position)
         case _ =>
           SemanticCheck.success
       }
@@ -479,7 +478,11 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
       when(!x.isSingleLength) {
         ctx match {
           case SemanticContext.Merge | SemanticContext.Create =>
-            error(s"Variable length relationships cannot be used in ${name(ctx)}", x.position)
+            SemanticAnalysisToolingErrorWithGqlInfo.invalidUseOfVariableLengthRelationshipError(
+              name(ctx),
+              s"Variable length relationships cannot be used in ${name(ctx)}",
+              x.position
+            )
           case _ =>
             None
         }
@@ -524,7 +527,8 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
       x match {
         case RelationshipPattern(_, Some(labelExpression), Some(_), _, _, _)
           if labelExpression.containsGpmSpecificRelTypeExpression =>
-          error(
+          SemanticAnalysisToolingErrorWithGqlInfo.invalidUseOfVariableLengthRelationshipError(
+            "combination with relationship type expressions",
             """Variable length relationships must not use relationship type expressions.""".stripMargin,
             labelExpression.position
           )
@@ -547,10 +551,7 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
         when(
           (ctx == SemanticContext.Merge || ctx == SemanticContext.Create) && labelExpression.containsGpmSpecificRelTypeExpression
         ) {
-          error(
-            s"Relationship type expressions in patterns are not allowed in ${ctx.description}, but only in a MATCH clause",
-            labelExpression.position
-          )
+          error(SemanticError.invalidRelTypeExpression(ctx.description, labelExpression.position))
         } chain
           unsatisfiableRelTypeExpression(labelExpression) chain
           SemanticExpressionCheck.checkLabelExpression(Some(RELATIONSHIP_TYPE), labelExpression)
@@ -559,15 +560,9 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
     def checkPredicate(ctx: SemanticContext, relationshipPattern: RelationshipPattern): SemanticCheck =
       relationshipPattern.predicate.foldSemanticCheck { predicate =>
         when(ctx != SemanticContext.Match) {
-          error(
-            s"Relationship pattern predicates are not allowed in ${ctx.description}, but only in a MATCH clause or inside a pattern comprehension",
-            predicate.position
-          )
+          error(SemanticError.invalidPatternPredicate("Relationship", ctx.description, predicate.position))
         } chain relationshipPattern.length.foldSemanticCheck { _ =>
-          error(
-            "Relationship pattern predicates are not supported for variable-length relationships.",
-            predicate.position
-          )
+          error(SemanticError.patternPredicateInVarLengthRel(predicate.position))
         } ifOkChain withScopedState {
           Where.checkExpression(predicate)
         }
@@ -654,7 +649,7 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
   private def ensureNoPathVariable(pattern: PatternPart): SemanticCheck =
     pattern match {
       case n: NamedPatternPart =>
-        error("Assigning a path in a quantified path pattern is not yet supported.", n.position)
+        error(SemanticError.pathBoundInQPP(n.position))
       case _ => SemanticCheck.success
     }
 
@@ -677,7 +672,7 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
         }
     }
 
-  private def ensureNoIllegalReferencesOut(pattern: Pattern): SemanticCheck = {
+  private def ensureNoOutOfScopePathReferences(pattern: Pattern): SemanticCheck = {
     val elements: Seq[PatternElement] = pattern.patternParts.flatMap { patternPart =>
       patternPart.element.folder.treeCollect {
         case q: QuantifiedPath    => q
@@ -685,14 +680,14 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
       }
     }
     elements.foldSemanticCheck {
-      case q: QuantifiedPath    => ensureNoReferencesOutFromQuantifiedPath(pattern, q)
-      case p: ParenthesizedPath => ensureNoReferencesOutFromParenthesizedPath(pattern, normalizeParenthesizedPath(p))
+      case q: QuantifiedPath    => ensureNoPathReferencesFromQuantifiedPath(pattern, q)
+      case p: ParenthesizedPath => ensureNoPathReferencesFromParenthesizedPath(pattern, normalizeParenthesizedPath(p))
       case x =>
         throw new IllegalArgumentException(s"Expected QuantifiedPath or ParenthesizedPath, but was ${x.getClass}.")
     }
   }
 
-  private def ensureNoReferencesOutFromQuantifiedPath(
+  private def ensureNoPathReferencesFromQuantifiedPath(
     pattern: Pattern,
     quantifiedPath: QuantifiedPath
   ): SemanticCheck = {
@@ -700,7 +695,7 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
       val scope = state.recordedScopes(quantifiedPath)
       val dependencies = scope.declarationsAndDependencies.dependencies
 
-      ensureNoReferencesOutFromPatternElement(
+      ensureNoReferencesToLocalPathVariable(
         pattern,
         quantifiedPath,
         dependencies,
@@ -709,7 +704,7 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
     }
   }
 
-  private def ensureNoReferencesOutFromParenthesizedPath(
+  private def ensureNoPathReferencesFromParenthesizedPath(
     pattern: Pattern,
     parenthesizedPath: ParenthesizedPath
   ): SemanticCheck = {
@@ -722,7 +717,7 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
       val finalScope = state.recordedScopes(parenthesizedPath)
       val dependencies = finalScope.declarationsAndDependencies.dependencies -- introducedDeclarations
 
-      ensureNoReferencesOutFromPatternElement(
+      ensureNoReferencesToLocalPathVariable(
         pattern,
         parenthesizedPath,
         dependencies,
@@ -731,7 +726,12 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
     }
   }
 
-  private def ensureNoReferencesOutFromPatternElement(
+  /**
+   * Verifies that the pattern does not reference a path variable defined in the same pattern.
+   *
+   * It does so by checking where path variables are defined.
+   */
+  private def ensureNoReferencesToLocalPathVariable(
     pattern: Pattern,
     patternElement: PatternElement,
     dependencies: Set[SymbolUse],
@@ -742,23 +742,35 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
       // this may contain declarations from previous MATCH clauses.
       val declarationsInCurrentScope = state.currentScope.declarationsAndDependencies.declarations
 
-      val pathVariablesInPattern = pattern.patternParts.flatMap { part =>
-        part.allVariables -- part.element.allVariables
-      }.toSet
-      val declarationsInPattern = pathVariablesInPattern.map(SymbolUse(_)).filter(declarationsInCurrentScope)
+      val pathVariablesUsedInPattern = pattern.patternParts.flatMap(_.pathVariable)
+      val pathVariablesDeclaredInPattern =
+        pathVariablesUsedInPattern
+          .map(SymbolUse(_))
+          .filter(declarationsInCurrentScope)
 
-      val referencesFromPatternElementToPattern = dependencies.intersect(declarationsInPattern).toSeq
+      val referencesFromPatternElementToPattern = dependencies.intersect(pathVariablesDeclaredInPattern.toSet)
       val errors = referencesFromPatternElementToPattern.map { symbolUse =>
         val stringifiedPatternElement = stringifier.patterns(patternElement)
-        SemanticError(
+        SemanticError.invalidReferenceInParenthesizedPathPatternPredicate(
+          stringifiedPatternElement,
+          Set(symbolUse.name),
+          symbolUse.asVariable.position,
           s"""From within a $patternElementErrorMessageDescription, one may only reference variables, that are already bound in a previous `MATCH` clause.
-             |In this case, `${symbolUse.name}` is defined in the same `MATCH` clause as $stringifiedPatternElement.""".stripMargin,
-          symbolUse.asVariable.position
+             |In this case, `${symbolUse.name}` is defined in the same `MATCH` clause as $stringifiedPatternElement.""".stripMargin
         )
       }
-      SemanticCheckResult(state, errors)
+      SemanticCheckResult(state, errors.toSeq)
     }
   }
+
+  private def ensureDifferentRelationships(pattern: Pattern, matchMode: MatchMode): SemanticCheck =
+    matchMode match {
+      case _: DifferentRelationships =>
+        ensureNoRepeatedRelationships(pattern) chain
+          ensureNoRepeatedVarLengthRelationships(pattern)
+      case _ =>
+        success
+    }
 
   /**
    * Traverse the sub-tree at astNode. If any repeated relationships are found in that sub-tree, warn on the first occurrence.
@@ -825,10 +837,7 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
   private def checkPredicate(ctx: SemanticContext, pattern: NodePattern): SemanticCheck =
     pattern.predicate.foldSemanticCheck { predicate =>
       when(ctx != SemanticContext.Match) {
-        error(
-          s"Node pattern predicates are not allowed in ${ctx.description}, but only in a MATCH clause or inside a pattern comprehension",
-          predicate.position
-        )
+        error(SemanticError.invalidPatternPredicate("Node", ctx.description, predicate.position))
       } ifOkChain withScopedState {
         Where.checkExpression(predicate)
       }
@@ -843,8 +852,7 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
         labelExpression.containsMatchSpecificLabelExpression && (ctx != SemanticContext.Match && ctx != SemanticContext.Expression)
       ) {
         error(
-          s"Label expressions in patterns are not allowed in ${ctx.description}, but only in a MATCH clause and in expressions",
-          labelExpression.position
+          SemanticError.invalidLabelExpressionInPattern(ctx.description, labelExpression.position)
         )
       } chain
         SemanticExpressionCheck.checkLabelExpression(Some(NODE_TYPE), labelExpression)
@@ -863,9 +871,9 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
       ) {
         { (state: SemanticState) =>
           val errors = dynamicLabelExpressions.filter(!_.all).map { dynamicLabel =>
-            SemanticError(
-              s"""Dynamic ${if (isLabels) "labels"
-                else "types"} using `$$any()` are not allowed in CREATE or MERGE.""".stripMargin,
+            SemanticError.invalidUseOfDynamicLabelOrType(
+              if (isLabels) "labels" else "types",
+              ctx.name,
               dynamicLabel.position
             )
           }
@@ -873,7 +881,11 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
         }
       } chain
         SemanticExpressionCheck.simple(dynamicLabels) chain
-        SemanticPatternCheck.checkValidDynamicLabels(dynamicLabels, labelExpression.position) chain
+        SemanticPatternCheck.checkValidDynamicLabels(
+          if (isLabels) TokenType.NodeLabel else TokenType.RelationshipType,
+          dynamicLabels,
+          labelExpression.position
+        ) chain
         SemanticExpressionCheck.expectType(
           CTString.covariant | CTList(CTString).covariant,
           dynamicLabels,
@@ -889,45 +901,52 @@ object SemanticPatternCheck extends SemanticAnalysisTooling {
     SemanticPatternCheck.checkValidPropertyKeyNames(propertyKeys)
   }
 
+  trait TokenType {
+    def tokenType: String
+  }
+
+  object TokenType {
+    case object PropertyName extends TokenType { override val tokenType: String = "property key" }
+    case object NodeLabel extends TokenType { override val tokenType: String = "label" }
+    case object RelationshipType extends TokenType { override val tokenType: String = "relationship type" }
+  }
+
   def checkValidPropertyKeyNames(propertyKeys: Seq[PropertyKeyName]): SemanticCheck = {
-    val error = propertyKeys.collectFirst {
-      case key if checkValidTokenName(key.name).nonEmpty =>
-        (checkValidTokenName(key.name).get, key.position)
-    }
-    if (error.nonEmpty) SemanticError(error.get._1, error.get._2) else None
+    propertyKeys.collectFirst(Function.unlift(key =>
+      checkValidTokenName(TokenType.PropertyName.tokenType, key.name, key.position)
+    ))
   }
 
-  def checkValidLabels(labelNames: Seq[SymbolicName], pos: InputPosition): SemanticCheck =
-    labelNames.view.flatMap {
-      case LabelName(name)   => checkValidTokenName(name)
-      case RelTypeName(name) => checkValidTokenName(name)
+  def checkValidLabels(tokenType: TokenType, labelNames: Seq[SymbolicName], pos: InputPosition): SemanticCheck = {
+    labelNames.view.collectFirst(Function.unlift {
+      case LabelName(name)   => checkValidTokenName(tokenType.tokenType, name, pos)
+      case RelTypeName(name) => checkValidTokenName(tokenType.tokenType, name, pos)
 
-      case LabelOrRelTypeName(name) => checkValidTokenName(name)
+      case LabelOrRelTypeName(name) => checkValidTokenName(tokenType.tokenType, name, pos)
       case _                        => None
-    }.headOption.map(message => SemanticError(message, pos))
-
-  def checkValidDynamicLabels(labelNames: Seq[Expression], pos: InputPosition): SemanticCheck = {
-    labelNames.view.flatMap {
-      case StringLiteral(name) => checkValidTokenName(name).toSeq
-      case ListLiteral(expressions) =>
-        expressions.collect {
-          case StringLiteral(name) => checkValidTokenName(name)
-          case _: Null             => checkValidTokenName(null)
-        }.flatten
-      case _: Null => checkValidTokenName(null)
-      case _       => Seq.empty
-    }.headOption.map(message => SemanticError(message, pos))
+    })
   }
 
-  private def checkValidTokenName(name: String): Option[String] = {
-    if (name == null || name.isEmpty || name.contains("\u0000")) {
-      Some(String.format(
-        "%s is not a valid token name. " + "Token names cannot be empty or contain any null-bytes.",
-        if (name != null) "'" + name + "'" else "Null"
-      ))
-    } else {
-      None
-    }
+  def checkValidDynamicLabels(tokenType: TokenType, labelNames: Seq[Expression], pos: InputPosition): SemanticCheck = {
+    labelNames.view.collectFirst(Function.unlift {
+      case StringLiteral(name) => checkValidTokenName(tokenType.tokenType, name, pos)
+      case ListLiteral(expressions) =>
+        expressions.collectFirst(Function.unlift {
+          case StringLiteral(name) => checkValidTokenName(tokenType.tokenType, name, pos)
+          case _: Null             => checkValidTokenName(tokenType.tokenType, null, pos)
+          case _                   => None
+        })
+      case _: Null => checkValidTokenName(tokenType.tokenType, null, pos)
+      case _       => None
+    })
+  }
+
+  private def checkValidTokenName(tokenType: String, name: String, pos: InputPosition): Option[SemanticError] = {
+    Option.when(name == null || name.isEmpty || name.contains("\u0000"))(SemanticError.invalidToken(
+      tokenType,
+      name,
+      pos
+    ))
   }
 
   private def normalizeParenthesizedPath(ppp: ParenthesizedPath): ParenthesizedPath = {
@@ -954,10 +973,7 @@ object checkNoParamMapsWhenMatching {
 
   def apply(properties: Option[Expression], ctx: SemanticContext): SemanticCheck = (properties, ctx) match {
     case (Some(e: Parameter), ctx) if ctx == Match || ctx == Merge =>
-      SemanticError(
-        s"Parameter maps cannot be used in `${ctx.name}` patterns (use a literal map instead, e.g. `{id: $$${e.name}.id}`)",
-        e.position
-      )
+      SemanticError.invalidUseOfParameterMap(ctx.name, e.name, e.position)
     case _ =>
       None
   }

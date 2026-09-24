@@ -19,10 +19,13 @@
  */
 package org.neo4j.bolt.txtracking;
 
+import static org.neo4j.kernel.api.exceptions.Status.Database.DatabaseNotFound;
+import static org.neo4j.kernel.api.exceptions.Status.General.DatabaseUnavailable;
 import static org.neo4j.kernel.api.exceptions.Status.Transaction.BookmarkTimeout;
 
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
+import org.neo4j.gqlstatus.GqlHelper;
 import org.neo4j.gqlstatus.GqlParams;
 import org.neo4j.gqlstatus.GqlRuntimeException;
 import org.neo4j.gqlstatus.GqlStatusInfoCodes;
@@ -32,19 +35,8 @@ import org.neo4j.kernel.database.AbstractDatabase;
 public class TransactionIdTrackerException extends GqlRuntimeException implements Status.HasStatus {
     private final Status status;
 
-    @Deprecated
-    TransactionIdTrackerException(Status status, String message) {
-        this(status, message, null);
-    }
-
     private TransactionIdTrackerException(ErrorGqlStatusObject gqlStatusObject, Status status, String message) {
         this(gqlStatusObject, status, message, null);
-    }
-
-    @Deprecated
-    TransactionIdTrackerException(Status status, String message, Throwable cause) {
-        super(message, cause);
-        this.status = status;
     }
 
     private TransactionIdTrackerException(
@@ -66,6 +58,21 @@ public class TransactionIdTrackerException extends GqlRuntimeException implement
                 "Database '" + db.getNamedDatabaseId().name() + "' not up to the requested version: "
                         + oldestAcceptableTxId + ". " + "Latest database version is " + lastTransactionId,
                 cause);
+    }
+
+    public static TransactionIdTrackerException databaseUnavailable(String databaseName, Throwable cause) {
+        return new TransactionIdTrackerException(
+                GqlHelper.getGql08N09(databaseName),
+                DatabaseUnavailable,
+                String.format("Database '%s' unavailable", databaseName),
+                cause);
+    }
+
+    public static TransactionIdTrackerException databaseNotFound(String databaseName) {
+        return new TransactionIdTrackerException(
+                GqlHelper.getGql22000_22N51(databaseName),
+                DatabaseNotFound,
+                "Database '" + databaseName + "' does not exist");
     }
 
     @Override

@@ -23,27 +23,24 @@ import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import org.neo4j.bolt.negotiation.ProtocolVersion;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 import org.neo4j.bolt.protocol.common.connector.connection.Feature;
-import org.neo4j.bolt.protocol.common.message.AccessMode;
-import org.neo4j.bolt.protocol.common.message.decoder.util.TransactionInitiatingMetadataParser;
-import org.neo4j.bolt.protocol.common.message.request.RequestMessage;
-import org.neo4j.bolt.protocol.common.message.request.authentication.LogoffMessage;
-import org.neo4j.bolt.protocol.common.message.request.authentication.LogonMessage;
-import org.neo4j.bolt.protocol.common.message.request.connection.GoodbyeMessage;
-import org.neo4j.bolt.protocol.common.message.request.connection.ResetMessage;
-import org.neo4j.bolt.protocol.common.message.request.connection.RouteMessage;
-import org.neo4j.bolt.protocol.common.message.request.connection.RoutingContext;
-import org.neo4j.bolt.protocol.common.message.request.streaming.DiscardMessage;
-import org.neo4j.bolt.protocol.common.message.request.streaming.PullMessage;
-import org.neo4j.bolt.protocol.common.message.request.transaction.BeginMessage;
-import org.neo4j.bolt.protocol.common.message.request.transaction.CommitMessage;
-import org.neo4j.bolt.protocol.common.message.request.transaction.RollbackMessage;
-import org.neo4j.bolt.protocol.common.message.request.transaction.RunMessage;
+import org.neo4j.boltmessages.AccessMode;
+import org.neo4j.boltmessages.request.RequestMessage;
+import org.neo4j.boltmessages.request.authentication.LogoffMessage;
+import org.neo4j.boltmessages.request.authentication.LogonMessage;
+import org.neo4j.boltmessages.request.connection.GoodbyeMessage;
+import org.neo4j.boltmessages.request.connection.ResetMessage;
+import org.neo4j.boltmessages.request.connection.RouteMessage;
+import org.neo4j.boltmessages.request.connection.RoutingContext;
+import org.neo4j.boltmessages.request.streaming.DiscardMessage;
+import org.neo4j.boltmessages.request.streaming.PullMessage;
+import org.neo4j.boltmessages.request.transaction.BeginMessage;
+import org.neo4j.boltmessages.request.transaction.CommitMessage;
+import org.neo4j.boltmessages.request.transaction.RollbackMessage;
+import org.neo4j.boltmessages.request.transaction.RunMessage;
 import org.neo4j.kernel.api.security.AuthToken;
-import org.neo4j.values.storable.Values;
 import org.neo4j.values.virtual.MapValue;
-import org.neo4j.values.virtual.MapValueBuilder;
 import org.neo4j.values.virtual.VirtualValues;
 
 public interface BoltMessages {
@@ -72,7 +69,7 @@ public interface BoltMessages {
     }
 
     default RequestMessage hello(Map<String, Object> authToken) {
-        return this.hello(Collections.emptyList(), null, authToken);
+        return this.hello(Collections.emptyList(), new RoutingContext(false, Collections.emptyMap()), authToken);
     }
 
     default RequestMessage hello(RoutingContext routingContext) {
@@ -143,7 +140,7 @@ public interface BoltMessages {
             Map<String, Object> txMetadata,
             String databaseName,
             String impersonatedUser) {
-        return new BeginMessage(bookmarks, null, mode, txMetadata, unifyDatabaseName(databaseName), impersonatedUser);
+        return new BeginMessage(bookmarks, null, mode, txMetadata, databaseName, impersonatedUser);
     }
 
     default RequestMessage commit() {
@@ -191,7 +188,7 @@ public interface BoltMessages {
     }
 
     default RequestMessage run(String statement, MapValue params) {
-        return this.run(statement, "", params);
+        return this.run(statement, null, params);
     }
 
     default RequestMessage run(String statement, String db, MapValue params) {
@@ -202,19 +199,8 @@ public interface BoltMessages {
                 null,
                 AccessMode.WRITE,
                 Collections.emptyMap(),
-                unifyDatabaseName(db),
+                db,
                 null,
                 null);
-    }
-
-    default String unifyDatabaseName(String db) {
-        // message handler assume that the db field got unified (empty string -> null)
-        try {
-            var mapBuilder = new MapValueBuilder();
-            mapBuilder.add("db", db == null ? Values.NO_VALUE : Values.stringValue(db));
-            return TransactionInitiatingMetadataParser.readDatabaseName(mapBuilder.build());
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
     }
 }

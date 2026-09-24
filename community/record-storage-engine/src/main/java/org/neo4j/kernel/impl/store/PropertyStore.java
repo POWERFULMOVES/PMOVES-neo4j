@@ -29,13 +29,13 @@ import static org.neo4j.kernel.impl.store.record.RecordLoad.NORMAL;
 
 import java.nio.ByteBuffer;
 import java.nio.file.OpenOption;
-import java.nio.file.Path;
 import java.util.Collection;
 import java.util.List;
 import org.eclipse.collections.api.set.ImmutableSet;
 import org.eclipse.collections.api.set.primitive.MutableLongSet;
 import org.eclipse.collections.impl.factory.primitive.LongSets;
 import org.neo4j.configuration.Config;
+import org.neo4j.exceptions.FeatureUnsupportedOnStoreFormatException;
 import org.neo4j.internal.helpers.collection.Iterables;
 import org.neo4j.internal.id.IdGeneratorFactory;
 import org.neo4j.internal.recordstorage.InconsistentDataReadException;
@@ -45,6 +45,7 @@ import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.PageCursor;
 import org.neo4j.io.pagecache.context.CursorContext;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.impl.store.format.RecordFormats;
 import org.neo4j.kernel.impl.store.format.standard.StandardFormatSettings;
@@ -61,7 +62,9 @@ import org.neo4j.string.UTF8;
 import org.neo4j.util.BitBuffer;
 import org.neo4j.values.storable.ArrayValue;
 import org.neo4j.values.storable.CoordinateReferenceSystem;
+import org.neo4j.values.storable.StringValue;
 import org.neo4j.values.storable.TextValue;
+import org.neo4j.values.storable.UUIDValue;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.Values;
 import org.neo4j.values.utils.TemporalValueWriterAdapter;
@@ -158,10 +161,12 @@ public class PropertyStore extends CommonAbstractStore<PropertyRecord, NoStoreHe
     private final PropertyKeyTokenStore propertyKeyTokenStore;
     private final DynamicArrayStore arrayStore;
 
+    private final RecordFormats recordFormats;
+
     public PropertyStore(
             FileSystemAbstraction fileSystem,
-            Path path,
-            Path idFile,
+            StoreFile storeFile,
+            StoreFile idStoreFile,
             Config configuration,
             IdGeneratorFactory idGeneratorFactory,
             PageCache pageCache,
@@ -176,8 +181,8 @@ public class PropertyStore extends CommonAbstractStore<PropertyRecord, NoStoreHe
             ImmutableSet<OpenOption> openOptions) {
         super(
                 fileSystem,
-                path,
-                idFile,
+                storeFile,
+                idStoreFile,
                 configuration,
                 RecordIdType.PROPERTY,
                 idGeneratorFactory,
@@ -193,6 +198,7 @@ public class PropertyStore extends CommonAbstractStore<PropertyRecord, NoStoreHe
         this.stringStore = stringPropertyStore;
         this.propertyKeyTokenStore = propertyKeyTokenStore;
         this.arrayStore = arrayPropertyStore;
+        this.recordFormats = recordFormats;
     }
 
     public DynamicStringStore getStringStore() {
@@ -341,7 +347,8 @@ public class PropertyStore extends CommonAbstractStore<PropertyRecord, NoStoreHe
             DynamicRecordAllocator stringAllocator,
             DynamicRecordAllocator arrayAllocator,
             CursorContext cursorContext,
-            MemoryTracker memoryTracker) {
+            MemoryTracker memoryTracker,
+            String storeFormatForFeatureUnsupportedException) {
         if (value instanceof ArrayValue) {
             Object asObject = value.asObject();
 
@@ -363,7 +370,13 @@ public class PropertyStore extends CommonAbstractStore<PropertyRecord, NoStoreHe
             }
             block.setValueRecords(arrayRecords);
         } else {
-            value.writeTo(new PropertyBlockValueWriter(block, keyId, stringAllocator, cursorContext, memoryTracker));
+            value.writeTo(new PropertyBlockValueWriter(
+                    block,
+                    keyId,
+                    stringAllocator,
+                    cursorContext,
+                    memoryTracker,
+                    storeFormatForFeatureUnsupportedException));
         }
     }
 
@@ -440,18 +453,21 @@ public class PropertyStore extends CommonAbstractStore<PropertyRecord, NoStoreHe
         private final DynamicRecordAllocator stringAllocator;
         private final CursorContext cursorContext;
         private final MemoryTracker memoryTracker;
+        private final String storeFormatForFeatureUnsupportedException;
 
         PropertyBlockValueWriter(
                 PropertyBlock block,
                 int keyId,
                 DynamicRecordAllocator stringAllocator,
                 CursorContext cursorContext,
-                MemoryTracker memoryTracker) {
+                MemoryTracker memoryTracker,
+                String storeFormatForFeatureUnsupportedException) {
             this.block = block;
             this.keyId = keyId;
             this.stringAllocator = stringAllocator;
             this.cursorContext = cursorContext;
             this.memoryTracker = memoryTracker;
+            this.storeFormatForFeatureUnsupportedException = storeFormatForFeatureUnsupportedException;
         }
 
         @Override
@@ -588,6 +604,48 @@ public class PropertyStore extends CommonAbstractStore<PropertyRecord, NoStoreHe
         public void writeDateTime(long epochSecondUTC, int nano, String zoneId) throws IllegalArgumentException {
             block.setValueBlocks(TemporalType.encodeDateTime(keyId, epochSecondUTC, nano, zoneId));
         }
+
+        @Override
+        public void writeInt8Vector(byte[] values) throws RuntimeException {
+            throw FeatureUnsupportedOnStoreFormatException.vectorsUnsupportedInStoreFormat(
+                    storeFormatForFeatureUnsupportedException);
+        }
+
+        @Override
+        public void writeInt16Vector(short[] values) throws RuntimeException {
+            throw FeatureUnsupportedOnStoreFormatException.vectorsUnsupportedInStoreFormat(
+                    storeFormatForFeatureUnsupportedException);
+        }
+
+        @Override
+        public void writeInt32Vector(int[] values) throws RuntimeException {
+            throw FeatureUnsupportedOnStoreFormatException.vectorsUnsupportedInStoreFormat(
+                    storeFormatForFeatureUnsupportedException);
+        }
+
+        @Override
+        public void writeInt64Vector(long[] values) throws RuntimeException {
+            throw FeatureUnsupportedOnStoreFormatException.vectorsUnsupportedInStoreFormat(
+                    storeFormatForFeatureUnsupportedException);
+        }
+
+        @Override
+        public void writeFloat32Vector(float[] values) throws RuntimeException {
+            throw FeatureUnsupportedOnStoreFormatException.vectorsUnsupportedInStoreFormat(
+                    storeFormatForFeatureUnsupportedException);
+        }
+
+        @Override
+        public void writeFloat64Vector(double[] values) throws RuntimeException {
+            throw FeatureUnsupportedOnStoreFormatException.vectorsUnsupportedInStoreFormat(
+                    storeFormatForFeatureUnsupportedException);
+        }
+
+        @Override
+        public void writeUUID(long msb, long lsb) throws IllegalArgumentException {
+            throw FeatureUnsupportedOnStoreFormatException.unsupportedInStoreFormat(
+                    storeFormatForFeatureUnsupportedException, UUIDValue.TYPE_NAME);
+        }
     }
 
     public static void setSingleBlockValue(PropertyBlock block, int keyId, PropertyType type, long longValue) {
@@ -656,12 +714,13 @@ public class PropertyStore extends CommonAbstractStore<PropertyRecord, NoStoreHe
         byte typeId = buffer.get();
         if (typeId == PropertyType.STRING.intValue()) {
             int arrayLength = buffer.getInt();
-            String[] result = new String[arrayLength];
+            StringValue[] result = new StringValue[arrayLength];
 
             for (int i = 0; i < arrayLength; i++) {
                 int byteLength = buffer.getInt();
-                result[i] = UTF8.decode(buffer.array(), buffer.position(), byteLength);
-                buffer.position(buffer.position() + byteLength);
+                byte[] bytes = new byte[byteLength];
+                buffer.get(bytes);
+                result[i] = Values.utf8Value(bytes);
             }
             return Values.stringArray(result);
         } else if (typeId == PropertyType.GEOMETRY.intValue()) {
@@ -692,5 +751,9 @@ public class PropertyStore extends CommonAbstractStore<PropertyRecord, NoStoreHe
                 return type.createArray(length, bits, requiredBits);
             }
         }
+    }
+
+    public RecordFormats getRecordFormats() {
+        return recordFormats;
     }
 }

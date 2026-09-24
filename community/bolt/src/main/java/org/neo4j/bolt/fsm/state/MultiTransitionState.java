@@ -24,7 +24,7 @@ import org.neo4j.bolt.fsm.error.StateMachineException;
 import org.neo4j.bolt.fsm.error.state.IllegalTransitionException;
 import org.neo4j.bolt.fsm.state.transition.StateTransition;
 import org.neo4j.bolt.protocol.common.fsm.response.ResponseHandler;
-import org.neo4j.bolt.protocol.common.message.request.RequestMessage;
+import org.neo4j.boltmessages.request.RequestMessage;
 
 final class MultiTransitionState extends AbstractState {
     private final HandlerRegistry<RequestMessage, StateTransition<?>> transitions;
@@ -47,7 +47,7 @@ final class MultiTransitionState extends AbstractState {
             throws StateMachineException {
         var transition = this.transitions.find(message.getClass());
         if (transition == null) {
-            throw new IllegalTransitionException(this, message);
+            throw IllegalTransitionException.illegalTransition(this, message);
         }
 
         return ((StateTransition) transition).process(ctx, message, handler);

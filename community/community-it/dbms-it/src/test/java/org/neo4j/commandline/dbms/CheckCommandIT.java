@@ -22,9 +22,10 @@ package org.neo4j.commandline.dbms;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.neo4j.cli.AbstractAdminCommand.COMMAND_CONFIG_FILE_NAME_PATTERN;
+import static org.neo4j.cli.CommandTestUtils.containCount;
+import static org.neo4j.cli.CommandTestUtils.latestFileInDirectory;
 import static org.neo4j.cli.CommandTestUtils.withSuppressedOutput;
 import static org.neo4j.configuration.GraphDatabaseSettings.pagecache_memory;
 
@@ -32,9 +33,12 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintStream;
+import java.net.URISyntaxException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -46,11 +50,13 @@ import org.junit.jupiter.api.Test;
 import org.neo4j.cli.CommandFailedException;
 import org.neo4j.cli.ExecutionContext;
 import org.neo4j.configuration.Config;
+import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.consistency.CheckCommand;
 import org.neo4j.consistency.CheckNativeDatabase;
 import org.neo4j.consistency.ConsistencyCheckService;
 import org.neo4j.consistency.checking.ConsistencyFlags;
 import org.neo4j.consistency.report.ConsistencySummaryStatistics;
+import org.neo4j.dbms.api.DatabaseManagementService;
 import org.neo4j.dbms.archive.CheckDatabase;
 import org.neo4j.dbms.archive.CheckDump;
 import org.neo4j.io.fs.FileSystemAbstraction;
@@ -87,8 +93,7 @@ class CheckCommandIT {
     void setUp() {
         homeDir = testDirectory.homePath();
         confPath = testDirectory.directory("conf");
-        dbName = "mydb";
-        prepareDatabase(neo4jLayout.databaseLayout(dbName));
+        dbName = prepareDatabase(neo4jLayout.databaseLayout("mydb"));
     }
 
     @Test
@@ -99,9 +104,7 @@ class CheckCommandIT {
         try (var out = new PrintStream(baos)) {
             cmd.usage(new PrintStream(out), CommandLine.Help.Ansi.OFF);
         }
-        assertThat(baos.toString().trim())
-                .isEqualToIgnoringNewLines(
-                        """
+        assertThat(baos.toString().trim()).isEqualToIgnoringNewLines("""
                         Check the consistency of a database.
 
                         USAGE
@@ -150,10 +153,11 @@ class CheckCommandIT {
                                                        has an extension of '.report'.
                                                        Default: .
                               --max-off-heap-memory=<size>
-                                                     Maximum memory that neo4j-admin can use for page cache and various caching data structures
-                                                       to improve performance. Value can be plain numbers, like 10000000 or e.g. 20G for 20
-                                                       gigabytes, or even e.g. 70%, which will amount to 70% of currently free memory on the
-                                                       machine.
+                                                     Maximum off-heap memory that the command can use for page cache and various caching data
+                                                       structures to improve performance. Use this option to tune the command memory usage; the
+                                                       command does not use the server.memory.pagecache.size configuration setting for this
+                                                       purpose. Values can be plain numbers, such as 10000000, or, for example, 20G for 20
+                                                       gigabytes, or 70%, which will amount to 70% of currently free memory on the machine.
                                                        Default: 90%
                               --threads=<number of threads>
                                                      Number of threads used to check the consistency. Default: The number of CPUs on the
@@ -164,9 +168,10 @@ class CheckCommandIT {
                               --from-path-txn=<path> Path to the transactions directory, containing the transaction directory for the database
                                                        to source from.
                                                        Default: <config: server.directories.transaction.logs.root>
-                              --from-path=<path>     Path to the directory containing dump/backup artifacts that need to be checked for
-                                                       consistency. If the directory contains multiple backups, it will select the most recent
-                                                       backup chain, based on the transaction IDs found, to perform the consistency check.
+                              --from-path=<path>     Path to a backup file or a directory containing dump/backup artifacts.
+                                                       If the path is to a single file, that artifact is selected and checked for consistency.
+                                                       If a directory is provided, the tool selects the most recent backup chain
+                                                       (based on transaction IDs) within it and checks that chain for consistency.
                               --temp-path=<path>     Path to directory to be used as a staging area to extract dump/backup artifacts, if needed.
                                                        Default:  <from-path>""");
     }
@@ -176,7 +181,7 @@ class CheckCommandIT {
         final var checkDatabases = CheckDatabase.all().stream()
                 .map(CheckDatabase::getClass)
                 .collect(Collectors.<Class<? extends CheckDatabase>>toUnmodifiableSet());
-        assertThat(checkDatabases).containsExactlyInAnyOrder(CheckNativeDatabase.class, CheckDump.class);
+        assertThat(checkDatabases).contains(CheckNativeDatabase.class, CheckDump.class);
     }
 
     @Test
@@ -415,6 +420,82 @@ class CheckCommandIT {
     }
 
     @Test
+    void checkSplitDump() throws IOException {
+        Files.write(
+                confPath.resolve(Config.DEFAULT_CONFIG_FILE_NAME),
+                List.of(GraphDatabaseInternalSettings.allow_small_split_archive_size.name() + "=true"));
+        final var dump = testDirectory.directory("split-dump");
+        createDump(dump, dbName, "--split-archive-part-size=5kb");
+
+        withSuppressedOutput(homeDir, confPath, filesytem, ctx -> {
+            final var checkCommand = new CheckCommand(ctx);
+            CommandLine.populateCommand(checkCommand, "--from-path=" + dump, dbName);
+            assertThatCode(checkCommand::execute).doesNotThrowAnyException();
+            assertThat(ctx.outAsString()).contains("Loading dump from: " + dump.resolve(dbName + ".dump"));
+        });
+    }
+
+    @Test
+    void checkDumpArtifact() throws IOException {
+        final var dump = testDirectory.directory("dump");
+
+        // Create 2 dumps - default, and another
+        createDump(dump);
+        Path firstDumpArtifact = latestFileInDirectory(filesytem, dump);
+
+        String altDBName = prepareDatabase(neo4jLayout.databaseLayout("altMyDB"));
+        createDump(dump, altDBName);
+        Path altDumpArtifact = latestFileInDirectory(filesytem, dump);
+
+        // Confirm that we successfully check the default DBdump, using the name of the dump file
+        withSuppressedOutput(homeDir, confPath, filesytem, ctx -> {
+            final var checkCommand = new CheckCommand(ctx);
+            CommandLine.populateCommand(checkCommand, "--from-path=" + dump.resolve(Path.of(dbName + ".dump")), dbName);
+            assertThatCode(checkCommand::execute).doesNotThrowAnyException();
+            assertThat(containCount(ctx.outAsString().lines(), expectedUndumpMessage(firstDumpArtifact)))
+                    .isEqualTo(1);
+            assertThat(containCount(ctx.outAsString().lines(), expectedUndumpMessage(altDumpArtifact)))
+                    .isEqualTo(0);
+        });
+
+        // Confirm that we successfully check the alternative DB, using the name of the database
+        withSuppressedOutput(homeDir, confPath, filesytem, ctx -> {
+            final var checkCommand = new CheckCommand(ctx);
+            CommandLine.populateCommand(checkCommand, "--from-path=" + dump, altDBName);
+            assertThatCode(checkCommand::execute).doesNotThrowAnyException();
+            assertThat(containCount(ctx.outAsString().lines(), expectedUndumpMessage(firstDumpArtifact)))
+                    .isEqualTo(0);
+            assertThat(containCount(ctx.outAsString().lines(), expectedUndumpMessage(altDumpArtifact)))
+                    .isEqualTo(1);
+        });
+
+        // Confirm that we successfully check the alternative DB, using the name of the dump file
+        withSuppressedOutput(homeDir, confPath, filesytem, ctx -> {
+            final var checkCommand = new CheckCommand(ctx);
+            CommandLine.populateCommand(
+                    checkCommand, "--from-path=" + dump.resolve(Path.of(altDBName + ".dump")), "ignored");
+            assertThatCode(checkCommand::execute).doesNotThrowAnyException();
+            assertThat(containCount(ctx.outAsString().lines(), expectedUndumpMessage(firstDumpArtifact)))
+                    .isEqualTo(0);
+            assertThat(containCount(ctx.outAsString().lines(), expectedUndumpMessage(altDumpArtifact)))
+                    .isEqualTo(1);
+        });
+
+        // Request check of file that does not have '.dump' extension - should refuse to check that
+        var nonexistentDBName = "nonexistentDB";
+        withSuppressedOutput(homeDir, confPath, filesytem, ctx -> {
+            final var checkCommand = new CheckCommand(ctx);
+            CommandLine.populateCommand(
+                    checkCommand, "--from-path=" + dump.resolve(Path.of(nonexistentDBName + ".dum")), "ignored");
+            Throwable thrown = catchThrowable(checkCommand::execute);
+            assertThat(thrown)
+                    .isInstanceOf(Exception.class)
+                    .hasMessageContaining("Failed to prepare for consistency check")
+                    .hasMessageContainingAll("Could not find a valid ", "database, or dump");
+        });
+    }
+
+    @Test
     void checkStagingAreaGetsClearedAwayForDump() {
         final var dump = testDirectory.directory("dump");
         createDump(dump);
@@ -432,7 +513,7 @@ class CheckCommandIT {
         });
 
         // After the command has finished the staging area should have been cleared away
-        assertFalse(testDirectory.getFileSystem().fileExists(tempDir.get()));
+        assertThat(testDirectory.getFileSystem().fileExists(tempDir.get())).isFalse();
     }
 
     @Test
@@ -453,7 +534,7 @@ class CheckCommandIT {
         });
 
         // After the command has finished the staging area should have been cleared away
-        assertFalse(testDirectory.getFileSystem().fileExists(tempDir.get()));
+        assertThat(testDirectory.getFileSystem().fileExists(tempDir.get())).isFalse();
     }
 
     @Test
@@ -475,8 +556,8 @@ class CheckCommandIT {
 
         // After the command has finished the staging area should have been cleared away and the temp-path should still
         // exist
-        assertFalse(testDirectory.getFileSystem().fileExists(tempDir.get()));
-        assertTrue(testDirectory.getFileSystem().fileExists(reqTempDir));
+        assertThat(testDirectory.getFileSystem().fileExists(tempDir.get())).isFalse();
+        assertThat(testDirectory.getFileSystem().fileExists(reqTempDir)).isTrue();
     }
 
     private void removeAndReprepareDatabase(DatabaseLayout databaseLayout) throws IOException {
@@ -484,8 +565,10 @@ class CheckCommandIT {
         prepareDatabase(databaseLayout);
     }
 
-    private static void prepareDatabase(DatabaseLayout databaseLayout) {
-        new TestDatabaseManagementServiceBuilder(databaseLayout).build().shutdown();
+    private static String prepareDatabase(DatabaseLayout databaseLayout) {
+        try (DatabaseManagementService dbms = new TestDatabaseManagementServiceBuilder(databaseLayout).build()) {
+            return dbms.database(databaseLayout.getDatabaseName()).databaseName();
+        }
     }
 
     private void verifyCheckableLayout(TrackingConsistencyCheckService service, DatabaseLayout plainLayout) {
@@ -510,15 +593,23 @@ class CheckCommandIT {
         return new TrackingConsistencyCheckService(returnValue, (service) -> {
             DatabaseLayout layout = (DatabaseLayout) service.arguments.get(DatabaseLayout.class);
             tempDir.set(layout.getNeo4jLayout().homeDirectory().toAbsolutePath());
-            assertTrue(testDirectory.getFileSystem().fileExists(tempDir.get()));
+            assertThat(testDirectory.getFileSystem().fileExists(tempDir.get())).isTrue();
             assertThat(tempDir.get().getParent().toAbsolutePath()).isEqualTo(expectedTempRoot.toAbsolutePath());
         });
     }
 
     private void createDump(Path dump) {
+        createDump(dump, dbName);
+    }
+
+    private void createDump(Path dump, final String dumpDBName, String... additionalArgs) {
         withSuppressedOutput(homeDir, confPath, filesytem, ctx -> {
             final var dumpCommand = new DumpCommand(ctx);
-            CommandLine.populateCommand(dumpCommand, "--to-path=" + dump, dbName);
+            String[] args = new String[2 + additionalArgs.length];
+            args[0] = dumpDBName;
+            args[1] = "--to-path=" + dump;
+            System.arraycopy(additionalArgs, 0, args, 2, additionalArgs.length);
+            CommandLine.populateCommand(dumpCommand, args);
             assertThatCode(dumpCommand::execute).doesNotThrowAnyException();
         });
     }
@@ -668,5 +759,11 @@ class CheckCommandIT {
         void verifyArgument(Class<?> type, Object expectedValue) {
             assertArgument(type).isEqualTo(expectedValue);
         }
+    }
+
+    private static final String DUMP_PREFIX = "Loading dump from:";
+
+    private String expectedUndumpMessage(final Path path) throws URISyntaxException {
+        return DUMP_PREFIX + ' ' + path.toString();
     }
 }

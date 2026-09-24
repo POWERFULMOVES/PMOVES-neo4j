@@ -31,6 +31,8 @@ import org.neo4j.internal.helpers.collection.Iterables
 
 import scala.jdk.CollectionConverters.IterableHasAsScala
 
+object SetRelationshipPropertiesFromMapTestBase
+
 abstract class SetRelationshipPropertiesFromMapTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
@@ -468,7 +470,7 @@ abstract class SetRelationshipPropertiesFromMapTestBase[CONTEXT <: RuntimeContex
       .produceResults("p")
       .projection("r.prop as p")
       .setRelationshipPropertiesFromMap("r", "{prop: sin(null)}", removeOtherProps = true)
-      .directedRelationshipByIdSeek("r", "x", "y", Set.empty, r.getId)
+      .relationshipByIdSeek("(x)-[r]->(y)", Set.empty, r.getId)
       .build(readOnly = false)
 
     // then
@@ -491,7 +493,7 @@ abstract class SetRelationshipPropertiesFromMapTestBase[CONTEXT <: RuntimeContex
       .produceResults("p")
       .projection("r.prop as p")
       .setRelationshipPropertiesFromMap("r", "{prop: 100}", removeOtherProps = true)
-      .directedRelationshipByIdSeek("r", "x", "y", Set.empty, r.getId)
+      .relationshipByIdSeek("(x)-[r]->(y)", Set.empty, r.getId)
       .build(readOnly = false)
 
     // then
@@ -547,8 +549,8 @@ abstract class SetRelationshipPropertiesFromMapTestBase[CONTEXT <: RuntimeContex
       .projection("r2.prop1 as p1", "r2.prop2 as p2", "r2.prop3 as p3")
       .setRelationshipPropertiesFromMap("r2", "r1", removeOtherProps = true)
       .apply()
-      .|.directedRelationshipByIdSeek("r2", "x2", "y2", Set.empty, relationships(1).getId)
-      .directedRelationshipByIdSeek("r1", "x1", "y1", Set.empty, relationships.head.getId)
+      .|.relationshipByIdSeek("(x2)-[r2]->(y2)", Set.empty, relationships(1).getId)
+      .relationshipByIdSeek("(x1)-[r1]->(y1)", Set.empty, relationships.head.getId)
       .build(readOnly = false)
 
     // then
@@ -579,8 +581,8 @@ abstract class SetRelationshipPropertiesFromMapTestBase[CONTEXT <: RuntimeContex
       .projection("r2.prop1 as p1", "r2.prop2 as p2", "r2.prop3 as p3")
       .setRelationshipPropertiesFromMap("r2", "r1", removeOtherProps = false)
       .apply()
-      .|.directedRelationshipByIdSeek("r2", "x2", "y2", Set.empty, relationships(1).getId)
-      .directedRelationshipByIdSeek("r1", "x1", "y1", Set.empty, relationships.head.getId)
+      .|.relationshipByIdSeek("(x2)-[r2]->(y2)", Set.empty, relationships(1).getId)
+      .relationshipByIdSeek("(x1)-[r1]->(y1)", Set.empty, relationships.head.getId)
       .build(readOnly = false)
 
     // then
@@ -607,7 +609,7 @@ abstract class SetRelationshipPropertiesFromMapTestBase[CONTEXT <: RuntimeContex
       .produceResults("p1", "p2", "p3")
       .projection("r.prop1 as p1", "r.prop2 as p2", "r.prop3 as p3")
       .setRelationshipPropertiesFromMap("r", "x1", removeOtherProps = true)
-      .directedRelationshipByIdSeek("r", "x1", "y1", Set.empty, relationships.head.getId)
+      .relationshipByIdSeek("(x1)-[r]->(y1)", Set.empty, relationships.head.getId)
       .build(readOnly = false)
 
     // then

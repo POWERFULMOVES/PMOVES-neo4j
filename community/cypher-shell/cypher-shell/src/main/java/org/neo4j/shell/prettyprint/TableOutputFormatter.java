@@ -22,7 +22,6 @@ package org.neo4j.shell.prettyprint;
 import static java.util.Arrays.asList;
 import static java.util.Collections.emptyIterator;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
-import static org.neo4j.shell.prettyprint.OutputFormatter.repeat;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -36,17 +35,20 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
+import org.apache.commons.lang3.StringUtils;
 import org.neo4j.driver.Record;
 import org.neo4j.driver.Value;
 import org.neo4j.driver.internal.InternalRecord;
 import org.neo4j.driver.internal.value.NumberValueAdapter;
 import org.neo4j.driver.summary.GqlNotification;
+import org.neo4j.driver.summary.GqlStatusObject;
 import org.neo4j.driver.summary.Plan;
 import org.neo4j.driver.summary.ResultSummary;
 import org.neo4j.shell.state.BoltResult;
 
 public class TableOutputFormatter implements OutputFormatter {
 
+    public static final String INCOMING_VARIABLES = "incoming variables";
     public static final String STRING_REPRESENTATION = "string-representation";
     private static final String INFO_SEVERITY_LEVEL = "info";
     private final boolean wrap;
@@ -64,8 +66,14 @@ public class TableOutputFormatter implements OutputFormatter {
             return 0;
         }
 
+        boolean[] rawColumns = new boolean[columns.length];
+        List<String> rawKeys = result.getRawKeys();
+        for (int i = 0; i < columns.length; i++) {
+            rawColumns[i] = rawKeys.contains(columns[i]);
+        }
+
         Iterator<Record> records = result.iterate();
-        return formatResultAndCountRows(columns, records, output);
+        return formatResultAndCountRows(columns, rawColumns, records, output);
     }
 
     /**
@@ -73,7 +81,12 @@ public class TableOutputFormatter implements OutputFormatter {
      */
     public void formatWithHeading(BoltResult result, LinePrinter output, String heading) {
         final String[] columns = result.getKeys().toArray(new String[0]);
-        printTableAndCountRows(columns, emptyIterator(), output, result.getRecords(), true, heading);
+        boolean[] rawColumns = new boolean[columns.length];
+        List<String> rawKeys = result.getRawKeys();
+        for (int i = 0; i < columns.length; i++) {
+            rawColumns[i] = rawKeys.contains(columns[i]);
+        }
+        printTableAndCountRows(columns, rawColumns, emptyIterator(), output, result.getRecords(), true, heading);
     }
 
     private static void take(Iterator<Record> records, ArrayList<Record> topRecords, int count) {
@@ -82,26 +95,28 @@ public class TableOutputFormatter implements OutputFormatter {
         }
     }
 
-    private int formatResultAndCountRows(String[] columns, Iterator<Record> records, LinePrinter output) {
+    private int formatResultAndCountRows(
+            String[] columns, boolean[] rawColumns, Iterator<Record> records, LinePrinter output) {
 
         ArrayList<Record> topRecords = new ArrayList<>(numSampleRows);
         try {
             take(records, topRecords, numSampleRows);
         } catch (RuntimeException e) {
-            printTableAndCountRows(columns, records, output, topRecords, false, null);
+            printTableAndCountRows(columns, rawColumns, records, output, topRecords, false, null);
             throw e;
         }
-        return printTableAndCountRows(columns, records, output, topRecords, true, null);
+        return printTableAndCountRows(columns, rawColumns, records, output, topRecords, true, null);
     }
 
     private int printTableAndCountRows(
             String[] columns,
+            boolean[] rawColumns,
             Iterator<Record> records,
             LinePrinter output,
             List<Record> topRecords,
             boolean printFooter,
             String heading) {
-        int[] columnSizes = calculateColumnSizes(columns, topRecords, records.hasNext(), heading);
+        int[] columnSizes = calculateColumnSizes(columns, rawColumns, topRecords, records.hasNext(), heading);
 
         int totalWidth = 1;
         for (int columnSize : columnSizes) {
@@ -110,7 +125,7 @@ public class TableOutputFormatter implements OutputFormatter {
 
         StringBuilder builder = new StringBuilder(totalWidth);
         int lineWidth = totalWidth - 2;
-        String dashes = "+" + String.valueOf(repeat('-', lineWidth)) + "+";
+        String dashes = "+" + "-".repeat(lineWidth) + "+";
 
         if (heading != null && !heading.isBlank()) {
             output.printOut(dashes);
@@ -126,12 +141,12 @@ public class TableOutputFormatter implements OutputFormatter {
         int numberOfRows = 0;
 
         for (Record record : topRecords) {
-            output.printOut(formatRecord(builder, columnSizes, record));
+            output.printOut(formatRecord(builder, columnSizes, rawColumns, record));
             numberOfRows++;
         }
 
         while (records.hasNext()) {
-            output.printOut(formatRecord(builder, columnSizes, records.next()));
+            output.printOut(formatRecord(builder, columnSizes, rawColumns, records.next()));
             numberOfRows++;
         }
 
@@ -149,23 +164,26 @@ public class TableOutputFormatter implements OutputFormatter {
      * @return the column sizes
      */
     private int[] calculateColumnSizes(
-            String[] columns, List<Record> data, boolean moreDataAfterSamples, String heading) {
+            String[] columns, boolean[] rawColumns, List<Record> data, boolean moreDataAfterSamples, String heading) {
         int[] columnSizes = new int[columns.length];
         for (int i = 0; i < columns.length; i++) {
-            columnSizes[i] = columns[i].length();
+            columnSizes[i] = displayWidth(columns[i]);
         }
         for (Record record : data) {
             for (int i = 0; i < columns.length; i++) {
-                int len = columnLengthForValue(record.get(i), moreDataAfterSamples);
-                if (columnSizes[i] < len) {
+                final var currentColumnSize = columnSizes[i];
+                final int len =
+                        columnLengthForValue(record.get(i), rawColumns[i], moreDataAfterSamples, currentColumnSize);
+                if (currentColumnSize < len) {
                     columnSizes[i] = len;
                 }
             }
         }
         if (heading != null) {
             final var totalSize = Arrays.stream(columnSizes).sum();
-            if (heading.length() > totalSize) {
-                columnSizes[0] = columnSizes[0] + (heading.length() - totalSize);
+            final var headingWidth = displayWidth(heading);
+            if (headingWidth > totalSize) {
+                columnSizes[0] = columnSizes[0] + (headingWidth - totalSize);
             }
         }
         return columnSizes;
@@ -175,28 +193,56 @@ public class TableOutputFormatter implements OutputFormatter {
      * The length of a column, where Numbers are always getting enough space to fit the highest number possible.
      *
      * @param value                the value to calculate the length for
+     * @param raw                  whether to format the value rawly (without quotations)
      * @param moreDataAfterSamples if there is more data that should be written into the table after `data`
+     * @param currentColSize       current size of this column
      * @return the column size for this value.
      */
-    private int columnLengthForValue(Value value, boolean moreDataAfterSamples) {
+    private int columnLengthForValue(Value value, boolean raw, boolean moreDataAfterSamples, int currentColSize) {
         if (value instanceof NumberValueAdapter && moreDataAfterSamples) {
             return 19; // The number of digits of Long.Max
         } else {
-            return formatValue(value).length();
+            final var formatted = raw ? formatValueRaw(value) : formatValue(value);
+            final boolean hasLineBreak = StringUtils.containsAny(formatted, '\n', '\r');
+            if (!hasLineBreak) {
+                return displayWidth(formatted);
+            } else if (wrap) {
+                // With wrapping we need the max line length.
+                // Not optimised, but not expected to come here that often.
+                return formatted
+                        .lines()
+                        .mapToInt(TableOutputFormatter::displayWidth)
+                        .max()
+                        .orElse(0);
+            } else {
+                // With no wrapping we only display the first line.
+                final int lineBreakIndex = StringUtils.indexOfAny(formatted, '\n', '\r');
+                return displayWidth(formatted, 0, lineBreakIndex);
+            }
         }
     }
 
-    private String formatRecord(StringBuilder sb, int[] columnSizes, Record record) {
+    private String formatRecord(StringBuilder sb, int[] columnSizes, boolean[] rawColumns, Record record) {
         sb.setLength(0);
-        return formatRow(sb, columnSizes, formatValues(record), new boolean[columnSizes.length]);
+        return formatRow(sb, columnSizes, formatValues(record, rawColumns), new boolean[columnSizes.length]);
     }
 
-    private String[] formatValues(Record record) {
+    private String[] formatValues(Record record, boolean[] rawColumns) {
         String[] row = new String[record.size()];
         for (int i = 0; i < row.length; i++) {
-            row[i] = formatValue(record.get(i));
+            row[i] = rawColumns[i] ? formatValueRaw(record.get(i)) : formatValue(record.get(i));
         }
         return row;
+    }
+
+    private String formatValueRaw(Value value) {
+        if (value == null || value.isNull()) {
+            return "";
+        }
+        if (value.type().name().equals("STRING")) {
+            return value.asString();
+        }
+        return formatValue(value);
     }
 
     /**
@@ -217,11 +263,12 @@ public class TableOutputFormatter implements OutputFormatter {
         boolean remainder = false;
         for (int i = 0; i < row.length; i++) {
             sb.append(" ");
-            int length = columnSizes[i];
-            String txt = row[i];
+            final int length = columnSizes[i];
+            final var txt = row[i];
             if (txt != null) {
+                final var txtLength = txt.length();
                 int offset = 0; // char offset in the string
-                int codePointCount = 0; // UTF code point counter (one code point can be multiple chars)
+                int displayWidthCount = 0; // Terminal column width counter
 
                 /*
                  * Copy content of cell to output, UTF codepoint by codepoint,
@@ -232,7 +279,7 @@ public class TableOutputFormatter implements OutputFormatter {
                  * which can lead to invalid characters in output when
                  * wrapping.
                  */
-                while (codePointCount < length && offset < txt.length()) {
+                while (displayWidthCount < length && offset < txtLength) {
                     final int codepoint = txt.codePointAt(offset);
 
                     // Stop at line breaks. Note that we skip the line break later in nextLineStart.
@@ -240,25 +287,32 @@ public class TableOutputFormatter implements OutputFormatter {
                         break;
                     }
 
+                    final int width = codePointDisplayWidth(codepoint);
+                    if (width > 0 && displayWidthCount + width > length) {
+                        break;
+                    }
+
                     sb.appendCodePoint(codepoint);
                     offset = txt.offsetByCodePoints(offset, 1); // Move offset to next code point
-                    ++codePointCount;
+                    displayWidthCount += width;
                 }
 
-                if (offset < txt.length())
+                if (offset < txtLength)
                 // Content did not fit column
                 {
                     if (wrap) {
                         row[i] = txt.substring(nextLineStart(txt, offset));
                         continuation[i] = true;
                         remainder = true;
-                    } else if (codePointCount < length) {
+                    } else if (displayWidthCount < length) {
                         sb.append("…");
-                        ++codePointCount;
+                        displayWidthCount += codePointDisplayWidth('…');
                     } else {
                         int lastCodePoint = sb.codePointBefore(sb.length());
                         int lastLength = Character.charCount(lastCodePoint);
+                        int lastWidth = codePointDisplayWidth(lastCodePoint);
                         sb.replace(sb.length() - lastLength, sb.length(), "…");
+                        displayWidthCount = displayWidthCount - lastWidth + codePointDisplayWidth('…');
                     }
                 } else
                 // Content did fit column
@@ -267,11 +321,11 @@ public class TableOutputFormatter implements OutputFormatter {
                 }
 
                 // Insert padding
-                if (codePointCount < length) {
-                    sb.append(repeat(' ', length - codePointCount));
+                if (displayWidthCount < length) {
+                    sb.repeat(' ', length - displayWidthCount);
                 }
             } else {
-                sb.append(repeat(' ', length));
+                sb.repeat(' ', length);
             }
             if (i == row.length - 1 || !continuation[i + 1]) {
                 sb.append(" |");
@@ -306,6 +360,59 @@ public class TableOutputFormatter implements OutputFormatter {
         return txt.length();
     }
 
+    private static int displayWidth(String text) {
+        return displayWidth(text, 0, text.length());
+    }
+
+    private static int displayWidth(String text, int start, int end) {
+        int width = 0;
+        int offset = start;
+        while (offset < end) {
+            int codepoint = text.codePointAt(offset);
+            if (codepoint == '\n' || codepoint == '\r') {
+                break;
+            }
+            width += codePointDisplayWidth(codepoint);
+            offset = text.offsetByCodePoints(offset, 1);
+        }
+        return width;
+    }
+
+    private static int codePointDisplayWidth(int codepoint) {
+        if (codepoint == 0) {
+            return 0;
+        }
+        if (codepoint < 32 || (codepoint >= 0x7F && codepoint < 0xA0)) {
+            return 0;
+        }
+        int type = Character.getType(codepoint);
+        if (type == Character.NON_SPACING_MARK
+                || type == Character.ENCLOSING_MARK
+                || type == Character.COMBINING_SPACING_MARK) {
+            return 0;
+        }
+        return isWide(codepoint) ? 2 : 1;
+    }
+
+    // Approximate terminal wcwidth rules for wide characters.
+    private static boolean isWide(int codepoint) {
+        return codepoint >= 0x1100
+                && (codepoint <= 0x115F
+                        || codepoint == 0x2329
+                        || codepoint == 0x232A
+                        || (codepoint >= 0x2E80 && codepoint <= 0xA4CF && codepoint != 0x303F)
+                        || (codepoint >= 0xAC00 && codepoint <= 0xD7A3)
+                        || (codepoint >= 0xF900 && codepoint <= 0xFAFF)
+                        || (codepoint >= 0xFE10 && codepoint <= 0xFE19)
+                        || (codepoint >= 0xFE30 && codepoint <= 0xFE6F)
+                        || (codepoint >= 0xFF00 && codepoint <= 0xFF60)
+                        || (codepoint >= 0xFFE0 && codepoint <= 0xFFE6)
+                        || (codepoint >= 0x1F300 && codepoint <= 0x1F64F)
+                        || (codepoint >= 0x1F900 && codepoint <= 0x1F9FF)
+                        || (codepoint >= 0x20000 && codepoint <= 0x2FFFD)
+                        || (codepoint >= 0x30000 && codepoint <= 0x3FFFD));
+    }
+
     @Override
     public String formatFooter(BoltResult result, int numberOfRows) {
         ResultSummary summary = result.getSummary();
@@ -331,13 +438,10 @@ public class TableOutputFormatter implements OutputFormatter {
         if (actualGqlStatusObjects.size() > 1) {
             // GQL Status Objects are available, use them
             messages = summary.gqlStatusObjects().stream()
-                    .map(gqlStatusObject -> {
-                        if (gqlStatusObject instanceof GqlNotification gqlNotification) {
-                            return String.format(
-                                    "%s (%s)", gqlNotification.statusDescription(), gqlNotification.gqlStatus());
-                        } else {
-                            return null;
-                        }
+                    .map(gqlStatusObject -> switch (gqlStatusObject) {
+                        case GqlNotification gqlNotification ->
+                            String.format("%s (%s)", gqlNotification.statusDescription(), gqlNotification.gqlStatus());
+                        case GqlStatusObject ignored -> null;
                     })
                     .filter(Objects::nonNull)
                     .collect(Collectors.toCollection(LinkedHashSet::new));
@@ -377,8 +481,11 @@ public class TableOutputFormatter implements OutputFormatter {
         StringBuilder sb = new StringBuilder();
         Record record =
                 new InternalRecord(asList(columns), info.values().stream().toList());
-        formatResultAndCountRows(columns, Collections.singletonList(record).iterator(), line -> sb.append(line)
-                .append(OutputFormatter.NEWLINE));
+        formatResultAndCountRows(
+                columns,
+                new boolean[columns.length],
+                Collections.singletonList(record).iterator(),
+                line -> sb.append(line).append(OutputFormatter.NEWLINE));
         return sb.toString();
     }
 
@@ -391,6 +498,8 @@ public class TableOutputFormatter implements OutputFormatter {
         Plan plan = summary.plan();
         if (plan.arguments().containsKey(STRING_REPRESENTATION)) {
             return plan.arguments().get(STRING_REPRESENTATION).asString();
+        } else if (plan.arguments().containsKey(INCOMING_VARIABLES)) {
+            return new TableScopePlanFormatter().formatPlan(plan);
         } else {
             return new TablePlanFormatter().formatPlan(plan);
         }

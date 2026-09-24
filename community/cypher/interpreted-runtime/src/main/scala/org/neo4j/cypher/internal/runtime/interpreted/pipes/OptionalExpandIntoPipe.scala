@@ -22,14 +22,16 @@ package org.neo4j.cypher.internal.runtime.interpreted.pipes
 import org.neo4j.cypher.internal.expressions.SemanticDirection
 import org.neo4j.cypher.internal.runtime.ClosingIterator
 import org.neo4j.cypher.internal.runtime.ClosingIterator.ScalaSeqAsClosingIterator
+import org.neo4j.cypher.internal.runtime.ClosingLongIterator.emptyClosingRelationshipIterator
 import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.runtime.IsNoValue
 import org.neo4j.cypher.internal.runtime.interpreted.commands.convert.DirectionConverter.toGraphDb
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Expression
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.ExpandIntoPipe.getRowNode
-import org.neo4j.cypher.internal.runtime.interpreted.pipes.ExpandIntoPipe.relationshipSelectionCursorIterator
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.ExpandIntoPipe.traceRelationshipSelectionCursor
+import org.neo4j.cypher.internal.runtime.iterators.RelationshipCursorIterator
 import org.neo4j.cypher.internal.util.attribution.Id
+import org.neo4j.exceptions.InternalException
 import org.neo4j.internal.kernel.api.helpers.CachingExpandInto
 import org.neo4j.values.storable.Values
 import org.neo4j.values.virtual.VirtualNodeValue
@@ -40,7 +42,7 @@ import scala.collection.mutable.ListBuffer
 case class OptionalExpandIntoPipe(
   source: Pipe,
   fromName: String,
-  relName: String,
+  maybeRelName: Option[String],
   toName: String,
   dir: SemanticDirection,
   types: RelationshipTypes,
@@ -70,52 +72,71 @@ case class OptionalExpandIntoPipe(
 
             toNode match {
               case IsNoValue() =>
-                row.set(relName, Values.NO_VALUE)
+                maybeRelName.foreach(relName => row.set(relName, Values.NO_VALUE))
                 ClosingIterator.single(row)
               case n: VirtualNodeValue =>
                 val traversalCursor = query.traversalCursor()
-                val nodeCursor = query.nodeCursor()
+                val fromCursor = query.nodeCursor()
+                val toCursor = query.nodeCursor()
                 try {
-                  val selectionCursor = expandInto.connectingRelationships(
-                    nodeCursor,
-                    traversalCursor,
-                    fromNode.id(),
-                    types.types(query),
-                    n.id()
-                  )
-                  traceRelationshipSelectionCursor(query.resources, selectionCursor, traversalCursor)
-                  query.resources.trace(selectionCursor)
-                  val relationships = relationshipSelectionCursorIterator(selectionCursor, traversalCursor)
+                  val selectionCursor =
+                    expandInto.connectingRelationships(
+                      fromNode.id(),
+                      fromCursor,
+                      n.id(),
+                      toCursor,
+                      traversalCursor,
+                      types.types(query)
+                    )
+                  val relationships = if (selectionCursor != null) {
+                    traceRelationshipSelectionCursor(query.resources, selectionCursor, traversalCursor)
+                    new RelationshipCursorIterator(selectionCursor, traversalCursor)
+                  } else {
+                    traversalCursor.close()
+                    emptyClosingRelationshipIterator
+                  }
+
                   val filteredRows = ListBuffer.empty[CypherRow]
                   // This is exhausting relationships directly, thus we do not need to return
                   // a ClosingIterator in this flatMap.
                   while (relationships.hasNext) {
-                    val candidateRow = rowFactory.copyWith(
-                      row,
-                      relName,
-                      VirtualValues.relationship(
-                        relationships.next(),
-                        relationships.startNodeId(),
-                        relationships.endNodeId(),
-                        relationships.typeId()
+                    val nextRel = relationships.next()
+                    val candidateRow = maybeRelName.map(relName =>
+                      rowFactory.copyWith(
+                        row,
+                        relName,
+                        VirtualValues.relationship(
+                          nextRel,
+                          relationships.startNodeId(),
+                          relationships.endNodeId(),
+                          relationships.typeId()
+                        )
                       )
-                    )
+                    ).getOrElse(rowFactory.copyWith(row))
+
                     if (predicate.forall(p => p(candidateRow, state) eq Values.TRUE)) {
                       filteredRows += candidateRow
                     }
                   }
                   if (filteredRows.isEmpty) {
-                    row.set(relName, Values.NO_VALUE)
+                    maybeRelName.foreach(relName => row.set(relName, Values.NO_VALUE))
                     ClosingIterator.single(row)
                   } else filteredRows.asClosingIterator
                 } finally {
-                  nodeCursor.close()
+                  fromCursor.close()
+                  toCursor.close()
                 }
+
+              case x =>
+                throw InternalException.internalError(getClass.getSimpleName, s"Unexpected value $x")
             }
 
           case IsNoValue() =>
-            row.set(relName, Values.NO_VALUE)
+            maybeRelName.foreach(relName => row.set(relName, Values.NO_VALUE))
             ClosingIterator.single(row)
+
+          case x =>
+            throw InternalException.internalError(getClass.getSimpleName, s"Unexpected value $x")
         }
     }.closing(expandInto)
   }

@@ -20,36 +20,41 @@
 package org.neo4j.router.impl.query;
 
 import static org.neo4j.kernel.database.NamedDatabaseId.SYSTEM_DATABASE_NAME;
+import static scala.jdk.CollectionConverters.CollectionHasAsScala;
 import static scala.jdk.javaapi.OptionConverters.toJava;
 
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Supplier;
-import org.neo4j.cypher.internal.PreParsedQuery;
+import org.neo4j.cypher.internal.CypherVersion;
 import org.neo4j.cypher.internal.PreParser;
-import org.neo4j.cypher.internal.QueryOptions;
-import org.neo4j.cypher.internal.ast.AdministrationCommand;
 import org.neo4j.cypher.internal.ast.CatalogName;
 import org.neo4j.cypher.internal.ast.Statement;
 import org.neo4j.cypher.internal.compiler.CypherParsing;
 import org.neo4j.cypher.internal.compiler.helpers.SignatureResolver;
 import org.neo4j.cypher.internal.evaluator.SimpleInternalExpressionEvaluator;
 import org.neo4j.cypher.internal.frontend.phases.BaseState;
+import org.neo4j.cypher.internal.frontend.phases.QueryLanguage;
 import org.neo4j.cypher.internal.frontend.phases.ScopedProcedureSignatureResolver;
 import org.neo4j.cypher.internal.frontend.phases.rewriting.cnf.flattenBooleanOperators;
-import org.neo4j.cypher.internal.javacompat.ExecutionEngine;
+import org.neo4j.cypher.internal.javacompat.InternalQueryExecutionEngine;
+import org.neo4j.cypher.internal.notification.InternalNotification;
+import org.neo4j.cypher.internal.notification.RecordingNotificationLogger;
+import org.neo4j.cypher.internal.preparser.PreParsedQuery;
+import org.neo4j.cypher.internal.preparser.QueryOptions;
 import org.neo4j.cypher.internal.rewriting.rewriters.RemoveUseRewriter;
 import org.neo4j.cypher.internal.runtime.CypherRow;
+import org.neo4j.cypher.internal.spi.ExceptionTranslatingResolver;
 import org.neo4j.cypher.internal.tracing.CompilationTracer;
 import org.neo4j.cypher.internal.util.CancellationChecker;
-import org.neo4j.cypher.internal.util.InternalNotification;
-import org.neo4j.cypher.internal.util.RecordingNotificationLogger;
 import org.neo4j.cypher.rendering.QueryOptionsRenderer;
 import org.neo4j.cypher.rendering.QueryRenderer;
 import org.neo4j.dbms.api.DatabaseNotFoundException;
+import org.neo4j.dbms.api.DatabaseNotFoundHelper;
 import org.neo4j.dbms.database.DatabaseContext;
 import org.neo4j.dbms.database.DatabaseContextProvider;
 import org.neo4j.fabric.executor.Location;
+import org.neo4j.fabric.executor.QueryStatementLifecycles;
 import org.neo4j.kernel.api.procedure.GlobalProcedures;
 import org.neo4j.kernel.availability.UnavailableException;
 import org.neo4j.kernel.database.DatabaseIdRepository;
@@ -63,14 +68,13 @@ import org.neo4j.router.query.TargetService;
 import org.neo4j.values.virtual.MapValue;
 import org.neo4j.values.virtual.MapValueBuilder;
 import scala.Option;
-import scala.Some$;
 import scala.collection.immutable.Seq;
 import scala.jdk.javaapi.CollectionConverters;
 import scala.jdk.javaapi.OptionConverters;
 
 public class QueryProcessorImpl implements QueryProcessor {
-
-    public static final CatalogName SYSTEM_DATABASE_CATALOG_NAME = CatalogName.of(SYSTEM_DATABASE_NAME);
+    // the system database resolves to the same database in both strict and non-strict mode
+    public static final CatalogName SYSTEM_DATABASE_CATALOG_NAME = CatalogName.of(SYSTEM_DATABASE_NAME, true);
     private final ProcessedQueryInfoCache cache;
     private final PreParser preParser;
     private final CypherParsing parsing;
@@ -95,14 +99,21 @@ public class QueryProcessorImpl implements QueryProcessor {
     }
 
     @Override
+    public PreParsedQuery preParse(Query query, CypherVersion defaultLanguage) {
+        return preParser.preParse(query.text(), defaultLanguage);
+    }
+
+    @Override
     public ProcessedQueryInfo processQuery(
             Query query,
+            PreParsedQuery preParsedQuery,
             TargetService targetService,
             LocationService locationService,
             CancellationChecker cancellationChecker,
-            DatabaseReference sessionDatabase) {
+            DatabaseReference sessionDatabase,
+            QueryStatementLifecycles.StatementLifecycle statementLifecycle) {
 
-        var cachedValue = getFromCache(query, cancellationChecker, sessionDatabase);
+        var cachedValue = getFromCache(query, preParsedQuery, cancellationChecker, sessionDatabase, statementLifecycle);
 
         QueryTarget queryTarget = targetService.target(cachedValue.catalogInfo());
 
@@ -142,15 +153,26 @@ public class QueryProcessorImpl implements QueryProcessor {
     }
 
     private ProcessedQueryInfoCache.Value getFromCache(
-            Query query, CancellationChecker cancellationChecker, DatabaseReference sessionDatabase) {
+            Query query,
+            PreParsedQuery preParsedQuery,
+            CancellationChecker cancellationChecker,
+            DatabaseReference sessionDatabase,
+            QueryStatementLifecycles.StatementLifecycle statementLifecycle) {
         var notificationLogger = new RecordingNotificationLogger();
-        var preParsedQuery = preParser.preParse(query.text(), notificationLogger);
-
+        var shadowedFunctions = globalProcedures
+                .getCurrentView()
+                .getAllShadowedNames(QueryLanguage.toKernelScope(preParsedQuery.resolvedLanguage()));
         var cachedValue = cache.get(preParsedQuery, query.parameters());
 
         if (cachedValue == null) {
             var preparedForCacheQuery = prepareQueryForCache(
-                    preParsedQuery, notificationLogger, query, cancellationChecker, sessionDatabase);
+                    preParsedQuery,
+                    notificationLogger,
+                    query,
+                    cancellationChecker,
+                    sessionDatabase,
+                    shadowedFunctions,
+                    statementLifecycle);
             if (preparedForCacheQuery.catalogInfo().canBeCached()) {
                 cache.put(preParsedQuery, query.parameters(), preparedForCacheQuery);
             }
@@ -164,14 +186,25 @@ public class QueryProcessorImpl implements QueryProcessor {
             RecordingNotificationLogger notificationLogger,
             Query query,
             CancellationChecker cancellationChecker,
-            DatabaseReference sessionDatabase) {
+            DatabaseReference sessionDatabase,
+            Set<String> shadowedFunctions,
+            QueryStatementLifecycles.StatementLifecycle statementLifecycle) {
         var queryTracer = tracer.compileQuery(query.text());
-        var resolver = SignatureResolver.from(
-                globalProcedures.getCurrentView(),
-                preParsedQuery.options().queryOptions().cypherVersion());
+        var resolver = new ExceptionTranslatingResolver(
+                SignatureResolver.from(globalProcedures.getCurrentView(), preParsedQuery.resolvedLanguage()));
         var parsedQuery = parse(
-                query, queryTracer, preParsedQuery, resolver, notificationLogger, cancellationChecker, sessionDatabase);
+                query,
+                queryTracer,
+                preParsedQuery,
+                resolver,
+                notificationLogger,
+                cancellationChecker,
+                sessionDatabase,
+                shadowedFunctions,
+                statementLifecycle);
+        var statementType = StatementType.of(parsedQuery.statement(), resolver);
         var catalogInfo = resolveCatalogInfo(
+                statementType,
                 parsedQuery.statement(),
                 sessionDatabase.isComposite(),
                 databaseContextProvider.databaseIdRepository(),
@@ -179,7 +212,6 @@ public class QueryProcessorImpl implements QueryProcessor {
 
         var rewrittenQueryText = rewriteQueryText(parsedQuery, preParsedQuery.options(), cancellationChecker);
         var maybeExtractedParams = formatMaybeExtractedParams(parsedQuery);
-        var statementType = StatementType.of(parsedQuery.statement(), resolver);
         var parsingNotifications = CollectionConverters.asJava(notificationLogger.notifications());
 
         return new ProcessedQueryInfoCache.Value(
@@ -193,8 +225,12 @@ public class QueryProcessorImpl implements QueryProcessor {
     }
 
     private TargetService.CatalogInfo resolveCatalogInfo(
-            Statement statement, boolean targetsComposite, DatabaseIdRepository databaseIdRepository, Query query) {
-        if (statement instanceof AdministrationCommand) {
+            StatementType statementType,
+            Statement statement,
+            boolean targetsComposite,
+            DatabaseIdRepository databaseIdRepository,
+            Query query) {
+        if (statementType.statementType().equals(StatementType.AdminCommand())) {
             return new TargetService.SingleQueryCatalogInfo(Optional.of(SYSTEM_DATABASE_CATALOG_NAME), true);
         }
 
@@ -212,12 +248,17 @@ public class QueryProcessorImpl implements QueryProcessor {
         var rewrittenStatement = flattenBooleanOperators
                 .instance(cancellationChecker)
                 .apply(RemoveUseRewriter.instance().apply(parsedQuery.statement()));
+
         var rewrittenStatementString = QueryRenderer.render((Statement) rewrittenStatement);
 
-        return QueryOptionsRenderer.addOptions(rewrittenStatementString, queryOptions);
+        return QueryOptionsRenderer.addOptions(
+                rewrittenStatementString, queryOptions.withQueryLanguage(queryOptions.resolvedLanguage()));
     }
 
     private static MapValue formatMaybeExtractedParams(BaseState parsedQuery) {
+        if (parsedQuery.maybeExtractedParams().isEmpty()) {
+            return MapValue.EMPTY;
+        }
         var mapValueBuilder = new MapValueBuilder();
         var extractedParams = parsedQuery.maybeExtractedParams().get();
         if (extractedParams.nonEmpty()) {
@@ -259,7 +300,7 @@ public class QueryProcessorImpl implements QueryProcessor {
             checkDatabaseAvailable(databaseContext);
 
             var resolver = databaseContext.dependencies();
-            var queryExecutionEngine = resolver.resolveDependency(ExecutionEngine.class);
+            var queryExecutionEngine = resolver.resolveDependency(InternalQueryExecutionEngine.class);
             queryExecutionEngine.insertIntoCache(
                     query.text(), preParsedQuery, query.parameters(), parsedQuery, parsingNotifications);
         }
@@ -269,7 +310,7 @@ public class QueryProcessorImpl implements QueryProcessor {
         try {
             databaseContext.database().getDatabaseAvailabilityGuard().assertDatabaseAvailable();
         } catch (UnavailableException e) {
-            throw new QueryRouterException(e.status(), e);
+            throw QueryRouterException.wrapError(e);
         }
     }
 
@@ -280,19 +321,26 @@ public class QueryProcessorImpl implements QueryProcessor {
             ScopedProcedureSignatureResolver resolver,
             RecordingNotificationLogger notificationLogger,
             CancellationChecker cancellationChecker,
-            DatabaseReference sessionDatabase) {
-        return parsing.parseQuery(
+            DatabaseReference sessionDatabase,
+            Set<String> shadowedFunctions,
+            QueryStatementLifecycles.StatementLifecycle statementLifecycle) {
+        // Wire the obfuscator onto the ExecutingQuery as soon as obfuscation metadata is collected.
+        return parsing.parseQueryWithObfuscatorCallback(
                 preParsedQuery.statement(),
                 preParsedQuery.rawStatement(),
-                preParsedQuery.options().queryOptions().cypherVersion(),
+                preParsedQuery.resolvedLanguage(),
                 notificationLogger,
                 preParsedQuery.options().queryOptions().planner().name(),
                 Option.apply(preParsedQuery.options().offset()),
                 queryTracer,
                 query.parameters(),
                 cancellationChecker,
-                Some$.MODULE$.apply(resolver),
-                sessionDatabase);
+                resolver,
+                sessionDatabase,
+                preParsedQuery.options().queryOptions().planMode().isScope(),
+                CollectionHasAsScala(shadowedFunctions).asScala().toSet(),
+                metadata -> statementLifecycle.onObfuscatorReady(
+                        metadata, preParsedQuery.options().offset()));
     }
 
     private TargetService.CatalogInfo toCatalogInfo(Seq<Option<StaticUseEvaluation.CatalogInfo>> graphSelections) {
@@ -318,6 +366,6 @@ public class QueryProcessorImpl implements QueryProcessor {
     }
 
     private static Supplier<DatabaseNotFoundException> databaseNotFound(String databaseNameRaw) {
-        return () -> new DatabaseNotFoundException("Database " + databaseNameRaw + " not found");
+        return () -> DatabaseNotFoundHelper.databaseNameNotFoundWithoutDot((databaseNameRaw));
     }
 }

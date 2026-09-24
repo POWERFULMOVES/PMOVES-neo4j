@@ -28,6 +28,7 @@ import static org.apache.commons.lang3.ArrayUtils.EMPTY_INT_ARRAY;
 import static org.apache.commons.lang3.ArrayUtils.EMPTY_LONG_ARRAY;
 import static org.apache.commons.lang3.ArrayUtils.EMPTY_SHORT_ARRAY;
 import static org.apache.commons.lang3.ArrayUtils.EMPTY_STRING_ARRAY;
+import static org.neo4j.values.storable.VectorValue.MAX_VECTOR_DIMENSIONS;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -35,6 +36,11 @@ import java.time.LocalTime;
 import java.time.OffsetTime;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.UUID;
+import org.neo4j.internal.helpers.ArrayUtil;
 
 class ExtremeValuesLibrary {
     private ExtremeValuesLibrary() {}
@@ -75,14 +81,13 @@ class ExtremeValuesLibrary {
     };
     static final Value[] EXTREME_CHAR =
             new Value[] {Values.charValue(Character.MAX_VALUE), Values.charValue(Character.MIN_VALUE)};
-    static final Value[] EXTREME_STRING =
-            new Value[] {Values.stringValue(MAX_CODE_POINT_STRING), Values.stringValue("")};
+    static final Value[] EXTREME_STRING = new Value[] {Values.utf8Value(MAX_CODE_POINT_STRING), Values.utf8Value("")};
     static final Value[] EXTREME_STRING_ALPHANUMERIC =
-            new Value[] {Values.stringValue(MAX_ALPHA_NUMERIC_CODE_POINT_STRING), Values.stringValue("")};
+            new Value[] {Values.utf8Value(MAX_ALPHA_NUMERIC_CODE_POINT_STRING), Values.utf8Value("")};
     static final Value[] EXTREME_STRING_ASCII =
-            new Value[] {Values.stringValue(MAX_ASCII_CODE_POINT_STRING), Values.stringValue("")};
+            new Value[] {Values.utf8Value(MAX_ASCII_CODE_POINT_STRING), Values.utf8Value("")};
     static final Value[] EXTREME_STRING_BMP =
-            new Value[] {Values.stringValue(MAX_BMP_CODE_POINT_STRING), Values.stringValue("")};
+            new Value[] {Values.utf8Value(MAX_BMP_CODE_POINT_STRING), Values.utf8Value("")};
     static final Value[] EXTREME_LOCAL_DATE_TIME =
             new Value[] {LocalDateTimeValue.MIN_VALUE, LocalDateTimeValue.MAX_VALUE};
     static final Value[] EXTREME_DATE = new Value[] {DateValue.MIN_VALUE, DateValue.MAX_VALUE};
@@ -99,6 +104,73 @@ class ExtremeValuesLibrary {
             new Value[] {PointValue.MIN_VALUE_WGS_84, PointValue.MAX_VALUE_WGS_84};
     static final Value[] EXTREME_GEOGRAPHIC_POINT_3D =
             new Value[] {PointValue.MIN_VALUE_WGS_84_3D, PointValue.MAX_VALUE_WGS_84_3D};
+    static final Value[] EXTREME_INT8_VECTOR = new Value[] {
+        Values.int8Vector((byte) 0),
+        Values.int8Vector(new byte[MAX_VECTOR_DIMENSIONS]),
+        Values.int8Vector(Byte.MIN_VALUE, Byte.MAX_VALUE),
+        Values.int8Vector(ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, Byte.MIN_VALUE)),
+        Values.int8Vector(ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, Byte.MAX_VALUE))
+    };
+    static final Value[] EXTREME_INT16_VECTOR = new Value[] {
+        Values.int16Vector((short) 0),
+        Values.int16Vector(new short[MAX_VECTOR_DIMENSIONS]),
+        Values.int16Vector(Short.MIN_VALUE, Short.MAX_VALUE),
+        Values.int16Vector(ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, Short.MIN_VALUE)),
+        Values.int16Vector(ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, Short.MAX_VALUE))
+    };
+    static final Value[] EXTREME_INT32_VECTOR = new Value[] {
+        Values.int32Vector(0),
+        Values.int32Vector(new int[MAX_VECTOR_DIMENSIONS]),
+        Values.int32Vector(Integer.MIN_VALUE, Integer.MAX_VALUE),
+        Values.int32Vector(ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, Integer.MIN_VALUE)),
+        Values.int32Vector(ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, Integer.MAX_VALUE))
+    };
+    static final Value[] EXTREME_INT64_VECTOR = new Value[] {
+        Values.int64Vector(0),
+        Values.int64Vector(new long[MAX_VECTOR_DIMENSIONS]),
+        Values.int64Vector(Long.MIN_VALUE, Long.MAX_VALUE),
+        Values.int64Vector(ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, Long.MIN_VALUE)),
+        Values.int64Vector(ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, Long.MAX_VALUE))
+    };
+    static final Value[] EXTREME_FLOAT32_VECTOR = new Value[] {
+        Values.float32Vector(0),
+        Values.float32Vector(new float[MAX_VECTOR_DIMENSIONS]),
+        Values.float32Vector(Float.MIN_VALUE, Float.MAX_VALUE),
+        Values.float32Vector(ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, Float.MIN_VALUE)),
+        Values.float32Vector(ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, Float.MAX_VALUE)),
+        Values.float32Vector(ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, -Float.MAX_VALUE)),
+        Values.float32Vector(ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, -Float.MIN_VALUE)),
+    };
+    static final Value[] EXTREME_FLOAT64_VECTOR = new Value[] {
+        Values.float64Vector(0),
+        Values.float64Vector(new double[MAX_VECTOR_DIMENSIONS]),
+        Values.float64Vector(Double.MIN_VALUE, Double.MAX_VALUE),
+        Values.float64Vector(ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, Double.MIN_VALUE)),
+        Values.float64Vector(ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, Double.MAX_VALUE)),
+        Values.float64Vector(ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, -Double.MAX_VALUE)),
+        Values.float64Vector(ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, -Double.MIN_VALUE)),
+    };
+    static final Value[] EXTREME_VECTOR_ARRAY;
+
+    static {
+        List<Value> values = new ArrayList<>();
+        values.addAll(Arrays.asList(EXTREME_INT8_VECTOR));
+        values.addAll(Arrays.asList(EXTREME_INT16_VECTOR));
+        values.addAll(Arrays.asList(EXTREME_INT32_VECTOR));
+        values.addAll(Arrays.asList(EXTREME_INT64_VECTOR));
+        values.addAll(Arrays.asList(extremeFloat16Vector(Float16Format.FLOAT16)));
+        values.addAll(Arrays.asList(extremeFloat16Vector(Float16Format.BFLOAT16)));
+        values.addAll(Arrays.asList(EXTREME_FLOAT32_VECTOR));
+        values.addAll(Arrays.asList(EXTREME_FLOAT64_VECTOR));
+        EXTREME_VECTOR_ARRAY = values.toArray(new Value[0]);
+    }
+
+    static final Value[] EXTREME_UUID = new Value[] {
+        Values.uuidValue(0, 0),
+        Values.uuidValue(Long.MAX_VALUE, Long.MAX_VALUE),
+        Values.uuidValue(Long.MIN_VALUE, Long.MIN_VALUE)
+    };
+
     static final Value[] EXTREME_BOOLEAN_ARRAY =
             new Value[] {Values.of(EMPTY_BOOLEAN_ARRAY), Values.of(new boolean[] {true})};
     static final Value[] EXTREME_BYTE_ARRAY =
@@ -147,4 +219,20 @@ class ExtremeValuesLibrary {
             new Value[] {Values.of(new PointValue[0]), Values.of(new PointValue[] {PointValue.MAX_VALUE_WGS_84})};
     static final Value[] EXTREME_GEOGRAPHIC_POINT_3D_ARRAY =
             new Value[] {Values.of(new PointValue[0]), Values.of(new PointValue[] {PointValue.MAX_VALUE_WGS_84_3D})};
+    static final Value[] EXTREME_UUID_ARRAY = new Value[] {
+        Values.uuidArray(new UUID[] {new UUID(Long.MIN_VALUE, Long.MIN_VALUE)}),
+        Values.uuidArray(new UUID[] {new UUID(Long.MAX_VALUE, Long.MAX_VALUE)})
+    };
+
+    static Value[] extremeFloat16Vector(Float16Format format) {
+        return new Value[] {
+            Values.float16Vector(format, (short) 0),
+            Values.float16Vector(format, new short[MAX_VECTOR_DIMENSIONS]),
+            Values.float16Vector(format, format.minValue(), format.maxValue()),
+            Values.float16Vector(format, ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, format.minValue())),
+            Values.float16Vector(format, ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, format.maxValue())),
+            Values.float16Vector(format, ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, format.negative(format.maxValue()))),
+            Values.float16Vector(format, ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, format.negative(format.minValue()))),
+        };
+    }
 }

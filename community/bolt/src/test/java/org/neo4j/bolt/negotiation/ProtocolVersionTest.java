@@ -29,14 +29,17 @@ import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestFactory;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 
 class ProtocolVersionTest {
 
     private static Stream<ProtocolVersion> versions() {
         return IntStream.range(3, 5)
                 .boxed()
-                .flatMap(major -> IntStream.range(0, 9).boxed().flatMap(minor -> IntStream.range(0, minor)
-                        .mapToObj(range -> new ProtocolVersion(major, minor, range))));
+                .flatMap(major -> IntStream.range(0, 9)
+                        .boxed()
+                        .flatMap(minor ->
+                                IntStream.range(0, minor).mapToObj(range -> new ProtocolVersion(major, minor, range))));
     }
 
     private static int encode(ProtocolVersion version) {
@@ -126,24 +129,29 @@ class ProtocolVersionTest {
 
     @TestFactory
     Stream<DynamicTest> shouldIdentifyRangedVersions() {
-        return IntStream.rangeClosed(2, 9).boxed().flatMap(major -> IntStream.range(0, 9)
+        return IntStream.rangeClosed(2, 9)
                 .boxed()
-                .flatMap(minor ->
-                        IntStream.range(0, minor).boxed().map(range -> new ProtocolVersion(major, minor, range)))
-                .map(version -> dynamicTest(version.toString(), () -> {
-                    var actual = version.hasRange();
+                .flatMap(major -> IntStream.range(0, 9)
+                        .boxed()
+                        .flatMap(minor -> IntStream.range(0, minor)
+                                .boxed()
+                                .map(range -> new ProtocolVersion(major, minor, range)))
+                        .map(version -> dynamicTest(version.toString(), () -> {
+                            var actual = version.hasRange();
 
-                    assertEquals(version.range() != 0, actual);
-                })));
+                            assertEquals(version.range() != 0, actual);
+                        })));
     }
 
     @TestFactory
     Stream<DynamicTest> shouldIdentifyNegotiationVersions() {
         return IntStream.rangeClosed(ProtocolVersion.MAX_MAJOR_BIT - 8, ProtocolVersion.MAX_MAJOR_BIT)
                 .boxed()
-                .flatMap(major -> IntStream.range(0, 9).boxed().flatMap(minor -> IntStream.range(0, minor)
+                .flatMap(major -> IntStream.range(0, 9)
                         .boxed()
-                        .map(range -> new ProtocolVersion(major, minor, range))))
+                        .flatMap(minor -> IntStream.range(0, minor)
+                                .boxed()
+                                .map(range -> new ProtocolVersion(major, minor, range))))
                 .map(version -> dynamicTest(version.toString(), () -> {
                     var actual = version.isNegotiationVersion();
 
@@ -153,9 +161,9 @@ class ProtocolVersionTest {
 
     @TestFactory
     Stream<DynamicTest> shouldIdentifyOlderVersionsByMajorComponent() {
-        return IntStream.rangeClosed(2, 9)
+        var closedRangeTests = IntStream.rangeClosed(2, 9)
                 .mapToObj(major -> new ProtocolVersion(major, 2))
-                .map(version -> DynamicTest.dynamicTest(version.toString(), () -> {
+                .map(version -> DynamicTest.dynamicTest("isAtMost/isAtLeast - " + version, () -> {
                     Assertions.assertThat(version.isAtLeast(new ProtocolVersion(1, 0)))
                             .isTrue();
                     Assertions.assertThat(new ProtocolVersion(1, 0).isAtLeast(version))
@@ -166,13 +174,29 @@ class ProtocolVersionTest {
                     Assertions.assertThat(new ProtocolVersion(1, 0).isAtMost(version))
                             .isTrue();
                 }));
+
+        var openRangeTests = IntStream.rangeClosed(2, 9)
+                .mapToObj(major -> new ProtocolVersion(major, 2))
+                .map(version -> DynamicTest.dynamicTest("isOlder / isNewer - " + version, () -> {
+                    Assertions.assertThat(version.isNewerThan(new ProtocolVersion(1, 0)))
+                            .isTrue();
+                    Assertions.assertThat(new ProtocolVersion(1, 0).isNewerThan(version))
+                            .isFalse();
+
+                    Assertions.assertThat(version.isOlderThan(new ProtocolVersion(1, 0)))
+                            .isFalse();
+                    Assertions.assertThat(new ProtocolVersion(1, 0).isOlderThan(version))
+                            .isTrue();
+                }));
+
+        return Stream.concat(closedRangeTests, openRangeTests);
     }
 
     @TestFactory
     Stream<DynamicTest> shouldIdentifyOlderVersionsByMinorComponent() {
-        return IntStream.rangeClosed(2, 9)
+        var closedRangeTests = IntStream.rangeClosed(2, 9)
                 .mapToObj(minor -> new ProtocolVersion(1, minor))
-                .map(version -> DynamicTest.dynamicTest(version.toString(), () -> {
+                .map(version -> DynamicTest.dynamicTest("isAtMost/isAtLeast - " + version, () -> {
                     Assertions.assertThat(version.isAtLeast(new ProtocolVersion(1, 1)))
                             .isTrue();
                     Assertions.assertThat(new ProtocolVersion(1, 1).isAtLeast(version))
@@ -183,5 +207,21 @@ class ProtocolVersionTest {
                     Assertions.assertThat(new ProtocolVersion(1, 1).isAtMost(version))
                             .isTrue();
                 }));
+
+        var openRangeTests = IntStream.rangeClosed(2, 9)
+                .mapToObj(minor -> new ProtocolVersion(1, minor))
+                .map(version -> DynamicTest.dynamicTest("isOlder / isNewer - " + version, () -> {
+                    Assertions.assertThat(version.isNewerThan(new ProtocolVersion(1, 1)))
+                            .isTrue();
+                    Assertions.assertThat(new ProtocolVersion(1, 1).isNewerThan(version))
+                            .isFalse();
+
+                    Assertions.assertThat(version.isOlderThan(new ProtocolVersion(1, 1)))
+                            .isFalse();
+                    Assertions.assertThat(new ProtocolVersion(1, 1).isOlderThan(version))
+                            .isTrue();
+                }));
+
+        return Stream.concat(closedRangeTests, openRangeTests);
     }
 }

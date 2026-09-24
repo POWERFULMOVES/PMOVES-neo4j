@@ -89,13 +89,13 @@ class PartitionedValueIndexReaderTest {
         PropertyIndexQuery.ExactPredicate query = PropertyIndexQuery.exact(1, "Test");
         doAnswer(new NodeIdsIndexReaderQueryAnswer(schemaIndexDescriptor, 1))
                 .when(indexReader1)
-                .query(any(), any(), any(), any());
+                .query(any(), any(), any(), any(), any());
         doAnswer(new NodeIdsIndexReaderQueryAnswer(schemaIndexDescriptor, 2))
                 .when(indexReader2)
-                .query(any(), any(), any(), any());
+                .query(any(), any(), any(), any(), any());
         doAnswer(new NodeIdsIndexReaderQueryAnswer(schemaIndexDescriptor, 3))
                 .when(indexReader3)
-                .query(any(), any(), any(), any());
+                .query(any(), any(), any(), any(), any());
 
         LongSet results = queryResultAsSet(indexReader, query);
         verifyResult(results);
@@ -108,13 +108,13 @@ class PartitionedValueIndexReaderTest {
         PropertyIndexQuery.RangePredicate<?> query = PropertyIndexQuery.range(1, 1, true, 2, true);
         doAnswer(new NodeIdsIndexReaderQueryAnswer(schemaIndexDescriptor, 1))
                 .when(indexReader1)
-                .query(any(), any(), any(), any());
+                .query(any(), any(), any(), any(), any());
         doAnswer(new NodeIdsIndexReaderQueryAnswer(schemaIndexDescriptor, 2))
                 .when(indexReader2)
-                .query(any(), any(), any(), any());
+                .query(any(), any(), any(), any(), any());
         doAnswer(new NodeIdsIndexReaderQueryAnswer(schemaIndexDescriptor, 3))
                 .when(indexReader3)
-                .query(any(), any(), any(), any());
+                .query(any(), any(), any(), any(), any());
 
         LongSet results = queryResultAsSet(indexReader, query);
         verifyResult(results);
@@ -127,13 +127,13 @@ class PartitionedValueIndexReaderTest {
         PropertyIndexQuery.RangePredicate<?> query = PropertyIndexQuery.range(1, "a", false, "b", true);
         doAnswer(new NodeIdsIndexReaderQueryAnswer(schemaIndexDescriptor, 1))
                 .when(indexReader1)
-                .query(any(), any(), any(), any());
+                .query(any(), any(), any(), any(), any());
         doAnswer(new NodeIdsIndexReaderQueryAnswer(schemaIndexDescriptor, 2))
                 .when(indexReader2)
-                .query(any(), any(), any(), any());
+                .query(any(), any(), any(), any(), any());
         doAnswer(new NodeIdsIndexReaderQueryAnswer(schemaIndexDescriptor, 3))
                 .when(indexReader3)
-                .query(any(), any(), any(), any());
+                .query(any(), any(), any(), any(), any());
 
         LongSet results = queryResultAsSet(indexReader, query);
         verifyResult(results);
@@ -145,13 +145,13 @@ class PartitionedValueIndexReaderTest {
         PropertyIndexQuery.StringPrefixPredicate query = PropertyIndexQuery.stringPrefix(1, stringValue("prefix"));
         doAnswer(new NodeIdsIndexReaderQueryAnswer(schemaIndexDescriptor, 1))
                 .when(indexReader1)
-                .query(any(), any(), any(), any());
+                .query(any(), any(), any(), any(), any());
         doAnswer(new NodeIdsIndexReaderQueryAnswer(schemaIndexDescriptor, 2))
                 .when(indexReader2)
-                .query(any(), any(), any(), any());
+                .query(any(), any(), any(), any(), any());
         doAnswer(new NodeIdsIndexReaderQueryAnswer(schemaIndexDescriptor, 3))
                 .when(indexReader3)
-                .query(any(), any(), any(), any());
+                .query(any(), any(), any(), any(), any());
 
         LongSet results = queryResultAsSet(indexReader, query);
         verifyResult(results);
@@ -163,13 +163,13 @@ class PartitionedValueIndexReaderTest {
         PropertyIndexQuery.ExistsPredicate query = PropertyIndexQuery.exists(1);
         doAnswer(new NodeIdsIndexReaderQueryAnswer(schemaIndexDescriptor, 1))
                 .when(indexReader1)
-                .query(any(), any(), any(), any());
+                .query(any(), any(), any(), any(), any());
         doAnswer(new NodeIdsIndexReaderQueryAnswer(schemaIndexDescriptor, 2))
                 .when(indexReader2)
-                .query(any(), any(), any(), any());
+                .query(any(), any(), any(), any(), any());
         doAnswer(new NodeIdsIndexReaderQueryAnswer(schemaIndexDescriptor, 3))
                 .when(indexReader3)
-                .query(any(), any(), any(), any());
+                .query(any(), any(), any(), any(), any());
 
         LongSet results = queryResultAsSet(indexReader, query);
         verifyResult(results);
@@ -205,8 +205,8 @@ class PartitionedValueIndexReaderTest {
     @MethodSource("needStoreFilters")
     void propagateNeedStoreFilter1(BooleanList needStoreFilters, boolean needStoreFilter)
             throws IndexNotApplicableKernelException {
-        var query = mock(PropertyIndexQuery.class);
-        var client = new GatheringNodeValueClient();
+        PropertyIndexQuery query = mock(PropertyIndexQuery.class);
+        GatheringNodeValueClient client = new GatheringNodeValueClient();
 
         // Update mocked sub-readers with value for needStoreFilter
         setNeedStoreFilter(indexReader1, needStoreFilters.get(0));
@@ -214,7 +214,7 @@ class PartitionedValueIndexReaderTest {
         setNeedStoreFilter(indexReader3, needStoreFilters.get(2));
 
         PartitionedValueIndexReader indexReader = createPartitionedReaderFromReaders();
-        indexReader.query(client, QueryContext.NULL_CONTEXT, unconstrained(), query);
+        indexReader.query(client, QueryContext.NULL_CONTEXT, CursorContext.NULL_CONTEXT, unconstrained(), query);
 
         assertThat(client.needStoreFilter).isEqualTo(needStoreFilter);
     }
@@ -223,14 +223,14 @@ class PartitionedValueIndexReaderTest {
             throws IndexNotApplicableKernelException {
         doAnswer(invocation -> {
                     // This is out outer client
-                    var invokedClient = (BridgingIndexProgressor) invocation.getArgument(0);
+                    BridgingIndexProgressor invokedClient = invocation.getArgument(0);
                     invokedClient.initializeQuery(
                             schemaIndexDescriptor, invokedClient, false, needStoreFilter, null, (PropertyIndexQuery)
                                     null);
                     return null;
                 })
                 .when(indexReader)
-                .query(any(), any(), any(), any());
+                .query(any(), any(), any(), any(), any());
     }
 
     public static Stream<Arguments> needStoreFilters() {
@@ -246,7 +246,7 @@ class PartitionedValueIndexReaderTest {
     private static LongSet queryResultAsSet(PartitionedValueIndexReader indexReader, PropertyIndexQuery query)
             throws IndexNotApplicableKernelException {
         try (NodeValueIterator iterator = new NodeValueIterator()) {
-            indexReader.query(iterator, QueryContext.NULL_CONTEXT, unconstrained(), query);
+            indexReader.query(iterator, QueryContext.NULL_CONTEXT, CursorContext.NULL_CONTEXT, unconstrained(), query);
             return PrimitiveLongCollections.asSet(iterator);
         }
     }
@@ -270,13 +270,7 @@ class PartitionedValueIndexReaderTest {
         return new PartitionedValueIndexReader(schemaIndexDescriptor, getPartitionReaders(), NO_USAGE_TRACKING);
     }
 
-    private static class SimpleSampler implements IndexSampler {
-        private final long sampleValue;
-
-        SimpleSampler(long sampleValue) {
-            this.sampleValue = sampleValue;
-        }
-
+    private record SimpleSampler(long sampleValue) implements IndexSampler {
         @Override
         public IndexSample sampleIndex(CursorContext cursorContext, AtomicBoolean stopped) {
             return new IndexSample(sampleValue, sampleValue, sampleValue);

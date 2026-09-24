@@ -31,19 +31,12 @@ public class LimitExceededException extends PackstreamReaderException
     private final long limit;
     private final long actual;
 
-    @Deprecated
-    protected LimitExceededException(long limit, long actual) {
-        super("Value of size " + actual + " exceeded limit of " + limit);
-
-        this.limit = limit;
-        this.actual = actual;
-    }
-
     protected LimitExceededException(ErrorGqlStatusObject gqlStatusObject, long limit, long actual) {
         super(
                 gqlStatusObject,
                 ErrorMessageHolder.getMessage(
-                        gqlStatusObject, "Value of size " + actual + " exceeded limit of " + limit));
+                        gqlStatusObject, "Value of size " + actual + " exceeded limit of " + limit),
+                "Value of size " + actual + " exceeded limit of " + limit);
 
         this.limit = limit;
         this.actual = actual;

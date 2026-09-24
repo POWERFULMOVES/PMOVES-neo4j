@@ -57,8 +57,6 @@ import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.impl.api.index.StoreScan;
 import org.neo4j.kernel.impl.coreapi.InternalTransaction;
 import org.neo4j.kernel.impl.scheduler.JobSchedulerFactory;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.lock.Lock;
 import org.neo4j.lock.LockService;
@@ -68,7 +66,10 @@ import org.neo4j.storageengine.api.StorageEngine;
 import org.neo4j.storageengine.api.StorageReader;
 import org.neo4j.test.extension.DbmsExtension;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.values.storable.Values;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
 
 @DbmsExtension
 class FullScanStoreViewTest {
@@ -126,11 +127,12 @@ class FullScanStoreViewTest {
     }
 
     @AfterEach
-    void after() throws Exception {
+    void after() {
         jobScheduler.close();
         reader.close();
     }
 
+    @SkipOnSpd(reason = "Entity shard doesn't have the property data")
     @Test
     void shouldScanExistingNodesForALabel() {
         // given
@@ -156,6 +158,7 @@ class FullScanStoreViewTest {
                         record(stefan.getId(), propertyKeyId, "Stefan", new int[] {labelId}));
     }
 
+    @SkipOnSpd(reason = "Entity shard doesn't have the property data")
     @Test
     void shouldScanExistingRelationshipsForARelationshipType() {
         // given
@@ -290,6 +293,7 @@ class FullScanStoreViewTest {
         order.verify(lock1).close();
     }
 
+    @SkipOnSpd(reason = "Entity shard doesn't have the property data")
     @Test
     void tracePageCacheAccessOnStoreViewNodeScan() throws IOException {
         // enforce checkpoint to flush tree caches
@@ -314,14 +318,16 @@ class FullScanStoreViewTest {
                 false);
         scan.run(NO_EXTERNAL_UPDATES);
 
-        assertThat(propertyScanConsumer.batches.get(0).size()).isEqualTo(2);
+        assertThat(propertyScanConsumer.batches.get(0)).hasSize(2);
 
         assertThatTracing(graphDb)
                 .record(pins(4).noFaults())
                 .block(pins(3).noFaults())
+                .spd(pins(3).noFaults())
                 .matches(pageCacheTracer);
     }
 
+    @SkipOnSpd(reason = "Entity shard doesn't have the property data")
     @Test
     void tracePageCacheAccessOnRelationshipStoreScan() throws Exception {
         // enforce checkpoint to flush tree caches
@@ -346,11 +352,12 @@ class FullScanStoreViewTest {
                 false);
         scan.run(NO_EXTERNAL_UPDATES);
 
-        assertThat(propertyScanConsumer.batches.get(0).size()).isEqualTo(2);
+        assertThat(propertyScanConsumer.batches.get(0)).hasSize(2);
 
         assertThatTracing(graphDb)
                 .record(pins(3).noFaults())
                 .block(pins(3).noFaults())
+                .spd(pins(3).noFaults())
                 .matches(pageCacheTracer);
     }
 
@@ -366,13 +373,15 @@ class FullScanStoreViewTest {
 
         // Then
         var updates = tokenScanConsumer.batches.get(0);
-        assertThat(updates.size()).isEqualTo(2);
+        assertThat(updates).hasSize(2);
         for (var update : updates) {
             int[] tokensAfter = update.tokens();
             assertThat(tokensAfter.length).isEqualTo(1);
             assertThat(tokensAfter[0]).isEqualTo(0);
-            assertThat(update.entityId()).satisfiesAnyOf(id -> assertThat(id).isEqualTo(0), id -> assertThat(id)
-                    .isEqualTo(1));
+            assertThat(update.entityId())
+                    .satisfiesAnyOf(
+                            id -> assertThat(id).isEqualTo(0),
+                            id -> assertThat(id).isEqualTo(1));
         }
     }
 

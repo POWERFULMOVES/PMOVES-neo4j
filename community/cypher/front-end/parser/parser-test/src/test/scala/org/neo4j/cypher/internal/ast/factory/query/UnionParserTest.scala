@@ -18,7 +18,7 @@ package org.neo4j.cypher.internal.ast.factory.query
 
 import org.neo4j.cypher.internal.ast.Statement
 import org.neo4j.cypher.internal.ast.Statements
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
+import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
 import org.neo4j.cypher.internal.ast.test.util.AstParsingTestBase
 
 class UnionParserTest extends AstParsingTestBase {
@@ -141,11 +141,37 @@ class UnionParserTest extends AstParsingTestBase {
 
   test("RETURN 1 AS a UNION UNION RETURN 2 AS a") {
     failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'UNION'")
-      case _ => _.withSyntaxError(
-          """Invalid input 'UNION': expected 'FOREACH', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNWIND', 'USE' or 'WITH' (line 1, column 21 (offset: 20))
+      case Cypher5 => _.withSyntaxError(
+          """Invalid input 'UNION': expected 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'FOREACH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNWIND', 'USE' or 'WITH' (line 1, column 21 (offset: 20))
             |"RETURN 1 AS a UNION UNION RETURN 2 AS a"
             |                     ^""".stripMargin
+        )
+      case _ => _.withSyntaxError(
+          """Invalid input 'UNION': expected 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'FOREACH', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SHOW', 'SKIP', 'TERMINATE', 'UNWIND', 'USE', 'WITH' or '{' (line 1, column 21 (offset: 20))
+            |"RETURN 1 AS a UNION UNION RETURN 2 AS a"
+            |                     ^""".stripMargin
+        )
+    }
+  }
+
+  test("UNION with unenclosed WHEN") {
+    val query = """{
+              WHEN false THEN RETURN 1 AS x
+              ELSE RETURN n AS x
+           }
+           UNION
+           WHEN true THEN RETURN 2 AS x
+           ELSE RETURN n AS x"""
+    query should parseIn[Statements] {
+      case Cypher5 => _.withSyntaxError(
+          """Invalid input '{': expected 'ALTER', 'ORDER BY', 'CALL', 'USING PERIODIC COMMIT', 'CREATE', 'LOAD CSV', 'START DATABASE', 'STOP DATABASE', 'DEALLOCATE', 'DELETE', 'DENY', 'DETACH', 'DROP', 'DRYRUN', 'FINISH', 'FOREACH', 'GRANT', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REALLOCATE', 'REMOVE', 'RENAME', 'RETURN', 'REVOKE', 'ENABLE SERVER', 'SET', 'SHOW', 'SKIP', 'TERMINATE', 'UNWIND', 'USE' or 'WITH' (line 1, column 1 (offset: 0))
+            |"{"
+            | ^""".stripMargin
+        )
+      case _ => _.withSyntaxError(
+          """Invalid input 'WHEN': expected 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'FOREACH', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SHOW', 'SKIP', 'TERMINATE', 'UNWIND', 'USE', 'WITH' or '{' (line 6, column 12 (offset: 120))
+            |"           WHEN true THEN RETURN 2 AS x"
+            |            ^""".stripMargin
         )
     }
   }

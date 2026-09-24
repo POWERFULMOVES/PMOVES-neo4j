@@ -19,10 +19,13 @@
  */
 package org.neo4j.bolt.protocol.common.fsm.transition.authentication;
 
+import static org.neo4j.bolt.testing.util.ErrorUtil.useNewMessage;
+
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Stream;
 import org.assertj.core.api.Assertions;
@@ -36,11 +39,12 @@ import org.neo4j.bolt.protocol.common.connector.connection.authentication.Authen
 import org.neo4j.bolt.protocol.common.fsm.States;
 import org.neo4j.bolt.protocol.common.fsm.error.AuthenticationStateTransitionException;
 import org.neo4j.bolt.protocol.common.fsm.transition.AbstractStateTransitionTest;
-import org.neo4j.bolt.protocol.common.message.request.authentication.AuthenticationMessage;
-import org.neo4j.bolt.protocol.common.message.request.authentication.HelloMessage;
-import org.neo4j.bolt.protocol.common.message.request.authentication.LogonMessage;
-import org.neo4j.bolt.protocol.common.message.request.connection.RoutingContext;
 import org.neo4j.bolt.security.error.AuthenticationException;
+import org.neo4j.bolt.testing.mock.TestConnectorConfiguration;
+import org.neo4j.boltmessages.request.authentication.AuthenticationMessage;
+import org.neo4j.boltmessages.request.authentication.HelloMessage;
+import org.neo4j.boltmessages.request.authentication.LogonMessage;
+import org.neo4j.boltmessages.request.connection.RoutingContext;
 import org.neo4j.kernel.api.exceptions.Status.Request;
 import org.neo4j.values.storable.Values;
 
@@ -60,7 +64,7 @@ class AuthenticationStateTransitionTest
                 .flatMap(token -> Stream.of(
                         new HelloMessage(
                                 "Test/1.0",
-                                List.of(Feature.UTC_DATETIME),
+                                List.of(Feature.UTC_DATETIME.getId()),
                                 new RoutingContext(false, Collections.emptyMap()),
                                 token),
                         new LogonMessage(token)));
@@ -126,7 +130,7 @@ class AuthenticationStateTransitionTest
                             .onMetadata(
                                     AuthenticationFlag.CREDENTIALS_EXPIRED
                                             .name()
-                                            .toLowerCase(),
+                                            .toLowerCase(Locale.ROOT),
                                     Values.TRUE);
                     inOrder.verify(this.context).defaultState(States.READY);
                 }));
@@ -140,13 +144,16 @@ class AuthenticationStateTransitionTest
                     // dynamic tests (see https://github.com/junit-team/junit5/issues/694)
                     this.prepareContext();
 
-                    Mockito.doThrow(new AuthenticationException(Request.Invalid, "Something went wrong"))
+                    Mockito.doThrow(AuthenticationException.internalError(
+                                    this.getClass().getSimpleName(), "Something went wrong", Request.Invalid))
                             .when(this.connection)
                             .logon(Mockito.anyMap());
 
                     Assertions.assertThatExceptionOfType(AuthenticationStateTransitionException.class)
                             .isThrownBy(() -> this.transition.process(this.context, request, this.responseHandler))
-                            .withMessage("Something went wrong")
+                            .withMessage(useNewMessage(
+                                            "50N00: Internal exception raised AuthenticationStateTransitionTest: Something went wrong")
+                                    .whenLegacyFallbackTo("Something went wrong"))
                             .withCauseInstanceOf(AuthenticationException.class);
 
                     Mockito.verify(this.context).connection();
@@ -161,9 +168,12 @@ class AuthenticationStateTransitionTest
 
     private static void mockAdvertisedAddress(ConnectionHandle connection, SocketAddress socketAddress) {
         var connector = Mockito.mock(Connector.class);
-        var configuration = Mockito.mock(Connector.Configuration.class);
+
+        var configuration = TestConnectorConfiguration.factory()
+                .advertisedAddress(socketAddress)
+                .build();
+
         Mockito.doReturn(connector).when(connection).connector();
         Mockito.doReturn(configuration).when(connector).configuration();
-        Mockito.doReturn(socketAddress).when(configuration).advertisedAddress();
     }
 }

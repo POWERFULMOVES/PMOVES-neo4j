@@ -40,11 +40,11 @@ import org.eclipse.collections.impl.factory.primitive.LongObjectMaps;
 import org.neo4j.internal.counts.DegreeUpdater;
 import org.neo4j.internal.helpers.collection.Iterables;
 import org.neo4j.internal.id.IdSequence;
+import org.neo4j.internal.id.IdSequenceProvider;
 import org.neo4j.internal.kernel.api.Upgrade;
 import org.neo4j.internal.kernel.api.exceptions.TransactionFailureException;
 import org.neo4j.internal.recordstorage.Command.Mode;
 import org.neo4j.internal.recordstorage.RecordAccess.RecordProxy;
-import org.neo4j.internal.recordstorage.id.IdSequenceProvider;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.SchemaRule;
 import org.neo4j.io.pagecache.context.CursorContext;
@@ -61,7 +61,6 @@ import org.neo4j.kernel.impl.store.TokenStore;
 import org.neo4j.kernel.impl.store.record.AbstractBaseRecord;
 import org.neo4j.kernel.impl.store.record.DynamicRecord;
 import org.neo4j.kernel.impl.store.record.LabelTokenRecord;
-import org.neo4j.kernel.impl.store.record.MetaDataRecord;
 import org.neo4j.kernel.impl.store.record.NodeRecord;
 import org.neo4j.kernel.impl.store.record.PrimitiveRecord;
 import org.neo4j.kernel.impl.store.record.PropertyKeyTokenRecord;
@@ -323,14 +322,11 @@ public class TransactionRecordState implements RecordState {
         }
 
         if (upgrade != null) {
-            MetaDataRecord before = new MetaDataRecord();
-            before.initialize(true, upgrade.from().version());
-            MetaDataRecord after = new MetaDataRecord();
-            after.initialize(true, upgrade.to().version());
             // This command will be the last one in the "old" version, indicating the switch and writing it to the
             // KernelVersionRepository. The KernelVersionRepository update will make the transaction that triggered
             // upgrade be written in the "new" version
-            commands.add(new Command.MetaDataCommand(commandSerialization, before, after));
+            commands.add(Command.MetaDataCommand.upgradeCommand(
+                    commandSerialization, upgrade.from(), upgrade.to(), upgrade.logFormatTo()));
         }
 
         prepared = true;
@@ -422,33 +418,6 @@ public class TransactionRecordState implements RecordState {
     public void nodeRemoveProperty(long nodeId, int propertyKey) {
         RecordProxy<NodeRecord, Void> node = recordChangeSet.getNodeRecords().getOrLoad(nodeId, null);
         propertyDeleter.removeProperty(node, propertyKey, recordChangeSet.getPropertyRecords());
-    }
-
-    /**
-     * Changes an existing property's value of the given relationship, with the
-     * given index to the passed value
-     * @param relId The id of the relationship which holds the property to change.
-     * @param propertyKey The index of the key of the property to change.
-     * @param value The new value of the property.
-     */
-    void relChangeProperty(long relId, int propertyKey, Value value) {
-        RecordProxy<RelationshipRecord, Void> rel =
-                recordChangeSet.getRelRecords().getOrLoad(relId, null);
-        propertyCreator.primitiveSetProperty(
-                rel, propertyKey, value, recordChangeSet.getPropertyRecords(), memoryTracker);
-    }
-
-    /**
-     * Changes an existing property of the given node, with the given index to
-     * the passed value
-     * @param nodeId The id of the node which holds the property to change.
-     * @param propertyKey The index of the key of the property to change.
-     * @param value The new value of the property.
-     */
-    void nodeChangeProperty(long nodeId, int propertyKey, Value value) {
-        RecordProxy<NodeRecord, Void> node = recordChangeSet.getNodeRecords().getOrLoad(nodeId, null);
-        propertyCreator.primitiveSetProperty(
-                node, propertyKey, value, recordChangeSet.getPropertyRecords(), memoryTracker);
     }
 
     /**

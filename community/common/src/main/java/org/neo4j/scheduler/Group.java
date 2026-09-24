@@ -19,92 +19,131 @@
  */
 package org.neo4j.scheduler;
 
+import static org.neo4j.scheduler.ExecutorServiceFactory.singleThread;
+
 import java.util.OptionalInt;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.neo4j.util.FeatureToggles;
 
 /**
  * Represents a common group of jobs, defining how they should be scheduled.
  */
 public enum Group {
     // GENERAL DATABASE GROUPS.
-    /** Thread that schedules delayed or recurring tasks. */
+    /**
+     * Thread that schedules delayed or recurring tasks.
+     */
     TASK_SCHEDULER("Scheduler", ExecutorServiceFactory.unschedulable()),
     /* Page cache background eviction. */
-    PAGE_CACHE_EVICTION("PageCacheEviction"),
+    PAGE_CACHE_EVICTION("PageCacheEviction", singleThread()),
     /* Page cache background eviction. */
     PAGE_CACHE_PRE_FETCHER("PageCachePreFetcher", ExecutorServiceFactory.cachedWithDiscard(), 4),
     PAGE_PRE_FETCHER("PagePreFetcher"),
-    /** Watch out for, and report, external manipulation of store files. */
+    /**
+     * Watch out for, and report, external manipulation of store files.
+     */
     FILE_WATCHER("FileWatcher", ExecutorServiceFactory.unschedulable()),
-    /** Monitor and report system-wide pauses, in case they lead to service interruption. */
-    VM_PAUSE_MONITOR("VmPauseMonitor"),
-    /** Rotates diagnostic text logs. */
-    LOG_ROTATION("LogRotation"),
-    /** Checkpoint and store flush. */
+    /**
+     * Monitor and report system-wide pauses, in case they lead to service interruption.
+     */
+    VM_PAUSE_MONITOR("VmPauseMonitor", true),
+    LOG_ROTATION("LogRotation", true),
+    /**
+     * Checkpoint and store flush.
+     */
     CHECKPOINT("CheckPoint"),
-    /** Various little periodic tasks that need to be done on a regular basis to keep the store in good shape. */
+    /**
+     * Various little periodic tasks that need to be done on a regular basis to keep the store in good shape.
+     */
     STORAGE_MAINTENANCE("StorageMaintenance"),
-    /** Index recovery cleanup. */
+    /**
+     * Index recovery cleanup.
+     */
     INDEX_CLEANUP("IndexCleanup"),
-    /** Index recovery cleanup work. */
+    /**
+     * Index recovery cleanup work.
+     */
     INDEX_CLEANUP_WORK("IndexCleanupWork"),
-    /** Terminates kernel transactions that have timed out. */
+    /**
+     * Terminates kernel transactions that have timed out.
+     */
     TRANSACTION_TIMEOUT_MONITOR("TransactionTimeoutMonitor"),
-    /** Background index population. */
+    /**
+     * Background index population.
+     */
     INDEX_POPULATION("IndexPopulationMain"),
     /**
-     * Background index population work.
-     * Threads in this group are used both for reading from store and generating index update for index population
-     * as well as other tasks for completing an index after the store scan.
-     * As it stands this group should not have a limit on its own because of how tasks are scheduled during population
-     * and is instead effectively limited by number of ongoing index populations times number of workers per index population,
-     * i.e. settings internal.dbms.index_population.parallelism * internal.dbms.index_population.workers
+     * Background index population work. Threads in this group are used both for reading from store and generating index update for index population as well as
+     * other tasks for completing an index after the store scan. As it stands this group should not have a limit on its own because of how tasks are scheduled
+     * during population and is instead effectively limited by number of ongoing index populations times number of workers per index population, i.e. settings
+     * internal.dbms.index_population.parallelism * internal.dbms.index_population.workers
      */
     INDEX_POPULATION_WORK("IndexPopulationWork", ExecutorServiceFactory.cached()),
-    /** Background index sampling */
-    INDEX_SAMPLING("IndexSampling"),
-    /** Background index update applier, for eventually consistent indexes. */
+    /**
+     * Intra-merge parallelism for vector indexes. Threads in this group are used by Lucene's
+     * {@code ConcurrentHnswMerger} to parallelize HNSW graph construction within a single segment merge.
+     * Sized via {@code internal.dbms.index.vector.intra_merge_workers}.
+     */
+    VECTOR_INDEX_MERGE("VectorIndexMerge", ExecutorServiceFactory.cached()),
+    /**
+     * Background index sampling
+     */
+    INDEX_SAMPLING("IndexSampling", true),
+    /**
+     * Background index update applier, for eventually consistent indexes.
+     */
     INDEX_UPDATING("IndexUpdating"),
     INDEX_REFRESHING("IndexRefreshing"),
-    /** Thread pool for anyone who want some help doing file IO in parallel. */
+    DEGREE_WRITER("DegreeWriter", true),
+    /**
+     * Thread pool for anyone who want some help doing file IO in parallel.
+     */
     FILE_IO_HELPER("FileIOHelper"),
     LOG_WRITER("LOG_WRITER"),
-    NATIVE_SECURITY("NativeSecurity"),
     METRICS_CSV_WRITE("MetricsCsvWrite"),
     METRICS_GRAPHITE_WRITE("MetricsGraphiteWrite"),
-    /** Threads that perform database manager operations necessary to bring databases to their desired states. */
+    /**
+     * Threads that perform database manager operations necessary to bring databases to their desired states.
+     */
     DATABASE_RECONCILER("DatabaseReconciler"),
-    /** Ensures DatabaseId lookup is not run from an outer transaction that will be tied to a database */
-    DATABASE_ID_REPOSITORY("DatabaseIdRepository"),
 
-    BUFFER_POOL_MAINTENANCE("BufferPoolMaintenance"),
-
-    UDC("UserDataCollector", ExecutorServiceFactory.singleThread()),
+    UDC("UserDataCollector", singleThread(), true),
 
     // CYPHER.
-    /** Thread pool for parallel Cypher query execution. */
+    /**
+     * Thread pool for parallel Cypher query execution.
+     */
     CYPHER_WORKER("CypherWorker", ExecutorServiceFactory.workStealing()),
     CYPHER_CACHE("CypherCache", ExecutorServiceFactory.workStealing()),
 
-    /** Thread pool for running call in transaction subqueries in parallel. */
+    /**
+     * Thread pool for running call in transaction subqueries in parallel.
+     */
     CYPHER_TRANSACTION_WORKER("CypherTransactionWorker", ExecutorServiceFactory.cached()),
 
-    /** Removes queries that have timed out */
+    /**
+     * Removes queries that have timed out
+     */
     CYPHER_QUERY_MONITOR("CypherQueryMonitor"),
 
     // CDC
     CDC("CDC"),
 
     // DATA COLLECTOR
-    DATA_COLLECTOR("DataCollector"),
+    DATA_COLLECTOR("DataCollector", true),
 
     // BOLT.
-    /** Network IO threads for the Bolt protocol. */
+    /**
+     * Network IO threads for the Bolt protocol.
+     */
     BOLT_NETWORK_IO("BoltNetworkIO", ExecutorServiceFactory.unschedulable()),
-    /** Transaction processing threads for Bolt. */
+    /**
+     * Transaction processing threads for Bolt.
+     */
     BOLT_WORKER("BoltWorker", ExecutorServiceFactory.unschedulable()),
-    BOLT_ADMISSION_CONTROL("AdmissionControl", ExecutorServiceFactory.singleThread()),
+    BOLT_ADMISSION_CONTROL("AdmissionControl"),
+    BOLT_MONITORING("BoltMonitoring", singleThread()),
 
     // CAUSAL CLUSTER, TOPOLOGY & BACKUP.
     RAFT_CLIENT("RaftClient"),
@@ -114,45 +153,51 @@ public enum Group {
     RAFT_READER_POOL_PRUNER("RaftReaderPoolPruner"),
     RAFT_LOG_PREFETCH("RaftLogPrefetch"),
     RAFT_DRAINING_SERVICE("RaftDrainingService"),
+    RAFT_BACKPRESSURE("RaftBackpressure"),
+    RAFT_METRICS_COLLECTOR("RaftMetricsCollector"),
     LEADER_TRANSFER_SERVICE("LeaderTransferService"),
     CORE_STATE_APPLIER("CoreStateApplier"),
-    AKKA_HELPER("AkkaActorSystemRestarter"),
-    PARALLEL_TOPOLOGY("PARALLEL_TOPOLOGY"),
+    MEMBERSHIP_LIST_NOTIFIER("MembershipNotifier"),
     LIGHTHOUSE_GOSSIP("LighthouseGossip"),
-    LIGHTHOUSE_RECEIVER("LighthouseReceiver", ExecutorServiceFactory.singleThread()),
-    LIGHTHOUSE_JOIN_LEAVE_JOB("LighthouseJoinLeaveWorker", ExecutorServiceFactory.singleThread()),
-    LIGHTHOUSE_JOIN_LEAVE_MANAGER("LighthouseJoinLeaveManager", ExecutorServiceFactory.singleThread()),
-    LIGHTHOUSE_MEMBER_STATE_TRANSITION_SCHEDULER(
-            "LighthouseMemberStateScheduler", ExecutorServiceFactory.singleThread()),
+    LIGHTHOUSE_RECEIVER("LighthouseReceiver", singleThread()),
+    LIGHTHOUSE_JOIN_LEAVE_JOB("LighthouseJoinLeaveWorker", singleThread()),
+    LIGHTHOUSE_JOIN_LEAVE_MANAGER("LighthouseJoinLeaveManager", singleThread()),
+    LIGHTHOUSE_MEMBER_STATE_TRANSITION_SCHEDULER("LighthouseMemberStateScheduler", singleThread()),
     DOWNLOAD_SNAPSHOT("DownloadSnapshot"),
+    SEEDING("Seeding"),
     CATCHUP_CHANNEL_POOL("CatchupChannelPool"),
     CATCHUP_CLIENT("CatchupClient"),
-    CATCHUP_PROCESS("CatchupProcess"),
     CATCHUP_SERVER("CatchupServer"),
-    DATABASE_INFO_SERVICE("DatabaseInfoService"),
     STORE_COPY_CLIENT("StoreCopyClient"),
+    STORE_DOWNLOADER("StoreDownloader"),
+    STORE_COPY_SNAPSHOT("StoreCopySnapshot"),
     THROUGHPUT_MONITOR("ThroughputMonitor"),
     PANIC_SERVICE("PanicService"),
-    CLUSTER_STATUS_CHECK_SERVICE("ClusterStatusService"),
-    TOPOLOGY_LOGGER("TopologyLogger"),
+    TOPOLOGY_NOTIFIER("TopologyNotifier"),
     TOPOLOGY_MAINTENANCE("TopologyMaintenance"),
-    TOPOLOGY_GRAPH_DBMS_MODEL("TopologyGraphDbmsModel", ExecutorServiceFactory.singleThread()),
+    TOPOLOGY_GRAPH_DBMS_MODEL("TopologyGraphDbmsModel", singleThread()),
     CONNECTIVITY_CHECKS("ConnectivityChecks"),
     RAFTED_STATUS_CHECKS("RaftedStatusChecks"),
     COMMIT_COORDINATOR("CommitCoordinator"),
-    METADATA_SCRIPT_PROVIDER("MetadataScriptProvider"),
-    PROCEDURE_ASYNC_CALLER("ProceduresAsyncCaller"),
+    RAFT_INFREQUENT_TASKS("RaftInfrequentTasks"),
 
-    /** Rolls back idle transactions on the server. */
+    // AURA
+    SECONDARY_QUIESCE("SecondaryQuiesce", singleThread()),
+
+    /**
+     * Rolls back idle transactions on the server.
+     */
     SERVER_TRANSACTION_TIMEOUT("ServerTransactionTimeout"),
     PULL_UPDATES("PullUpdates"),
     APPLY_UPDATES("ApplyUpdates"),
 
     // FABRIC
     FABRIC_IDLE_DRIVER_MONITOR("FabricIdleDriverMonitor"),
-    FABRIC_WORKER("FabricWorker"),
+    FABRIC_WORKER("FabricWorker", true),
 
-    QUERY_ROUTER_WORKER("QueryRouterWorker", ExecutorServiceFactory.cached()),
+    QUERY_ROUTER_WORKER("QueryRouterWorker", true),
+
+    SPD_WORKER("SpdWorker"),
 
     // SECURITY
     AUTH_CACHE("AuthCache", ExecutorServiceFactory.workStealing()),
@@ -166,22 +211,44 @@ public enum Group {
     GDS_ASYNC_PROCEDURE("GdsAsyncProcedure"),
 
     // TESTING
-    TESTING("TestingGroup", ExecutorServiceFactory.callingThread());
+    TESTING("TestingGroup", ExecutorServiceFactory.callingThread()),
+
+    // Graph Engine
+    GRAPH_ENGINE_DATA_SOURCE_POOL("GraphEngineDataSourcePool", true);
 
     private final String name;
     private final ExecutorServiceFactory executorServiceFactory;
     private final Integer defaultParallelism;
     private final AtomicInteger threadCounter;
+    private final boolean virtual;
 
-    Group(String name, ExecutorServiceFactory executorServiceFactory, Integer defaultParallelism) {
+    Group(
+            String name,
+            ExecutorServiceFactory executorServiceFactory,
+            Integer defaultParallelism,
+            boolean virtualCandidate) {
         this.name = name;
-        this.executorServiceFactory = executorServiceFactory;
+        this.virtual = GroupSupport.USE_VIRTUAL_THREADS && virtualCandidate;
+        this.executorServiceFactory =
+                virtual ? ExecutorServiceFactory.newVirtualThreadPerTask() : executorServiceFactory;
         this.defaultParallelism = defaultParallelism;
         this.threadCounter = new AtomicInteger();
     }
 
+    Group(String name, boolean virtual) {
+        this(name, ExecutorServiceFactory.cached(), null, virtual);
+    }
+
+    Group(String name, ExecutorServiceFactory executorServiceFactory, boolean virtual) {
+        this(name, executorServiceFactory, null, virtual);
+    }
+
+    Group(String name, ExecutorServiceFactory executorServiceFactory, Integer defaultParallelism) {
+        this(name, executorServiceFactory, defaultParallelism, false);
+    }
+
     Group(String name, ExecutorServiceFactory executorServiceFactory) {
-        this(name, executorServiceFactory, null);
+        this(name, executorServiceFactory, null, false);
     }
 
     Group(String name) {
@@ -197,11 +264,14 @@ public enum Group {
     }
 
     /**
-     * Name a new thread. This method may or may not be used, it is up to the scheduling strategy to decide
-     * to honor this.
+     * Name a new thread. This method may or may not be used, it is up to the scheduling strategy to decide to honor this.
      */
     public String threadName() {
-        return "neo4j." + groupName() + "-" + threadCounter.incrementAndGet();
+        return threadNamePrefix() + "-" + threadCounter.incrementAndGet();
+    }
+
+    public String threadNamePrefix() {
+        return "neo4j." + groupName();
     }
 
     public ExecutorService buildExecutorService(SchedulerThreadFactory factory, int parallelism) {
@@ -210,5 +280,13 @@ public enum Group {
 
     public OptionalInt defaultParallelism() {
         return defaultParallelism == null ? OptionalInt.empty() : OptionalInt.of(defaultParallelism);
+    }
+
+    public boolean isVirtual() {
+        return virtual;
+    }
+
+    static final class GroupSupport {
+        static final boolean USE_VIRTUAL_THREADS = FeatureToggles.flag(Group.class, "enableVirtualThreads", true);
     }
 }

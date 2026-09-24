@@ -22,7 +22,8 @@ package org.neo4j.cypher.internal.runtime.interpreted
 import org.neo4j.configuration.Config
 import org.neo4j.csv.reader.CharReadable
 import org.neo4j.cypher.internal.runtime.QueryRuntimeConfig
-import org.neo4j.cypher.internal.runtime.debug.DebugSupport
+import org.neo4j.cypher.internal.runtime.debug.events.Debug
+import org.neo4j.cypher.internal.runtime.interpreted.debug.events.TransactionalContext.CloseWithSelf
 import org.neo4j.cypher.internal.util.CancellationChecker
 import org.neo4j.graphdb.Entity
 import org.neo4j.internal.kernel.api.CursorFactory
@@ -106,7 +107,7 @@ class ParallelTransactionalContextWrapper(
 
   override def token: Token = unsupported()
 
-  override def schemaRead: SchemaRead = unsupported()
+  override def schemaRead: SchemaRead = _kernelExecutionContext.schemaRead()
 
   override def schemaWrite: SchemaWrite = unsupported()
 
@@ -126,14 +127,7 @@ class ParallelTransactionalContextWrapper(
   override def queryExecutingConfiguration: QueryExecutionConfiguration = tc.queryExecutingConfiguration()
 
   override def close(): Unit = {
-    if (DebugSupport.DEBUG_TRANSACTIONAL_CONTEXT) {
-      DebugSupport.TRANSACTIONAL_CONTEXT.log(
-        "%s.close(): %s thread=%s",
-        this.getClass.getSimpleName,
-        this,
-        Thread.currentThread().getName
-      )
-    }
+    Debug.log(CloseWithSelf(this))
     _kernelExecutionContext.complete()
     _kernelExecutionContext.close()
   }
@@ -193,4 +187,6 @@ class ParallelTransactionalContextWrapper(
 
   override def createExecutionContextMemoryTracker(heapEstimatorCacheConfig: HeapEstimatorCacheConfig): MemoryTracker =
     unsupported()
+
+  override def registerTransactionResource(resource: AutoCloseable): Unit = unsupported()
 }

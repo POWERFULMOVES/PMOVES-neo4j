@@ -21,13 +21,15 @@ package org.neo4j.internal.id;
 
 import java.io.Closeable;
 import java.io.IOException;
+import org.eclipse.collections.api.set.primitive.LongSet;
 import org.neo4j.annotations.documented.ReporterFactory;
-import org.neo4j.collection.PrimitiveLongResourceCollections;
 import org.neo4j.collection.PrimitiveLongResourceIterator;
 import org.neo4j.internal.helpers.progress.ProgressMonitorFactory;
 import org.neo4j.internal.id.range.PageIdRange;
+import org.neo4j.io.async.AsyncBlockAccessor;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.context.OldestVisibilityHorizonFactory;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.kernel.impl.index.schema.ConsistencyCheckable;
 
@@ -64,11 +66,21 @@ public interface IdGenerator extends IdSequence, Closeable, ConsistencyCheckable
 
     /**
      * Reserve range of ids that cover whole page of the store
+     *
      * @param cursorContext for tracking cursor interaction.
-     * @param idsPerPage - number of ids per page in store that this generator responsible for
+     * @param idsPerPage    - number of ids per page in store that this generator is responsible for
      * @return range of reserved ids
      */
     PageIdRange nextPageRange(CursorContext cursorContext, int idsPerPage);
+
+    /**
+     * Reserves range of ids that cover whole page of the store and has no other ids already allocated inside that page
+     *
+     * @param idsPerPage    - number of ids per page in store that this generator is responsible for
+     * @param cursorContext
+     * @return range of reserved ids from empty page
+     */
+    PageIdRange nextContinuousPageRange(int idsPerPage, CursorContext cursorContext);
 
     /**
      * Release back id leftovers from previously reserved range.
@@ -77,6 +89,11 @@ public interface IdGenerator extends IdSequence, Closeable, ConsistencyCheckable
      * @param cursorContext for tracking cursor interaction.
      */
     void releasePageRange(PageIdRange range, CursorContext cursorContext);
+
+    /**
+     * Release back set of pages ids that were used by transaction to allow other transactions to allocate from those ranges.
+     */
+    void releasePageRangesLocks(LongSet pageIds, CursorContext cursorContext);
 
     /**
      * @param id the highest in use + 1
@@ -104,7 +121,12 @@ public interface IdGenerator extends IdSequence, Closeable, ConsistencyCheckable
     @Override
     void close();
 
-    void checkpoint(FileFlushEvent flushEvent, CursorContext cursorContext);
+    void checkpoint(FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext);
+
+    default long compact(
+            FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext) {
+        return 0;
+    }
 
     /**
      * Does some maintenance. This operation isn't critical for the functionality of an IdGenerator, but may make it perform better.
@@ -113,7 +135,7 @@ public interface IdGenerator extends IdSequence, Closeable, ConsistencyCheckable
      *
      * @param cursorContext underlying page cursor context
      */
-    void maintenance(CursorContext cursorContext);
+    void maintenance(CursorContext cursorContext, OldestVisibilityHorizonFactory oldestVisibilityHorizonFactory);
 
     /**
      * Starts the id generator, signaling that the database has entered normal operations mode.
@@ -159,9 +181,7 @@ public interface IdGenerator extends IdSequence, Closeable, ConsistencyCheckable
      * Allows iteration over free or deleted ids in the generator, see {@link #notUsedIdsIterator(long, long)}
      * @throws IOException
      */
-    default PrimitiveLongResourceIterator notUsedIdsIterator() throws IOException {
-        return PrimitiveLongResourceCollections.emptyIterator();
-    }
+    PrimitiveLongResourceIterator notUsedIdsIterator() throws IOException;
 
     /**
      * Allows iteration over free or deleted ids in the generator, up to highId. Items are return in sorted order
@@ -170,17 +190,17 @@ public interface IdGenerator extends IdSequence, Closeable, ConsistencyCheckable
      * @return A resource iterator. Not that this needs to be closed!
      * @throws IOException
      */
-    default PrimitiveLongResourceIterator notUsedIdsIterator(long fromIdInclusive, long toIdExclusive)
-            throws IOException {
-        return PrimitiveLongResourceCollections.emptyIterator();
-    }
+    PrimitiveLongResourceIterator notUsedIdsIterator(long fromIdInclusive, long toIdExclusive) throws IOException;
 
     /**
      * Allows iteration over free ids in the generator, see {@link #notUsedIdsIterator(long, long)}
      */
-    default PrimitiveLongResourceIterator freeIdsIterator() throws IOException {
-        return PrimitiveLongResourceCollections.emptyIterator();
-    }
+    PrimitiveLongResourceIterator freeIdsIterator() throws IOException;
+
+    /**
+     * Allows iteration over used ids in the generator.
+     */
+    PrimitiveLongResourceIterator usedIdsIterator() throws IOException;
 
     /**
      * Marks IDs as being one state or another. A typical chain of interactions:
@@ -204,16 +224,24 @@ public interface IdGenerator extends IdSequence, Closeable, ConsistencyCheckable
         void markUsed(long id, int numberOfIds);
 
         default void markDeleted(long id) {
-            markDeleted(id, 1);
+            markDeleted(id, 1, false);
         }
 
-        void markDeleted(long id, int numberOfIds);
+        void markDeleted(long id, int numberOfIds, boolean bridgeOnDelete);
+
+        default void markDeleted(long id, int numberOfIds) {
+            markDeleted(id, numberOfIds, false);
+        }
 
         default void markDeletedAndFree(long id) {
-            markDeletedAndFree(id, 1);
+            markDeletedAndFree(id, 1, false);
         }
 
-        void markDeletedAndFree(long id, int numberOfIds);
+        default void markDeletedAndFree(long id, int numberOfIds) {
+            markDeletedAndFree(id, numberOfIds, false);
+        }
+
+        void markDeletedAndFree(long id, int numberOfIds, boolean bridgeOnDelete);
 
         /**
          * For an ID that was allocated and later not committed (e.g. tx rolled back).
@@ -240,13 +268,13 @@ public interface IdGenerator extends IdSequence, Closeable, ConsistencyCheckable
             }
 
             @Override
-            public void markDeleted(long id, int numberOfIds) {
-                actual.markDeleted(id, numberOfIds);
+            public void markDeleted(long id, int numberOfIds, boolean bridgeOnDelete) {
+                actual.markDeleted(id, numberOfIds, bridgeOnDelete);
             }
 
             @Override
-            public void markDeletedAndFree(long id, int numberOfIds) {
-                actual.markDeletedAndFree(id, numberOfIds);
+            public void markDeletedAndFree(long id, int numberOfIds, boolean bridgeOnDelete) {
+                actual.markDeletedAndFree(id, numberOfIds, bridgeOnDelete);
             }
 
             @Override
@@ -349,8 +377,18 @@ public interface IdGenerator extends IdSequence, Closeable, ConsistencyCheckable
         }
 
         @Override
+        public PageIdRange nextContinuousPageRange(int idsPerPage, CursorContext cursorContext) {
+            return delegate.nextContinuousPageRange(idsPerPage, cursorContext);
+        }
+
+        @Override
         public void releasePageRange(PageIdRange range, CursorContext cursorContext) {
             delegate.releasePageRange(range, cursorContext);
+        }
+
+        @Override
+        public void releasePageRangesLocks(LongSet pageIds, CursorContext cursorContext) {
+            delegate.releasePageRangesLocks(pageIds, cursorContext);
         }
 
         @Override
@@ -399,13 +437,21 @@ public interface IdGenerator extends IdSequence, Closeable, ConsistencyCheckable
         }
 
         @Override
-        public void checkpoint(FileFlushEvent fileFlushEvent, CursorContext cursorContext) {
-            delegate.checkpoint(fileFlushEvent, cursorContext);
+        public void checkpoint(
+                FileFlushEvent fileFlushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext) {
+            delegate.checkpoint(fileFlushEvent, asyncBlockAccessor, cursorContext);
         }
 
         @Override
-        public void maintenance(CursorContext cursorContext) {
-            delegate.maintenance(cursorContext);
+        public long compact(
+                FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext) {
+            return delegate.compact(flushEvent, asyncBlockAccessor, cursorContext);
+        }
+
+        @Override
+        public void maintenance(
+                CursorContext cursorContext, OldestVisibilityHorizonFactory oldestVisibilityHorizonFactory) {
+            delegate.maintenance(cursorContext, oldestVisibilityHorizonFactory);
         }
 
         @Override
@@ -450,12 +496,26 @@ public interface IdGenerator extends IdSequence, Closeable, ConsistencyCheckable
         }
 
         @Override
+        public PrimitiveLongResourceIterator freeIdsIterator() throws IOException {
+            return delegate.freeIdsIterator();
+        }
+
+        @Override
+        public PrimitiveLongResourceIterator usedIdsIterator() throws IOException {
+            return delegate.usedIdsIterator();
+        }
+
+        @Override
         public boolean consistencyCheck(
                 ReporterFactory reporterFactory,
                 CursorContextFactory contextFactory,
                 int numThreads,
                 ProgressMonitorFactory progressMonitorFactory) {
             return delegate.consistencyCheck(reporterFactory, contextFactory, numThreads, progressMonitorFactory);
+        }
+
+        public IdGenerator delegate() {
+            return delegate;
         }
     }
 
@@ -467,10 +527,10 @@ public interface IdGenerator extends IdSequence, Closeable, ConsistencyCheckable
         public void markUsed(long id, int numberOfIds) {}
 
         @Override
-        public void markDeleted(long id, int numberOfIds) {}
+        public void markDeleted(long id, int numberOfIds, boolean bridgeOnDelete) {}
 
         @Override
-        public void markDeletedAndFree(long id, int numberOfIds) {}
+        public void markDeletedAndFree(long id, int numberOfIds, boolean bridgeOnDelete) {}
 
         @Override
         public void markUnallocated(long id, int numberOfIds) {}

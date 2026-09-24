@@ -36,24 +36,26 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.Optional;
 import java.util.function.Consumer;
 import org.apache.commons.lang3.mutable.MutableBoolean;
 import org.junit.jupiter.api.Test;
 import org.mockito.stubbing.Answer;
+import org.neo4j.gqlstatus.GqlHelper;
 import org.neo4j.graphdb.Label;
 import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.Relationship;
 import org.neo4j.graphdb.RelationshipType;
 import org.neo4j.graphdb.ResourceIterable;
 import org.neo4j.graphdb.Transaction;
-import org.neo4j.graphdb.TransactionTerminatedException;
+import org.neo4j.graphdb.TransactionTerminatedHelper;
 import org.neo4j.graphdb.TransientFailureException;
 import org.neo4j.internal.kernel.api.SchemaRead;
 import org.neo4j.internal.kernel.api.TokenRead;
 import org.neo4j.internal.kernel.api.exceptions.TransactionFailureException;
 import org.neo4j.kernel.api.KernelTransaction;
-import org.neo4j.kernel.api.KernelTransaction.KernelTransactionMonitor;
+import org.neo4j.kernel.api.KernelTransaction.Monitor;
 import org.neo4j.kernel.api.ResourceTracker;
 import org.neo4j.kernel.api.exceptions.ResourceCloseFailureException;
 import org.neo4j.kernel.api.exceptions.Status;
@@ -62,6 +64,8 @@ import org.neo4j.kernel.impl.coreapi.DefaultTransactionExceptionMapper;
 import org.neo4j.kernel.impl.coreapi.TransactionImpl;
 import org.neo4j.kernel.impl.query.QueryExecutionEngine;
 import org.neo4j.kernel.impl.query.TransactionalContextFactory;
+import org.neo4j.logging.NullLogProvider;
+import org.neo4j.monitoring.ExceptionHandlerService;
 import org.neo4j.token.TokenHolders;
 import org.neo4j.values.ElementIdMapper;
 
@@ -77,8 +81,10 @@ class TransactionImplTest {
         // GIVEN
         KernelTransaction kernelTransaction = mock(KernelTransaction.class);
         when(kernelTransaction.isOpen()).thenReturn(true);
-        doThrow(new TransactionFailureException(
-                        Status.Transaction.ConstraintsChanged, "Proving that transaction does the right thing"))
+        doThrow(TransactionFailureException.internalError(
+                        Status.Transaction.ConstraintsChanged,
+                        this.getClass().getSimpleName(),
+                        "Proving that transaction does the right thing"))
                 .when(kernelTransaction)
                 .commit();
         TransactionImpl transaction = createTransaction(kernelTransaction);
@@ -108,7 +114,8 @@ class TransactionImplTest {
         // GIVEN
         KernelTransaction kernelTransaction = mock(KernelTransaction.class);
         when(kernelTransaction.isOpen()).thenReturn(true);
-        doThrow(new TransientFailureException("Just a random failure") {
+        var dummyGql = GqlHelper.get50N00(this.getClass().getSimpleName(), "Just a random failure");
+        doThrow(new TransientFailureException(dummyGql, "Just a random failure") {
                     @Override
                     public Status status() {
                         return null;
@@ -127,7 +134,7 @@ class TransactionImplTest {
     void shouldShowTransactionTerminatedExceptionAsTransient() throws Exception {
         KernelTransaction kernelTransaction = mock(KernelTransaction.class);
         doReturn(true).when(kernelTransaction).isOpen();
-        RuntimeException error = new TransactionTerminatedException(Status.Transaction.Terminated);
+        RuntimeException error = TransactionTerminatedHelper.transactionTerminated(Status.Transaction.Terminated);
         doThrow(error).when(kernelTransaction).commit();
         TransactionImpl transaction = createTransaction(kernelTransaction);
 
@@ -172,7 +179,8 @@ class TransactionImplTest {
         doThrow(new ResourceCloseFailureException("not so fast", null))
                 .when(resourceTracker)
                 .closeAllCloseableResources();
-        var exceptionFromClose = new TransactionFailureException("This transaction can't be closed", null);
+        var exceptionFromClose = TransactionFailureException.internalError(
+                this.getClass().getSimpleName(), "This transaction can't be closed", null);
         doThrow(exceptionFromClose).when(kernelTransaction).close();
 
         assertThatThrownBy(tx::close)
@@ -310,19 +318,18 @@ class TransactionImplTest {
         // GIVEN
         // Mock that forward commit calls to the given monitor
         KernelTransaction kernelTransaction = mock(KernelTransaction.class);
-        when(kernelTransaction.commit(any(KernelTransactionMonitor.class)))
-                .thenAnswer((Answer<Long>) invocationOnMock -> {
-                    var monitor = (KernelTransactionMonitor) invocationOnMock.getArgument(0);
-                    monitor.beforeApply();
-                    return -1L;
-                });
+        when(kernelTransaction.commit(any(Monitor.class))).thenAnswer((Answer<Long>) invocationOnMock -> {
+            var monitor = (Monitor) invocationOnMock.getArgument(0);
+            monitor.beforeApply();
+            return -1L;
+        });
 
         // a TransactionImpl
         TransactionImpl transaction = createTransaction(kernelTransaction);
 
         // and a monitor that simulates a tx-failure + rollback inside of commit
         var monitorCalled = new MutableBoolean();
-        var monitor = KernelTransactionMonitor.withBeforeApply(() -> {
+        var monitor = Monitor.withBeforeApply(() -> {
             monitorCalled.setTrue();
             transaction.rollback();
         });
@@ -360,6 +367,9 @@ class TransactionImplTest {
                 null,
                 DefaultTransactionExceptionMapper.INSTANCE,
                 mock(ElementIdMapper.class),
-                null);
+                null,
+                List.of(),
+                NullLogProvider.getInstance(),
+                new ExceptionHandlerService(NullLogProvider.getInstance()));
     }
 }

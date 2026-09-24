@@ -24,10 +24,9 @@ import static org.junit.jupiter.api.Assertions.fail;
 import static org.neo4j.internal.helpers.collection.Iterators.asSet;
 import static org.neo4j.internal.kernel.api.IndexQueryConstraints.unconstrained;
 import static org.neo4j.internal.schema.SchemaDescriptors.forLabel;
-import static org.neo4j.io.memory.ByteBufferFactory.heapBufferFactory;
 import static org.neo4j.kernel.impl.index.schema.IndexUsageTracking.NO_USAGE_TRACKING;
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
-import static org.neo4j.storageengine.api.IndexEntryUpdate.add;
+import static org.neo4j.storageengine.api.EagerValueIndexEntryUpdate.add;
 
 import java.util.Arrays;
 import org.eclipse.collections.api.factory.Sets;
@@ -39,6 +38,7 @@ import org.neo4j.internal.schema.IndexPrototype;
 import org.neo4j.internal.schema.StorageEngineIndexingBehaviour;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.kernel.api.exceptions.index.IndexEntryConflictException;
+import org.neo4j.kernel.api.schema.SchemaTestUtil;
 import org.neo4j.kernel.impl.api.index.IndexSamplingConfig;
 import org.neo4j.kernel.impl.api.index.PhaseTracker;
 import org.neo4j.kernel.impl.index.schema.NodeValueIterator;
@@ -55,7 +55,7 @@ abstract class CompositeIndexPopulatorCompatibility extends PropertyIndexProvide
 
     abstract static class General extends CompositeIndexPopulatorCompatibility {
         General(PropertyIndexProviderCompatibilityTestSuite testSuite) {
-            super(testSuite, IndexPrototype.forSchema(forLabel(1000, 100, 200)));
+            super(testSuite, IndexPrototype.forSchema(forLabel(1000, 0, 1)));
         }
 
         @Test
@@ -66,7 +66,7 @@ abstract class CompositeIndexPopulatorCompatibility extends PropertyIndexProvide
                     indexProvider.getPopulator(
                             descriptor,
                             indexSamplingConfig,
-                            heapBufferFactory(1024),
+                            SchemaTestUtil.defaultHeapBufferFactory(),
                             INSTANCE,
                             tokenNameLookup,
                             ElementIdMapper.PLACEHOLDER,
@@ -91,8 +91,9 @@ abstract class CompositeIndexPopulatorCompatibility extends PropertyIndexProvide
                     reader.query(
                             nodes,
                             QueryContext.NULL_CONTEXT,
+                            CursorContext.NULL_CONTEXT,
                             unconstrained(),
-                            PropertyIndexQuery.exact(1, "v1"),
+                            PropertyIndexQuery.exact(0, "v1"),
                             PropertyIndexQuery.exact(1, "v2"));
                     assertEquals(asSet(1L, 2L), PrimitiveLongCollections.toSet(nodes));
                 }
@@ -101,14 +102,14 @@ abstract class CompositeIndexPopulatorCompatibility extends PropertyIndexProvide
     }
 
     abstract static class Unique extends CompositeIndexPopulatorCompatibility {
-        Value value1 = Values.of("value1");
-        Value value2 = Values.of("value2");
-        Value value3 = Values.of("value3");
-        int nodeId1 = 3;
-        int nodeId2 = 4;
+        static final Value VALUE_1 = Values.of("value1");
+        static final Value VALUE_2 = Values.of("value2");
+        static final Value VALUE_3 = Values.of("value3");
+        static final int NODE_ID_1 = 3;
+        static final int NODE_ID_2 = 4;
 
         Unique(PropertyIndexProviderCompatibilityTestSuite testSuite) {
-            super(testSuite, IndexPrototype.uniqueForSchema(forLabel(1000, 100, 200)));
+            super(testSuite, IndexPrototype.uniqueForSchema(forLabel(1000, 0, 1)));
         }
 
         @Test
@@ -119,7 +120,7 @@ abstract class CompositeIndexPopulatorCompatibility extends PropertyIndexProvide
                     indexProvider.getPopulator(
                             descriptor,
                             indexSamplingConfig,
-                            heapBufferFactory(1024),
+                            SchemaTestUtil.defaultHeapBufferFactory(),
                             INSTANCE,
                             tokenNameLookup,
                             ElementIdMapper.PLACEHOLDER,
@@ -129,8 +130,8 @@ abstract class CompositeIndexPopulatorCompatibility extends PropertyIndexProvide
                         try {
                             p.add(
                                     Arrays.asList(
-                                            add(nodeId1, descriptor, value1, value2),
-                                            add(nodeId2, descriptor, value1, value2)),
+                                            add(NODE_ID_1, descriptor, VALUE_1, VALUE_2),
+                                            add(NODE_ID_2, descriptor, VALUE_1, VALUE_2)),
                                     CursorContext.NULL_CONTEXT);
                             p.scanCompleted(
                                     PhaseTracker.nullInstance, populationWorkScheduler, CursorContext.NULL_CONTEXT);
@@ -139,9 +140,9 @@ abstract class CompositeIndexPopulatorCompatibility extends PropertyIndexProvide
                         }
                         // then
                         catch (IndexEntryConflictException conflict) {
-                            assertEquals(nodeId1, conflict.getExistingEntityId());
-                            assertEquals(ValueTuple.of(value1, value2), conflict.getPropertyValues());
-                            assertEquals(nodeId2, conflict.getAddedEntityId());
+                            assertEquals(NODE_ID_1, conflict.getExistingEntityId());
+                            assertEquals(ValueTuple.of(VALUE_1, VALUE_2), conflict.getPropertyValues());
+                            assertEquals(NODE_ID_2, conflict.getAddedEntityId());
                         }
                     },
                     false);
@@ -155,7 +156,7 @@ abstract class CompositeIndexPopulatorCompatibility extends PropertyIndexProvide
                     indexProvider.getPopulator(
                             descriptor,
                             indexSamplingConfig,
-                            heapBufferFactory(1024),
+                            SchemaTestUtil.defaultHeapBufferFactory(),
                             INSTANCE,
                             tokenNameLookup,
                             ElementIdMapper.PLACEHOLDER,
@@ -164,8 +165,8 @@ abstract class CompositeIndexPopulatorCompatibility extends PropertyIndexProvide
                     p -> {
                         p.add(
                                 Arrays.asList(
-                                        add(nodeId1, descriptor, value1, value2),
-                                        add(nodeId2, descriptor, value1, value3)),
+                                        add(NODE_ID_1, descriptor, VALUE_1, VALUE_2),
+                                        add(NODE_ID_2, descriptor, VALUE_1, VALUE_3)),
                                 CursorContext.NULL_CONTEXT);
                         p.scanCompleted(PhaseTracker.nullInstance, populationWorkScheduler, CursorContext.NULL_CONTEXT);
                     });

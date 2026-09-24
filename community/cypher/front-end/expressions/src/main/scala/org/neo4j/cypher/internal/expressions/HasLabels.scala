@@ -42,14 +42,67 @@ trait DynamicLabelsOrTypeExpressions extends LabelOrTypeCheckExpression {
   def labelsOrTypes: Seq[Expression]
 }
 
+trait HasLabelsExpression extends LabelCheckExpression {
+  def hasLabels: HasLabels
+}
+
+case class ImpliedLabel(hasLabels: HasLabels)(val position: InputPosition) extends HasLabelsExpression {
+  override def expression: Expression = hasLabels
+}
+
 /**
  * Checks if expression has all labels
  */
-case class HasLabels(expression: Expression, labels: Seq[LabelName])(val position: InputPosition)
-    extends LabelCheckExpression {
+case class HasLabels(expression: Expression, labels: Seq[LabelName])(
+  val position: InputPosition,
+  val isPostfix: Boolean = HasLabels.isPostfixDefault
+) extends HasLabelsExpression {
 
   override def asCanonicalStringVal =
     s"${expression.asCanonicalStringVal}${labels.map(_.asCanonicalStringVal).mkString(":", ":", "")}"
+
+  override def hasLabels: HasLabels = this
+
+  override def dup(children: Seq[AnyRef]): this.type =
+    children.size match {
+      case 2 =>
+        HasLabels(
+          children.head.asInstanceOf[Expression],
+          children(1).asInstanceOf[Seq[LabelName]]
+        )(position, isPostfix).asInstanceOf[this.type]
+      case 3 =>
+        HasLabels(
+          children.head.asInstanceOf[Expression],
+          children(1).asInstanceOf[Seq[LabelName]]
+        )(
+          children(2).asInstanceOf[InputPosition],
+          isPostfix
+        ).asInstanceOf[this.type]
+      case 4 =>
+        HasLabels(
+          children.head.asInstanceOf[Expression],
+          children(1).asInstanceOf[Seq[LabelName]]
+        )(
+          children(2).asInstanceOf[InputPosition],
+          children(3).asInstanceOf[Boolean]
+        ).asInstanceOf[this.type]
+      case _ => throw new IllegalStateException("HasLabels has at least 2 and at most 4 children.")
+    }
+}
+
+object HasLabels {
+  val isPostfixDefault: Boolean = false
+}
+
+/**
+ * Helper object to express that we assume only one label to be present in a `HasLabels`
+ */
+object HasLabel {
+
+  def unapply(arg: HasLabels): Option[(Expression, LabelName)] = arg match {
+    case HasLabels(expr, Seq(label)) => Some((expr, label))
+    case _                           => None
+  }
 }
 
 /**

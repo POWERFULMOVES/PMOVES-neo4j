@@ -21,10 +21,12 @@ package org.neo4j.cypher.internal.options
 
 import org.neo4j.configuration.Config
 import org.neo4j.configuration.GraphDatabaseInternalSettings
+import org.neo4j.configuration.GraphDatabaseInternalSettings.CypherPipelinedBatchSizePreset
 import org.neo4j.configuration.GraphDatabaseInternalSettings.HeapEstimatorCachePreset
 import org.neo4j.configuration.GraphDatabaseSettings
-import org.neo4j.cypher.internal
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.config.CypherConfiguration
+import org.neo4j.cypher.internal.options.CypherPlanMode.default
 import org.neo4j.cypher.internal.options.CypherQueryOptions.ILLEGAL_EXPRESSION_ENGINE_RUNTIME_COMBINATIONS
 import org.neo4j.cypher.internal.options.CypherQueryOptions.ILLEGAL_INTERPRETED_PIPES_FALLBACK_RUNTIME_COMBINATIONS
 import org.neo4j.cypher.internal.options.CypherQueryOptions.ILLEGAL_OPERATOR_ENGINE_RUNTIME_COMBINATIONS
@@ -38,8 +40,9 @@ import java.util.Locale
  * Collects all cypher options that can be set on query basis (pre-parser options)
  */
 case class CypherQueryOptions(
-  cypherVersion: CypherVersion,
+  cypherVersion: CypherVersionOption, // This is NOT the resolved query language, only the pre-parser option.
   executionMode: CypherExecutionMode,
+  planMode: CypherPlanMode,
   planner: CypherPlannerOption,
   runtime: CypherRuntimeOption,
   updateStrategy: CypherUpdateStrategy,
@@ -47,15 +50,21 @@ case class CypherQueryOptions(
   operatorEngine: CypherOperatorEngineOption,
   interpretedPipesFallback: CypherInterpretedPipesFallbackOption,
   replan: CypherReplanOption,
+  cache: CypherCacheOption,
   connectComponentsPlanner: CypherConnectComponentsPlannerOption,
   debugOptions: CypherDebugOptions,
   parallelRuntimeSupportOption: CypherParallelRuntimeSupportOption,
+  parallelRuntimeConfigOption: CypherParallelRuntimeConfigOption,
   eagerAnalyzer: CypherEagerAnalyzerOption,
   inferSchemaParts: CypherInferSchemaPartsOption,
   statefulShortestPlanningModeOption: CypherStatefulShortestPlanningModeOption,
   planVarExpandInto: CypherPlanVarExpandInto,
+  plannerVersionOption: CypherPlannerVersionOption,
+  pipelinedBatchSizePresetOption: CypherPipelinedBatchSizePresetOption,
   pipelinedBatchReuseOption: CypherPipelinedBatchReuseOption,
-  heapEstimatorCacheOption: CypherHeapEstimatorCacheOption
+  heapEstimatorCacheOption: CypherHeapEstimatorCacheOption,
+  transactionBatchStrategy: CypherTransactionBatchStrategyOption,
+  parallelRepeatHeuristic: CypherParallelRepeatHeuristicOption
 ) {
 
   if (ILLEGAL_EXPRESSION_ENGINE_RUNTIME_COMBINATIONS((expressionEngine, runtime)))
@@ -77,13 +86,15 @@ case class CypherQueryOptions(
   }
 
   def renderCypherOptions: String = {
-    // For Cypher query rendering purposes, execution mode and Cypher options are two separate things.
+    // For Cypher query rendering purposes, execution & plan mode and Cypher options are two separate things.
     // Default execution mode renders to nothing, so let's use it as a part of a trick for rendering
     // just Cypher options with execution mode.
-    CypherQueryOptions.renderer.render(this.copy(executionMode = CypherExecutionMode.default))
+    CypherQueryOptions.renderer.render(this.copy(executionMode = CypherExecutionMode.default, planMode = default))
   }
 
   def renderExecutionMode: String = executionMode.render
+
+  def renderPlanMode: String = planMode.render
 
   /**
    * Cache key used for executableQueryCache, astCache, and exeuctionPlanCache.
@@ -96,34 +107,78 @@ case class CypherQueryOptions(
   def logicalPlanCacheKey: String = CypherQueryOptions.logicalPlanCacheKey.logicalPlanCacheKey(this)
 }
 
+case class CypherDerivedQueryOptions(
+  pipelinedBatchSize: CypherPipelinedBatchSize,
+  heapEstimatorCacheConfig: HeapEstimatorCacheConfig
+) {
+
+  /**
+   * Cache key used for executableQueryCache, astCache, and exeuctionPlanCache.
+   */
+  def cacheKey: String = {
+    pipelinedBatchSize.cacheKey
+  }
+
+  /**
+   * Cache key used for logicalPlanCache.
+   */
+  def logicalPlanCacheKey: String = {
+    pipelinedBatchSize.cacheKey
+  }
+}
+
 object CypherQueryOptions {
 
-  private val hasDefault = OptionDefault.derive[CypherQueryOptions]
-  private val renderer = OptionRenderer.derive[CypherQueryOptions]
-  private val cacheKey = OptionCacheKey.derive[CypherQueryOptions]
-  private val logicalPlanCacheKey = OptionLogicalPlanCacheKey.derive[CypherQueryOptions]
-  private val reader = OptionReader.derive[CypherQueryOptions]
+  private val hasDefault = OptionDefault.derived[CypherQueryOptions]
+  private val renderer = OptionRenderer.derived[CypherQueryOptions]
+  private val cacheKey = OptionCacheKey.derived[CypherQueryOptions]
+  private val logicalPlanCacheKey = OptionLogicalPlanCacheKey.derived[CypherQueryOptions]
+  private val reader = OptionReader.derived[CypherQueryOptions]
 
   val defaultOptions: CypherQueryOptions = hasDefault.default
 
   def fromValues(config: CypherConfiguration, keyValues: Set[(String, String)]): CypherQueryOptions = {
     reader.read(OptionReader.Input(config, keyValues)) match {
-
       case OptionReader.Result(remainder, _) if remainder.keyValues.nonEmpty =>
-        throw InvalidCypherOption.unsupportedOptions(remainder.keyValues.map(_._1).toArray: _*)
+        throw InvalidCypherOption.unsupportedOptions(remainder.keyValues.map(_._1).toArray*)
       case OptionReader.Result(_, options) =>
-        if (options.debugOptions.generateJavaSourceEnabled && !config.allowSourceGeneration) {
-          throw InvalidCypherOption.sourceGenerationDisabled()
+        if (options.planMode.isScope && !config.enableScopeQueries) {
+          throw InvalidCypherOption.invalidOption(
+            CypherPlanMode.scope.modeName,
+            CypherPlanMode.name,
+            CypherPlanMode.plan.modeName
+          )
         }
-        if (options.cypherVersion.actualVersion.experimental && !config.enableExperimentalCypherVersions) {
+        if (options.debugOptions.generateJavaSourceEnabled && !config.allowSourceGeneration) {
+          throw InvalidCypherOption.sourceGenerationDisabled(this.getClass.getSimpleName)
+        }
+        if (options.cypherVersion.explicitVersion.exists(_.experimental) && !config.enableExperimentalCypherVersions) {
           throw InvalidCypherOption.invalidOption(
             options.cypherVersion.name,
-            CypherVersion.name,
-            CypherVersion.supportedValues.map(_.name): _*
+            CypherVersionOption.name,
+            CypherVersionOption.supportedValues.map(_.name)*
           )
         }
         options
     }
+  }
+
+  def derivedOptions(queryOptions: CypherQueryOptions, config: CypherConfiguration): CypherDerivedQueryOptions = {
+    val batchSize = CypherPipelinedBatchSizePresetOption.batchSizeConfigFrom(
+      queryOptions.pipelinedBatchSizePresetOption,
+      config.pipelinedBatchSizeSmall,
+      config.pipelinedBatchSizeBig
+    )
+    val heapEstimatorCacheConfig = CypherHeapEstimatorCacheOption.heapEstimatorCacheConfigFrom(
+      queryOptions.heapEstimatorCacheOption,
+      config
+    )
+    CypherDerivedQueryOptions(batchSize, heapEstimatorCacheConfig)
+  }
+
+  // Test-only
+  def defaultDerivedOptions: CypherDerivedQueryOptions = {
+    derivedOptions(defaultOptions, CypherConfiguration.fromConfig(Config.defaults()))
   }
 
   final private def ILLEGAL_EXPRESSION_ENGINE_RUNTIME_COMBINATIONS
@@ -173,7 +228,7 @@ sealed abstract class CypherExecutionMode(val modeName: String) extends CypherOp
   override def relevantForLogicalPlanCacheKey: Boolean = false
 }
 
-case object CypherExecutionMode extends CypherOptionCompanion[CypherExecutionMode](
+object CypherExecutionMode extends CypherOptionCompanion[CypherExecutionMode](
       name = "execution mode"
     ) {
 
@@ -199,38 +254,88 @@ case object CypherExecutionMode extends CypherOptionCompanion[CypherExecutionMod
   implicit val reader: OptionReader[CypherExecutionMode] = singleOptionReader()
 }
 
-sealed abstract class CypherVersion(val version: String) extends CypherOption(version) {
-  override def companion: CypherExecutionMode.type = CypherExecutionMode
+sealed abstract class CypherPlanMode(val modeName: String) extends CypherOption(modeName) {
+  override def companion: CypherPlanMode.type = CypherPlanMode
   override def render: String = super.render.toUpperCase(Locale.ROOT)
   override def cacheKey: String = super.cacheKey.toUpperCase(Locale.ROOT)
-  override def relevantForLogicalPlanCacheKey: Boolean = true
-  def actualVersion: org.neo4j.cypher.internal.CypherVersion
+  def isScope: Boolean = this == CypherPlanMode.scope
+
+  /** Does not affect the plan we produce. */
+  override def relevantForLogicalPlanCacheKey: Boolean = false
 }
 
-case object CypherVersion extends CypherOptionCompanion[CypherVersion](name = "cypher version") {
+object CypherPlanMode extends CypherOptionCompanion[CypherPlanMode](
+      name = "plan mode"
+    ) {
+  case object default extends CypherPlanMode("")
 
-  case object default extends CypherVersion("") {
-    override def actualVersion: internal.CypherVersion = internal.CypherVersion.Default
+  case object plan extends CypherPlanMode("PLAN") {
+    override def render: String = modeName
+    override def cacheKey: String = ""
   }
 
-  case object cypher5 extends CypherVersion("5") {
-    override def actualVersion: internal.CypherVersion = internal.CypherVersion.Cypher5
+  case object scope extends CypherPlanMode("SCOPE") {
+    override def render: String = modeName
+    override def cacheKey: String = ""
   }
 
-  case object cypher25 extends CypherVersion("25") {
-    override def actualVersion: internal.CypherVersion = internal.CypherVersion.Cypher25
-  }
+  def values: Set[CypherPlanMode] = Set(scope, plan)
 
-  override def values: Set[CypherVersion] = Set(cypher5, cypher25)
-  override def supportedValues: Seq[CypherVersion] = super.supportedValues.filterNot(_.actualVersion.experimental)
+  implicit val hasDefault: OptionDefault[CypherPlanMode] = OptionDefault.create(default)
+  implicit val renderer: OptionRenderer[CypherPlanMode] = OptionRenderer.create(_.render)
+  implicit val cacheKey: OptionCacheKey[CypherPlanMode] = OptionCacheKey.create(_.cacheKey)
 
-  implicit val hasDefault: OptionDefault[CypherVersion] = OptionDefault.create(default)
-  implicit val renderer: OptionRenderer[CypherVersion] = OptionRenderer.create(_.render)
-  implicit val cacheKey: OptionCacheKey[CypherVersion] = OptionCacheKey.create(_.cacheKey)
-
-  implicit val logicalPlanCacheKey: OptionLogicalPlanCacheKey[CypherVersion] =
+  implicit val logicalPlanCacheKey: OptionLogicalPlanCacheKey[CypherPlanMode] =
     OptionLogicalPlanCacheKey.create(_.logicalPlanCacheKey)
-  implicit val reader: OptionReader[CypherVersion] = singleOptionReader()
+  implicit val reader: OptionReader[CypherPlanMode] = singleOptionReader()
+}
+
+/**
+ * The pre-parser option to select query language, NOT the actual language to use.
+ * The final resolved language for a query depend on:
+ * - The pre-parser option (this class).
+ * - The database default language (persisted in system db).
+ * - The system default language setting, `db.query.default_language`.
+ */
+sealed abstract class CypherVersionOption(val version: String) extends CypherOption(version) {
+  override def companion: CypherExecutionMode.type = CypherExecutionMode
+  override def render: String = super.render.toUpperCase(Locale.ROOT)
+  override def cacheKey: String = "" // We include the resolved version in the cache key
+  override def relevantForLogicalPlanCacheKey: Boolean = false // We include the resolved version in the cache key
+  def fromPreParserOption: Boolean
+  def explicitVersion: Option[CypherVersion]
+}
+
+object CypherVersionOption extends CypherOptionCompanion[CypherVersionOption](name = "cypher version") {
+
+  /** No cypher version specified in pre-parser options => we should use the db default version. */
+  case object default extends CypherVersionOption("") {
+    override def fromPreParserOption: Boolean = false
+    override def explicitVersion: Option[CypherVersion] = None
+  }
+
+  case object cypher5 extends CypherVersionOption("5") {
+    override def fromPreParserOption: Boolean = true
+    override def explicitVersion: Option[CypherVersion] = Some(CypherVersion.Cypher5)
+  }
+
+  case object cypher25 extends CypherVersionOption("25") {
+    override def fromPreParserOption: Boolean = true
+    override def explicitVersion: Option[CypherVersion] = Some(CypherVersion.Cypher25)
+  }
+
+  override def values: Set[CypherVersionOption] = Set(cypher5, cypher25)
+
+  override def supportedValues: Seq[CypherVersionOption] =
+    super.supportedValues.filter(_.explicitVersion.forall(v => !v.experimental))
+
+  implicit val hasDefault: OptionDefault[CypherVersionOption] = OptionDefault.create(default)
+  implicit val renderer: OptionRenderer[CypherVersionOption] = OptionRenderer.create(_.render)
+  implicit val cacheKey: OptionCacheKey[CypherVersionOption] = OptionCacheKey.create(_.cacheKey)
+
+  implicit val logicalPlanCacheKey: OptionLogicalPlanCacheKey[CypherVersionOption] =
+    OptionLogicalPlanCacheKey.create(_.logicalPlanCacheKey)
+  implicit val reader: OptionReader[CypherVersionOption] = singleOptionReader()
 }
 
 sealed abstract class CypherPlannerOption(plannerName: String) extends CypherKeyValueOption(plannerName) {
@@ -245,7 +350,7 @@ sealed abstract class CypherPlannerOption(plannerName: String) extends CypherKey
   override def relevantForLogicalPlanCacheKey: Boolean = false
 }
 
-case object CypherPlannerOption extends CypherOptionCompanion[CypherPlannerOption](
+object CypherPlannerOption extends CypherOptionCompanion[CypherPlannerOption](
       name = "planner",
       setting = Some(GraphDatabaseSettings.cypher_planner),
       cypherConfigField = Some(_.planner)
@@ -279,7 +384,7 @@ sealed abstract class CypherRuntimeOption(runtimeName: String) extends CypherKey
   override def relevantForLogicalPlanCacheKey: Boolean = false
 }
 
-case object CypherRuntimeOption extends CypherOptionCompanion[CypherRuntimeOption](
+object CypherRuntimeOption extends CypherOptionCompanion[CypherRuntimeOption](
       name = "runtime",
       setting = Some(GraphDatabaseInternalSettings.cypher_runtime),
       cypherConfigField = Some(_.runtime)
@@ -308,7 +413,7 @@ sealed abstract class CypherUpdateStrategy(strategy: String) extends CypherKeyVa
   override def relevantForLogicalPlanCacheKey: Boolean = true
 }
 
-case object CypherUpdateStrategy extends CypherOptionCompanion[CypherUpdateStrategy](
+object CypherUpdateStrategy extends CypherOptionCompanion[CypherUpdateStrategy](
       name = "updateStrategy"
     ) {
 
@@ -331,7 +436,7 @@ sealed abstract class CypherInferSchemaPartsOption(option: String) extends Cyphe
   override def relevantForLogicalPlanCacheKey: Boolean = true
 }
 
-case object CypherInferSchemaPartsOption extends CypherOptionCompanion[CypherInferSchemaPartsOption](
+object CypherInferSchemaPartsOption extends CypherOptionCompanion[CypherInferSchemaPartsOption](
       name = "inferSchemaParts",
       setting = Some(GraphDatabaseSettings.cypher_infer_schema_parts_strategy),
       cypherConfigField = Some(_.labelInference)
@@ -361,7 +466,7 @@ sealed abstract class CypherExpressionEngineOption(engineName: String) extends C
   override def relevantForLogicalPlanCacheKey: Boolean = false
 }
 
-case object CypherExpressionEngineOption extends CypherOptionCompanion[CypherExpressionEngineOption](
+object CypherExpressionEngineOption extends CypherOptionCompanion[CypherExpressionEngineOption](
       name = "expressionEngine",
       setting = Some(GraphDatabaseInternalSettings.cypher_expression_engine),
       cypherConfigField = Some(_.expressionEngineOption)
@@ -392,7 +497,7 @@ sealed abstract class CypherOperatorEngineOption(mode: String) extends CypherKey
   override def relevantForLogicalPlanCacheKey: Boolean = false
 }
 
-case object CypherOperatorEngineOption extends CypherOptionCompanion[CypherOperatorEngineOption](
+object CypherOperatorEngineOption extends CypherOptionCompanion[CypherOperatorEngineOption](
       name = "operatorEngine",
       setting = Some(GraphDatabaseInternalSettings.cypher_operator_engine),
       cypherConfigField = Some(_.operatorEngine)
@@ -421,7 +526,7 @@ sealed abstract class CypherParallelRuntimeSupportOption(mode: String) extends C
   override def relevantForLogicalPlanCacheKey: Boolean = false
 }
 
-case object CypherParallelRuntimeSupportOption extends CypherOptionCompanion[CypherParallelRuntimeSupportOption](
+object CypherParallelRuntimeSupportOption extends CypherOptionCompanion[CypherParallelRuntimeSupportOption](
       name = "parallelRuntimeSupport",
       setting = Some(GraphDatabaseInternalSettings.cypher_parallel_runtime_support),
       cypherConfigField = Some(_.parallelRuntimeSupport)
@@ -442,6 +547,43 @@ case object CypherParallelRuntimeSupportOption extends CypherOptionCompanion[Cyp
   implicit val reader: OptionReader[CypherParallelRuntimeSupportOption] = singleOptionReader()
 }
 
+sealed abstract class CypherParallelRuntimeConfigOption(selection: String) extends CypherKeyValueOption(selection) {
+  override def companion: CypherParallelRuntimeConfigOption.type = CypherParallelRuntimeConfigOption
+
+  def leverageOrder: Boolean
+
+  /**
+   * Allowing for leveraged order will change the logical plan.
+   */
+  override def relevantForLogicalPlanCacheKey: Boolean = true
+}
+
+object CypherParallelRuntimeConfigOption extends CypherOptionCompanion[CypherParallelRuntimeConfigOption](
+      name = "parallelRuntimeConfig",
+      setting = Some(GraphDatabaseInternalSettings.parallel_runtime_config),
+      cypherConfigField = Some(_.parallel_runtime_config)
+    ) {
+
+  case object none extends CypherParallelRuntimeConfigOption("none") {
+    override def leverageOrder: Boolean = false
+  }
+
+  case object leverageOrder extends CypherParallelRuntimeConfigOption("leverageOrder") {
+    override def leverageOrder: Boolean = true
+  }
+  override def default: CypherParallelRuntimeConfigOption = none
+
+  override def values: Set[CypherParallelRuntimeConfigOption] = Set(none, leverageOrder)
+
+  implicit val hasDefault: OptionDefault[CypherParallelRuntimeConfigOption] = OptionDefault.create(default)
+  implicit val renderer: OptionRenderer[CypherParallelRuntimeConfigOption] = OptionRenderer.create(_.render)
+  implicit val cacheKey: OptionCacheKey[CypherParallelRuntimeConfigOption] = OptionCacheKey.create(_.cacheKey)
+
+  implicit val logicalPlanCacheKey: OptionLogicalPlanCacheKey[CypherParallelRuntimeConfigOption] =
+    OptionLogicalPlanCacheKey.create(_.logicalPlanCacheKey)
+  implicit val reader: OptionReader[CypherParallelRuntimeConfigOption] = singleOptionReader()
+}
+
 sealed abstract class CypherInterpretedPipesFallbackOption(mode: String) extends CypherKeyValueOption(mode) {
   override def companion: CypherInterpretedPipesFallbackOption.type = CypherInterpretedPipesFallbackOption
 
@@ -451,7 +593,7 @@ sealed abstract class CypherInterpretedPipesFallbackOption(mode: String) extends
   override def relevantForLogicalPlanCacheKey: Boolean = false
 }
 
-case object CypherInterpretedPipesFallbackOption extends CypherOptionCompanion[CypherInterpretedPipesFallbackOption](
+object CypherInterpretedPipesFallbackOption extends CypherOptionCompanion[CypherInterpretedPipesFallbackOption](
       name = "interpretedPipesFallback",
       setting = Some(GraphDatabaseInternalSettings.cypher_pipelined_interpreted_pipes_fallback),
       cypherConfigField = Some(_.interpretedPipesFallback)
@@ -483,7 +625,7 @@ sealed abstract class CypherReplanOption(strategy: String) extends CypherKeyValu
   override def relevantForLogicalPlanCacheKey: Boolean = false
 }
 
-case object CypherReplanOption extends CypherOptionCompanion[CypherReplanOption](
+object CypherReplanOption extends CypherOptionCompanion[CypherReplanOption](
       name = "replan"
     ) {
 
@@ -502,12 +644,41 @@ case object CypherReplanOption extends CypherOptionCompanion[CypherReplanOption]
   implicit val reader: OptionReader[CypherReplanOption] = singleOptionReader()
 }
 
+sealed abstract class CypherCacheOption(strategy: String) extends CypherKeyValueOption(strategy) {
+  override def companion: CypherCacheOption.type = CypherCacheOption
+  override def cacheKey: String = ""
+
+  /**
+   * This option affects caching itself and it handled outside the cache.
+   */
+  override def relevantForLogicalPlanCacheKey: Boolean = false
+}
+
+object CypherCacheOption extends CypherOptionCompanion[CypherCacheOption](
+      name = "cache"
+    ) {
+
+  case object default extends CypherCacheOption(CypherOption.DEFAULT)
+  case object force extends CypherCacheOption("force")
+  case object skip extends CypherCacheOption("skip")
+
+  def values: Set[CypherCacheOption] = Set(force, skip)
+
+  implicit val hasDefault: OptionDefault[CypherCacheOption] = OptionDefault.create(default)
+  implicit val renderer: OptionRenderer[CypherCacheOption] = OptionRenderer.create(_.render)
+  implicit val cacheKey: OptionCacheKey[CypherCacheOption] = OptionCacheKey.create(_.cacheKey)
+
+  implicit val logicalPlanCacheKey: OptionLogicalPlanCacheKey[CypherCacheOption] =
+    OptionLogicalPlanCacheKey.create(_.logicalPlanCacheKey)
+  implicit val reader: OptionReader[CypherCacheOption] = singleOptionReader()
+}
+
 sealed abstract class CypherConnectComponentsPlannerOption(planner: String) extends CypherKeyValueOption(planner) {
   override def companion: CypherConnectComponentsPlannerOption.type = CypherConnectComponentsPlannerOption
   override def relevantForLogicalPlanCacheKey: Boolean = true
 }
 
-case object CypherConnectComponentsPlannerOption extends CypherOptionCompanion[CypherConnectComponentsPlannerOption](
+object CypherConnectComponentsPlannerOption extends CypherOptionCompanion[CypherConnectComponentsPlannerOption](
       name = "connectComponentsPlanner"
     ) {
 
@@ -531,30 +702,16 @@ sealed abstract class CypherEagerAnalyzerOption(name: String) extends CypherKeyV
   override def relevantForLogicalPlanCacheKey: Boolean = true
 }
 
-case object CypherEagerAnalyzerOption extends CypherOptionCompanion[CypherEagerAnalyzerOption](
-      name = "eagerAnalyzer",
-      setting = Some(GraphDatabaseInternalSettings.cypher_eager_analysis_implementation),
-      cypherConfigField = Some(_.eagerAnalyzer)
+object CypherEagerAnalyzerOption extends CypherOptionCompanion[CypherEagerAnalyzerOption](
+      name = "eagerAnalyzer"
     ) {
 
   case object lp extends CypherEagerAnalyzerOption("lp")
   case object ir extends CypherEagerAnalyzerOption("ir")
-  case object irFromConfig extends CypherEagerAnalyzerOption("irFromConfig")
 
   override def default: CypherEagerAnalyzerOption = lp
 
   def values: Set[CypherEagerAnalyzerOption] = Set(lp, ir)
-
-  /**
-   * Read this option from config
-   */
-  override def fromConfig(configuration: Config): CypherEagerAnalyzerOption = {
-    super.fromConfig(configuration) match {
-      case CypherEagerAnalyzerOption.ir             => irFromConfig
-      case CypherEagerAnalyzerOption.`irFromConfig` => irFromConfig
-      case CypherEagerAnalyzerOption.lp             => lp
-    }
-  }
 
   implicit val hasDefault: OptionDefault[CypherEagerAnalyzerOption] = OptionDefault.create(default)
   implicit val renderer: OptionRenderer[CypherEagerAnalyzerOption] = OptionRenderer.create(_.render)
@@ -628,6 +785,150 @@ case object CypherPlanVarExpandInto
 
 }
 
+sealed abstract class CypherPlannerVersionOption(name: String) extends CypherKeyValueOption(name) {
+  override def companion: CypherPlannerVersionOption.type = CypherPlannerVersionOption
+  override def relevantForLogicalPlanCacheKey: Boolean = true
+}
+
+object CypherPlannerVersionOption extends CypherOptionCompanion[CypherPlannerVersionOption](
+      name = "plannerVersion",
+      setting = Some(GraphDatabaseInternalSettings.cypher_planner_version),
+      cypherConfigField = Some(_.plannerVersion)
+    ) {
+  case object experimental extends CypherPlannerVersionOption("experimental")
+  case object next extends CypherPlannerVersionOption("next")
+  case object v2026_05 extends CypherPlannerVersionOption("2026.05")
+  case object v2026_04 extends CypherPlannerVersionOption("2026.04")
+  case object v2026_03 extends CypherPlannerVersionOption("2026.03")
+  // New Planner version release: update the default value to the new version
+  val latest: CypherPlannerVersionOption = v2026_05
+  val LATEST_ALIAS: String = "latest"
+
+  override def default: CypherPlannerVersionOption = latest
+
+  def values: Set[CypherPlannerVersionOption] = this.supportedValues.toSet
+
+  // We want to override supported values to avoid sorting by name.
+  override def supportedValues: Seq[CypherPlannerVersionOption] = Seq(
+    experimental,
+    next,
+    v2026_05,
+    v2026_04,
+    v2026_03
+  )
+
+  // To retire a planner version, add its case object to this set. The pre-parser will then emit a
+  // RetiredPlannerVersionPreParserOption notification and the query will run with the default planner.
+  val retired: Set[CypherPlannerVersionOption] = Set(v2026_03)
+
+  private val retiredCanonicalNames: Set[String] = retired.map(v => OptionReader.canonical(v.name))
+
+  def isRetired(value: String): Boolean = retiredCanonicalNames.contains(OptionReader.canonical(value))
+
+  override def fromValue(input: String): CypherPlannerVersionOption = OptionReader.canonical(input) match {
+    case LATEST_ALIAS              => latest
+    case value if isRetired(value) => default
+    case _                         => super.fromValue(input)
+  }
+
+  implicit val hasDefault: OptionDefault[CypherPlannerVersionOption] = OptionDefault.create(default)
+  implicit val renderer: OptionRenderer[CypherPlannerVersionOption] = OptionRenderer.create(_.render)
+  implicit val cacheKey: OptionCacheKey[CypherPlannerVersionOption] = OptionCacheKey.create(_.cacheKey)
+
+  implicit val logicalPlanCacheKey: OptionLogicalPlanCacheKey[CypherPlannerVersionOption] =
+    OptionLogicalPlanCacheKey.create(_.logicalPlanCacheKey)
+  implicit val reader: OptionReader[CypherPlannerVersionOption] = singleOptionReader()
+}
+
+sealed abstract class CypherPipelinedBatchSizePresetOption(val preset: String) extends CypherKeyValueOption(preset) {
+  override def companion: CypherPipelinedBatchSizePresetOption.type = CypherPipelinedBatchSizePresetOption
+  override def cacheKey: String = "" // This is option only has effect via derivedOptionsCacheKey
+
+  override def relevantForLogicalPlanCacheKey: Boolean =
+    false // This is option only has effect via derivedOptionsCacheKey
+}
+
+object CypherPipelinedBatchSizePresetOption extends CypherOptionCompanion[CypherPipelinedBatchSizePresetOption](
+      name = "batchSizePreset",
+      setting = Some(GraphDatabaseInternalSettings.cypher_pipelined_batch_size_preset),
+      cypherConfigField = Some(_.pipelinedBatchSizePreset)
+    ) {
+  case object default extends CypherPipelinedBatchSizePresetOption("default")
+  case object disabled extends CypherPipelinedBatchSizePresetOption("disabled")
+  case object small extends CypherPipelinedBatchSizePresetOption("small")
+  case object medium extends CypherPipelinedBatchSizePresetOption("medium")
+  case object large extends CypherPipelinedBatchSizePresetOption("large")
+  case object custom extends CypherPipelinedBatchSizePresetOption("custom")
+
+  def values: Set[CypherPipelinedBatchSizePresetOption] = Set(default, disabled, small, medium, large, custom)
+
+  implicit val hasDefault: OptionDefault[CypherPipelinedBatchSizePresetOption] = OptionDefault.create(default)
+  implicit val renderer: OptionRenderer[CypherPipelinedBatchSizePresetOption] = OptionRenderer.create(_.render)
+  implicit val cacheKey: OptionCacheKey[CypherPipelinedBatchSizePresetOption] = OptionCacheKey.create(_.cacheKey)
+
+  implicit val logicalPlanCacheKey: OptionLogicalPlanCacheKey[CypherPipelinedBatchSizePresetOption] =
+    OptionLogicalPlanCacheKey.create(_.logicalPlanCacheKey)
+  implicit val reader: OptionReader[CypherPipelinedBatchSizePresetOption] = singleOptionReader()
+
+  override def fromConfig(configuration: Config): CypherPipelinedBatchSizePresetOption = {
+    configuration.get(GraphDatabaseInternalSettings.cypher_pipelined_batch_size_preset) match {
+      case CypherPipelinedBatchSizePreset.DEFAULT =>
+        CypherPipelinedBatchSizePresetOption.default
+      case CypherPipelinedBatchSizePreset.DISABLED =>
+        CypherPipelinedBatchSizePresetOption.disabled
+      case CypherPipelinedBatchSizePreset.SMALL =>
+        CypherPipelinedBatchSizePresetOption.small
+      case CypherPipelinedBatchSizePreset.MEDIUM =>
+        CypherPipelinedBatchSizePresetOption.medium
+      case CypherPipelinedBatchSizePreset.LARGE =>
+        CypherPipelinedBatchSizePresetOption.large
+      case CypherPipelinedBatchSizePreset.CUSTOM =>
+        CypherPipelinedBatchSizePresetOption.custom
+    }
+  }
+
+  // This is included in derivedOptionsCacheKey
+  def batchSizeConfigFrom(
+    option: CypherPipelinedBatchSizePresetOption,
+    defaultBatchSizeSmall: Int,
+    defaultBatchSizeBig: Int
+  ): CypherPipelinedBatchSize = {
+    option match {
+      case CypherPipelinedBatchSizePresetOption.default | CypherPipelinedBatchSizePresetOption.custom =>
+        CypherPipelinedBatchSize(defaultBatchSizeSmall, defaultBatchSizeBig)
+      case CypherPipelinedBatchSizePresetOption.disabled =>
+        CypherPipelinedBatchSize(1, 1)
+      case CypherPipelinedBatchSizePresetOption.small =>
+        CypherPipelinedBatchSize(128, 128)
+      case CypherPipelinedBatchSizePresetOption.medium =>
+        CypherPipelinedBatchSize(1024, 1024)
+      case CypherPipelinedBatchSizePresetOption.large =>
+        CypherPipelinedBatchSize(16384, 16384)
+    }
+  }
+}
+
+object CypherPipelinedBatchSize {
+
+  // Used to avoid polluting the cache key when nothing has been reconfigured.
+  final val defaultDefaultBatchSize: CypherPipelinedBatchSize =
+    CypherPipelinedBatchSize(
+      GraphDatabaseInternalSettings.cypher_pipelined_batch_size_small.defaultValue(),
+      GraphDatabaseInternalSettings.cypher_pipelined_batch_size_big.defaultValue()
+    )
+}
+
+case class CypherPipelinedBatchSize(small: Int, big: Int) {
+
+  def cacheKey: String = {
+    if (this == CypherPipelinedBatchSize.defaultDefaultBatchSize) {
+      "" // Do not pollute the cache key with default values
+    } else {
+      String.format("BatchSize(%s,%s)", small, big)
+    }
+  }
+}
+
 sealed abstract class CypherPipelinedBatchReuseOption(val preset: String) extends CypherKeyValueOption(preset) {
   override def companion: CypherPipelinedBatchReuseOption.type = CypherPipelinedBatchReuseOption
   override def cacheKey: String = "" // Does not affect the cached query
@@ -636,7 +937,7 @@ sealed abstract class CypherPipelinedBatchReuseOption(val preset: String) extend
   override def relevantForLogicalPlanCacheKey: Boolean = false
 }
 
-case object CypherPipelinedBatchReuseOption extends CypherOptionCompanion[CypherPipelinedBatchReuseOption](
+object CypherPipelinedBatchReuseOption extends CypherOptionCompanion[CypherPipelinedBatchReuseOption](
       name = "batchReuse",
       setting = Some(GraphDatabaseInternalSettings.cypher_pipelined_batch_reuse),
       cypherConfigField = Some(_.pipelinedBatchReuse)
@@ -668,7 +969,7 @@ sealed abstract class CypherHeapEstimatorCacheOption(val preset: String) extends
   override def relevantForLogicalPlanCacheKey: Boolean = false
 }
 
-case object CypherHeapEstimatorCacheOption extends CypherOptionCompanion[CypherHeapEstimatorCacheOption](
+object CypherHeapEstimatorCacheOption extends CypherOptionCompanion[CypherHeapEstimatorCacheOption](
       name = "heapEstimatorCache",
       setting = Some(GraphDatabaseInternalSettings.heap_estimator_cache_preset),
       cypherConfigField = Some(_.heapEstimatorCacheOption)
@@ -724,6 +1025,58 @@ case object CypherHeapEstimatorCacheOption extends CypherOptionCompanion[CypherH
   }
 }
 
+sealed abstract class CypherTransactionBatchStrategyOption(strategy: String) extends CypherKeyValueOption(strategy) {
+  override def companion: CypherTransactionBatchStrategyOption.type = CypherTransactionBatchStrategyOption
+  override def relevantForLogicalPlanCacheKey: Boolean = true
+}
+
+case object CypherTransactionBatchStrategyOption
+    extends CypherOptionCompanion[CypherTransactionBatchStrategyOption](
+      name = "transactionBatchStrategy",
+      setting = Some(GraphDatabaseSettings.cypher_default_subquery_transaction_batch_strategy),
+      cypherConfigField = Some(_.transactionsDefaultBatchStrategy)
+    ) {
+
+  case object default extends CypherTransactionBatchStrategyOption("default")
+  case object none extends CypherTransactionBatchStrategyOption("none")
+  case object auto extends CypherTransactionBatchStrategyOption("auto")
+
+  def values: Set[CypherTransactionBatchStrategyOption] = Set(default, none, auto)
+
+  implicit val hasDefault: OptionDefault[CypherTransactionBatchStrategyOption] = OptionDefault.create(default)
+  implicit val renderer: OptionRenderer[CypherTransactionBatchStrategyOption] = OptionRenderer.create(_.render)
+  implicit val cacheKey: OptionCacheKey[CypherTransactionBatchStrategyOption] = OptionCacheKey.create(_.cacheKey)
+
+  implicit val logicalPlanCacheKey: OptionLogicalPlanCacheKey[CypherTransactionBatchStrategyOption] =
+    OptionLogicalPlanCacheKey.create(_.logicalPlanCacheKey)
+  implicit val reader: OptionReader[CypherTransactionBatchStrategyOption] = singleOptionReader()
+}
+
+sealed abstract class CypherParallelRepeatHeuristicOption(name: String) extends CypherKeyValueOption(name) {
+  override def companion: CypherParallelRepeatHeuristicOption.type = CypherParallelRepeatHeuristicOption
+  override def relevantForLogicalPlanCacheKey: Boolean = true
+}
+
+case object CypherParallelRepeatHeuristicOption
+    extends CypherOptionCompanion[CypherParallelRepeatHeuristicOption](
+      name = "parallelRepeatHeuristic"
+    ) {
+  case object enabled extends CypherParallelRepeatHeuristicOption("enabled")
+  case object disabled extends CypherParallelRepeatHeuristicOption("disabled")
+
+  override def default: CypherParallelRepeatHeuristicOption = disabled
+
+  override def values: Set[CypherParallelRepeatHeuristicOption] = Set(enabled, disabled)
+
+  implicit val hasDefault: OptionDefault[CypherParallelRepeatHeuristicOption] = OptionDefault.create(default)
+  implicit val renderer: OptionRenderer[CypherParallelRepeatHeuristicOption] = OptionRenderer.create(_.render)
+  implicit val cacheKey: OptionCacheKey[CypherParallelRepeatHeuristicOption] = OptionCacheKey.create(_.cacheKey)
+
+  implicit val logicalPlanCacheKey: OptionLogicalPlanCacheKey[CypherParallelRepeatHeuristicOption] =
+    OptionLogicalPlanCacheKey.create(_.logicalPlanCacheKey)
+  implicit val reader: OptionReader[CypherParallelRepeatHeuristicOption] = singleOptionReader()
+}
+
 sealed abstract class CypherDebugOption(flag: String) extends CypherKeyValueOption(flag) {
   override def companion: CypherDebugOption.type = CypherDebugOption
 
@@ -733,7 +1086,7 @@ sealed abstract class CypherDebugOption(flag: String) extends CypherKeyValueOpti
   override def relevantForLogicalPlanCacheKey: Boolean = false
 }
 
-case object CypherDebugOption extends CypherOptionCompanion[CypherDebugOption](
+object CypherDebugOption extends CypherOptionCompanion[CypherDebugOption](
       name = "debug",
       cypherConfigBooleans = Map()
     ) {
@@ -756,10 +1109,13 @@ case object CypherDebugOption extends CypherOptionCompanion[CypherDebugOption](
   case object logicalPlanBuilder extends CypherDebugOption("logicalplanbuilder")
   case object rawCardinalities extends CypherDebugOption("rawcardinalities")
   case object renderDistinctness extends CypherDebugOption("renderdistinctness")
+  case object renderNestedPlanExpressions extends CypherDebugOption("rendernestedplanexpressions")
   case object warnOnCompilationErrors extends CypherDebugOption("warnoncompilationerrors")
   case object disableExistsSubqueryCaching extends CypherDebugOption("disableexistssubquerycaching")
   case object verboseEagernessReasons extends CypherDebugOption("verboseeagernessreasons")
+  case object printIDPLog extends CypherDebugOption("printidplog")
   case object disablePropertyCaching extends CypherDebugOption("disablepropertycaching")
+  case object logPlanningSteps extends CypherDebugOption("logplanningsteps")
 
   def values: Set[CypherDebugOption] = Set(
     tostring,
@@ -779,10 +1135,13 @@ case object CypherDebugOption extends CypherOptionCompanion[CypherDebugOption](
     logicalPlanBuilder,
     rawCardinalities,
     renderDistinctness,
+    renderNestedPlanExpressions,
     warnOnCompilationErrors,
     disableExistsSubqueryCaching,
     verboseEagernessReasons,
-    disablePropertyCaching
+    printIDPLog,
+    disablePropertyCaching,
+    logPlanningSteps
   )
 
   implicit val hasDefault: OptionDefault[CypherDebugOption] = OptionDefault.create(default)
@@ -839,8 +1198,11 @@ case class CypherDebugOptions(enabledOptions: Set[CypherDebugOption]) {
   val logicalPlanBuilderEnabled: Boolean = isEnabled(CypherDebugOption.logicalPlanBuilder)
   val rawCardinalitiesEnabled: Boolean = isEnabled(CypherDebugOption.rawCardinalities)
   val renderDistinctnessEnabled: Boolean = isEnabled(CypherDebugOption.renderDistinctness)
+  val renderNestedPlanExpressions: Boolean = isEnabled(CypherDebugOption.renderNestedPlanExpressions)
   val warnOnCompilationErrors: Boolean = isEnabled(CypherDebugOption.warnOnCompilationErrors)
   val disableExistsSubqueryCaching: Boolean = isEnabled(CypherDebugOption.disableExistsSubqueryCaching)
   val verboseEagernessReasons: Boolean = isEnabled(CypherDebugOption.verboseEagernessReasons)
+  val printIDPLog: Boolean = isEnabled(CypherDebugOption.printIDPLog)
   val disablePropertyCaching: Boolean = isEnabled(CypherDebugOption.disablePropertyCaching)
+  val logPlanningSteps: Boolean = isEnabled(CypherDebugOption.logPlanningSteps)
 }

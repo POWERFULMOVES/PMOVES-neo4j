@@ -38,6 +38,7 @@ import java.net.SocketException;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.ByteOrder;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.time.ZoneId;
 import java.time.zone.ZoneRulesProvider;
@@ -55,6 +56,7 @@ import org.neo4j.internal.diagnostics.DiagnosticsProvider;
 import org.neo4j.internal.nativeimpl.NativeAccess;
 import org.neo4j.internal.nativeimpl.NativeAccessProvider;
 import org.neo4j.internal.unsafe.UnsafeUtil;
+import org.neo4j.io.async.AsyncIOProvider;
 import org.neo4j.io.fs.FileUtils;
 import org.neo4j.io.os.OsBeanUtil;
 import org.neo4j.util.VisibleForTesting;
@@ -63,8 +65,8 @@ public enum SystemDiagnostics implements DiagnosticsProvider {
     SYSTEM_MEMORY("System memory information") {
         @Override
         public void dump(DiagnosticsLogger logger) {
-            logBytes(logger, "Total Physical memory: ", OsBeanUtil.getTotalPhysicalMemory());
-            logBytes(logger, "Free Physical memory: ", OsBeanUtil.getFreePhysicalMemory());
+            logBytes(logger, "Total Physical memory: ", OsBeanUtil.getTotalMemory());
+            logBytes(logger, "Free Physical memory: ", OsBeanUtil.getFreeMemory());
             logBytes(logger, "Committed virtual memory: ", OsBeanUtil.getCommittedVirtualMemory());
             logBytes(logger, "Total swap space: ", OsBeanUtil.getTotalSwapSpace());
             logBytes(logger, "Free swap space: ", OsBeanUtil.getFreeSwapSpace());
@@ -245,6 +247,8 @@ public enum SystemDiagnostics implements DiagnosticsProvider {
         public void dump(DiagnosticsLogger logger) {
             NativeAccess nativeAccess = NativeAccessProvider.getNativeAccess();
             logger.log("Native access details: " + nativeAccess.describe());
+            logger.log(
+                    "Native async IO provider: " + AsyncIOProvider.getInstance().describe());
         }
     };
 
@@ -261,19 +265,26 @@ public enum SystemDiagnostics implements DiagnosticsProvider {
 
     @VisibleForTesting
     static String canonicalize(String path) {
+        path = path.trim();
+        boolean hasWildcard = path.endsWith("*");
+        if (hasWildcard) {
+            path = path.substring(0, path.length() - 1);
+        }
+        Path filePath;
         try {
-            boolean hasWildcard = path.endsWith("*");
-            if (hasWildcard) {
-                path = path.substring(0, path.length() - 1);
-            }
+            filePath = Path.of(path);
+        } catch (InvalidPathException e) {
+            return path + " (InvalidPath: " + e.getMessage() + ")";
+        }
+        try {
             String result =
-                    FileUtils.getCanonicalFile(Path.of(path)).toAbsolutePath().toString();
+                    FileUtils.getCanonicalFile(filePath).toAbsolutePath().toString();
             if (hasWildcard) {
                 result += File.separator + "*";
             }
             return result;
         } catch (UncheckedIOException e) {
-            return Path.of(path).toAbsolutePath().toString();
+            return filePath.toAbsolutePath().toString();
         }
     }
 

@@ -20,11 +20,13 @@
 package org.neo4j.internal.batchimport.input;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import org.junit.jupiter.api.Test;
 import org.neo4j.batchimport.api.input.Group;
+import org.neo4j.csv.reader.VectorExtractor;
 import org.neo4j.test.Race;
 
 class GroupsTest {
@@ -37,7 +39,7 @@ class GroupsTest {
         for (int i = 0; i < Runtime.getRuntime().availableProcessors(); i++) {
             race.addContestant(() -> {
                 Group group = groups.getOrCreate(name);
-                assertEquals(0, group.id());
+                assertThat(group.id()).isZero();
             });
         }
 
@@ -46,7 +48,7 @@ class GroupsTest {
 
         // THEN
         Group otherGroup = groups.getOrCreate("MyOtherGroup");
-        assertThat(otherGroup.id()).isEqualTo(1);
+        assertThat(otherGroup.id()).isOne();
     }
 
     @Test
@@ -109,6 +111,77 @@ class GroupsTest {
         Groups groups = new Groups();
 
         // when
-        assertThrows(HeaderException.class, () -> groups.get("Something"));
+        assertThatExceptionOfType(HeaderException.class).isThrownBy(() -> groups.get("Something"));
+    }
+
+    @Test
+    void globalGroupIdIsNotFixedToZero() {
+        final var groups1 = new Groups();
+        final var g1_0 = groups1.getOrCreate(null);
+        assertThat(g1_0.id()).isZero();
+        final var g1_1 = groups1.getOrCreate("foo");
+        assertThat(g1_1.id()).isOne();
+        assertThat(groups1.get(0)).isEqualTo(g1_0);
+        assertThat(groups1.get(null)).isEqualTo(g1_0);
+        assertThat(groups1.get(1)).isEqualTo(g1_1);
+        assertThat(groups1.get("foo")).isEqualTo(g1_1);
+
+        final var groups2 = new Groups();
+        final var g2_0 = groups2.getOrCreate("foo");
+        assertThat(g2_0.id()).isZero();
+        final var g2_1 = groups2.getOrCreate(null);
+        assertThat(g2_1.id()).isOne();
+        assertThat(groups2.get(0)).isEqualTo(g2_0);
+        assertThat(groups2.get("foo")).isEqualTo(g2_0);
+        assertThat(groups2.get(1)).isEqualTo(g2_1);
+        assertThat(groups2.get(null)).isEqualTo(g2_1);
+    }
+
+    @Test
+    void shouldGetOnlyNonGlobalGroup() {
+        final var groups = new Groups();
+        final var g1_0 = groups.getOrCreate("foo");
+        assertThat(groups.get(0)).isEqualTo(g1_0);
+    }
+
+    @Test
+    void shouldValidateSpecificIdTypesForAGroup() {
+        var groupName = "foo";
+        var keyWithLongType = "id1";
+        var keyWithStringType = "id2";
+        var keyWithVectorType = "id3";
+        var longType = "long";
+        var stringType = "string";
+
+        var groups = new Groups();
+        var group = groups.getOrCreate(groupName);
+
+        assertThat(groups.getSpecificIdType(group, 0)).isNull();
+        assertThat(groups.getSpecificIdType(group, 1)).isNull();
+
+        assertThatCode(() -> groups.bindIdType(group, keyWithLongType, longType))
+                .doesNotThrowAnyException();
+        assertThat(groups.getSpecificIdType(group, 1)).isNull();
+
+        assertThatCode(() -> groups.bindIdType(group, keyWithLongType, longType))
+                .doesNotThrowAnyException();
+        assertThatCode(() -> groups.bindIdType(group, keyWithStringType, stringType))
+                .doesNotThrowAnyException();
+
+        assertThatThrownBy(() -> groups.bindIdType(group, keyWithLongType, stringType))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContainingAll(
+                        "Group",
+                        groupName,
+                        "has a different specific type for column",
+                        keyWithLongType,
+                        "Was created with",
+                        longType,
+                        "and later used with",
+                        stringType);
+
+        assertThatThrownBy(() -> groups.bindIdType(group, keyWithVectorType, VectorExtractor.COL_NAME))
+                .isInstanceOf(HeaderException.class)
+                .hasMessage("vector is not allowed as an id-type");
     }
 }

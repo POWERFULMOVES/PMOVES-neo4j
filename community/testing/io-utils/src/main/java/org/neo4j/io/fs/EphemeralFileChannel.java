@@ -48,6 +48,7 @@ class EphemeralFileChannel extends FileChannel implements EphemeralPositionable 
     final EphemeralFileStillOpenException openedAt;
     private final EphemeralFileData data;
     private long position;
+    private volatile Exception closedBy;
 
     EphemeralFileChannel(EphemeralFileData data, Supplier<EphemeralFileStillOpenException> opened) {
         this.data = data;
@@ -60,62 +61,70 @@ class EphemeralFileChannel extends FileChannel implements EphemeralPositionable 
         return getClass().getSimpleName() + "[" + openedAt.getFilename() + "]";
     }
 
-    private void checkIfClosedOrInterrupted() throws IOException {
+    private void checkIfClosedOrInterruptedOrMapped() throws IOException {
         if (!isOpen()) {
-            throw new ClosedChannelException();
+            ClosedChannelException closedException = new ClosedChannelException();
+            if (closedBy != null) {
+                closedException.addSuppressed(closedBy);
+            }
+            throw closedException;
         }
         if (Thread.currentThread().isInterrupted()) {
             close();
             throw new ClosedByInterruptException();
         }
+        if (data.isMapped()) {
+            throw new UnsupportedOperationException("Proper support from mapped files are not implemented. Right now "
+                    + "we only support mapping a file ONCE, then any further interactions with it will fail.");
+        }
     }
 
     @Override
     public int read(ByteBuffer dst) throws IOException {
-        checkIfClosedOrInterrupted();
+        checkIfClosedOrInterruptedOrMapped();
         return data.read(this, dst);
     }
 
     @Override
     public long read(ByteBuffer[] dsts, int offset, int length) throws IOException {
-        checkIfClosedOrInterrupted();
+        checkIfClosedOrInterruptedOrMapped();
         throw new UnsupportedOperationException();
     }
 
     @Override
     public int write(ByteBuffer src) throws IOException {
-        checkIfClosedOrInterrupted();
+        checkIfClosedOrInterruptedOrMapped();
         return data.write(this, src);
     }
 
     @Override
     public long write(ByteBuffer[] srcs, int offset, int length) throws IOException {
-        checkIfClosedOrInterrupted();
+        checkIfClosedOrInterruptedOrMapped();
         throw new UnsupportedOperationException();
     }
 
     @Override
     public long position() throws IOException {
-        checkIfClosedOrInterrupted();
+        checkIfClosedOrInterruptedOrMapped();
         return position;
     }
 
     @Override
     public FileChannel position(long newPosition) throws IOException {
-        checkIfClosedOrInterrupted();
+        checkIfClosedOrInterruptedOrMapped();
         this.position = newPosition;
         return this;
     }
 
     @Override
     public long size() throws IOException {
-        checkIfClosedOrInterrupted();
+        checkIfClosedOrInterruptedOrMapped();
         return data.size();
     }
 
     @Override
     public FileChannel truncate(long size) throws IOException {
-        checkIfClosedOrInterrupted();
+        checkIfClosedOrInterruptedOrMapped();
         data.truncate(size);
         pos(size);
         return this;
@@ -123,7 +132,7 @@ class EphemeralFileChannel extends FileChannel implements EphemeralPositionable 
 
     @Override
     public void force(boolean metaData) throws IOException {
-        checkIfClosedOrInterrupted();
+        checkIfClosedOrInterruptedOrMapped();
         // Otherwise no forcing of an in-memory file
         data.force();
     }
@@ -135,7 +144,7 @@ class EphemeralFileChannel extends FileChannel implements EphemeralPositionable 
 
     @Override
     public long transferFrom(ReadableByteChannel src, long position, long count) throws IOException {
-        checkIfClosedOrInterrupted();
+        checkIfClosedOrInterruptedOrMapped();
         long previousPos = position();
         position(position);
         try {
@@ -160,25 +169,26 @@ class EphemeralFileChannel extends FileChannel implements EphemeralPositionable 
 
     @Override
     public int read(ByteBuffer dst, long position) throws IOException {
-        checkIfClosedOrInterrupted();
+        checkIfClosedOrInterruptedOrMapped();
         return data.read(new EphemeralLocalPosition(position), dst);
     }
 
     @Override
     public int write(ByteBuffer src, long position) throws IOException {
-        checkIfClosedOrInterrupted();
+        checkIfClosedOrInterruptedOrMapped();
         return data.write(new EphemeralLocalPosition(position), src);
     }
 
     @Override
     public MappedByteBuffer map(MapMode mode, long position, long size) throws IOException {
-        checkIfClosedOrInterrupted();
-        throw new IOException("Not supported");
+        checkIfClosedOrInterruptedOrMapped();
+        data.setIsMapped();
+        return (MappedByteBuffer) ByteBuffer.allocateDirect(toIntExact(size));
     }
 
     @Override
     public java.nio.channels.FileLock lock(long position, long size, boolean shared) throws IOException {
-        checkIfClosedOrInterrupted();
+        checkIfClosedOrInterruptedOrMapped();
         if (data.takeLock()) {
             return new EphemeralFileLock(this, data);
         }
@@ -195,6 +205,7 @@ class EphemeralFileChannel extends FileChannel implements EphemeralPositionable 
 
     @Override
     protected void implCloseChannel() {
+        closedBy = new Exception("Closed by thread " + Thread.currentThread().getName());
         data.close(this);
     }
 

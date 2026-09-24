@@ -32,6 +32,7 @@ import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_CONSENSUS_I
 import static org.neo4j.storageengine.api.txstate.TxStateVisitor.NO_DECORATION;
 
 import java.io.IOException;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -46,7 +47,6 @@ import org.neo4j.internal.recordstorage.Command.NodeCommand;
 import org.neo4j.internal.recordstorage.Commands;
 import org.neo4j.internal.recordstorage.RecordStorageEngine;
 import org.neo4j.internal.schema.AllIndexProviderDescriptors;
-import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.LabelSchemaDescriptor;
 import org.neo4j.internal.schema.SchemaDescriptors;
 import org.neo4j.io.fs.DefaultFileSystemAbstraction;
@@ -62,14 +62,12 @@ import org.neo4j.kernel.impl.api.txid.TransactionIdGenerator;
 import org.neo4j.kernel.impl.store.NeoStores;
 import org.neo4j.kernel.impl.store.NodeStore;
 import org.neo4j.kernel.impl.transaction.SimpleTransactionIdStore;
-import org.neo4j.kernel.impl.transaction.log.CompleteCommandBatch;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
-import org.neo4j.kernel.impl.transaction.log.TransactionCommitmentFactory;
 import org.neo4j.lock.LockTracer;
 import org.neo4j.lock.ResourceLocker;
 import org.neo4j.storageengine.api.CommandCreationContext;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
 import org.neo4j.storageengine.api.IndexUpdateListener;
+import org.neo4j.storageengine.api.Leases;
 import org.neo4j.storageengine.api.StorageCommand;
 import org.neo4j.storageengine.api.StorageEngineTransaction;
 import org.neo4j.storageengine.api.StorageReader;
@@ -83,6 +81,9 @@ import org.neo4j.test.storage.RecordStorageEngineSupport;
 import org.neo4j.test.utils.TestDirectory;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.Values;
+import org.neo4j.wal.CompleteCommandBatch;
+import org.neo4j.wal.LogPosition;
+import org.neo4j.wal.TransactionCommitmentFactory;
 
 @PageCacheExtension
 class IndexWorkSyncTransactionApplicationStressIT {
@@ -133,7 +134,8 @@ class IndexWorkSyncTransactionApplicationStressIT {
                             storageCursors,
                             commitmentFactory,
                             transactionIdGenerator),
-                    EXTERNAL);
+                    EXTERNAL,
+                    INSTANCE);
         }
 
         // WHEN
@@ -161,7 +163,15 @@ class IndexWorkSyncTransactionApplicationStressIT {
             TransactionCommitmentFactory commitmentFactory,
             TransactionIdGenerator transactionIdGenerator) {
         CompleteCommandBatch txRepresentation = new CompleteCommandBatch(
-                commands, UNKNOWN_CONSENSUS_INDEX, -1, -1, -1, -1, LatestVersions.LATEST_KERNEL_VERSION, ANONYMOUS);
+                commands,
+                UNKNOWN_CONSENSUS_INDEX,
+                -1,
+                -1,
+                -1,
+                -1,
+                Leases.NO_LEASES,
+                LatestVersions.LATEST_KERNEL_VERSION,
+                ANONYMOUS);
         CompleteTransaction tx = new CompleteTransaction(
                 txRepresentation,
                 NULL_CONTEXT,
@@ -206,7 +216,7 @@ class IndexWorkSyncTransactionApplicationStressIT {
         @Override
         public void run() {
             try (StorageReader reader = storageEngine.newReader();
-                    CommandCreationContext creationContext = storageEngine.newCommandCreationContext(false);
+                    CommandCreationContext creationContext = storageEngine.newCommandCreationContext(false, INSTANCE);
                     var storeCursors = storageEngine.createStorageCursors(NULL_CONTEXT)) {
                 creationContext.initialize(
                         LatestVersions.LATEST_KERNEL_VERSION_PROVIDER,
@@ -217,7 +227,7 @@ class IndexWorkSyncTransactionApplicationStressIT {
                         () -> LockTracer.NONE);
                 TransactionQueue queue = new TransactionQueue(batchSize, tx -> {
                     // Apply
-                    storageEngine.apply(tx, EXTERNAL);
+                    storageEngine.apply(tx, EXTERNAL, INSTANCE);
 
                     // And verify that all nodes are in the index
                     verifyIndex(tx);
@@ -292,15 +302,14 @@ class IndexWorkSyncTransactionApplicationStressIT {
         private final ConcurrentMap<Value, Set<Long>> index = new ConcurrentHashMap<>();
 
         @Override
-        public void applyUpdates(
-                Iterable<IndexEntryUpdate<IndexDescriptor>> updates, CursorContext cursorContext, boolean parallel) {
-            updates.forEach(rawUpdate -> {
-                // Only additions assumed
+        public void applyUpdates(Iterator<IndexEntryUpdate> updates, CursorContext cursorContext, boolean parallel) {
+            while (updates.hasNext()) {
+                var rawUpdate = updates.next();
                 assert rawUpdate.updateMode() == UpdateMode.ADDED;
-                ValueIndexEntryUpdate<?> update = (ValueIndexEntryUpdate<?>) rawUpdate;
+                var update = (ValueIndexEntryUpdate) rawUpdate;
                 index.computeIfAbsent(update.values()[0], value -> ConcurrentHashMap.newKeySet())
                         .add(update.getEntityId());
-            });
+            }
         }
 
         void assertHasIndexEntry(Value value, long entityId) {

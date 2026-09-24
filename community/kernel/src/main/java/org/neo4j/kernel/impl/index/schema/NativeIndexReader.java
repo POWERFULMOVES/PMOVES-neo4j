@@ -34,6 +34,7 @@ import org.neo4j.internal.kernel.api.PropertyIndexQuery;
 import org.neo4j.internal.kernel.api.PropertyIndexQuery.IncomparableExactPredicate;
 import org.neo4j.internal.kernel.api.PropertyIndexQuery.IncomparableRangePredicate;
 import org.neo4j.internal.kernel.api.QueryContext;
+import org.neo4j.internal.kernel.api.exceptions.schema.IndexNotApplicableKernelException;
 import org.neo4j.internal.kernel.api.exceptions.schema.IndexNotFoundKernelException;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexOrder;
@@ -42,6 +43,8 @@ import org.neo4j.io.pagecache.impl.FileIsNotMappedException;
 import org.neo4j.kernel.api.index.IndexProgressor;
 import org.neo4j.kernel.api.index.IndexSampler;
 import org.neo4j.kernel.api.index.ValueIndexReader;
+import org.neo4j.logging.Log;
+import org.neo4j.logging.LogProvider;
 import org.neo4j.util.Preconditions;
 import org.neo4j.values.storable.Value;
 
@@ -50,16 +53,19 @@ abstract class NativeIndexReader<KEY extends NativeIndexKey<KEY>> implements Val
     protected final IndexUsageTracking usageTracker;
     final IndexLayout<KEY> layout;
     final GBPTree<KEY, NullValue> tree;
+    protected final Log log;
 
     NativeIndexReader(
             GBPTree<KEY, NullValue> tree,
             IndexLayout<KEY> layout,
             IndexDescriptor descriptor,
-            IndexUsageTracking usageTracker) {
+            IndexUsageTracking usageTracker,
+            LogProvider logProvider) {
         this.tree = tree;
         this.layout = layout;
         this.descriptor = descriptor;
         this.usageTracker = usageTracker;
+        this.log = logProvider.getLog(getClass());
     }
 
     @Override
@@ -116,12 +122,13 @@ abstract class NativeIndexReader<KEY extends NativeIndexKey<KEY>> implements Val
     @Override
     public void query(
             IndexProgressor.EntityValueClient cursor,
-            QueryContext context,
+            QueryContext queryContext,
+            CursorContext cursorContext,
             IndexQueryConstraints constraints,
-            PropertyIndexQuery... predicates) {
+            PropertyIndexQuery... predicates)
+            throws IndexNotApplicableKernelException {
         validateQuery(constraints, predicates);
-        context.monitor().queried(descriptor);
-        usageTracker.queried();
+        reportIndexQueried(queryContext, predicates);
 
         KEY treeKeyFrom = layout.newKey();
         KEY treeKeyTo = layout.newKey();
@@ -129,15 +136,19 @@ abstract class NativeIndexReader<KEY extends NativeIndexKey<KEY>> implements Val
 
         boolean needFilter = initializeRangeForQuery(treeKeyFrom, treeKeyTo, predicates);
         startSeekForInitializedRange(
-                cursor, treeKeyFrom, treeKeyTo, context.cursorContext(), needFilter, constraints, predicates);
+                cursor, treeKeyFrom, treeKeyTo, cursorContext, needFilter, constraints, predicates);
+    }
+
+    @Override
+    public void reportIndexQueried(QueryContext context, PropertyIndexQuery... queries) {
+        context.monitor().queried(descriptor);
+        usageTracker.queried();
     }
 
     void initializeFromToKeys(KEY treeKeyFrom, KEY treeKeyTo) {
         treeKeyFrom.initialize(Long.MIN_VALUE);
         treeKeyTo.initialize(Long.MAX_VALUE);
     }
-
-    abstract void validateQuery(IndexQueryConstraints constraints, PropertyIndexQuery... predicates);
 
     /**
      * @return true if query results from seek will need to be filtered through the predicates, else false
@@ -189,7 +200,7 @@ abstract class NativeIndexReader<KEY extends NativeIndexKey<KEY>> implements Val
         return layout.compare(treeKeyFrom, treeKeyTo) > 0;
     }
 
-    private boolean isEmptyResultQuery(PropertyIndexQuery... predicates) {
+    private static boolean isEmptyResultQuery(PropertyIndexQuery... predicates) {
         for (PropertyIndexQuery predicate : predicates) {
             if (predicate instanceof IncomparableRangePredicate || predicate instanceof IncomparableExactPredicate) {
                 return true;
@@ -201,7 +212,8 @@ abstract class NativeIndexReader<KEY extends NativeIndexKey<KEY>> implements Val
 
     @Override
     public PartitionedValueSeek valueSeek(
-            int desiredNumberOfPartitions, QueryContext queryContext, PropertyIndexQuery... query) {
+            int desiredNumberOfPartitions, QueryContext queryContext, PropertyIndexQuery... query)
+            throws IndexNotApplicableKernelException {
         try {
             return new NativePartitionedValueSeek(desiredNumberOfPartitions, queryContext, query);
         } catch (IOException e) {
@@ -217,22 +229,22 @@ abstract class NativeIndexReader<KEY extends NativeIndexKey<KEY>> implements Val
 
         NativePartitionedValueSeek(
                 int desiredNumberOfPartitions, QueryContext queryContext, PropertyIndexQuery... query)
-                throws IOException {
+                throws IOException, IndexNotApplicableKernelException {
             Preconditions.requirePositive(desiredNumberOfPartitions);
             validateQuery(IndexQueryConstraints.unorderedValues(), query);
             usageTracker.queried();
             this.query = query;
 
-            final var fromInclusive = layout.newKey();
-            final var toExclusive = layout.newKey();
+            KEY fromInclusive = layout.newKey();
+            KEY toExclusive = layout.newKey();
             initializeFromToKeys(fromInclusive, toExclusive);
 
             filter = initializeRangeForQuery(fromInclusive, toExclusive, this.query);
 
-            partitionEdges = !isEmptyResultQuery(query)
-                    ? tree.partitionedSeek(
-                            fromInclusive, toExclusive, desiredNumberOfPartitions, queryContext.cursorContext())
-                    : Collections.emptyList();
+            partitionEdges = isEmptyResultQuery(query)
+                    ? Collections.emptyList()
+                    : tree.partitionedSeek(
+                            fromInclusive, toExclusive, desiredNumberOfPartitions, queryContext.cursorContext());
         }
 
         @Override
@@ -242,14 +254,14 @@ abstract class NativeIndexReader<KEY extends NativeIndexKey<KEY>> implements Val
 
         @Override
         public IndexProgressor reservePartition(IndexProgressor.EntityValueClient client, CursorContext cursorContext) {
-            final var from = nextFrom.getAndIncrement();
-            final var to = from + 1;
+            int from = nextFrom.getAndIncrement();
+            int to = from + 1;
             if (to >= partitionEdges.size()) {
                 return IndexProgressor.EMPTY;
             }
             try {
-                final var fromInclusive = partitionEdges.get(from);
-                final var toExclusive = partitionEdges.get(to);
+                KEY fromInclusive = layout.copyKey(partitionEdges.get(from));
+                KEY toExclusive = layout.copyKey(partitionEdges.get(to));
                 return getIndexProgressor(tree.seek(fromInclusive, toExclusive, cursorContext), client, filter, query);
             } catch (IOException e) {
                 throw new UncheckedIOException(e);

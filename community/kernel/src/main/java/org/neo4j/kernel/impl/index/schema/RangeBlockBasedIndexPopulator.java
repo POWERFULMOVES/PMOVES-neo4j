@@ -27,12 +27,13 @@ import org.neo4j.common.TokenNameLookup;
 import org.neo4j.configuration.Config;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.io.memory.ByteBufferFactory;
+import org.neo4j.kernel.api.index.IndexPopulator;
 import org.neo4j.kernel.api.index.IndexValueValidator;
+import org.neo4j.logging.LogProvider;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.values.ElementIdMapper;
 
 class RangeBlockBasedIndexPopulator extends BlockBasedIndexPopulator<RangeKey> {
-    private final TokenNameLookup tokenNameLookup;
     private final ElementIdMapper elementIdMapper;
 
     RangeBlockBasedIndexPopulator(
@@ -47,7 +48,9 @@ class RangeBlockBasedIndexPopulator extends BlockBasedIndexPopulator<RangeKey> {
             TokenNameLookup tokenNameLookup,
             ElementIdMapper elementIdMapper,
             Monitor monitor,
-            ImmutableSet<OpenOption> openOptions) {
+            ImmutableSet<OpenOption> openOptions,
+            LogProvider logProvider,
+            IndexPopulator.Configuration configuration) {
         super(
                 databaseIndexContext,
                 indexFiles,
@@ -58,14 +61,16 @@ class RangeBlockBasedIndexPopulator extends BlockBasedIndexPopulator<RangeKey> {
                 config,
                 memoryTracker,
                 monitor,
-                openOptions);
-        this.tokenNameLookup = tokenNameLookup;
+                openOptions,
+                logProvider,
+                tokenNameLookup,
+                configuration);
         this.elementIdMapper = elementIdMapper;
     }
 
     @Override
     NativeIndexReader<RangeKey> newReader() {
-        return new RangeIndexReader(tree, layout, descriptor, NO_USAGE_TRACKING);
+        return new RangeIndexReader(tree, layout, descriptor, NO_USAGE_TRACKING, logProvider);
     }
 
     @Override

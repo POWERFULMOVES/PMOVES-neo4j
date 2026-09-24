@@ -34,14 +34,17 @@ import org.neo4j.graphdb.Label;
 import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.Transaction;
 import org.neo4j.internal.kernel.api.IndexMonitor;
+import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.monitoring.Monitors;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.DbmsExtension;
 import org.neo4j.test.extension.ExtensionCallback;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
 
 @DbmsExtension(configurationCallback = "configure")
+@SkipOnSpd
 class BlockBasedIndexPopulationMemoryUsageIT {
     private static final long TEST_BLOCK_SIZE = kibiBytes(64);
     private static final String[] KEYS = {"key1", "key2", "key3", "key4"};
@@ -105,25 +108,26 @@ class BlockBasedIndexPopulationMemoryUsageIT {
 
     private void someData() throws InterruptedException {
         int threads = Runtime.getRuntime().availableProcessors();
-        ExecutorService executor = Executors.newFixedThreadPool(threads);
-        for (int i = 0; i < threads; i++) {
-            executor.submit(() -> {
-                for (int t = 0; t < 100; t++) {
-                    try (Transaction tx = db.beginTx()) {
-                        for (int n = 0; n < 100; n++) {
-                            Node node = tx.createNode(LABELS);
-                            for (String key : KEYS) {
-                                node.setProperty(key, format("some value %d", n));
+        try (ExecutorService executor = Executors.newFixedThreadPool(threads)) {
+            for (int i = 0; i < threads; i++) {
+                executor.submit(() -> {
+                    for (int t = 0; t < 100; t++) {
+                        try (Transaction tx = db.beginTx()) {
+                            for (int n = 0; n < 100; n++) {
+                                Node node = tx.createNode(LABELS);
+                                for (String key : KEYS) {
+                                    node.setProperty(key, format("some value %d", n));
+                                }
                             }
+                            tx.commit();
                         }
-                        tx.commit();
                     }
-                }
-            });
-        }
-        executor.shutdown();
-        while (!executor.awaitTermination(1, SECONDS)) {
-            // Just wait longer
+                });
+            }
+            executor.shutdown();
+            while (!executor.awaitTermination(1, SECONDS)) {
+                // Just wait longer
+            }
         }
     }
 
@@ -132,7 +136,7 @@ class BlockBasedIndexPopulationMemoryUsageIT {
         private final CountDownLatch called = new CountDownLatch(1);
 
         @Override
-        public void populationJobCompleted(long peakDirectMemoryUsage) {
+        public void populationJobCompleted(long peakDirectMemoryUsage, IndexDescriptor[] indexDescriptors) {
             this.peakDirectMemoryUsage = peakDirectMemoryUsage;
             // We need a count on this one because index will come online slightly before we get a call to this method
             called.countDown();

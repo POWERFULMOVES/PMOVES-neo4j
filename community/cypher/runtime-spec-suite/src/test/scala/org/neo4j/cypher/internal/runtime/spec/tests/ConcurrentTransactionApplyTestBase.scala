@@ -20,10 +20,14 @@
 package org.neo4j.cypher.internal.runtime.spec.tests
 
 import org.neo4j.cypher.internal.CypherRuntime
+import org.neo4j.cypher.internal.LogicalQuery
 import org.neo4j.cypher.internal.RuntimeContext
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorBreak
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorContinue
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorFail
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorRetryThenContinue
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorRetryThenFail
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createNode
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createNodeWithProperties
 import org.neo4j.cypher.internal.logical.plans.Prober
@@ -31,63 +35,52 @@ import org.neo4j.cypher.internal.logical.plans.Prober.Probe
 import org.neo4j.cypher.internal.logical.plans.TransactionConcurrency
 import org.neo4j.cypher.internal.logical.plans.TransactionConcurrency.Serial
 import org.neo4j.cypher.internal.runtime.CypherRow
-import org.neo4j.cypher.internal.runtime.ExtendedQueryStatistics
 import org.neo4j.cypher.internal.runtime.spec.Edition
 import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RecordingRuntimeResult
 import org.neo4j.cypher.internal.runtime.spec.RowsMatcher
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
-import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSupport
 import org.neo4j.cypher.internal.runtime.spec.SideEffectingInputStream
 import org.neo4j.cypher.internal.runtime.spec.rewriters.TestPlanCombinationRewriter.NoRewrites
 import org.neo4j.cypher.internal.util.test_helpers.TimeLimitedCypherTest
 import org.neo4j.exceptions.CypherTypeException
 import org.neo4j.exceptions.StatusWrapCypherException
-import org.neo4j.graphdb.GraphDatabaseService
 import org.neo4j.graphdb.Label
-import org.neo4j.internal.helpers.MathUtil
 import org.neo4j.internal.helpers.collection.Iterables
 import org.neo4j.kernel.api.KernelTransaction.Type
+import org.neo4j.kernel.api.exceptions.Status
+import org.neo4j.kernel.api.exceptions.Status.HasStatus
+import org.neo4j.kernel.api.query.ExtendedQueryStatistics
 import org.neo4j.kernel.impl.coreapi.InternalTransaction
 import org.neo4j.kernel.impl.util.ValueUtils
-import org.neo4j.logging.InternalLogProvider
 import org.neo4j.test.Barrier
+import org.neo4j.values.storable.IntegralValue
 import org.neo4j.values.storable.Values
 import org.neo4j.values.storable.Values.stringValue
 import org.neo4j.values.virtual.MapValue
 import org.scalatest.LoneElement
 
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.locks.LockSupport
 
+import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.duration.MILLISECONDS
+import scala.concurrent.duration.SECONDS
 import scala.jdk.CollectionConverters.IterableHasAsScala
+
+object ConcurrentTransactionApplyTestBase
 
 abstract class ConcurrentTransactionApplyTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
   val sizeHint: Int,
-  concurrency: TransactionConcurrency = TransactionConcurrency.Serial
+  concurrency: TransactionConcurrency
 ) extends RuntimeTestSuite[CONTEXT](edition, runtime, testPlanCombinationRewriterHints = Set(NoRewrites))
     with SideEffectingInputStream[CONTEXT]
     with LoneElement
     with TimeLimitedCypherTest {
 
-  override protected def createRuntimeTestSupport(
-    graphDb: GraphDatabaseService,
-    edition: Edition[CONTEXT],
-    runtime: CypherRuntime[CONTEXT],
-    workloadMode: Boolean,
-    logProvider: InternalLogProvider
-  ): RuntimeTestSupport[CONTEXT] = {
-    new RuntimeTestSupport[CONTEXT](
-      graphDb,
-      edition,
-      runtime,
-      workloadMode,
-      logProvider,
-      debugOptions,
-      defaultTransactionType = Type.IMPLICIT
-    )
-  }
+  override protected def defaultTransactionType: Type = Type.IMPLICIT
 
   def inExpectedOrder(rows: Iterable[Array[_]]): RowsMatcher = inOrder(rows, concurrency != Serial)
 
@@ -230,8 +223,8 @@ abstract class ConcurrentTransactionApplyTestBase[CONTEXT <: RuntimeContext](
         nodesCreated = nRows,
         labelsAdded = nRows,
         propertiesSet = nRows,
-        transactionsStarted = MathUtil.ceil(nRows, nBatchSize) + 1,
-        transactionsCommitted = MathUtil.ceil(nRows, nBatchSize) + 1
+        transactionsStarted = Math.ceilDiv(nRows, nBatchSize) + 1,
+        transactionsCommitted = Math.ceilDiv(nRows, nBatchSize) + 1
       )
   }
 
@@ -403,7 +396,7 @@ abstract class ConcurrentTransactionApplyTestBase[CONTEXT <: RuntimeContext](
   test("should create data in different transactions in batches when using transactionApply") {
     val numberOfIterations = 30
     val batchSize = 7
-    val numBatches = MathUtil.ceil(numberOfIterations, batchSize)
+    val numBatches = Math.ceilDiv(numberOfIterations, batchSize)
     val inputRows = (0 until numberOfIterations).map { i =>
       Array[Any](i.toLong)
     }
@@ -649,7 +642,7 @@ abstract class ConcurrentTransactionApplyTestBase[CONTEXT <: RuntimeContext](
   test("no resource leaks with continuations on rhs") {
     val size = 10
     val relCount = givenGraph {
-      val (as, bs) = bipartiteGraph(size, "A", "B", "R")
+      val (as, _) = bipartiteGraph(size, "A", "B", "R")
       val rIdGen = new AtomicInteger(0)
       for {
         a <- as
@@ -758,7 +751,7 @@ abstract class ConcurrentTransactionApplyTestBase[CONTEXT <: RuntimeContext](
         val shouldThrow = x == 16L
         if (shouldThrow) {
           startBarrier.reached()
-          throw new CypherTypeException("I hate the number you chose")
+          throw CypherTypeException.internalError(this.getClass.getSimpleName, "I hate the number you chose")
         }
         if (shouldBeInterrupted) {
           startBarrier.await()
@@ -777,15 +770,16 @@ abstract class ConcurrentTransactionApplyTestBase[CONTEXT <: RuntimeContext](
 
     // then
     val queryStatistics = runtimeResult.runtimeResult.queryStatistics().asInstanceOf[ExtendedQueryStatistics]
-    val expectedCommitted = List.fill(queryStatistics.getTransactionsCommitted * batchSize)(Array(true, true, null))
-    val expectedFailed = List.fill(batchSize)(Array(false, true, "I hate the number you chose"))
-    val expectedInterrupted = List.fill((queryStatistics.getTransactionsRolledBack - 1) * batchSize)(Array(
+    val expectedCommitted =
+      List.fill(queryStatistics.getTransactionsCommitted.toInt * batchSize)(Array[Any](true, true, null))
+    val expectedFailed = List.fill(batchSize)(Array[Any](false, true, "I hate the number you chose"))
+    val expectedInterrupted = List.fill((queryStatistics.getTransactionsRolledBack.toInt - 1) * batchSize)(Array[Any](
       false,
       true,
       "The batch was interrupted and the transaction was rolled back because another batch failed"
     ))
     val expectedNotStarted =
-      List.fill(input.size - queryStatistics.getTransactionsStarted * batchSize)(Array(false, false, null))
+      List.fill(input.size - queryStatistics.getTransactionsStarted.toInt * batchSize)(Array[Any](false, false, null))
     val expected = expectedCommitted ++ expectedFailed ++ expectedInterrupted ++ expectedNotStarted
 
     assert(expectedFailed.nonEmpty, "No transactions failed")
@@ -816,18 +810,154 @@ abstract class ConcurrentTransactionApplyTestBase[CONTEXT <: RuntimeContext](
     exception.getMessage should include("/ by zero")
   }
 
-  protected def txAssertionProbe(assertion: InternalTransaction => Unit): Prober.Probe = {
-    new Probe {
-      override def onRow(row: AnyRef, state: AnyRef): Unit = {
-        withNewTx(assertion(_))
+  final private class TestTransientFailure(message: String) extends RuntimeException(message) with HasStatus {
+    override def status: Status = Status.Transaction.Outdated
+  }
+
+  class ErrorInjectionProbe(
+    nRows: Int,
+    errorsToThrowForRow: Int => Int, // Row number => Number of errors to inject
+    delayInNanosForRow: Int => Long, // Row number => Delay in nanos before retry
+    rowNumberFromCypherRow: AnyRef => Int // Cypher Row => Row number
+  ) extends Prober.Probe {
+    // NOTE: We assume only one thread at a time will access the same array element,
+    // and that thread visibility is guaranteed by the scheduler
+
+    val thrownCounts = new Array[Int](nRows)
+
+    override def onRow(row: AnyRef, state: AnyRef): Unit = {
+      val i = rowNumberFromCypherRow(row)
+      // print(s"Row $i on thread ${Thread.currentThread().getName}\n")
+      val delay = delayInNanosForRow(i)
+      if (delay > 0L) {
+        LockSupport.parkNanos(delay)
+      }
+      val ec = errorsToThrowForRow(i)
+      var tc = thrownCounts(i)
+      if (tc < ec) {
+        tc += 1
+        thrownCounts(i) = tc
+        val message = s"Error on row $i ($tc thrown, ${ec - tc} left) on thread ${Thread.currentThread().getName}"
+        // print(message + "\n")
+        throw new TestTransientFailure(message)
       }
     }
   }
 
-  protected def countingProbe(atomicIncr: AtomicInteger): Prober.Probe = {
+  private def getRowNumberByVariable(variableName: String): AnyRef => Int = {
+    row =>
+      row.asInstanceOf[CypherRow].getByName(variableName).asInstanceOf[IntegralValue].longValue().toInt
+  }
+
+  private def createNodePropertyTestGraph(nNodes: Int): Array[Long] = {
+    val nodeIds = new Array[Long](nNodes)
+    withNewTx(tx => {
+      (0 until nNodes).foreach { i =>
+        val node = tx.createNode()
+        node.setProperty("prop", i.toLong)
+        nodeIds(i) = node.getId
+      }
+      tx.commit()
+    })
+    nodeIds
+  }
+
+  private def createErrorTestQuery(
+    batchSize: Int,
+    errorProbe: Prober.Probe,
+    onErrorBehaviour: InTransactionsOnErrorBehaviour,
+    maybeRetryTimeout: Option[FiniteDuration]
+  ): LogicalQuery = {
+    new LogicalQueryBuilder(this)
+      .produceResults("i", "u")
+      .projection("a.u AS u")
+      .transactionApplyWithRetry(
+        batchSize = batchSize,
+        concurrency = concurrency,
+        onErrorBehaviour = onErrorBehaviour,
+        maybeRetryTimeout = maybeRetryTimeout
+      )
+      .|.setProperty("a", "u", "i * 1000")
+      .|.prober(errorProbe)
+      .|.argument("a", "i")
+      .sort("i ASC")
+      .projection("a.prop AS i")
+      .allNodeScan("a")
+      .build(readOnly = false)
+  }
+
+  test("should retry transient errors - scenario 1") {
+    val nNodes = 5
+    createNodePropertyTestGraph(nNodes)
+    val batchSize = 1
+
+    // Setup error injection
+    val errorCounts = new Array[Int](nNodes)
+    errorCounts(0) = 3
+    errorCounts(1) = 8
+    errorCounts(2) = 0
+    errorCounts(3) = 2
+    errorCounts(4) = 5
+    val delays = new Array[Long](nNodes)
+    delays(0) = MILLISECONDS.toNanos(20)
+    delays(3) = MILLISECONDS.toNanos(50)
+    delays(4) = MILLISECONDS.toNanos(1)
+
+    val errorProbe = new ErrorInjectionProbe(
+      nNodes,
+      errorCounts(_),
+      delays(_),
+      getRowNumberByVariable("i")
+    )
+
+    val retryTimeout = Some(FiniteDuration(10, SECONDS))
+    val query = createErrorTestQuery(batchSize, errorProbe, OnErrorRetryThenContinue, retryTimeout)
+
+    // then
+    val runtimeResult: RecordingRuntimeResult = execute(query, runtime)
+    val expected = (0 until nNodes).map { i =>
+      Array[Any](i.toLong, i * 1000L)
+    }
+    runtimeResult should beColumns("i", "u").withRows(expected)
+  }
+
+  test("should timeout and fallback on retrying transient errors - scenario") {
+    val nNodes = 10
+    createNodePropertyTestGraph(nNodes)
+
+    // Setup error injection
+    val errorCounts = new Array[Int](nNodes)
+    errorCounts(1) = 3
+    errorCounts(3) = 8
+    errorCounts(5) = 5
+    errorCounts(7) = 2
+    errorCounts(9) = 100
+    val delays = new Array[Long](nNodes)
+    delays(1) = MILLISECONDS.toNanos(10)
+    delays(5) = MILLISECONDS.toNanos(50)
+    delays(9) = MILLISECONDS.toNanos(1)
+
+    val errorProbe = new ErrorInjectionProbe(
+      nNodes,
+      errorCounts(_),
+      delays(_),
+      getRowNumberByVariable("i")
+    )
+
+    val retryTimeout = Some(FiniteDuration(2, SECONDS))
+    val query = createErrorTestQuery(batchSize = 2, errorProbe, OnErrorRetryThenFail, retryTimeout)
+
+    // then
+    val exception = intercept[StatusWrapCypherException] {
+      consume(execute(query, runtime))
+    }
+    exception.getMessage should include("Transaction retry aborted")
+  }
+
+  protected def txAssertionProbe(assertion: InternalTransaction => Unit): Prober.Probe = {
     new Probe {
       override def onRow(row: AnyRef, state: AnyRef): Unit = {
-        atomicIncr.getAndAdd(1)
+        withNewTx(assertion(_))
       }
     }
   }

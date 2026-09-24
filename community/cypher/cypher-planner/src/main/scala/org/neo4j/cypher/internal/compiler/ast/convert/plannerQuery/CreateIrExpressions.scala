@@ -22,10 +22,12 @@ package org.neo4j.cypher.internal.compiler.ast.convert.plannerQuery
 import org.neo4j.cypher.internal.ast.CollectExpression
 import org.neo4j.cypher.internal.ast.CountExpression
 import org.neo4j.cypher.internal.ast.ExistsExpression
+import org.neo4j.cypher.internal.ast.ScopeClauseSubqueryCall
 import org.neo4j.cypher.internal.ast.prettifier.ExpressionStringifier
 import org.neo4j.cypher.internal.ast.semantics.SemanticTable
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.QuerySolvableByGetDegree.SetExtractor
 import org.neo4j.cypher.internal.expressions.CountStar
+import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.UnPositionedVariable.varFor
 import org.neo4j.cypher.internal.ir.AggregatingQueryProjection
 import org.neo4j.cypher.internal.ir.CallSubqueryHorizon
@@ -44,14 +46,19 @@ import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.topDown
 
 case class CreateIrExpressions(
+  statementConverters: StatementConverters,
   anonymousVariableNameGenerator: AnonymousVariableNameGenerator,
   semanticTable: SemanticTable,
   cancellationChecker: CancellationChecker
 ) extends Rewriter {
   private val stringifier = ExpressionStringifier(_.asCanonicalStringVal)
 
-  private val instance: Rewriter = topDown(
+  private def instance(importedVariablesByLastCallSubquery: Seq[LogicalVariable] = Seq.empty): Rewriter = topDown(
     Rewriter.lift {
+
+      case q @ ScopeClauseSubqueryCall(innerQuery, _, importedVariables, _, _, _) =>
+        val innerRewriter = instance(importedVariables)
+        q.copy(innerQuery = innerQuery.endoRewrite(innerRewriter))(q.position)
 
       /**
      * Rewrites exists{ MATCH (n)-[anon_0]->(anon_1:M) RETURN n} into
@@ -60,7 +67,7 @@ case class CreateIrExpressions(
      */
       case existsExpression @ ExistsExpression(q) =>
         val existsVariable = varFor(anonymousVariableNameGenerator.nextName)
-        val plannerQuery = StatementConverters.convertToPlannerQuery(
+        val plannerQuery = statementConverters.convertToPlannerQuery(
           q,
           semanticTable,
           anonymousVariableNameGenerator,
@@ -80,7 +87,7 @@ case class CreateIrExpressions(
       case countExpression @ CountExpression(q) =>
         val countVariable = varFor(anonymousVariableNameGenerator.nextName)
         val arguments = countExpression.dependencies
-        val plannerQuery = StatementConverters.convertToPlannerQuery(
+        val plannerQuery = statementConverters.convertToPlannerQuery(
           q,
           semanticTable,
           anonymousVariableNameGenerator,
@@ -132,7 +139,9 @@ case class CreateIrExpressions(
                 yielding = true,
                 inTransactionsParameters = None,
                 optional = false,
-                importedVariables = arguments
+                // Keep the variables from last scoped call subquery in scope
+                importedVariables = arguments ++ importedVariablesByLastCallSubquery,
+                importedSymbolsFromLastCallSubquery = importedVariablesByLastCallSubquery.toSet
               ),
               tail = Some(
                 RegularSinglePlannerQuery(
@@ -158,7 +167,7 @@ case class CreateIrExpressions(
       case collectExpression @ CollectExpression(q) =>
         val collectVariable = varFor(anonymousVariableNameGenerator.nextName)
         val arguments = collectExpression.dependencies
-        val plannerQuery = StatementConverters.convertToPlannerQuery(
+        val plannerQuery = statementConverters.convertToPlannerQuery(
           q,
           semanticTable,
           anonymousVariableNameGenerator,
@@ -181,5 +190,5 @@ case class CreateIrExpressions(
     cancellation = cancellationChecker
   )
 
-  override def apply(input: AnyRef): AnyRef = instance.apply(input)
+  override def apply(input: AnyRef): AnyRef = instance().apply(input)
 }

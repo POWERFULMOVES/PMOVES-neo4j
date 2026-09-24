@@ -46,10 +46,12 @@ import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.kernel.api.impl.index.storage.DirectoryFactory;
 import org.neo4j.kernel.api.impl.index.storage.IndexStorageFactory;
 import org.neo4j.kernel.api.impl.index.storage.PartitionedIndexStorage;
+import org.neo4j.kernel.api.impl.schema.text.TextIndexProvider;
 import org.neo4j.kernel.api.index.IndexDirectoryStructure;
 import org.neo4j.kernel.api.index.IndexProvider;
 import org.neo4j.kernel.api.index.LoggingMonitor;
 import org.neo4j.logging.AssertableLogProvider;
+import org.neo4j.logging.NullLogProvider;
 import org.neo4j.monitoring.Monitors;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.testdirectory.EphemeralTestDirectoryExtension;
@@ -129,10 +131,16 @@ class TextIndexCorruptionTest {
         Monitors monitors = new Monitors();
         monitors.addMonitorListener(monitor);
         return new TextIndexProvider(
-                fs, directoryFactory, directoriesByProvider(indexRootFolder), monitors, Config.defaults(), readOnly()) {
+                fs,
+                directoryFactory,
+                directoriesByProvider(indexRootFolder),
+                monitors,
+                Config.defaults(),
+                readOnly(),
+                NullLogProvider.getInstance()) {
             @Override
             protected IndexStorageFactory buildIndexStorageFactory(
-                    FileSystemAbstraction fileSystem, DirectoryFactory directoryFactory) {
+                    FileSystemAbstraction fileSystem, DirectoryFactory directoryFactory, Config config) {
                 FaultyIndexStorageFactory storageFactory =
                         new FaultyIndexStorageFactory(faultyIndexId, error, directoryFactory, directoryStructure());
                 return storageFactory;
@@ -164,6 +172,8 @@ class TextIndexCorruptionTest {
                 PartitionedIndexStorage storage = mock(PartitionedIndexStorage.class);
                 when(storage.listFolders()).thenReturn(singletonList(Path.of("/some/path/somewhere/1")));
                 when(storage.openDirectory(any())).thenThrow(error);
+                when(storage.getIndexFailureFile()).thenReturn(Path.of("/a/b/c"));
+                when(storage.getIndexFolder()).thenReturn(Path.of("/a/b"));
                 return storage;
             } catch (IOException e) {
                 throw new UncheckedIOException(e);

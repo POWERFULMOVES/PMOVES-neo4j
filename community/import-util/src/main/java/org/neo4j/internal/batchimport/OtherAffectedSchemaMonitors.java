@@ -20,60 +20,42 @@
 package org.neo4j.internal.batchimport;
 
 import static org.apache.commons.lang3.ArrayUtils.EMPTY_INT_ARRAY;
-import static org.neo4j.configuration.GraphDatabaseInternalSettings.index_populator_block_size;
-import static org.neo4j.internal.batchimport.IncrementalBatchImportUtil.moveIndex;
-import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.nio.file.OpenOption;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.Consumer;
+import java.util.Optional;
+import java.util.function.IntFunction;
 import java.util.function.LongPredicate;
-import java.util.function.Supplier;
+import java.util.function.Predicate;
 import org.eclipse.collections.api.block.function.primitive.LongToLongFunction;
-import org.eclipse.collections.api.list.primitive.MutableIntList;
-import org.eclipse.collections.api.map.primitive.IntObjectMap;
-import org.eclipse.collections.api.map.primitive.MutableIntObjectMap;
+import org.eclipse.collections.api.factory.primitive.IntSets;
 import org.eclipse.collections.api.set.ImmutableSet;
 import org.eclipse.collections.api.set.primitive.LongSet;
-import org.eclipse.collections.api.set.primitive.MutableLongSet;
-import org.eclipse.collections.impl.factory.primitive.IntLists;
-import org.eclipse.collections.impl.factory.primitive.IntObjectMaps;
-import org.eclipse.collections.impl.factory.primitive.LongSets;
 import org.neo4j.batchimport.api.Configuration;
+import org.neo4j.batchimport.api.input.ApplicationMode;
 import org.neo4j.batchimport.api.input.Collector;
 import org.neo4j.common.EntityType;
 import org.neo4j.common.TokenNameLookup;
 import org.neo4j.configuration.Config;
-import org.neo4j.internal.helpers.progress.ProgressListener;
+import org.neo4j.internal.batchimport.ImportLabelConstraintEnforcer.ImportLabelConstraintMonitor;
+import org.neo4j.internal.helpers.progress.ProgressMonitorFactory;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.SchemaCache;
 import org.neo4j.internal.schema.StorageEngineIndexingBehaviour;
+import org.neo4j.internal.schema.constraints.TypeRepresentation;
 import org.neo4j.io.fs.FileSystemAbstraction;
-import org.neo4j.io.memory.ByteBufferFactory;
-import org.neo4j.io.memory.UnsafeDirectByteBufferAllocator;
-import org.neo4j.io.pagecache.context.CursorContext;
-import org.neo4j.io.pagecache.tracing.FileFlushEvent;
-import org.neo4j.kernel.api.exceptions.index.IndexEntryConflictException;
-import org.neo4j.kernel.api.index.IndexEntryConflictHandler;
+import org.neo4j.kernel.api.index.IndexAccessor;
 import org.neo4j.kernel.api.index.IndexPopulator;
 import org.neo4j.kernel.impl.api.index.IndexProviderMap;
-import org.neo4j.kernel.impl.api.index.IndexSamplingConfig;
-import org.neo4j.kernel.impl.api.index.PhaseTracker;
 import org.neo4j.kernel.impl.api.index.stats.IndexStatisticsStore;
-import org.neo4j.memory.EmptyMemoryTracker;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
-import org.neo4j.values.ElementIdMapper;
+import org.neo4j.storageengine.api.UpdateMode;
+import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
 import org.neo4j.values.storable.Value;
-import org.neo4j.values.storable.Values;
 
 /**
  * uniqueness constraint index (prepare copies these):
@@ -82,33 +64,26 @@ import org.neo4j.values.storable.Values;
  * - build: neo4j-incremental-12345/temp-schema/index/range-1.0/3
  *    - validate(): merge neo4j-incremental-12345/temp-schema/index/range-1.0/3 --> neo4j-incremental-12345/schema/index/range-1.0/3
  * - merge: move neo4j-incremental-12345/schema/index/range-1.0/3 --> neo4j/schema/index/range-1.0/3
- *
+ *<p>
  * non-uniqueness constraint index (prepare does not copy these):
  * - neo4j/schema/index/range-1.0/3
  * - build: neo4j-incremental-12345/temp-schema/index/range-1.0/3
  *    - validate(): move neo4j-incremental-12345/temp-schema/index/range-1.0/3 --> neo4j-incremental-12345/schema/index/range-1.0/3
  * - merge: merge neo4j-incremental-12345/schema/index/range-1.0/3 --> neo4j/schema/index/range-1.0/3
+ *<p>
+ * Regarding index update, and especially uniqueness indexes, this class focuses on the ability to make decisions
+ * based on the data given to it - (for updates) not existing data of the entity. Almost all checks and
+ * generated updates can be made based on the new data (delta for updates), and for the rest there's
+ * {@link SchemaMonitor#indexUpdate(IndexEntryUpdate)}.
  */
-public class OtherAffectedSchemaMonitors implements Supplier<SchemaMonitor>, Closeable {
-    private final FileSystemAbstraction fileSystem;
-    private final IndexProviderMap indexProviderMap;
-    private final IndexProviderMap tempIndexes;
+public class OtherAffectedSchemaMonitors implements SchemaMonitors {
     private final SchemaCache schemaCache;
-    private final TokenNameLookup tokenNameLookup;
     private final EntityType entityType;
-    private final ImmutableSet<OpenOption> openOptions;
-    private final PopulationWorkJobScheduler workScheduler;
     private final LongToLongFunction indexedEntityIdConverter;
-    private final LongToLongFunction entityIdFromIndexIdConverter;
-    private final Configuration configuration;
-    private final IndexStatisticsStore indexStatisticsStore;
-    private final IntObjectMap<List<int[]>> propertyExistenceConstraints;
-    private final Map<IndexDescriptor, IndexPopulator> indexPopulators = new ConcurrentHashMap<>();
-    private final Lock populatorConstructionLock = new ReentrantLock();
-    private final ByteBufferFactory bufferFactory;
-    private final MutableLongSet violatingEntities = LongSets.mutable.empty().asSynchronized();
-    private final StorageEngineIndexingBehaviour indexingBehaviour;
-    private final boolean incrementalIndexing;
+    private final boolean generateNonUniqueIndexUpdates;
+    private final ImportPropertyConstraintEnforcer propertyConstraints;
+    private final ImportIndexBuilder indexBuilder;
+    private final ImportLabelConstraintEnforcer importLabelConstraintsEnforcer;
 
     public OtherAffectedSchemaMonitors(
             FileSystemAbstraction fileSystem,
@@ -124,300 +99,318 @@ public class OtherAffectedSchemaMonitors implements Supplier<SchemaMonitor>, Clo
             Configuration configuration,
             IndexStatisticsStore indexStatisticsStore,
             StorageEngineIndexingBehaviour indexingBehaviour,
-            boolean incrementalIndexing) {
-        this.fileSystem = fileSystem;
-        this.indexProviderMap = indexProviderMap;
-        this.tempIndexes = tempIndexes;
+            boolean generateNonUniqueIndexUpdates,
+            Predicate<IndexDescriptor> excludedIndexes,
+            Config config,
+            IndexPopulator.Configuration indexPopulatorConfiguration,
+            IntFunction<NodeLabelChecker> nodeLabelCheckerFactory) {
         this.schemaCache = schemaCache;
-        this.tokenNameLookup = tokenNameLookup;
         this.entityType = entityType;
-        this.openOptions = openOptions;
-        this.workScheduler = workScheduler;
         this.indexedEntityIdConverter = indexedEntityIdConverter;
-        this.entityIdFromIndexIdConverter = entityIdFromIndexIdConverter;
-        this.configuration = configuration;
-        this.indexStatisticsStore = indexStatisticsStore;
-        this.indexingBehaviour = indexingBehaviour;
-        this.incrementalIndexing = incrementalIndexing;
-        this.propertyExistenceConstraints = buildPropertyExistenceConstraintsMap(schemaCache, entityType);
-        this.bufferFactory = new ByteBufferFactory(
-                UnsafeDirectByteBufferAllocator::new,
-                Config.defaults().get(index_populator_block_size).intValue());
-    }
+        this.generateNonUniqueIndexUpdates = generateNonUniqueIndexUpdates;
 
-    private static MutableIntObjectMap<List<int[]>> buildPropertyExistenceConstraintsMap(
-            SchemaCache schemaCache, EntityType entityType) {
-        var propertyExistenceConstraints = IntObjectMaps.mutable.<List<int[]>>empty();
-        for (var constraint : schemaCache.constraints()) {
-            if (constraint.enforcesPropertyExistence() && constraint.schema().entityType() == entityType) {
-                var schema = constraint.schema();
-                for (var entityToken : schema.getEntityTokenIds()) {
-                    propertyExistenceConstraints
-                            .getIfAbsentPut(entityToken, ArrayList::new)
-                            .add(schema.getPropertyIds());
-                }
-            }
-        }
-        return propertyExistenceConstraints.isEmpty() ? null : propertyExistenceConstraints;
+        this.propertyConstraints = new ImportPropertyConstraintEnforcer(schemaCache, entityType);
+        this.importLabelConstraintsEnforcer =
+                ImportLabelConstraintEnforcer.of(schemaCache, tokenNameLookup, nodeLabelCheckerFactory);
+
+        this.indexBuilder = new ImportIndexBuilder(
+                fileSystem,
+                indexProviderMap,
+                tempIndexes,
+                tokenNameLookup,
+                openOptions,
+                workScheduler,
+                // We'll do this conversion ourselves when constructing the updates
+                id -> id,
+                entityIdFromIndexIdConverter,
+                configuration,
+                indexStatisticsStore,
+                indexingBehaviour,
+                excludedIndexes,
+                config,
+                indexPopulatorConfiguration);
     }
 
     /**
      * Will be invoked once for each worker, i.e. this should create a new monitor used by a single thread.
      */
     @Override
-    public SchemaMonitor get() {
-        return new OtherAffectedSchemaMonitor();
-    }
-
-    /**
-     * Schedules "scanCompleted" calls to any index populations that are part of this ID mapper,
-     * such that they can be scheduled with "scanCompleted" calls to other index populations.
-     */
-    public void completeBuild(Collector collector, Consumer<Runnable> scheduler) {
-        for (var population : indexPopulators.entrySet()) {
-            // Complete the population of the increment index
-            var populator = population.getValue();
-            scheduler.accept(() -> {
-                var conflictHandler = new RecordingIndexEntryConflictHandler(
-                        collector,
-                        violatingEntities,
-                        population.getKey(),
-                        tokenNameLookup,
-                        entityIdFromIndexIdConverter);
-                try {
-                    populator.scanCompleted(
-                            PhaseTracker.nullInstance, workScheduler, conflictHandler, CursorContext.NULL_CONTEXT);
-                    indexStatisticsStore.setSampleStats(population.getKey().getId(), populator.sample(NULL_CONTEXT));
-                    populator.close(true, CursorContext.NULL_CONTEXT);
-                } catch (IndexEntryConflictException e) {
-                    // Should not happen
-                    throw new RuntimeException(e);
-                }
-            });
-        }
+    public SchemaMonitor newMonitor(int workerId) {
+        return new OtherAffectedSchemaMonitor(importLabelConstraintsEnforcer.newWorker(workerId));
     }
 
     /**
      * @return a list of entity IDs that violated constraints during complete (e.g. merging of indexes).
      */
-    public LongSet validate(LongSet skippedEntityIds, Collector collector) {
-        // Merge increments into copied-target-indexes and skip (and remember) those that violate constraints
-        var indexSamplingConfig = new IndexSamplingConfig(Config.defaults());
-        try {
-            for (var population : indexPopulators.entrySet()) {
-                var descriptor = population.getKey();
-                var conflictHandler = new RecordingIndexEntryConflictHandler(
-                        collector, violatingEntities, descriptor, tokenNameLookup, entityIdFromIndexIdConverter);
-                // For constraint indexes checking violations
-                if (descriptor.isUnique()) {
-                    // Validate uniqueness, since it's a constraint index
-                    try (var copiedIncrementIndex = indexProviderMap
-                                    .lookup(descriptor.getIndexProvider())
-                                    .getOnlineAccessor(
-                                            descriptor,
-                                            indexSamplingConfig,
-                                            tokenNameLookup,
-                                            ElementIdMapper.PLACEHOLDER,
-                                            openOptions,
-                                            indexingBehaviour);
-                            var builtIncrementIndex = tempIndexes
-                                    .lookup(descriptor.getIndexProvider())
-                                    .getOnlineAccessor(
-                                            descriptor,
-                                            indexSamplingConfig,
-                                            tokenNameLookup,
-                                            ElementIdMapper.PLACEHOLDER,
-                                            openOptions,
-                                            indexingBehaviour)) {
-                        copiedIncrementIndex.validate(
-                                builtIncrementIndex,
-                                true,
-                                conflictHandler,
-                                skippedEntityIds::contains,
-                                configuration.maxNumberOfWorkerThreads(),
-                                workScheduler.jobScheduler());
-                    }
-                }
-            }
+    @Override
+    public LongSet validate(Collector collector, ProgressMonitorFactory progressMonitorFactory) throws IOException {
+        return indexBuilder.validate(collector, progressMonitorFactory);
+    }
 
-            // When all violations are known then merge all increment indexes
-            LongPredicate filter = skippedEntityIds.isEmpty() && violatingEntities.isEmpty()
-                    ? null
-                    : indexEntityId -> !skippedEntityIds.contains(indexEntityId)
-                            && !violatingEntities.contains(entityIdFromIndexIdConverter.applyAsLong(indexEntityId));
-            for (var descriptor : indexPopulators.keySet()) {
-                if (!descriptor.isUnique() && filter == null && incrementalIndexing) {
-                    // For non-constraint indexes we can simply move the increment index into place
-                    // if there are no violations.
-                    moveIndex(fileSystem, tempIndexes, indexProviderMap, descriptor);
-                } else {
-                    try (var copiedIncrementIndex = indexProviderMap
-                                    .lookup(descriptor.getIndexProvider())
-                                    .getOnlineAccessor(
-                                            descriptor,
-                                            indexSamplingConfig,
-                                            tokenNameLookup,
-                                            ElementIdMapper.PLACEHOLDER,
-                                            openOptions,
-                                            indexingBehaviour);
-                            var builtIncrementIndex = tempIndexes
-                                    .lookup(descriptor.getIndexProvider())
-                                    .getOnlineAccessor(
-                                            descriptor,
-                                            indexSamplingConfig,
-                                            tokenNameLookup,
-                                            ElementIdMapper.PLACEHOLDER,
-                                            openOptions,
-                                            indexingBehaviour)) {
-                        copiedIncrementIndex.insertFrom(
-                                builtIncrementIndex,
-                                null,
-                                false,
-                                IndexEntryConflictHandler.THROW,
-                                filter,
-                                configuration.maxNumberOfWorkerThreads(),
-                                workScheduler.jobScheduler(),
-                                ProgressListener.NONE);
-                        copiedIncrementIndex.force(FileFlushEvent.NULL, NULL_CONTEXT);
-                    }
-                }
-            }
-        } catch (IndexEntryConflictException e) {
-            // This will not be thrown, but the method is declared to throw it so just catch it here
-            throw new RuntimeException(e);
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
-
-        return violatingEntities;
+    @Override
+    public void writeToTarget(
+            LongPredicate violatingIdMapperEntityIds,
+            LongSet otherViolatingEntityIds,
+            ProgressMonitorFactory progressMonitorFactory) {
+        indexBuilder.writeToTarget(violatingIdMapperEntityIds, otherViolatingEntityIds, progressMonitorFactory);
     }
 
     @Override
     public void close() throws IOException {
-        bufferFactory.close();
+        indexBuilder.close();
     }
 
+    @Override
     public LongSet affectedIndexes() {
-        var ids = LongSets.mutable.empty();
-        indexPopulators.keySet().stream().map(IndexDescriptor::getId).forEach(ids::add);
-        return ids;
+        return indexBuilder.affectedIndexes();
+    }
+
+    @Override
+    public Optional<IndexAccessor> openTempIndexAccessor(long indexId) throws IOException {
+        return indexBuilder.openTempIndexAccessor(indexId);
+    }
+
+    @Override
+    public Optional<IndexAccessor> openTargetIndexAccessor(long indexId) {
+        return Optional.of(indexBuilder.openTargetIndexAccessor(schemaCache.getIndex(indexId)));
+    }
+
+    @Override
+    public Optional<IndexDescriptor> indexDescriptor(long indexId) {
+        return indexBuilder.indexDescriptor(indexId);
     }
 
     private class OtherAffectedSchemaMonitor implements SchemaMonitor {
-        private final MutableIntList entityTokens = IntLists.mutable.empty();
-        private final MutableIntObjectMap<Value> properties = IntObjectMaps.mutable.empty();
+        private final ImportLabelConstraintMonitor labelEnforcer;
 
-        @Override
-        public void property(int propertyKeyId, Object value) {
-            if (value instanceof Value propValue) {
-                properties.put(propertyKeyId, propValue);
-            } else {
-                properties.put(propertyKeyId, Values.of(value));
-            }
+        OtherAffectedSchemaMonitor(ImportLabelConstraintMonitor labelEnforcer) {
+            this.labelEnforcer = labelEnforcer;
         }
 
         @Override
-        public void entityToken(int entityTokenId) {
-            entityTokens.add(entityTokenId);
-        }
-
-        @Override
-        public void entityTokens(int[] entityTokenIds) {
-            entityTokens.addAll(entityTokenIds);
-        }
-
-        @Override
-        public boolean endOfEntity(long entityId, ViolationVisitor violationVisitor) {
+        public boolean handle(
+                Entity entity,
+                ExistingPropertyKeysLookup existingPropertyKeysLookup,
+                ViolationVisitor violationVisitor,
+                UniquenessIndexUpdatesListener uniquenessIndexUpdatesListener) {
             try {
-                entityTokens.sortThis();
-                boolean propertyExistenceOk = checkPropertyExistenceConstraints(entityId, violationVisitor);
-                if (propertyExistenceOk) {
-                    generateIndexUpdatesForAffectedIndexes(entityId);
+                var mode = entity.mode;
+                boolean constraintsOk = labelEnforcer.handle(entity, violationVisitor);
+                if (mode == null || mode == ApplicationMode.CREATE) {
+                    constraintsOk &= checkPropertyExistenceConstraintsOnCreate(entity, violationVisitor);
+                    constraintsOk &= checkPropertyTypeConstraints(entity, violationVisitor);
+                    if (constraintsOk && generateNonUniqueIndexUpdates) {
+                        // For CREATE all index updates are simply added to each respective index populator
+                        // and uniqueness violations will be sorted out afterward, where violating entities
+                        // are deleted.
+                        generateIndexUpdatesForCreatedEntity(entity);
+                    }
+                    return constraintsOk;
+                } else if (mode == ApplicationMode.UPDATE) {
+                    constraintsOk &= checkPropertyExistenceConstraintsOnUpdate(
+                            entity, existingPropertyKeysLookup, violationVisitor);
+                    constraintsOk &= checkPropertyTypeConstraints(entity, violationVisitor);
+                    if (constraintsOk) {
+                        // For UPDATE at least uniqueness index updates needs to be generated so that their
+                        // ADD part can be written to the indexes and validated right here.
+                        return generateAndValidateUniquenessIndexUpdates(
+                                entity, violationVisitor, uniquenessIndexUpdatesListener);
+                    } else {
+                        return false;
+                    }
+                } else {
+                    return true;
                 }
-                return propertyExistenceOk;
             } finally {
-                entityTokens.clear();
-                properties.clear();
+                uniquenessIndexUpdatesListener.endEntity();
             }
         }
 
-        private void generateIndexUpdatesForAffectedIndexes(long entityId) {
-            // TODO might be a bit expensive?
-            var propertyKeyTokens = properties.keySet().toSortedArray();
-            var indexes = schemaCache.getValueIndexesRelatedTo(
-                    entityTokens.toArray(), EMPTY_INT_ARRAY, propertyKeyTokens, true, entityType);
-            for (var index : indexes) {
-                var populator = getIndexPopulator(index);
-                var indexUpdate = constructIndexUpdate(entityId, index);
-                try {
-                    // TODO only adding one update per call, not cool?
-                    // TODO cursor context?
-                    populator.add(List.of(indexUpdate), NULL_CONTEXT);
-                    populator.includeSample(indexUpdate);
-                } catch (IndexEntryConflictException e) {
-                    throw new RuntimeException(e);
+        private boolean checkPropertyExistenceConstraintsOnUpdate(
+                Entity entity,
+                ExistingPropertyKeysLookup existingPropertyKeysLookup,
+                ViolationVisitor violationVisitor) {
+            if (!entity.entityTokens.isEmpty()) {
+                // Check if all added properties in this input entity satisfies the mandatory properties
+                // if not then we must load the existing property keys for this node and check
+                var mandatoryPropertyKeys = propertyConstraints.mandatoryPropertyKeys(entity.sortedEntityTokens());
+                if (!mandatoryPropertyKeys.isEmpty()) {
+                    var mandatoryPropertyKeysLeftToCheck = IntSets.mutable.ofAll(mandatoryPropertyKeys);
+                    entity.propertiesMap().keySet().forEach(mandatoryPropertyKeysLeftToCheck::remove);
+                    if (!mandatoryPropertyKeysLeftToCheck.isEmpty()) {
+                        var existingRemainingKeys = existingPropertyKeysLookup.lookupPropertyKeys(
+                                entity.entityId, mandatoryPropertyKeysLeftToCheck);
+                        existingRemainingKeys.forEach(key -> {
+                            if (!entity.removedProperties.contains(key)) {
+                                mandatoryPropertyKeysLeftToCheck.remove(key);
+                            }
+                        });
+                    }
+                    if (!mandatoryPropertyKeysLeftToCheck.isEmpty()) {
+                        violationVisitor.accept(entity, "a property existence constraint");
+                        return false;
+                    }
                 }
             }
+
+            if (!entity.removedProperties.isEmpty()) {
+                var affectedLabels =
+                        propertyConstraints.entityTokensRelatedToPropertyKeys(entity.removedProperties.toArray());
+                if (!affectedLabels.isEmpty()) {
+                    var affectedLabelsLeftToCheck = IntSets.mutable.ofAll(affectedLabels);
+                    affectedLabelsLeftToCheck.removeAll(entity.removedEntityTokens);
+                    if (affectedLabelsLeftToCheck.containsAny(entity.existingEntityTokens)
+                            || affectedLabelsLeftToCheck.containsAny(entity.entityTokens)) {
+                        violationVisitor.accept(entity, "a property existence constraint");
+                        return false;
+                    }
+                }
+            }
+            return true;
         }
 
-        private IndexEntryUpdate<IndexDescriptor> constructIndexUpdate(long entityId, IndexDescriptor index) {
+        /**
+         * Used for allowing external code, which is applying changes to the store, generate relevant index updates
+         * for this entity. Any updates to uniqueness indexes will be converted to removals (of the before-values),
+         * making this method essential and interlinked with
+         * {@link SchemaMonitor#handle(Entity, ExistingPropertyKeysLookup, ViolationVisitor, UniquenessIndexUpdatesListener)} for updated entities.
+         * @see #generateAndValidateUniquenessIndexUpdates(Entity, ViolationVisitor, UniquenessIndexUpdatesListener)
+         */
+        @Override
+        public void indexUpdate(IndexEntryUpdate indexUpdate) {
+            // TODO can we make this general assumption here? It's probably good because the splitting of
+            //  uniqueness index updates to just do the ADD part is _also_ in this monitor.
+            if (indexUpdate.indexKey().isUnique() && indexUpdate.updateMode() == UpdateMode.CHANGED) {
+                var valueUpdate = (ValueIndexEntryUpdate) indexUpdate;
+                indexUpdate = EagerValueIndexEntryUpdate.remove(
+                        indexUpdate.getEntityId(), indexUpdate.indexKey(), valueUpdate.beforeValues());
+            }
+
+            indexBuilder.add(indexUpdate);
+        }
+
+        @Override
+        public boolean directIndexUpdate(IndexEntryUpdate indexUpdate) {
+            return indexBuilder.addDirect(indexUpdate);
+        }
+
+        @Override
+        public boolean checkUniqueness(EagerValueIndexEntryUpdate[] checks) {
+            return indexBuilder.checkUniqueness(checks);
+        }
+
+        @Override
+        public void close() {
+            indexBuilder.flushOnSchemaMonitorClose();
+            labelEnforcer.close();
+        }
+
+        private void generateIndexUpdatesForCreatedEntity(Entity entity) {
+            var propertyKeyTokens = entity.propertiesMap().keySet().toSortedArray();
+            var indexes = schemaCache.getValueIndexesRelatedTo(
+                    entity.sortedEntityTokens(), EMPTY_INT_ARRAY, propertyKeyTokens, true, entityType);
+            for (var index : indexes) {
+                indexBuilder.add(constructIndexUpdate(entity, index));
+            }
+        }
+
+        /**
+         * Used when updating an entity. Based on the data known about this entity, and also assuming that
+         * uniqueness indexes always consists of a single entityToken/propertyKey pair, see which uniqueness indexes
+         * this entity is associated with and attempt to add this entity into all such uniqueness indexes.
+         * The trick here is that we don't need to know the previous values of the properties - instead just
+         * add the new values to the affected indexes (atomically, i.e. if any fails then undo them all).
+         * This relies on the actual index updates carrying the before-values will arrive later in
+         * calls to {@link #indexUpdate(IndexEntryUpdate)}, where such updates will be transformed into
+         * only removal of the before-values - thereby completing the updates.
+         */
+        private boolean generateAndValidateUniquenessIndexUpdates(
+                Entity entity,
+                ViolationVisitor violationVisitor,
+                UniquenessIndexUpdatesListener uniquenessIndexUpdatesListener) {
+            var properties = entity.propertiesMap();
+            var identifierPropertyKeys = entity.identifierPropertyKeys();
+            var propertyKeyTokens = identifierPropertyKeys.isEmpty()
+                    ? properties.keySet().toSortedArray()
+                    : properties
+                            .keySet()
+                            .reject(identifierPropertyKeys::contains)
+                            .toSortedArray();
+            var allEntityTokens = IntSets.mutable.ofAll(entity.existingEntityTokens);
+            allEntityTokens.addAll(entity.entityTokens);
+            var indexes = schemaCache.getValueIndexesRelatedTo(
+                    allEntityTokens.toSortedArray(), EMPTY_INT_ARRAY, propertyKeyTokens, true, entityType);
+            if (!indexes.isEmpty()) {
+                List<EagerValueIndexEntryUpdate> appliedAdditions = new ArrayList<>();
+                boolean failed = false;
+                for (var index : indexes) {
+                    if (index.isUnique()) {
+                        var indexUpdate = constructIndexUpdate(entity, index);
+                        if (!uniquenessIndexUpdatesListener.shouldApply(indexUpdate)) {
+                            continue;
+                        }
+                        if (indexBuilder.addDirect(indexUpdate)) {
+                            appliedAdditions.add(indexUpdate);
+                        } else {
+                            failed = true;
+                            violationVisitor.accept(entity, index.toString());
+                            break;
+                        }
+                    }
+                }
+                if (failed) {
+                    for (var updateToUndo : appliedAdditions) {
+                        boolean removed = indexBuilder.addDirect(EagerValueIndexEntryUpdate.remove(
+                                updateToUndo.getEntityId(), updateToUndo.indexKey(), updateToUndo.values()));
+                        assert removed;
+                    }
+                    return false;
+                } else {
+                    uniquenessIndexUpdatesListener.updates(appliedAdditions);
+                }
+            }
+            return true;
+        }
+
+        private EagerValueIndexEntryUpdate constructIndexUpdate(Entity entity, IndexDescriptor index) {
             var propertyIds = index.schema().getPropertyIds();
             Value[] values = new Value[propertyIds.length];
             for (int i = 0; i < propertyIds.length; i++) {
-                values[i] = properties.get(propertyIds[i]);
+                values[i] = entity.propertiesMap().get(propertyIds[i]);
             }
-            return IndexEntryUpdate.add(indexedEntityIdConverter.applyAsLong(entityId), index, values);
+            return EagerValueIndexEntryUpdate.add(indexedEntityIdConverter.applyAsLong(entity.entityId), index, values);
         }
 
-        private IndexPopulator getIndexPopulator(IndexDescriptor index) {
-            var populator = indexPopulators.get(index);
-            if (populator == null) {
-                populatorConstructionLock.lock();
-                try {
-                    populator = indexPopulators.get(index);
-                    if (populator == null) {
-                        populator = constructIndexPopulator(index);
-                        indexPopulators.put(index, populator);
+        private boolean checkPropertyExistenceConstraintsOnCreate(Entity entity, ViolationVisitor violationVisitor) {
+            if (propertyConstraints.hasPropertyExistenceConstraints()) {
+                for (int entityToken : entity.sortedEntityTokens()) {
+                    var mandatoryPropertyKeys = propertyConstraints.mandatoryPropertyKeys(entityToken);
+                    if (mandatoryPropertyKeys != null) {
+                        if (!entity.propertiesMap().keySet().containsAll(mandatoryPropertyKeys)) {
+                            violationVisitor.accept(entity, "a property existence constraint");
+                            return false;
+                        }
                     }
-                } finally {
-                    populatorConstructionLock.unlock();
                 }
             }
-            return populator;
+            return true;
         }
 
-        private IndexPopulator constructIndexPopulator(IndexDescriptor index) {
-            var indexProvider = tempIndexes.lookup(index.getIndexProvider());
-            var populator = indexProvider.getPopulator(
-                    index,
-                    new IndexSamplingConfig(Config.defaults()),
-                    bufferFactory,
-                    EmptyMemoryTracker.INSTANCE,
-                    tokenNameLookup,
-                    ElementIdMapper.PLACEHOLDER,
-                    openOptions,
-                    indexingBehaviour);
-            try {
-                populator.create();
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
+        private boolean checkPropertyTypeConstraints(Entity entity, ViolationVisitor violationVisitor) {
+            if (propertyConstraints.hasPropertyTypeConstraints()) {
+                return checkPropertyTypeConstraints(entity, violationVisitor, entity.sortedEntityTokens())
+                        && checkPropertyTypeConstraints(entity, violationVisitor, entity.sortedExistingEntityTokens());
             }
-            return populator;
+            return true;
         }
 
-        private boolean checkPropertyExistenceConstraints(long entityId, ViolationVisitor violationVisitor) {
-            if (propertyExistenceConstraints != null) {
-                var entityTokensIterator = entityTokens.intIterator();
-                while (entityTokensIterator.hasNext()) {
-                    var existenceConstraints = propertyExistenceConstraints.get(entityTokensIterator.next());
-                    if (existenceConstraints != null) {
-                        for (var mandatoryProperties : existenceConstraints) {
-                            if (!properties.keySet().containsAll(mandatoryProperties)) {
-                                violationVisitor.accept(
-                                        entityId, entityTokens, properties, "a property existence constraint");
-                                return false;
-                            }
-                        }
+        private boolean checkPropertyTypeConstraints(Entity entity, ViolationVisitor violationVisitor, int[] tokens) {
+            for (int token : tokens) {
+                for (var typeConstraint : propertyConstraints.propertyTypeConstraints(token)) {
+                    var value = entity.propertiesMap().get(typeConstraint.propertyKeyId());
+                    if (TypeRepresentation.disallows(typeConstraint.type(), value)) {
+                        violationVisitor.accept(entity, "a property type constraint " + value);
+                        return false;
                     }
                 }
             }
@@ -425,34 +418,12 @@ public class OtherAffectedSchemaMonitors implements Supplier<SchemaMonitor>, Clo
         }
     }
 
-    private record RecordingIndexEntryConflictHandler(
-            Collector badCollector,
-            MutableLongSet violatingEntities,
-            IndexDescriptor descriptor,
-            TokenNameLookup tokenNameLookup,
-            LongToLongFunction entityIdFromIndexIdConverter)
-            implements IndexEntryConflictHandler {
+    public interface NodeLabelChecker extends Closeable {
+        boolean nodeHasLabel(long nodeId, int labelId);
 
         @Override
-        public IndexEntryConflictAction indexEntryConflict(long firstEntityId, long otherEntityId, Value[] values) {
-            long realId = entityIdFromIndexIdConverter.applyAsLong(otherEntityId);
-            violatingEntities.add(realId);
-            badCollector.collectEntityViolatingConstraint(
-                    null,
-                    realId,
-                    asPropertyMap(descriptor, values),
-                    descriptor.userDescription(tokenNameLookup),
-                    descriptor.schema().entityType());
-            return IndexEntryConflictAction.DELETE;
-        }
+        default void close() {}
 
-        private Map<String, Object> asPropertyMap(IndexDescriptor descriptor, Value[] values) {
-            var properties = new HashMap<String, Object>();
-            var propertyIds = descriptor.schema().getPropertyIds();
-            for (var i = 0; i < propertyIds.length; i++) {
-                properties.put(tokenNameLookup.propertyKeyGetName(propertyIds[i]), values[i].asObjectCopy());
-            }
-            return properties;
-        }
+        IntFunction<NodeLabelChecker> DISABLED_NODE_CHECKER_FACTORY = (ignored) -> null;
     }
 }

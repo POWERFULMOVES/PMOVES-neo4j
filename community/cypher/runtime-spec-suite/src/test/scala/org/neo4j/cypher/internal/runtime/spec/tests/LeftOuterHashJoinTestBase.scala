@@ -35,6 +35,8 @@ import scala.jdk.CollectionConverters.IterableHasAsJava
 import scala.jdk.CollectionConverters.IterableHasAsScala
 import scala.util.Random
 
+object LeftOuterHashJoinTestBase
+
 abstract class LeftOuterHashJoinTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
@@ -284,7 +286,7 @@ abstract class LeftOuterHashJoinTestBase[CONTEXT <: RuntimeContext](
 
   test("should work when LHS is empty when on RHS of apply") {
     // given
-    val nodes = givenGraph {
+    givenGraph {
       nodeGraph(sizeHint)
     }
 
@@ -618,10 +620,12 @@ abstract class LeftOuterHashJoinTestBase[CONTEXT <: RuntimeContext](
 
     runtimeResult should beColumns("n", "l", "r").withRows(expectedRows)
 
-    val rhsFilterDbHits = runtimeResult.runtimeResult.queryProfile().operatorProfile(3).dbHits()
-
     // final projection should only need to look up n.leftProp for :Right nodes
-    runtimeResult.runtimeResult.queryProfile().operatorProfile(1).dbHits() shouldBe rhsFilterDbHits / 2
+    val expected = if (isPipelined || isParallel) {
+      // for pipelined/parallel we count the calls to next as a dbHit
+      sizeHint * 2
+    } else sizeHint
+    runtimeResult.runtimeResult.queryProfile().operatorProfile(1).dbHits() shouldBe expected
   }
 
   test("should handle aggregation on top of left-outer hash join") {

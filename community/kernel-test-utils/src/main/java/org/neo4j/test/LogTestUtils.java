@@ -19,25 +19,25 @@
  */
 package org.neo4j.test;
 
-import static org.neo4j.kernel.impl.transaction.log.entry.LogHeaderReader.readLogHeader;
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
+import static org.neo4j.wal.entry.LogHeaderReader.readLogHeader;
 
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.function.Predicate;
+import org.neo4j.io.fs.ChannelNativeAccessor;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.fs.StoreChannel;
-import org.neo4j.kernel.impl.transaction.log.ChannelNativeAccessor;
-import org.neo4j.kernel.impl.transaction.log.PhysicalLogVersionedStoreChannel;
-import org.neo4j.kernel.impl.transaction.log.ReadAheadUtils;
-import org.neo4j.kernel.impl.transaction.log.ReadableLogChannel;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntry;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntryReader;
-import org.neo4j.kernel.impl.transaction.log.entry.LogHeader;
-import org.neo4j.kernel.impl.transaction.log.entry.VersionAwareLogEntryReader;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
 import org.neo4j.kernel.impl.transaction.tracing.DatabaseTracer;
 import org.neo4j.storageengine.api.CommandReaderFactory;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.PhysicalLogVersionedStoreChannel;
+import org.neo4j.wal.ReadAheadUtils;
+import org.neo4j.wal.ReadableLogChannel;
+import org.neo4j.wal.entry.LogEntry;
+import org.neo4j.wal.entry.LogEntryReader;
+import org.neo4j.wal.entry.LogHeader;
+import org.neo4j.wal.entry.VersionAwareLogEntryReader;
 
 /**
  * Utility for reading and filtering logical logs as well as tx logs.
@@ -101,13 +101,14 @@ public final class LogTestUtils {
             assert logHeader != null : "Looks like we tried to read a log header of an empty pre-allocated file.";
             var inChannel = new PhysicalLogVersionedStoreChannel(
                     in, logHeader, file, ChannelNativeAccessor.EMPTY_ACCESSOR, DatabaseTracer.NULL);
-            ReadableLogChannel inBuffer = ReadAheadUtils.newChannel(inChannel, logHeader, INSTANCE);
-            LogEntryReader entryReader =
-                    new VersionAwareLogEntryReader(commandReaderFactory, LatestVersions.BINARY_VERSIONS);
+            try (ReadableLogChannel inBuffer = ReadAheadUtils.newChannel(inChannel, logHeader, INSTANCE)) {
+                LogEntryReader entryReader =
+                        new VersionAwareLogEntryReader(commandReaderFactory, LatestVersions.BINARY_VERSIONS, INSTANCE);
 
-            LogEntry entry;
-            while ((entry = entryReader.readLogEntry(inBuffer)) != null) {
-                filter.test(entry);
+                LogEntry entry;
+                while ((entry = entryReader.readLogEntry(inBuffer)) != null) {
+                    filter.test(entry);
+                }
             }
         }
     }

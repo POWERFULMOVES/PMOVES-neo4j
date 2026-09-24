@@ -25,8 +25,8 @@ import org.neo4j.bolt.fsm.state.StateReference;
 import org.neo4j.bolt.fsm.state.transition.AbstractStateTransition;
 import org.neo4j.bolt.protocol.common.fsm.error.AuthenticationStateTransitionException;
 import org.neo4j.bolt.protocol.common.fsm.response.ResponseHandler;
-import org.neo4j.bolt.protocol.common.message.request.ImpersonationRequestMessage;
 import org.neo4j.bolt.security.error.AuthenticationException;
+import org.neo4j.boltmessages.request.ImpersonationRequestMessage;
 
 public abstract class SimpleImpersonationStateTransition<R extends ImpersonationRequestMessage>
         extends AbstractStateTransition<R> {
@@ -41,7 +41,7 @@ public abstract class SimpleImpersonationStateTransition<R extends Impersonation
             try {
                 ctx.connection().impersonate(message.impersonatedUser());
             } catch (AuthenticationException ex) {
-                throw new AuthenticationStateTransitionException(ex);
+                throw AuthenticationStateTransitionException.wrapError(ex);
             }
         }
 

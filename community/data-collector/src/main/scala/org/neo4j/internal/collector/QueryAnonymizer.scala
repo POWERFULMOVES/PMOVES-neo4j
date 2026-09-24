@@ -22,7 +22,6 @@ package org.neo4j.internal.collector
 import org.neo4j.configuration.Config
 import org.neo4j.cypher.internal.CachingPreParser
 import org.neo4j.cypher.internal.CypherVersion
-import org.neo4j.cypher.internal.PreParsedQuery
 import org.neo4j.cypher.internal.ast.Statement
 import org.neo4j.cypher.internal.ast.prettifier.ExpressionStringifier
 import org.neo4j.cypher.internal.ast.prettifier.Prettifier
@@ -30,11 +29,12 @@ import org.neo4j.cypher.internal.cache.ExecutorBasedCaffeineCacheFactory
 import org.neo4j.cypher.internal.cache.LFUCache
 import org.neo4j.cypher.internal.config.CypherConfiguration
 import org.neo4j.cypher.internal.expressions.Expression
+import org.neo4j.cypher.internal.notification.devNullLogger
 import org.neo4j.cypher.internal.parser.AstParserFactory
+import org.neo4j.cypher.internal.preparser.PreParsedQuery
 import org.neo4j.cypher.internal.rewriting.rewriters.anonymizeQuery
 import org.neo4j.cypher.internal.util.CypherExceptionFactory
 import org.neo4j.cypher.internal.util.Neo4jCypherExceptionFactory
-import org.neo4j.cypher.internal.util.devNullLogger
 import org.neo4j.internal.kernel.api.TokenRead
 import org.neo4j.values.ValueMapper
 import org.neo4j.values.virtual.MapValue
@@ -42,12 +42,12 @@ import org.neo4j.values.virtual.MapValue
 import scala.collection.mutable
 
 trait QueryAnonymizer {
-  def queryText(queryText: String): String
+  def queryText(queryText: String, queryLang: CypherVersion): String
   def queryParams(params: MapValue): Object
 }
 
 case class PlainText(valueMapper: ValueMapper.JavaMapper) extends QueryAnonymizer {
-  def queryText(queryText: String): String = queryText
+  def queryText(queryText: String, queryLang: CypherVersion): String = queryText
   def queryParams(params: MapValue): Object = params.map(valueMapper)
 }
 
@@ -55,7 +55,7 @@ object IdAnonymizer {
 
   private val preParser = new CachingPreParser(
     CypherConfiguration.fromConfig(Config.defaults()),
-    new LFUCache[String, PreParsedQuery](
+    new LFUCache[PreParsedQuery.CacheKey, PreParsedQuery](
       cacheFactory = new ExecutorBasedCaffeineCacheFactory((_: Runnable).run()),
       initialSize = 0
     )
@@ -65,15 +65,15 @@ object IdAnonymizer {
 case class IdAnonymizer(tokens: TokenRead) extends QueryAnonymizer {
 
   private def parse(version: CypherVersion, query: String, exceptionFactory: CypherExceptionFactory): Statement = {
-    AstParserFactory(version)(query, exceptionFactory, None).singleStatement()
+    AstParserFactory(version)(query, exceptionFactory, None, Seq()).singleStatement()
   }
 
   private val prettifier = Prettifier(ExpressionStringifier(_.asCanonicalStringVal))
 
-  override def queryText(queryText: String): String = {
-    val preParsedQuery = IdAnonymizer.preParser.preParseQuery(queryText, devNullLogger)
+  override def queryText(queryText: String, queryLang: CypherVersion): String = {
+    val preParsedQuery = IdAnonymizer.preParser.preParseQuery(queryText, devNullLogger, queryLang)
     val originalAst = parse(
-      preParsedQuery.options.queryOptions.cypherVersion.actualVersion,
+      preParsedQuery.resolvedLanguage,
       preParsedQuery.statement,
       Neo4jCypherExceptionFactory(queryText, Some(preParsedQuery.options.offset))
     )
@@ -93,6 +93,8 @@ class IdAnonymizerState(tokens: TokenRead, prettifier: Prettifier)
   private val variables = mutable.Map[String, String]()
   private val parameters = mutable.Map[String, String]()
   private val schemaNames = mutable.Map[String, String]()
+  private val identifiersAsStrings = mutable.Map[String, String]()
+  private val secrets = mutable.Map[String, String]()
   private val unknownTokens = mutable.Map[String, String]()
 
   override def variable(name: String): String =
@@ -124,6 +126,12 @@ class IdAnonymizerState(tokens: TokenRead, prettifier: Prettifier)
 
   override def constraintName(name: String): String =
     schemaNames.getOrElseUpdate(name, "constraint" + schemaNames.size)
+
+  override def identifierAsString(name: String): String =
+    identifiersAsStrings.getOrElseUpdate(name, "ident" + identifiersAsStrings.size)
+
+  override def secretName(name: String): String =
+    secrets.getOrElseUpdate(name, "secret" + secrets.size)
 
   private def tokenName(prefix: String, name: String, id: Int): String =
     id match {

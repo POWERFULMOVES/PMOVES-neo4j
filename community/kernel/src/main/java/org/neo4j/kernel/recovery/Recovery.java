@@ -19,18 +19,19 @@
  */
 package org.neo4j.kernel.recovery;
 
-import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.neo4j.collection.Dependencies.dependenciesOf;
 import static org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker.writable;
 import static org.neo4j.internal.helpers.collection.Iterables.stream;
-import static org.neo4j.io.pagecache.PageCacheOpenOptions.MULTI_VERSIONED;
-import static org.neo4j.io.pagecache.context.OldestTransactionIdFactory.EMPTY_OLDEST_ID_FACTORY;
+import static org.neo4j.io.pagecache.context.CursorContextFactory.NULL_CONTEXT_FACTORY;
+import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
+import static org.neo4j.io.pagecache.context.OldestVisibilityHorizonFactory.EMPTY_OLDEST_HORIZON_FACTORY;
 import static org.neo4j.io.pagecache.context.TransactionIdSnapshotFactory.EMPTY_SNAPSHOT_FACTORY;
 import static org.neo4j.kernel.impl.api.TransactionVisibilityProvider.EMPTY_VISIBILITY_PROVIDER;
 import static org.neo4j.kernel.impl.constraints.ConstraintSemantics.getConstraintSemantics;
 import static org.neo4j.kernel.impl.locking.LockManager.NO_LOCKS_LOCK_MANAGER;
+import static org.neo4j.kernel.recovery.IncompleteTransactionAction.ROLLBACK;
 import static org.neo4j.kernel.recovery.RecoveryStartupChecker.EMPTY_CHECKER;
 import static org.neo4j.lock.LockService.NO_LOCK_SERVICE;
 import static org.neo4j.scheduler.Group.INDEX_CLEANUP;
@@ -72,10 +73,12 @@ import org.neo4j.io.pagecache.IOController;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.impl.muninn.VersionStorage;
 import org.neo4j.io.pagecache.prefetch.PagePrefetcher;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.BinarySupportedKernelVersions;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.KernelVersionProvider;
 import org.neo4j.kernel.availability.AvailabilityGuard;
 import org.neo4j.kernel.availability.AvailabilityListener;
@@ -85,12 +88,12 @@ import org.neo4j.kernel.database.Database;
 import org.neo4j.kernel.database.DatabaseIdFactory;
 import org.neo4j.kernel.database.DatabaseTracers;
 import org.neo4j.kernel.database.DefaultForceOperation;
-import org.neo4j.kernel.database.MetadataCache;
 import org.neo4j.kernel.database.NamedDatabaseId;
 import org.neo4j.kernel.extension.DatabaseExtensions;
 import org.neo4j.kernel.extension.ExtensionFactory;
 import org.neo4j.kernel.extension.ExtensionFailureStrategies;
 import org.neo4j.kernel.extension.context.DatabaseExtensionContext;
+import org.neo4j.kernel.impl.api.ChunkedTransactionTracker;
 import org.neo4j.kernel.impl.api.DatabaseSchemaState;
 import org.neo4j.kernel.impl.api.index.IndexProxy;
 import org.neo4j.kernel.impl.api.index.IndexingService;
@@ -101,19 +104,7 @@ import org.neo4j.kernel.impl.index.DatabaseIndexStats;
 import org.neo4j.kernel.impl.pagecache.ConfiguringPageCacheFactory;
 import org.neo4j.kernel.impl.scheduler.JobSchedulerFactory;
 import org.neo4j.kernel.impl.store.FileStoreProviderRegistry;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
-import org.neo4j.kernel.impl.transaction.log.LogicalTransactionStore;
-import org.neo4j.kernel.impl.transaction.log.PhysicalLogicalTransactionStore;
-import org.neo4j.kernel.impl.transaction.log.TransactionMetadataCache;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointerImpl;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.RecoveryThreshold;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.StoreCopyCheckPointMutex;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
-import org.neo4j.kernel.impl.transaction.log.files.LogFilesBuilder;
-import org.neo4j.kernel.impl.transaction.log.pruning.LogPruneStrategyFactory;
-import org.neo4j.kernel.impl.transaction.log.pruning.LogPruning;
-import org.neo4j.kernel.impl.transaction.log.pruning.LogPruningImpl;
+import org.neo4j.kernel.impl.store.segment.SegmentTrackingFactory;
 import org.neo4j.kernel.impl.transaction.state.StaticIndexProviderMapFactory;
 import org.neo4j.kernel.impl.transaction.state.storeview.FullScanStoreView;
 import org.neo4j.kernel.impl.transaction.state.storeview.IndexStoreViewFactory;
@@ -132,13 +123,16 @@ import org.neo4j.logging.internal.SimpleLogService;
 import org.neo4j.memory.MemoryPools;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.monitoring.DatabaseHealth;
+import org.neo4j.monitoring.ExceptionHandlerService;
 import org.neo4j.monitoring.HealthEventGenerator;
 import org.neo4j.monitoring.Monitors;
 import org.neo4j.scheduler.JobScheduler;
 import org.neo4j.service.Services;
+import org.neo4j.storageengine.OperationMode;
+import org.neo4j.storageengine.VectorStoreCreator;
+import org.neo4j.storageengine.api.LogMetadataProvider;
 import org.neo4j.storageengine.api.LogVersionRepository;
-import org.neo4j.storageengine.api.MetadataProvider;
-import org.neo4j.storageengine.api.RecoveryState;
+import org.neo4j.storageengine.api.RecoveryBehavior;
 import org.neo4j.storageengine.api.StorageEngine;
 import org.neo4j.storageengine.api.StorageEngineFactory;
 import org.neo4j.storageengine.api.StorageFilesState;
@@ -149,7 +143,24 @@ import org.neo4j.time.Stopwatch;
 import org.neo4j.token.CreatingTokenHolder;
 import org.neo4j.token.ReadOnlyTokenCreator;
 import org.neo4j.token.TokenHolders;
+import org.neo4j.util.VisibleForTesting;
 import org.neo4j.values.DefaultElementIdMapperV1;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.LogFormatVersionProvider;
+import org.neo4j.wal.LogPosition;
+import org.neo4j.wal.LogTailMetadata;
+import org.neo4j.wal.LogicalTransactionStore;
+import org.neo4j.wal.PhysicalLogicalTransactionStore;
+import org.neo4j.wal.RecoveryOutcome;
+import org.neo4j.wal.TransactionMetadataCache;
+import org.neo4j.wal.checkpoint.CheckPointerImpl;
+import org.neo4j.wal.checkpoint.RecoveryThreshold;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
+import org.neo4j.wal.checkpoint.StoreCopyCheckPointMutex;
+import org.neo4j.wal.files.LogFilesBuilder;
+import org.neo4j.wal.pruning.LogPruneStrategyFactory;
+import org.neo4j.wal.pruning.LogPruning;
+import org.neo4j.wal.pruning.LogPruningImpl;
 
 /**
  * Utility class to perform store recovery or check is recovery is required.
@@ -247,15 +258,38 @@ public final class Recovery {
             MemoryTracker memoryTracker,
             DatabaseTracers databaseTracers)
             throws IOException {
-        RecoveryRequiredChecker requiredChecker =
-                new RecoveryRequiredChecker(fs, pageCache, config, storageEngineFactory, databaseTracers);
+        return isRecoveryRequired(
+                fs,
+                pageCache,
+                layout,
+                storageEngineFactory,
+                config,
+                logTailMetadata,
+                memoryTracker,
+                databaseTracers,
+                RecoveryPredicate.ALL);
+    }
+
+    public static boolean isRecoveryRequired(
+            FileSystemAbstraction fs,
+            PageCache pageCache,
+            DatabaseLayout layout,
+            StorageEngineFactory storageEngineFactory,
+            Config config,
+            Optional<LogTailMetadata> logTailMetadata,
+            MemoryTracker memoryTracker,
+            DatabaseTracers databaseTracers,
+            RecoveryPredicate recoveryPredicate)
+            throws IOException {
+        RecoveryRequiredChecker requiredChecker = new RecoveryRequiredChecker(
+                fs, pageCache, config, storageEngineFactory, databaseTracers, recoveryPredicate);
         final var databaseLayout = storageEngineFactory.formatSpecificDatabaseLayout(layout);
         return logTailMetadata.isPresent()
                 ? requiredChecker.isRecoveryRequiredAt(databaseLayout, logTailMetadata.get())
                 : requiredChecker.isRecoveryRequiredAt(databaseLayout, memoryTracker);
     }
 
-    public static Context context(
+    public static Context contextWithNoLogTail(
             FileSystemAbstraction fs,
             PageCache pageCache,
             DatabaseTracers tracers,
@@ -265,16 +299,9 @@ public final class Recovery {
             IOController ioController,
             InternalLogProvider logProvider,
             KernelVersionProvider emptyLogsFallbackKernelVersion) {
-        return new Context(
-                fs,
-                pageCache,
-                databaseLayout,
-                config,
-                memoryTracker,
-                tracers,
-                ioController,
-                logProvider,
-                emptyLogsFallbackKernelVersion);
+        Context context =
+                new Context(fs, pageCache, databaseLayout, config, memoryTracker, tracers, ioController, logProvider);
+        return context.kernelVersionProvider(emptyLogsFallbackKernelVersion);
     }
 
     public static Context context(
@@ -287,8 +314,9 @@ public final class Recovery {
             IOController ioController,
             InternalLogProvider logProvider,
             LogTailMetadata logTail) {
-        return new Context(
-                fs, pageCache, databaseLayout, config, memoryTracker, tracers, ioController, logProvider, logTail);
+        Context context =
+                new Context(fs, pageCache, databaseLayout, config, memoryTracker, tracers, ioController, logProvider);
+        return context.withLogTailInfo(logTail);
     }
 
     /**
@@ -303,7 +331,7 @@ public final class Recovery {
         private final Config config;
         private final DatabaseTracers tracers;
         private final InternalLogProvider logProvider;
-        private boolean rollbackIncompleteTransactions = true;
+        private IncompleteTransactionAction incompleteTransactionAction = IncompleteTransactionAction.STOP;
         private boolean forceRunRecovery;
         private Monitors globalMonitors = new Monitors();
         private Iterable<ExtensionFactory<?>> extensionFactories;
@@ -313,8 +341,11 @@ public final class Recovery {
         private final IOController ioController;
         private RecoveryPredicate recoveryPredicate = RecoveryPredicate.ALL;
         private RecoveryMode mode = RecoveryMode.FULL;
+        private ChunkedTransactionTracker chunkedTransactionTracker = new ChunkedTransactionTracker();
         private long awaitIndexesOnlineMillis;
-        private final KernelVersionProvider emptyLogsFallbackKernelVersion;
+        private KernelVersionProvider emptyLogsFallbackKernelVersion;
+        private boolean failOnCorruptedLogs;
+        private boolean treatBrokenLastEntryAsCorruption;
 
         private Context(
                 FileSystemAbstraction fileSystemAbstraction,
@@ -324,8 +355,7 @@ public final class Recovery {
                 MemoryTracker memoryTracker,
                 DatabaseTracers tracers,
                 IOController ioController,
-                InternalLogProvider logProvider,
-                KernelVersionProvider emptyLogsFallbackKernelVersion) {
+                InternalLogProvider logProvider) {
             requireNonNull(pageCache);
             requireNonNull(fileSystemAbstraction);
             requireNonNull(databaseLayout);
@@ -338,34 +368,14 @@ public final class Recovery {
             this.tracers = tracers;
             this.ioController = ioController;
             this.logProvider = requireNonNull(logProvider);
-            this.emptyLogsFallbackKernelVersion = emptyLogsFallbackKernelVersion;
+            this.failOnCorruptedLogs = config.get(GraphDatabaseInternalSettings.fail_on_corrupted_log_files);
         }
 
-        private Context(
-                FileSystemAbstraction fileSystemAbstraction,
-                PageCache pageCache,
-                DatabaseLayout databaseLayout,
-                Config config,
-                MemoryTracker memoryTracker,
-                DatabaseTracers tracers,
-                IOController ioController,
-                InternalLogProvider logProvider,
-                LogTailMetadata logTail) {
-            requireNonNull(pageCache);
-            requireNonNull(fileSystemAbstraction);
-            requireNonNull(databaseLayout);
-            requireNonNull(config);
-            this.pageCache = pageCache;
-            this.fs = fileSystemAbstraction;
-            this.databaseLayout = databaseLayout;
-            this.config = config;
-            this.memoryTracker = memoryTracker;
-            this.tracers = tracers;
-            this.ioController = ioController;
-            this.logProvider = requireNonNull(logProvider);
+        public Context withLogTailInfo(LogTailMetadata logTail) {
             // No need for the kernelVersionProvider if we are guaranteed a log tail.
             this.emptyLogsFallbackKernelVersion = KernelVersionProvider.THROWING_PROVIDER;
             this.providedLogTail = Optional.of(logTail);
+            return this;
         }
 
         /**
@@ -429,8 +439,28 @@ public final class Recovery {
             return this;
         }
 
-        public Context rollbackIncompleteTransactions(boolean rollbackIncompleteTransactions) {
-            this.rollbackIncompleteTransactions = rollbackIncompleteTransactions;
+        public Context incompleteTransactionAction(IncompleteTransactionAction incompleteTransactionAction) {
+            this.incompleteTransactionAction = incompleteTransactionAction;
+            return this;
+        }
+
+        public Context kernelVersionProvider(KernelVersionProvider kernelVersionProvider) {
+            this.emptyLogsFallbackKernelVersion = kernelVersionProvider;
+            return this;
+        }
+
+        public Context rollbackRegistry(ChunkedTransactionTracker chunkedTransactionTracker) {
+            this.chunkedTransactionTracker = chunkedTransactionTracker;
+            return this;
+        }
+
+        /**
+         * Is decided by {@link GraphDatabaseInternalSettings#fail_on_corrupted_log_files} by default. This method forces recovery to fail on corrupted log files.
+         * Is needed in some cluster components.
+         */
+        public Context forceFailOnCorruptedLogs() {
+            this.failOnCorruptedLogs = true;
+            this.treatBrokenLastEntryAsCorruption = true;
             return this;
         }
     }
@@ -440,7 +470,7 @@ public final class Recovery {
      * @param context The context to use
      * @throws IOException on any unexpected I/O exception encountered during recovery.
      */
-    public static boolean performRecovery(Context context) throws IOException {
+    public static RecoveryResult performRecovery(Context context) throws IOException {
         requireNonNull(context);
         StorageEngineFactory storageEngineFactory =
                 selectStorageEngine(context.fs, context.databaseLayout, context.config);
@@ -468,10 +498,13 @@ public final class Recovery {
                     context.clock,
                     context.ioController,
                     context.recoveryPredicate,
-                    context.rollbackIncompleteTransactions,
+                    context.chunkedTransactionTracker,
+                    context.incompleteTransactionAction,
                     context.awaitIndexesOnlineMillis,
                     context.emptyLogsFallbackKernelVersion,
-                    context.mode);
+                    context.mode,
+                    context.failOnCorruptedLogs,
+                    context.treatBrokenLastEntryAsCorruption);
         } finally {
             config.removeAllLocalListeners();
         }
@@ -487,7 +520,7 @@ public final class Recovery {
                 .build();
     }
 
-    private static boolean performRecovery(
+    private static RecoveryResult performRecovery(
             FileSystemAbstraction fs,
             PageCache pageCache,
             DatabaseTracers tracers,
@@ -504,12 +537,26 @@ public final class Recovery {
             Clock clock,
             IOController ioController,
             RecoveryPredicate recoveryPredicate,
-            boolean rollbackIncompleteTransactions,
+            ChunkedTransactionTracker chunkedTransactionTracker,
+            IncompleteTransactionAction incompleteTransactionAction,
             long awaitIndexesOnlineMillis,
             KernelVersionProvider emptyLogsFallbackKernelVersion,
-            RecoveryMode mode)
+            RecoveryMode mode,
+            boolean failOnCorruptedLogs,
+            boolean treatBrokenLastEntryAsCorruption)
             throws IOException {
         InternalLog recoveryLog = logProvider.getLog(Recovery.class);
+
+        LogTailMetadata logTailMetadata = providedLogTail.orElseGet(() -> loadLogTail(
+                fs,
+                tracers,
+                config,
+                databaseLayout,
+                storageEngineFactory,
+                memoryTracker,
+                emptyLogsFallbackKernelVersion,
+                recoveryPredicate.maxPosition()));
+
         if (!forceRunRecovery
                 && !isRecoveryRequired(
                         fs,
@@ -517,31 +564,49 @@ public final class Recovery {
                         databaseLayout,
                         storageEngineFactory,
                         config,
-                        providedLogTail,
+                        Optional.of(logTailMetadata),
                         memoryTracker,
-                        tracers)) {
-            return false;
+                        tracers,
+                        recoveryPredicate)) {
+            return new RecoveryResult(false, RecoveryOutcome.EMPTY_OUTCOME);
         }
-        checkAllFilesPresence(databaseLayout, fs, pageCache, storageEngineFactory);
+        var recoveryStartTime = Stopwatch.start();
+        StoreFileChecker storageFilesState = isDirty ->
+                storageEngineFactory.checkStoreFileState(fs, databaseLayout, pageCache, logTailMetadata, isDirty);
+        checkIfUnrecoverable(storageFilesState.check(true));
         LifeSupport recoveryLife = new LifeSupport();
         var namedDatabaseId = createRecoveryDatabaseId(fs, pageCache, databaseLayout, storageEngineFactory);
         Monitors monitors = new Monitors(globalMonitors, logProvider);
         VersionStorage recoveryVersionStorage = VersionStorage.EMPTY_STORAGE;
-        DatabasePageCache databasePageCache =
-                new DatabasePageCache(pageCache, ioController, recoveryVersionStorage, config);
-        SimpleLogService logService = new SimpleLogService(logProvider);
         DatabaseReadOnlyChecker readOnlyChecker = writable();
+        DatabaseHealth databaseHealth = new DatabaseHealth(HealthEventGenerator.NO_OP, recoveryLog);
+        SegmentTrackingFactory segmentTrackingFactory = recoveryLife.add(new SegmentTrackingFactory(
+                storageEngineFactory,
+                fs,
+                pageCache,
+                databaseLayout,
+                NULL_CONTEXT_FACTORY,
+                config,
+                readOnlyChecker,
+                databaseHealth,
+                recoveryLog));
+        DatabasePageCache databasePageCache = new DatabasePageCache(
+                pageCache, ioController, recoveryVersionStorage, segmentTrackingFactory.segmentTracker(), config);
 
+        SimpleLogService logService = new SimpleLogService(logProvider);
         DatabaseSchemaState schemaState = new DatabaseSchemaState(logProvider);
         JobScheduler scheduler = recoveryLife.add(JobSchedulerFactory.createInitialisedScheduler());
         DatabaseAvailabilityGuard guard = new RecoveryAvailabilityGuard(namedDatabaseId, clock, recoveryLog);
         recoveryLife.add(guard);
 
-        TransactionVersionContextSupplier versionContextSupplier = new TransactionVersionContextSupplier();
-        versionContextSupplier.init(EMPTY_SNAPSHOT_FACTORY, EMPTY_OLDEST_ID_FACTORY);
+        RecoveryBehavior recoveryBehavior =
+                storageEngineFactory.recoveryBehavior(fs, databasePageCache, databaseLayout, NULL_CONTEXT_FACTORY);
+        var versionContextSupplier = recoveryBehavior.useTransactionVersionContext()
+                ? new TransactionVersionContextSupplier()
+                : EMPTY_CONTEXT_SUPPLIER;
+        versionContextSupplier.init(EMPTY_SNAPSHOT_FACTORY, EMPTY_OLDEST_HORIZON_FACTORY);
         CursorContextFactory cursorContextFactory =
                 new CursorContextFactory(tracers.getPageCacheTracer(), versionContextSupplier);
-        DatabaseHealth databaseHealth = new DatabaseHealth(HealthEventGenerator.NO_OP, recoveryLog);
 
         // The token registries during recovery can add tokens w/o making a defensive copy
         // of all internal token registry state, because there should be none doing lookups
@@ -576,9 +641,41 @@ public final class Recovery {
         Dependencies indexDependencies = new Dependencies(extensions);
         indexDependencies.satisfyDependencies(recoveryVersionStorage);
 
+        var dependencies = dependenciesOf(
+                databaseLayout,
+                config,
+                databasePageCache,
+                fs,
+                logProvider,
+                tokenHolders,
+                schemaState,
+                getConstraintSemantics(),
+                NO_LOCK_SERVICE,
+                databaseHealth,
+                new DefaultIdGeneratorFactory(
+                        fs, recoveryCleanupCollector, tracers.getPageCacheTracer(), databaseLayout.getDatabaseName()),
+                new DefaultIdController(),
+                readOnlyChecker,
+                cursorContextFactory,
+                logService);
+
+        LogFiles logFiles = LogFilesBuilder.writeableBuilder(databaseLayout, fs, logTailMetadata, logTailMetadata)
+                .withStorageEngineFactory(storageEngineFactory)
+                .withConfig(config)
+                .withDatabaseTracers(tracers)
+                .withExternalLogTailMetadata(logTailMetadata)
+                .withDependencies(dependencies)
+                .withMemoryTracker(memoryTracker)
+                .withLogTermProvider(logTailMetadata)
+                .build();
+
+        LogMetadataProvider logMetadataProvider = logFiles.logMetadataProvider();
+        boolean doParallelRecovery = config.get(GraphDatabaseInternalSettings.do_parallel_recovery);
+
         var indexProviderMap = recoveryLife.add(StaticIndexProviderMapFactory.create(
                 recoveryLife,
                 config,
+                logMetadataProvider,
                 databasePageCache,
                 fs,
                 logService,
@@ -593,15 +690,6 @@ public final class Recovery {
                 tracers.getPageCacheTracer(),
                 indexDependencies));
 
-        LogTailMetadata logTailMetadata = providedLogTail.orElseGet(() -> loadLogTail(
-                fs,
-                tracers,
-                config,
-                databaseLayout,
-                storageEngineFactory,
-                memoryTracker,
-                emptyLogsFallbackKernelVersion));
-        MetadataCache recoveryMetaDataCache = new MetadataCache(logTailMetadata);
         StorageEngine storageEngine = storageEngineFactory.instantiate(
                 fs,
                 clock,
@@ -616,22 +704,29 @@ public final class Recovery {
                 new DefaultIdGeneratorFactory(
                         fs, recoveryCleanupCollector, tracers.getPageCacheTracer(), databaseLayout.getDatabaseName()),
                 databaseHealth,
+                scheduler,
                 logService.getInternalLogProvider(),
                 logService.getUserLogProvider(),
                 recoveryCleanupCollector,
-                logTailMetadata,
-                recoveryMetaDataCache,
+                logMetadataProvider,
                 memoryTracker,
                 cursorContextFactory,
                 tracers.getPageCacheTracer(),
                 recoveryVersionStorage,
-                PagePrefetcher.DISABLED);
+                PagePrefetcher.DISABLED,
+                dependenciesOf(recoveryVersionStorage, startupChecker),
+                new ExceptionHandlerService(logService.getInternalLogProvider()),
+                OperationMode.RECOVERY,
+                VectorStoreCreator.FAILING,
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS,
+                !doParallelRecovery);
 
-        // multi versioned stores recovery does not support format mode atm
-        if (storageEngine.getOpenOptions().contains(MULTI_VERSIONED)) {
+        dependencies.satisfyDependency(storageEngine.metadataProvider());
+
+        if (recoveryBehavior.forceFullRecovery()) {
             mode = RecoveryMode.FULL;
         } else {
-            rollbackIncompleteTransactions = true;
+            incompleteTransactionAction = ROLLBACK;
         }
 
         // Schema indexes
@@ -666,42 +761,12 @@ public final class Recovery {
                 databaseLayout.getDatabaseName(),
                 readOnlyChecker,
                 clock,
-                recoveryMetaDataCache,
+                logMetadataProvider,
                 fs,
                 EMPTY_VISIBILITY_PROVIDER);
 
-        MetadataProvider metadataProvider = storageEngine.metadataProvider();
-
-        var dependencies = dependenciesOf(
-                databaseLayout,
-                config,
-                databasePageCache,
-                fs,
-                logProvider,
-                tokenHolders,
-                schemaState,
-                getConstraintSemantics(),
-                NO_LOCK_SERVICE,
-                databaseHealth,
-                new DefaultIdGeneratorFactory(
-                        fs, recoveryCleanupCollector, tracers.getPageCacheTracer(), databaseLayout.getDatabaseName()),
-                new DefaultIdController(),
-                readOnlyChecker,
-                cursorContextFactory,
-                logService,
-                metadataProvider);
-
-        LogFiles logFiles = LogFilesBuilder.builder(databaseLayout, fs, recoveryMetaDataCache)
-                .withStorageEngineFactory(storageEngineFactory)
-                .withConfig(config)
-                .withDatabaseTracers(tracers)
-                .withExternalLogTailMetadata(logTailMetadata)
-                .withDependencies(dependencies)
-                .withMemoryTracker(memoryTracker)
-                .build();
-
-        boolean failOnCorruptedLogFiles = config.get(GraphDatabaseInternalSettings.fail_on_corrupted_log_files);
-        validateStoreId(logTailMetadata, storageEngine.retrieveStoreId());
+        StoreId storeId = storageEngine.metadataProvider().getStoreId();
+        validateStoreId(logTailMetadata, storeId);
 
         TransactionMetadataCache metadataCache = new TransactionMetadataCache();
         PhysicalLogicalTransactionStore transactionStore = new PhysicalLogicalTransactionStore(
@@ -709,50 +774,69 @@ public final class Recovery {
                 metadataCache,
                 storageEngineFactory.commandReaderFactory(),
                 monitors,
-                failOnCorruptedLogFiles,
-                config);
+                failOnCorruptedLogs,
+                config,
+                memoryTracker);
 
         LifeSupport schemaLife = new LifeSupport();
-        schemaLife.add(storageEngine.schemaAndTokensLifecycle());
+        schemaLife.add(storageEngine.schemaAndTokensLifecycle(
+                config.get(GraphDatabaseInternalSettings.ignore_corrupt_schema)));
         schemaLife.add(indexingService);
 
-        var doParallelRecovery = config.get(GraphDatabaseInternalSettings.do_parallel_recovery);
         RecoveryMonitor recoveryMonitor = monitors.newMonitor(RecoveryMonitor.class);
+        BinarySupportedKernelVersions binarySupportedKernelVersions = new BinarySupportedKernelVersions(config);
         TransactionLogsRecovery transactionLogsRecovery = transactionLogRecovery(
                 fs,
-                metadataProvider,
+                logMetadataProvider,
                 recoveryMonitor,
                 monitors.newMonitor(RecoveryStartInformationProvider.Monitor.class),
                 logFiles,
                 storageEngine,
                 logTailMetadata,
+                logTailMetadata,
                 transactionStore,
-                metadataProvider,
+                logMetadataProvider,
                 schemaLife,
                 databaseLayout,
-                failOnCorruptedLogFiles,
+                failOnCorruptedLogs,
+                treatBrokenLastEntryAsCorruption,
                 recoveryLog,
                 startupChecker,
                 memoryTracker,
                 clock,
                 doParallelRecovery,
                 recoveryPredicate,
-                rollbackIncompleteTransactions,
+                incompleteTransactionAction,
                 cursorContextFactory,
                 mode,
-                new BinarySupportedKernelVersions(config));
+                chunkedTransactionTracker,
+                binarySupportedKernelVersions,
+                storageFilesState,
+                config);
 
         CheckPointerImpl.ForceOperation forceOperation =
                 new DefaultForceOperation(indexingService, storageEngine, databasePageCache);
-        var checkpointAppender = logFiles.getCheckpointFile().getCheckpointAppender();
-        LogPruning logPruning = new LogPruningImpl(
-                fs, logFiles, logProvider, new LogPruneStrategyFactory(), clock, config, new ReentrantLock());
+
+        LogPruning logPruning = recoveryBehavior.runLogPruningOnCompletion(storageEngine)
+                ? new LogPruningImpl(
+                        fs,
+                        logFiles,
+                        logProvider,
+                        new LogPruneStrategyFactory(),
+                        clock,
+                        config,
+                        new ReentrantLock(),
+                        logMetadataProvider,
+                        storageEngineFactory.commandReaderFactory(),
+                        binarySupportedKernelVersions,
+                        memoryTracker)
+                : LogPruning.NO_PRUNING;
         CheckPointerImpl checkPointer = new CheckPointerImpl(
-                metadataProvider,
+                logMetadataProvider,
                 RecoveryThreshold.INSTANCE,
                 forceOperation,
                 logPruning,
-                checkpointAppender,
+                logFiles.getCheckpointFile(),
                 databaseHealth,
                 logProvider,
                 tracers,
@@ -760,11 +844,17 @@ public final class Recovery {
                 cursorContextFactory,
                 clock,
                 ioController,
-                recoveryMetaDataCache);
+                memoryTracker,
+                segmentTrackingFactory.createSegmentMetadataService(storeId, memoryTracker),
+                config);
         recoveryLife.add(indexStatisticsStore);
         recoveryLife.add(storageEngine);
         recoveryLife.add(new MissingTransactionLogsCheck(config, logTailMetadata, recoveryLog));
-        recoveryLife.add(logFiles);
+        // Starting the checkpoint file to append recovery checkpoint at the end.
+        // Not starting the transaction log file since it requires a fully recovered state, which
+        // is not guaranteed after TransactionLogsRecovery. For example seen with partial recovery
+        // if chunks from incomplete transactions were encountered.
+        recoveryLife.add(logFiles.getCheckpointFile());
         recoveryLife.add(transactionLogsRecovery);
         recoveryLife.add(checkPointer);
         try {
@@ -779,6 +869,7 @@ public final class Recovery {
                 String recoveryMessage =
                         logTailMetadata.logsMissing() ? "Recovery with missing logs completed." : "Recovery completed.";
                 checkPointer.forceCheckPoint(new SimpleTriggerInfo(recoveryMessage));
+                recoveryMonitor.transactionLogRecoveryCompleted(recoveryStartTime.elapsed(MILLISECONDS), mode);
             }
         } finally {
             recoveryLife.shutdown();
@@ -787,7 +878,7 @@ public final class Recovery {
         if (!databaseHealth.hasNoPanic()) {
             throw new IllegalStateException(databaseHealth.causeOfPanic());
         }
-        return true;
+        return new RecoveryResult(true, transactionLogsRecovery.getRecoveryOutcome());
     }
 
     private static void awaitIndexesOnline(IndexingService indexingService, long awaitIndexesOnlineMillis) {
@@ -811,9 +902,10 @@ public final class Recovery {
             DatabaseLayout databaseLayout,
             StorageEngineFactory storageEngineFactory,
             MemoryTracker memoryTracker,
-            KernelVersionProvider emptyLogsFallbackKernelVersion) {
+            KernelVersionProvider emptyLogsFallbackKernelVersion,
+            LogPosition maxPosition) {
         try {
-            return new LogTailExtractor(fs, config, storageEngineFactory, tracers, false)
+            return new LogTailExtractor(fs, config, storageEngineFactory, tracers, false, maxPosition)
                     .getTailMetadata(databaseLayout, memoryTracker, emptyLogsFallbackKernelVersion);
         } catch (IOException ioe) {
             throw new UncheckedIOException("Fail to load log tail.", ioe);
@@ -832,26 +924,36 @@ public final class Recovery {
     }
 
     public static void validateStoreId(LogTailMetadata tailMetadata, StoreId storeId) {
-        var optionalTxStoreId = tailMetadata.getStoreId();
+        var optionalTxStoreId = tailMetadata.getStoreIdentifier();
         if (optionalTxStoreId.isPresent()) {
             var txStoreId = optionalTxStoreId.get();
-            if (!storeId.isSameOrUpgradeSuccessor(txStoreId) && !txStoreId.isSameOrUpgradeSuccessor(storeId)) {
-                throw new RuntimeException(
-                        "Mismatching store id. Store StoreId: " + storeId + ". Transaction log StoreId: " + txStoreId);
+            if (!(storeId.isSameOrUpgradeSuccessor(txStoreId) || txStoreId.isSameOrUpgradeSuccessor(storeId))) {
+                throw new RuntimeException("Mismatching store id. Store StoreId: " + storeId
+                        + ". Transaction log StoreIdentifier: " + txStoreId);
             }
         }
     }
 
-    private static void checkAllFilesPresence(
-            DatabaseLayout databaseLayout,
-            FileSystemAbstraction fs,
-            PageCache pageCache,
-            StorageEngineFactory storageEngineFactory) {
-        StorageFilesState state = storageEngineFactory.checkStoreFileState(fs, databaseLayout, pageCache);
-        if (state.recoveryState() == RecoveryState.UNRECOVERABLE) {
-            throw new RuntimeException(format(
-                    "Store files %s is(are) missing and recovery is not possible. Please restore from a consistent backup.",
-                    state.missingFiles()));
+    @VisibleForTesting
+    @FunctionalInterface
+    public interface StoreFileChecker {
+        /**
+         * Check if all required files are present.
+         *
+         * @param isDirty if {@code true} the store has not properly been shutdown, and we can't trust
+         *                the content of the files.
+         * @return a {@link StorageFilesState} indicating the recovered/recoverable state of the store.
+         */
+        StorageFilesState check(boolean isDirty);
+    }
+
+    static void checkIfUnrecoverable(StorageFilesState state) {
+        final List<StoreFile> missingFiles = state.missingFiles();
+        if (missingFiles != null && !missingFiles.isEmpty()) {
+            final boolean plural = missingFiles.size() > 1;
+            throw new RuntimeException(
+                    "Store file%s %s %s missing and recovery is not possible. Please restore from a consistent backup."
+                            .formatted(plural ? "s" : "", missingFiles, plural ? "are" : "is"));
         }
     }
 
@@ -863,21 +965,26 @@ public final class Recovery {
             LogFiles logFiles,
             StorageEngine storageEngine,
             KernelVersionProvider versionProvider,
+            LogFormatVersionProvider logFormatVersionProvider,
             LogicalTransactionStore logicalTransactionStore,
             LogVersionRepository logVersionRepository,
             Lifecycle schemaLife,
             DatabaseLayout databaseLayout,
             boolean failOnCorruptedLogFiles,
+            boolean treatBrokenLastEntryAsCorruption,
             InternalLog log,
             RecoveryStartupChecker startupChecker,
             MemoryTracker memoryTracker,
             Clock clock,
             boolean doParallelRecovery,
             RecoveryPredicate recoveryPredicate,
-            boolean rollbackIncompleteTransactions,
+            IncompleteTransactionAction incompleteTransactionAction,
             CursorContextFactory contextFactory,
             RecoveryMode mode,
-            BinarySupportedKernelVersions binarySupportedKernelVersions) {
+            ChunkedTransactionTracker chunkedTransactionTracker,
+            BinarySupportedKernelVersions binarySupportedKernelVersions,
+            StoreFileChecker storageFilesState,
+            Config config) {
         RecoveryService recoveryService = new DefaultRecoveryService(
                 storageEngine,
                 transactionIdStore,
@@ -885,29 +992,36 @@ public final class Recovery {
                 logVersionRepository,
                 logFiles,
                 versionProvider,
+                logFormatVersionProvider,
                 positionMonitor,
                 log,
                 doParallelRecovery,
-                contextFactory);
+                contextFactory,
+                storageFilesState,
+                config);
         CorruptedLogsTruncator logsTruncator = new CorruptedLogsTruncator(
                 databaseLayout.databaseDirectory(), logFiles, fileSystemAbstraction, memoryTracker);
         var loggerPrintWriterAdaptor = new LoggerPrintWriterAdaptor(log, Level.INFO);
         return new TransactionLogsRecovery(
                 logFiles,
                 versionProvider,
+                logFormatVersionProvider,
                 recoveryService,
                 logsTruncator,
                 schemaLife,
                 recoveryMonitor,
                 ProgressMonitorFactory.basicTextual(loggerPrintWriterAdaptor),
                 failOnCorruptedLogFiles,
+                treatBrokenLastEntryAsCorruption,
                 startupChecker,
                 recoveryPredicate,
-                rollbackIncompleteTransactions,
+                incompleteTransactionAction,
                 contextFactory,
                 clock,
                 binarySupportedKernelVersions,
-                mode);
+                mode,
+                chunkedTransactionTracker,
+                doParallelRecovery);
     }
 
     private static Iterable<ExtensionFactory<?>> loadExtensions() {
@@ -973,11 +1087,12 @@ public final class Recovery {
 
     static void throwUnableToCleanRecover(Throwable t) {
         throw new RuntimeException(
-                "Error reading transaction logs, recovery not possible. To force the database to start anyway, you can specify '"
+                "Error reading transaction logs, recovery not possible. To force the database to start anyway, you can"
+                        + " specify '"
                         + GraphDatabaseInternalSettings.fail_on_corrupted_log_files.name()
-                        + "=false'. This will try to recover as much "
-                        + "as possible and then truncate the corrupt part of the transaction log. Doing this means your database "
-                        + "integrity might be compromised, please consider restoring from a consistent backup instead.",
+                        + "=false'. This will try to recover as much as possible and then truncate the corrupt part of"
+                        + " the transaction log. Doing this means your database integrity might be compromised, please"
+                        + " consider restoring from a consistent backup instead.",
                 t);
     }
 
@@ -1031,10 +1146,10 @@ public final class Recovery {
                 if (config.get(GraphDatabaseSettings.fail_on_missing_files)) {
                     log.error("Transaction logs are missing and recovery is not possible.");
                     log.info(
-                            "To force the database to start anyway, you can specify '%s=false'. "
-                                    + "This will create new transaction log and will update database metadata accordingly. "
-                                    + "Doing this means your database integrity might be compromised, "
-                                    + "please consider restoring from a consistent backup instead.",
+                            "To force the database to start anyway, you can specify '%s=false'. This will create new"
+                                    + " transaction log and will update database metadata accordingly. Doing this means"
+                                    + " your database integrity might be compromised, please consider restoring from a"
+                                    + " consistent backup instead.",
                             GraphDatabaseSettings.fail_on_missing_files.name());
 
                     throw new RuntimeException("Transaction logs are missing and recovery is not possible.");

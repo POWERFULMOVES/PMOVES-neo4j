@@ -24,22 +24,21 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
 
 import io.netty.channel.embedded.EmbeddedChannel;
 import java.util.Collections;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatchers;
-import org.neo4j.bolt.fsm.StateMachine;
+import org.neo4j.bolt.fsm.StateMachineHandle;
 import org.neo4j.bolt.protocol.common.connection.Job;
 import org.neo4j.bolt.protocol.common.fsm.response.ResponseHandler;
 import org.neo4j.bolt.protocol.common.message.Error;
-import org.neo4j.bolt.protocol.common.message.request.RequestMessage;
-import org.neo4j.bolt.protocol.common.message.request.authentication.HelloMessage;
-import org.neo4j.bolt.protocol.common.message.request.connection.RoutingContext;
 import org.neo4j.bolt.runtime.BoltConnectionFatality;
 import org.neo4j.bolt.testing.mock.ConnectionMockFactory;
+import org.neo4j.boltmessages.request.RequestMessage;
+import org.neo4j.boltmessages.request.authentication.HelloMessage;
+import org.neo4j.boltmessages.request.connection.RoutingContext;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.packstream.error.struct.IllegalStructArgumentException;
 
@@ -66,7 +65,7 @@ class RequestHandlerTest {
     @Test
     void shouldEnqueueErrors() throws BoltConnectionFatality {
         var responseHandler = mock(ResponseHandler.class);
-        var fsm = mock(StateMachine.class);
+        var fsm = mock(StateMachineHandle.class);
 
         var channel = new EmbeddedChannel();
 
@@ -78,10 +77,11 @@ class RequestHandlerTest {
                 })
                 .attachTo(channel, new RequestHandler(NullLogProvider.getInstance()));
 
-        channel.pipeline().fireExceptionCaught(new IllegalStructArgumentException("foo", "Something went wrong! :("));
+        channel.pipeline()
+                .fireExceptionCaught(new IllegalStructArgumentException(null, "foo", "Something went wrong! :(", null));
 
         // invoked through mock
         verify(responseHandler).onFailure(any(Error.class));
-        verifyNoInteractions(fsm);
+        verify(fsm).fail();
     }
 }

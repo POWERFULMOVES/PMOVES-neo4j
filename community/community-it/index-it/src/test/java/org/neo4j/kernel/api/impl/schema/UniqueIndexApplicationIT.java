@@ -54,7 +54,7 @@ public class UniqueIndexApplicationIT {
 
     @AfterEach
     void then() {
-        try (var transaction = db.beginTx()) {
+        try (Transaction transaction = db.beginTx()) {
             assertThat(listNodeIdsFromIndexLookup(transaction, label("Label1"), "key1", "value1")
                             .apply(db))
                     .as("Matching nodes from index lookup")
@@ -78,8 +78,8 @@ public class UniqueIndexApplicationIT {
     void tx_createNode_addLabel_setProperty(Function<Transaction, Void> createIndexFunc) {
         createIndex(createIndexFunc);
 
-        try (var transaction = db.beginTx()) {
-            var node = transaction.createNode();
+        try (Transaction transaction = db.beginTx()) {
+            Node node = transaction.createNode();
             node.addLabel(label("Label1"));
             node.setProperty("key1", "value1");
             transaction.commit();
@@ -91,8 +91,8 @@ public class UniqueIndexApplicationIT {
     void tx_createNode_tx_addLabel_setProperty(Function<Transaction, Void> createIndexFunc) {
         createIndex(createIndexFunc);
 
-        try (var transaction = db.beginTx()) {
-            var node = transaction.createNode();
+        try (Transaction transaction = db.beginTx()) {
+            Node node = transaction.createNode();
             node.addLabel(label("Label1"));
             node.setProperty("key1", "value1");
             transaction.commit();
@@ -104,14 +104,15 @@ public class UniqueIndexApplicationIT {
     void tx_createNode_addLabel_tx_setProperty(Function<Transaction, Void> createIndexFunc) {
         createIndex(createIndexFunc);
 
-        Node node;
-        try (var transaction = db.beginTx()) {
-            node = transaction.createNode();
+        String nodeId;
+        try (Transaction transaction = db.beginTx()) {
+            Node node = transaction.createNode();
+            nodeId = node.getElementId();
             node.addLabel(label("Label1"));
             transaction.commit();
         }
-        try (var transaction = db.beginTx()) {
-            transaction.getNodeById(node.getId()).setProperty("key1", "value1");
+        try (Transaction transaction = db.beginTx()) {
+            transaction.getNodeByElementId(nodeId).setProperty("key1", "value1");
             transaction.commit();
         }
     }
@@ -121,15 +122,16 @@ public class UniqueIndexApplicationIT {
     void tx_createNode_setProperty_tx_addLabel(Function<Transaction, Void> createIndexFunc) {
         createIndex(createIndexFunc);
 
-        Node node;
-        try (var transaction = db.beginTx()) {
-            node = transaction.createNode();
+        String nodeId;
+        try (Transaction transaction = db.beginTx()) {
+            Node node = transaction.createNode();
+            nodeId = node.getElementId();
             node.addLabel(label("Label1"));
             node.setProperty("key1", "value1");
             transaction.commit();
         }
-        try (var transaction = db.beginTx()) {
-            transaction.getNodeById(node.getId()).addLabel(label("Label1"));
+        try (Transaction transaction = db.beginTx()) {
+            transaction.getNodeByElementId(nodeId).addLabel(label("Label1"));
             transaction.commit();
         }
     }
@@ -139,17 +141,17 @@ public class UniqueIndexApplicationIT {
     void tx_createNode_tx_addLabel_tx_setProperty(Function<Transaction, Void> createIndexFunc) {
         createIndex(createIndexFunc);
 
-        Node node;
-        try (var transaction = db.beginTx()) {
-            node = transaction.createNode();
+        String nodeId;
+        try (Transaction transaction = db.beginTx()) {
+            nodeId = transaction.createNode().getElementId();
             transaction.commit();
         }
-        try (var transaction = db.beginTx()) {
-            transaction.getNodeById(node.getId()).addLabel(label("Label1"));
+        try (Transaction transaction = db.beginTx()) {
+            transaction.getNodeByElementId(nodeId).addLabel(label("Label1"));
             transaction.commit();
         }
-        try (var transaction = db.beginTx()) {
-            transaction.getNodeById(node.getId()).setProperty("key1", "value1");
+        try (Transaction transaction = db.beginTx()) {
+            transaction.getNodeByElementId(nodeId).setProperty("key1", "value1");
             transaction.commit();
         }
     }
@@ -159,8 +161,8 @@ public class UniqueIndexApplicationIT {
     void tx_createNode_tx_setProperty_tx_addLabel(Function<Transaction, Void> createIndexFunc) {
         createIndex(createIndexFunc);
 
-        try (var transaction = db.beginTx()) {
-            var node = transaction.createNode();
+        try (Transaction transaction = db.beginTx()) {
+            Node node = transaction.createNode();
             node.setProperty("key1", "value1");
             node.addLabel(label("Label1"));
             transaction.commit();
@@ -168,7 +170,7 @@ public class UniqueIndexApplicationIT {
     }
 
     private static Function<GraphDatabaseService, List<Long>> listNodeIdsFromIndexLookup(
-            Transaction tx, final Label label, final String propertyKey, final Object value) {
+            Transaction tx, Label label, String propertyKey, Object value) {
         return graphDb -> {
             List<Long> ids = new ArrayList<>();
             try (ResourceIterator<Node> nodes = tx.findNodes(label, propertyKey, value)) {

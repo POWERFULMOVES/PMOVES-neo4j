@@ -19,8 +19,8 @@
  */
 package org.neo4j.internal.batchimport.input;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.neo4j.kernel.KernelVersion.VERSION_ENVELOPED_TRANSACTION_LOGS_INTRODUCED;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.neo4j.kernel.KernelVersion.VERSION_ENVELOPED_TRANSACTION_LOGS_GUARANTEED;
 
 import java.io.Flushable;
 import java.io.IOException;
@@ -28,6 +28,7 @@ import java.nio.ByteBuffer;
 import org.junit.jupiter.api.Test;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.fs.FlushableChannel;
+import org.neo4j.io.fs.WritableChannel;
 import org.neo4j.kernel.KernelVersion;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.testdirectory.EphemeralTestDirectoryExtension;
@@ -61,8 +62,8 @@ class ValueTypeTest {
                 Integer.BYTES
                 + // array length
                 value.length * Integer.BYTES; // array data
-        assertEquals(expected, length);
-        assertEquals(expected, channel.position());
+        assertThat(length).isEqualTo(expected);
+        assertThat(channel.position()).isEqualTo(expected);
     }
 
     private static class CountingChannel implements FlushableChannel {
@@ -117,11 +118,16 @@ class ValueTypeTest {
 
         @Override
         public CountingChannel putVersion(byte version) {
-            if (KernelVersion.getForVersion(version).isAtLeast(VERSION_ENVELOPED_TRANSACTION_LOGS_INTRODUCED)) {
+            if (KernelVersion.getForVersion(version).isAtLeast(VERSION_ENVELOPED_TRANSACTION_LOGS_GUARANTEED)) {
                 // version is not part of the data when writing envelopes
                 return this;
             }
             return put(version);
+        }
+
+        @Override
+        public WritableChannel putAppendIndex(long appendIndex) {
+            return putLong(appendIndex);
         }
 
         @Override

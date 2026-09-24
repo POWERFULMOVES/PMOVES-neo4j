@@ -21,31 +21,39 @@ package org.neo4j.cypher.internal
 
 import org.neo4j.common.DependencyResolver
 import org.neo4j.configuration.Config
+import org.neo4j.cypher.internal.AdministrationCommandRuntime.checkNamespaceExists
+import org.neo4j.cypher.internal.AdministrationCommandRuntime.getDatabaseNameFields
 import org.neo4j.cypher.internal.AdministrationCommandRuntime.internalKey
 import org.neo4j.cypher.internal.AdministrationCommandRuntime.makeRenameExecutionPlan
 import org.neo4j.cypher.internal.AdministrationCommandRuntime.runtimeStringValue
-import org.neo4j.cypher.internal.AdministrationCommandRuntime.userNamePropKey
 import org.neo4j.cypher.internal.administration.AlterUserExecutionPlanner
+import org.neo4j.cypher.internal.administration.CommunityAlterDatabaseExecutionPlanner
 import org.neo4j.cypher.internal.administration.CreateUserExecutionPlanner
 import org.neo4j.cypher.internal.administration.DoNothingExecutionPlanner
 import org.neo4j.cypher.internal.administration.DropUserExecutionPlanner
 import org.neo4j.cypher.internal.administration.EnsureNodeExistsExecutionPlanner
 import org.neo4j.cypher.internal.administration.SetOwnPasswordExecutionPlanner
-import org.neo4j.cypher.internal.administration.ShowDatabasesExecutionPlanner
 import org.neo4j.cypher.internal.administration.ShowUsersExecutionPlanner
 import org.neo4j.cypher.internal.administration.SystemProcedureCallPlanner
 import org.neo4j.cypher.internal.ast.AdministrationAction
 import org.neo4j.cypher.internal.ast.DbmsAction
+import org.neo4j.cypher.internal.ast.NoOptions
 import org.neo4j.cypher.internal.ast.StartDatabaseAction
 import org.neo4j.cypher.internal.ast.StopDatabaseAction
-import org.neo4j.cypher.internal.ast.UnassignableAction
 import org.neo4j.cypher.internal.expressions.Parameter
 import org.neo4j.cypher.internal.logical.plans.AllowedNonAdministrationCommands
+import org.neo4j.cypher.internal.logical.plans.AlterDatabase
 import org.neo4j.cypher.internal.logical.plans.AlterUser
+import org.neo4j.cypher.internal.logical.plans.AlterUsers
 import org.neo4j.cypher.internal.logical.plans.AssertAllowedDatabaseAction
 import org.neo4j.cypher.internal.logical.plans.AssertAllowedDbmsActions
 import org.neo4j.cypher.internal.logical.plans.AssertAllowedDbmsActionsOrSelf
+import org.neo4j.cypher.internal.logical.plans.AssertCanAlterDatabase
+import org.neo4j.cypher.internal.logical.plans.AssertManagementActionNotBlocked
 import org.neo4j.cypher.internal.logical.plans.AssertNotCurrentUser
+import org.neo4j.cypher.internal.logical.plans.AssertNotGraphShard
+import org.neo4j.cypher.internal.logical.plans.AssertNotPropertyShard
+import org.neo4j.cypher.internal.logical.plans.AssertNotVirtualSpd
 import org.neo4j.cypher.internal.logical.plans.CheckNativeAuthentication
 import org.neo4j.cypher.internal.logical.plans.CreateUser
 import org.neo4j.cypher.internal.logical.plans.DoNothingIfDatabaseExists
@@ -61,37 +69,49 @@ import org.neo4j.cypher.internal.logical.plans.PrivilegePlan
 import org.neo4j.cypher.internal.logical.plans.RenameUser
 import org.neo4j.cypher.internal.logical.plans.SetOwnPassword
 import org.neo4j.cypher.internal.logical.plans.ShowCurrentUser
-import org.neo4j.cypher.internal.logical.plans.ShowDatabase
 import org.neo4j.cypher.internal.logical.plans.ShowUsers
 import org.neo4j.cypher.internal.logical.plans.SystemProcedureCall
 import org.neo4j.cypher.internal.procs.ActionMapper
 import org.neo4j.cypher.internal.procs.AuthorizationAndPredicateExecutionPlan
 import org.neo4j.cypher.internal.procs.Continue
 import org.neo4j.cypher.internal.procs.ParameterTransformer
+import org.neo4j.cypher.internal.procs.ParameterTransformer.ParameterGenerationFunction
 import org.neo4j.cypher.internal.procs.PredicateExecutionPlan
 import org.neo4j.cypher.internal.procs.QueryHandler
 import org.neo4j.cypher.internal.procs.SystemCommandExecutionPlan
 import org.neo4j.cypher.internal.procs.ThrowException
 import org.neo4j.cypher.internal.procs.UpdatingSystemCommandExecutionPlan
 import org.neo4j.cypher.rendering.QueryRenderer
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_NAME_PROPERTY
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.DATABASE_NAME
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.DATABASE_NAME_PROPERTY
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.GRAPH_SHARD
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.NAMESPACE_PROPERTY
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.PROPERTY_SHARD
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.SPD
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.TARGETS
 import org.neo4j.exceptions.CantCompileQueryException
 import org.neo4j.exceptions.CypherExecutionException
 import org.neo4j.exceptions.DatabaseAdministrationOnFollowerException
 import org.neo4j.exceptions.InvalidArgumentException
+import org.neo4j.exceptions.InvalidSemanticsException
 import org.neo4j.exceptions.Neo4jException
+import org.neo4j.gqlstatus.PrivilegeGqlCodeEntity
 import org.neo4j.graphdb.security.AuthorizationViolationException
 import org.neo4j.internal.kernel.api.security.AbstractSecurityLog
-import org.neo4j.internal.kernel.api.security.AccessMode
 import org.neo4j.internal.kernel.api.security.AdminActionOnResource
 import org.neo4j.internal.kernel.api.security.AdminActionOnResource.DatabaseScope
 import org.neo4j.internal.kernel.api.security.PermissionState
 import org.neo4j.internal.kernel.api.security.SecurityAuthorizationHandler
 import org.neo4j.internal.kernel.api.security.SecurityContext
+import org.neo4j.internal.kernel.api.security.SecurityExceptionLogger
 import org.neo4j.internal.kernel.api.security.Segment
+import org.neo4j.internal.kernel.api.security.StaticAccessMode
 import org.neo4j.kernel.api.exceptions.Status
 import org.neo4j.kernel.api.exceptions.Status.HasStatus
 import org.neo4j.kernel.impl.api.security.RestrictedAccessMode
 import org.neo4j.kernel.impl.query.TransactionalContext.DatabaseMode
+import org.neo4j.server.security.systemgraph.ShowUsersOutput
 import org.neo4j.server.security.systemgraph.UserSecurityGraphComponent
 import org.neo4j.values.storable.BooleanValue
 import org.neo4j.values.storable.TextValue
@@ -111,17 +131,17 @@ case class CommunityAdministrationCommandRuntime(
 ) extends AdministrationCommandRuntime {
   override def name: String = "community administration-commands"
 
+  private val securityLog = resolver.resolveDependency(classOf[AbstractSecurityLog])
+
   private lazy val securityAuthorizationHandler =
-    new SecurityAuthorizationHandler(resolver.resolveDependency(classOf[AbstractSecurityLog]))
+    new SecurityAuthorizationHandler(securityLog)
   private val config: Config = resolver.resolveDependency(classOf[Config])
 
   private lazy val userSecurity: UserSecurityGraphComponent =
     resolver.resolveDependency(classOf[UserSecurityGraphComponent])
 
   def throwCantCompile(unknownPlan: LogicalPlan): Nothing = {
-    throw new CantCompileQueryException(
-      s"Plan is not a recognized database administration command in community edition: ${unknownPlan.getClass.getSimpleName}"
-    )
+    throw CantCompileQueryException.planUnsupportedInCommunityEdition(unknownPlan.getClass.getSimpleName)
   }
 
   override def compileToExecutable(
@@ -138,31 +158,27 @@ case class CommunityAdministrationCommandRuntime(
   // When the community commands are run within enterprise, this allows the enterprise commands to be chained
   private def fullLogicalToExecutable = extraLogicalToExecutable orElse logicalToExecutable
 
-  val checkShowUserPrivilegesText: String =
+  private val checkShowUserPrivilegesText: String =
     "Try executing SHOW USER PRIVILEGES to determine the missing or denied privileges. " +
       "In case of missing privileges, they need to be granted (See GRANT). In case of denied privileges, they need to be revoked (See REVOKE) and granted."
 
-  def prettifyActionName(actions: AdministrationAction*): String = {
+  private def prettifyActionName(actions: AdministrationAction*): String = {
     actions.map {
       case StartDatabaseAction => "START DATABASE"
       case StopDatabaseAction  => "STOP DATABASE"
       case a                   => a.name
-    }.sorted.mkString(" and/or ")
+    }.distinct.sorted.mkString(" and/or ")
   }
 
-  private[internal] def adminActionErrorMessage(
+  def adminActionErrorMessage(
     permissionState: PermissionState,
     actions: Seq[AdministrationAction]
-  ) = {
-    val allUnassignable = actions.forall(_.isInstanceOf[UnassignableAction])
-    val missingPrivilegeHelpMessageSuffix = if (allUnassignable) "" else s" $checkShowUserPrivilegesText"
-
+  ): String = {
     permissionState match {
       case PermissionState.EXPLICIT_DENY =>
-        s"Permission denied for ${prettifyActionName(actions: _*)}.$missingPrivilegeHelpMessageSuffix"
+        s"Permission denied for ${prettifyActionName(actions: _*)}. $checkShowUserPrivilegesText"
       case PermissionState.NOT_GRANTED =>
-        val reason = if (allUnassignable) "cannot be" else "has not been"
-        s"Permission $reason granted for ${prettifyActionName(actions: _*)}.$missingPrivilegeHelpMessageSuffix"
+        s"Permission has not been granted for ${prettifyActionName(actions: _*)}. $checkShowUserPrivilegesText"
       case PermissionState.EXPLICIT_GRANT => ""
     }
   }
@@ -176,7 +192,7 @@ case class CommunityAdministrationCommandRuntime(
       case _            => None
     }
 
-  private[internal] def checkActions(
+  def checkActions(
     actions: Seq[DbmsAction],
     securityContext: SecurityContext
   ): Seq[(DbmsAction, PermissionState)] =
@@ -196,7 +212,7 @@ case class CommunityAdministrationCommandRuntime(
     actions: Seq[DbmsAction]
   ): AdministrationCommandRuntimeContext => ExecutionPlan = _ => {
     AuthorizationAndPredicateExecutionPlan(
-      securityAuthorizationHandler,
+      securityLog,
       (params, securityContext) => {
         if (securityContext.subject().hasUsername(runtimeStringValue(user, params)))
           Seq((null, PermissionState.EXPLICIT_GRANT))
@@ -210,7 +226,7 @@ case class CommunityAdministrationCommandRuntime(
     // Check Admin Rights for DBMS commands
     case AssertAllowedDbmsActions(maybeSource, actions) => context =>
         AuthorizationAndPredicateExecutionPlan(
-          securityAuthorizationHandler,
+          securityLog,
           (_, securityContext) => checkActions(actions, securityContext),
           violationMessage = adminActionErrorMessage,
           source = getSource(maybeSource, context)
@@ -219,6 +235,28 @@ case class CommunityAdministrationCommandRuntime(
     // Check Admin Rights for DBMS commands or self
     case AssertAllowedDbmsActionsOrSelf(user, actions) =>
       context => checkAdminRightsForDBMSOrSelf(user, actions)(context)
+
+    // Check rights for ALTER DATABASE, does the same as AssertAllowedDbmsActions
+    // using the non-composite privileges, since community doesn't have composite databases
+    case AssertCanAlterDatabase(source, database, _, actions) => context =>
+        AuthorizationAndPredicateExecutionPlan(
+          securityLog,
+          (params, securityContext) =>
+            actions.map(action =>
+              (
+                action,
+                securityContext.allowsAdminAction(
+                  new AdminActionOnResource(
+                    ActionMapper.asKernelAction(action),
+                    new DatabaseScope(runtimeStringValue(database, params)),
+                    Segment.ALL
+                  )
+                )
+              )
+            ),
+          violationMessage = adminActionErrorMessage,
+          source = getSource(Some(source), context)
+        )
 
     // Check that the specified user is not the logged in user (eg. for some CREATE/DROP/ALTER USER commands)
     case AssertNotCurrentUser(source, userName, verb, violationMessage, errorGqlStatusObject) => context =>
@@ -235,7 +273,7 @@ case class CommunityAdministrationCommandRuntime(
     // Check Admin Rights for some Database commands
     case AssertAllowedDatabaseAction(action, database, maybeSource) => context =>
         AuthorizationAndPredicateExecutionPlan(
-          securityAuthorizationHandler,
+          securityLog,
           (params, securityContext) =>
             Seq((
               action,
@@ -252,23 +290,53 @@ case class CommunityAdministrationCommandRuntime(
         )
 
     // SHOW USERS
-    case ShowUsers(source, withAuth, symbols, yields, returns) => context =>
-        val sourcePlan: Option[ExecutionPlan] =
-          Some(fullLogicalToExecutable.applyOrElse(source, throwCantCompile).apply(context))
-        ShowUsersExecutionPlanner(normalExecutionEngine, securityAuthorizationHandler).planShowUsers(
-          symbols,
-          withAuth,
-          yields,
-          returns,
-          sourcePlan
+    case ShowUsers(source, withAuth, asCommands, symbols, yields, returns) => context => {
+        val rowsKey = internalKey(ShowUsersOutput.USERS)
+
+        val genFunc: ParameterGenerationFunction = (tx, securityContext, params) => {
+          val outputParams = userSecurity.showUsers(tx, withAuth, true, asCommands, false)
+          outputParams.toMapValue
+        }
+
+        val returnClause =
+          AdministrationShowCommandUtils.generateReturnClause(
+            symbols,
+            yields,
+            returns,
+            Seq("user")
+          )
+        SystemCommandExecutionPlan(
+          "ShowUsers",
+          normalExecutionEngine,
+          securityAuthorizationHandler,
+          s"""
+             |UNWIND $$$rowsKey AS row
+             |  WITH
+             |  row.${ShowUsersOutput.COMMAND} AS command,
+             |  row.${ShowUsersOutput.USER} AS user,
+             |  null AS roles,
+             |  row.${ShowUsersOutput.PASSWORD_CHANGE_REQ} AS passwordChangeRequired,
+             |  null AS suspended,
+             |  null AS home,
+             |  row.${ShowUsersOutput.PROVIDER} AS provider,
+             |  row.${ShowUsersOutput.AUTH} AS auth,
+             |  row.${ShowUsersOutput.TAGS} AS tags
+             |$returnClause
+             |""".stripMargin,
+          VirtualValues.EMPTY_MAP,
+          source = Some(fullLogicalToExecutable.applyOrElse(source, throwCantCompile).apply(context)),
+          parameterTransformer = ParameterTransformer(genFunc),
+          cypherVersion = context.runtimeContext.cypherVersion
         )
+      }
 
     // SHOW CURRENT USER
-    case ShowCurrentUser(symbols, yields, returns) => _ =>
+    case ShowCurrentUser(symbols, yields, returns) => context =>
         ShowUsersExecutionPlanner(normalExecutionEngine, securityAuthorizationHandler).planShowCurrentUser(
           symbols,
           yields,
-          returns
+          returns,
+          context
         )
 
     // CREATE [OR REPLACE] USER foo [IF NOT EXISTS] SET [PLAINTEXT | ENCRYPTED] PASSWORD 'password'
@@ -290,8 +358,8 @@ case class CommunityAdministrationCommandRuntime(
         val sourcePlan: Option[ExecutionPlan] =
           Some(fullLogicalToExecutable.applyOrElse(source, throwCantCompile).apply(context))
         makeRenameExecutionPlan(
-          PrivilegeGQLCodeEntity.User(),
-          userNamePropKey,
+          PrivilegeGqlCodeEntity.USER,
+          USER_NAME_PROPERTY,
           fromUserName,
           toUserName,
           params => {
@@ -299,6 +367,10 @@ case class CommunityAdministrationCommandRuntime(
             NameValidator.assertValidUsername(toName)
           }
         )(sourcePlan, normalExecutionEngine, securityAuthorizationHandler)
+
+    // ALTER USERS — tag-only command; entirely unsupported in community
+    case _: AlterUsers => _ =>
+        throw CantCompileQueryException.commandUnsupportedInCommunityEdition("ALTER USERS")
 
     // ALTER USER foo [SET [PLAINTEXT | ENCRYPTED] PASSWORD pw] [CHANGE [NOT] REQUIRED]
     case alterUser: AlterUser => context =>
@@ -327,20 +399,168 @@ case class CommunityAdministrationCommandRuntime(
     case SetOwnPassword(source, newPassword, currentPassword) => context =>
         val sourcePlan: Option[ExecutionPlan] =
           Some(fullLogicalToExecutable.applyOrElse(source, throwCantCompile).apply(context))
-        SetOwnPasswordExecutionPlanner(normalExecutionEngine, securityAuthorizationHandler, config).planSetOwnPassword(
+        SetOwnPasswordExecutionPlanner(
+          normalExecutionEngine,
+          securityAuthorizationHandler,
+          config,
+          securityLog
+        ).planSetOwnPassword(
           newPassword,
           currentPassword,
           sourcePlan
         )
 
-    // SHOW DATABASES | SHOW DEFAULT DATABASE | SHOW HOME DATABASE | SHOW DATABASE foo
-    case ShowDatabase(scope, verbose, symbols, yields, returns) => _ =>
-        ShowDatabasesExecutionPlanner(
-          resolver,
+    // ALTER DATABASE SET DEFAULT LANGUAGE
+    case AlterDatabase(source, databaseName, None, None, NoOptions, Some(defaultLanguageVersion), optionsToRemove, None)
+      if optionsToRemove.isEmpty =>
+      context => {
+        val sourcePlan: Option[ExecutionPlan] =
+          Some(fullLogicalToExecutable.applyOrElse(source, throwCantCompile).apply(context))
+        CommunityAlterDatabaseExecutionPlanner(
           normalExecutionEngine,
           securityAuthorizationHandler
+        ).planAlterDatabase(databaseName, defaultLanguageVersion, sourcePlan, context)
+      }
+
+    case AssertNotVirtualSpd(source, databaseName, action, actionVerb) => context =>
+        val sourcePlan: Option[ExecutionPlan] =
+          Some(fullLogicalToExecutable.applyOrElse(source, throwCantCompile).apply(context))
+        val nameFields = getDatabaseNameFields("databaseName", databaseName)
+
+        val parameterTransformer = ParameterTransformer()
+          .convert(nameFields.nameConverter)
+          .validate(checkNamespaceExists(nameFields, context))
+
+        UpdatingSystemCommandExecutionPlan(
+          "AssertNotSpd",
+          normalExecutionEngine,
+          securityAuthorizationHandler,
+          query =
+            s"""
+               |MATCH (n:$DATABASE_NAME)-[:$TARGETS]->(d:$SPD)
+               |  WHERE n.$DATABASE_NAME_PROPERTY = $$`${nameFields.nameKey}`
+               |  AND n.$NAMESPACE_PROPERTY = $$`${nameFields.namespaceKey}`
+               |RETURN d.$DATABASE_NAME_PROPERTY AS dbName""".stripMargin,
+          VirtualValues.map(
+            Array(nameFields.nameKey, nameFields.namespaceKey),
+            Array(nameFields.nameValue, nameFields.namespaceValue)
+          ),
+          queryHandler = QueryHandler.handleResult((_, _, _) =>
+            ThrowException(
+              InvalidSemanticsException.invalidAlterShardedTarget(
+                action
+              )
+            )
+          ).handleError((error, params) =>
+            (error, error.getCause) match {
+              case (e: HasStatus, _) if e.status() == Status.Cluster.NotALeader =>
+                DatabaseAdministrationOnFollowerException.notALeader(
+                  action,
+                  s"Failed to $actionVerb the specified database '${runtimeStringValue(databaseName, params)}'",
+                  error
+                )
+              case _ => error
+            }
+          ),
+          source = sourcePlan,
+          parameterTransformer = parameterTransformer
         )
-          .planShowDatabases(scope, verbose, symbols, yields, returns)
+
+    case AssertNotGraphShard(source, databaseName, action, actionVerb) => context =>
+        val sourcePlan: Option[ExecutionPlan] =
+          Some(fullLogicalToExecutable.applyOrElse(source, throwCantCompile).apply(context))
+        val nameFields = getDatabaseNameFields("databaseName", databaseName)
+
+        val parameterTransformer = ParameterTransformer()
+          .convert(nameFields.nameConverter)
+          .validate(checkNamespaceExists(nameFields, context))
+
+        UpdatingSystemCommandExecutionPlan(
+          "AssertNotGraphShard",
+          normalExecutionEngine,
+          securityAuthorizationHandler,
+          query =
+            s"""
+               |MATCH (n:$DATABASE_NAME)-[:$TARGETS]->(d:$GRAPH_SHARD)
+               |  WHERE n.$DATABASE_NAME_PROPERTY = $$`${nameFields.nameKey}`
+               |  AND n.$NAMESPACE_PROPERTY = $$`${nameFields.namespaceKey}`
+               |RETURN d.$DATABASE_NAME_PROPERTY AS dbName""".stripMargin,
+          VirtualValues.map(
+            Array(nameFields.nameKey, nameFields.namespaceKey),
+            Array(nameFields.nameValue, nameFields.namespaceValue)
+          ),
+          queryHandler = QueryHandler.handleResult((_, _, _) =>
+            ThrowException(
+              InvalidSemanticsException.invalidAlterGraphShardTarget(
+                action
+              )
+            )
+          ).handleError((error, params) =>
+            (error, error.getCause) match {
+              case (e: HasStatus, _) if e.status() == Status.Cluster.NotALeader =>
+                DatabaseAdministrationOnFollowerException.notALeader(
+                  action,
+                  s"Failed to $actionVerb the specified database '${runtimeStringValue(databaseName, params)}'",
+                  error
+                )
+              case _ => error
+            }
+          ),
+          source = sourcePlan,
+          parameterTransformer = parameterTransformer
+        )
+
+    case AssertNotPropertyShard(source, databaseName, action, actionVerb) => context =>
+        val sourcePlan: Option[ExecutionPlan] =
+          Some(fullLogicalToExecutable.applyOrElse(source, throwCantCompile).apply(context))
+        val nameFields = getDatabaseNameFields("databaseName", databaseName)
+
+        val parameterTransformer = ParameterTransformer()
+          .convert(nameFields.nameConverter)
+          .validate(checkNamespaceExists(nameFields, context))
+
+        UpdatingSystemCommandExecutionPlan(
+          "AssertNotPropertyShard",
+          normalExecutionEngine,
+          securityAuthorizationHandler,
+          query =
+            s"""
+               |MATCH (n:$DATABASE_NAME)-[:$TARGETS]->(d:$PROPERTY_SHARD)
+               |  WHERE n.$DATABASE_NAME_PROPERTY = $$`${nameFields.nameKey}`
+               |  AND n.$NAMESPACE_PROPERTY = $$`${nameFields.namespaceKey}`
+               |RETURN d.$DATABASE_NAME_PROPERTY AS dbName""".stripMargin,
+          VirtualValues.map(
+            Array(nameFields.nameKey, nameFields.namespaceKey),
+            Array(nameFields.nameValue, nameFields.namespaceValue)
+          ),
+          queryHandler = QueryHandler.handleResult((_, _, _) =>
+            ThrowException(
+              InvalidSemanticsException.invalidAlterShardTarget(
+                action
+              )
+            )
+          ).handleError((error, params) =>
+            (error, error.getCause) match {
+              case (e: HasStatus, _) if e.status() == Status.Cluster.NotALeader =>
+                DatabaseAdministrationOnFollowerException.notALeader(
+                  action,
+                  s"Failed to $actionVerb the specified database '${runtimeStringValue(databaseName, params)}'",
+                  error
+                )
+              case _ => error
+            }
+          ),
+          source = sourcePlan,
+          parameterTransformer = parameterTransformer
+        )
+
+    // This is no-op in community
+    case _: AssertManagementActionNotBlocked => _ =>
+        PredicateExecutionPlan(
+          (_, _) => true,
+          None,
+          onViolation = (_, _, _) => new RuntimeException()
+        )
 
     case DoNothingIfNotExists(source, command, entity, name, operation, valueMapper) => context =>
         val sourcePlan: Option[ExecutionPlan] =
@@ -365,7 +585,7 @@ case class CommunityAdministrationCommandRuntime(
           sourcePlan
         )
 
-    case DoNothingIfDatabaseNotExists(source, command, name, operation, databaseTypeFilter) => context =>
+    case DoNothingIfDatabaseNotExists(source, command, name, operation, databaseTypeFilter, false) => context =>
         val sourcePlan: Option[ExecutionPlan] =
           Some(fullLogicalToExecutable.applyOrElse(source, throwCantCompile).apply(context))
         DoNothingExecutionPlanner(normalExecutionEngine, securityAuthorizationHandler).planDoNothingIfDatabaseNotExists(
@@ -373,7 +593,23 @@ case class CommunityAdministrationCommandRuntime(
           name,
           operation,
           sourcePlan,
-          databaseTypeFilter
+          databaseTypeFilter,
+          context
+        )
+
+    case DoNothingIfDatabaseNotExists(source, command, name, operation, databaseTypeFilter, true) => context =>
+        val sourcePlan: Option[ExecutionPlan] =
+          Some(fullLogicalToExecutable.applyOrElse(source, throwCantCompile).apply(context))
+        DoNothingExecutionPlanner(
+          normalExecutionEngine,
+          securityAuthorizationHandler
+        ).planDoNothingIfDatabaseNotExistsUpdateContext(
+          command,
+          name,
+          operation,
+          sourcePlan,
+          databaseTypeFilter,
+          context
         )
 
     case DoNothingIfDatabaseExists(source, command, name, databaseTypeFilter) => context =>
@@ -383,7 +619,8 @@ case class CommunityAdministrationCommandRuntime(
           command,
           name,
           sourcePlan,
-          databaseTypeFilter
+          databaseTypeFilter,
+          context
         )
 
     // Ensure that the role or user exists before being dropped
@@ -395,8 +632,9 @@ case class CommunityAdministrationCommandRuntime(
           .planEnsureNodeExists(command, entity, name, valueMapper, extraFilter, labelDescription, action, sourcePlan)
 
     // SUPPORT PROCEDURES (need to be cleared before here)
-    case SystemProcedureCall(_, call, returns, _, checkCredentialsExpired) => _ =>
+    case SystemProcedureCall(call, returns, _, checkCredentialsExpired) => context =>
         SystemProcedureCallPlanner(normalExecutionEngine, securityAuthorizationHandler).planSystemProcedureCall(
+          context.runtimeContext.cypherVersion,
           call,
           returns,
           checkCredentialsExpired
@@ -417,18 +655,22 @@ case class CommunityAdministrationCommandRuntime(
           QueryHandler
             .handleError {
               case (error: HasStatus, p) if error.status() == Status.Cluster.NotALeader =>
-                DatabaseAdministrationOnFollowerException.notALeader(
-                  "ALTER CURRENT USER SET PASSWORD",
-                  s"User '${currentUser(p)}' failed to alter their own password",
-                  error
+                new SecurityExceptionLogger(securityLog).logAndGet(
+                  DatabaseAdministrationOnFollowerException.notALeader(
+                    "ALTER CURRENT USER SET PASSWORD",
+                    s"User '${currentUser(p)}' failed to alter their own password",
+                    error
+                  )
                 )
               case (error: Neo4jException, _) => error
               case (error, p) =>
-                CypherExecutionException.alterOwnPassword(currentUser(p), error)
+                new SecurityExceptionLogger(securityLog).logAndGet(
+                  CypherExecutionException.alterOwnPassword(currentUser(p), error)
+                )
             }
             .handleResult((_, value, _) => {
               if (value eq BooleanValue.TRUE) Continue
-              else ThrowException(new AuthorizationViolationException("`ALTER CURRENT USER` is not permitted."))
+              else ThrowException(AuthorizationViolationException.alterCurrentUserNotAllowed())
             }),
           parameterTransformer = ParameterTransformer((_, securityContext, _) =>
             VirtualValues.map(
@@ -443,23 +685,21 @@ case class CommunityAdministrationCommandRuntime(
         )
 
     // Non-administration commands that are allowed on system database, e.g. SHOW PROCEDURES
-    case AllowedNonAdministrationCommands(statement) => context =>
-        // While running against system will override most pre-parser options.
-        // However, we shouldn't override the Cypher version,
-        // so let's prepend the inner query with the relevant Cypher version.
-        val versionName = context.runtimeContext.cypherVersion.versionName
-        val versionString = s"CYPHER $versionName "
-
+    case AllowedNonAdministrationCommands(statement, _) => context =>
         SystemCommandExecutionPlan(
           "AllowedNonAdministrationCommand",
           normalExecutionEngine,
           securityAuthorizationHandler,
-          versionString + QueryRenderer.render(statement),
+          QueryRenderer.render(statement),
           MapValue.EMPTY,
           // If we have a non admin command executing in the system database, forbid it to make reads / writes
           // from the system graph. This is to prevent queries such as SHOW PROCEDURES YIELD * RETURN ()--()
           // from leaking nodes from the system graph: the ()--() would return empty results
-          modeConverter = s => s.withMode(new RestrictedAccessMode(s.mode(), AccessMode.Static.ACCESS))
+          modeConverter = s => s.withMode(new RestrictedAccessMode(s.mode(), StaticAccessMode.ACCESS)),
+          // While running against system will override most pre-parser options.
+          // However, we shouldn't override the Cypher version,
+          // so let's prepend the inner query with the relevant Cypher version.
+          cypherVersion = context.runtimeContext.cypherVersion
         )
 
     // Ignore the log command in community

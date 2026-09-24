@@ -25,6 +25,7 @@ import org.neo4j.cypher.internal.expressions.SemanticDirection
 import org.neo4j.cypher.internal.expressions.SemanticDirection.BOTH
 import org.neo4j.cypher.internal.expressions.SemanticDirection.INCOMING
 import org.neo4j.cypher.internal.expressions.SemanticDirection.OUTGOING
+import org.neo4j.cypher.internal.logical.plans.TraversalPathMode
 import org.neo4j.cypher.internal.runtime.spec.Edition
 import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
@@ -43,17 +44,25 @@ abstract class PruningVarLengthExpandFuzzTestBase[CONTEXT <: RuntimeContext](
   private val seed = System.currentTimeMillis()
   private val random = new Random(seed)
 
-  test("random and compare") {
-    val nodes = setUpGraph(15 + random.nextInt(10))
-    val millisToRun = 10000
+  List(TraversalPathMode.Walk).foreach(pathMode => {
+    test(s"random and compare, pathMode=$pathMode") {
+      val nodes = setUpGraph(15 + random.nextInt(10))
+      val millisToRun = 10000
 
-    withClue("seed used: " + seed) {
-      runForMillis(millisToRun)(() => testPruningVarExpand(nodes(random.nextInt(population)), random))
-      runForMillis(millisToRun)(() => testBFSPruningVarExpand(nodes(random.nextInt(population)), BOTH, random))
-      runForMillis(millisToRun)(() => testBFSPruningVarExpand(nodes(random.nextInt(population)), OUTGOING, random))
-      runForMillis(millisToRun)(() => testBFSPruningVarExpand(nodes(random.nextInt(population)), INCOMING, random))
+      withClue("seed used: " + seed) {
+        runForMillis(millisToRun)(() => testPruningVarExpand(nodes(random.nextInt(population)), random, pathMode))
+        runForMillis(millisToRun)(() =>
+          testBFSPruningVarExpand(nodes(random.nextInt(population)), BOTH, random, pathMode)
+        )
+        runForMillis(millisToRun)(() =>
+          testBFSPruningVarExpand(nodes(random.nextInt(population)), OUTGOING, random, pathMode)
+        )
+        runForMillis(millisToRun)(() =>
+          testBFSPruningVarExpand(nodes(random.nextInt(population)), INCOMING, random, pathMode)
+        )
+      }
     }
-  }
+  })
 
   private def runForMillis(millisToRun: Long)(f: () => Unit): Unit = {
     val start = System.currentTimeMillis()
@@ -94,20 +103,20 @@ abstract class PruningVarLengthExpandFuzzTestBase[CONTEXT <: RuntimeContext](
     nodes
   }
 
-  private def testPruningVarExpand(startNode: Node, r: Random): Unit = {
+  private def testPruningVarExpand(startNode: Node, r: Random, pathMode: TraversalPathMode): Unit = {
     val min = r.nextInt(3)
     val max = min + 1 + r.nextInt(3)
 
     val pruningQuery = new LogicalQueryBuilder(this)
       .produceResults("from", "to")
-      .pruningVarExpand(s"(from)-[*$min..$max]-(to)")
+      .pruningVarExpand(s"(from)-[*$min..$max]-(to)", pathMode = pathMode)
       .input(nodes = Seq("from"))
       .build()
 
     val distinctQuery = new LogicalQueryBuilder(this)
       .produceResults("from", "to")
       .distinct("from AS from", "to AS to")
-      .expand(s"(from)-[*$min..$max]-(to)")
+      .expand(s"(from)-[*$min..$max]-(to)", pathMode = pathMode)
       .input(nodes = Seq("from"))
       .build()
 
@@ -138,7 +147,12 @@ abstract class PruningVarLengthExpandFuzzTestBase[CONTEXT <: RuntimeContext](
     }
   }
 
-  private def testBFSPruningVarExpand(startNode: Node, direction: SemanticDirection, r: Random): Unit = {
+  private def testBFSPruningVarExpand(
+    startNode: Node,
+    direction: SemanticDirection,
+    r: Random,
+    pathMode: TraversalPathMode
+  ): Unit = {
     val min = r.nextInt(2)
     val max = min + 1 + r.nextInt(3)
 
@@ -149,14 +163,14 @@ abstract class PruningVarLengthExpandFuzzTestBase[CONTEXT <: RuntimeContext](
     }
     val pruningQuery = new LogicalQueryBuilder(this)
       .produceResults("from", "to")
-      .bfsPruningVarExpand(pattern)
+      .bfsPruningVarExpand(pattern, pathMode = pathMode)
       .input(nodes = Seq("from"))
       .build()
 
     val distinctQuery = new LogicalQueryBuilder(this)
       .produceResults("from", "to")
       .distinct("from AS from", "to AS to")
-      .expand(pattern)
+      .expand(pattern, pathMode = pathMode)
       .input(nodes = Seq("from"))
       .build()
 

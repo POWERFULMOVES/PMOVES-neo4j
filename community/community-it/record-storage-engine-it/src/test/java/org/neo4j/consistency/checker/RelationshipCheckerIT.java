@@ -62,6 +62,8 @@ import org.neo4j.test.extension.ExtensionCallback;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.token.TokenHolders;
 import org.neo4j.values.ElementIdMapper;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
 
 @DbmsExtension(configurationCallback = "configure")
 class RelationshipCheckerIT {
@@ -136,12 +138,15 @@ class RelationshipCheckerIT {
 
         relationshipChecker.check(LongRange.range(0, relationshipId + 1), true, false, EmptyMemoryTracker.INSTANCE);
 
-        assertThat(pageCacheTracer.pins() - initialPins).isEqualTo(6);
-        assertThat(pageCacheTracer.unpins() - initialUnpins).isEqualTo(6);
-        assertThat(pageCacheTracer.hits() - initialHits).isEqualTo(6);
+        assertThat(pageCacheTracer.pins() - initialPins).isEqualTo(4);
+        assertThat(pageCacheTracer.unpins() - initialUnpins).isEqualTo(4);
+        assertThat(pageCacheTracer.hits() - initialHits).isEqualTo(4);
     }
 
     private void prepareContext() throws Exception {
+        database.getDependencyResolver()
+                .resolveDependency(CheckPointer.class)
+                .forceCheckPoint(new SimpleTriggerInfo("test"));
         var neoStores = storageEngine.testAccessNeoStores();
         var contextFactory = new CursorContextFactory(pageCacheTracer, EMPTY_CONTEXT_SUPPLIER);
         try (var storeCursors = new CachedStoreCursors(neoStores, CursorContext.NULL_CONTEXT)) {

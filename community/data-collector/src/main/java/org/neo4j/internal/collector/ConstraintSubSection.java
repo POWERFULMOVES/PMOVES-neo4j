@@ -26,9 +26,9 @@ import java.util.Map;
 import org.neo4j.common.EntityType;
 import org.neo4j.common.TokenNameLookup;
 import org.neo4j.internal.schema.ConstraintDescriptor;
+import org.neo4j.internal.schema.constraints.ConstrainableType;
 import org.neo4j.internal.schema.constraints.PropertyTypeSet;
 import org.neo4j.internal.schema.constraints.RelationshipEndpointLabelConstraintDescriptor;
-import org.neo4j.internal.schema.constraints.SchemaValueType;
 import org.neo4j.internal.schema.constraints.TypeConstraintDescriptor;
 
 final class ConstraintSubSection {
@@ -73,14 +73,21 @@ final class ConstraintSubSection {
                 data.put("type", "Property type constraint");
                 TypeConstraintDescriptor typeConstraintDescriptor = constraint.asPropertyTypeConstraint();
                 PropertyTypeSet propertyTypeSet = typeConstraintDescriptor.propertyType();
-                List<String> propertyTypes =
-                        propertyTypeSet.stream().map(SchemaValueType::serialize).toList();
+                List<String> propertyTypes = propertyTypeSet.stream()
+                        .map(ConstrainableType::serialize)
+                        .toList();
                 data.put("propertyTypes", propertyTypes);
                 break;
             case RELATIONSHIP_ENDPOINT_LABEL:
                 RelationshipEndpointLabelConstraintDescriptor relationshipEndpointLabelConstraintDescriptor =
                         constraint.asRelationshipEndpointLabelConstraint();
                 data.put("type", "Relationship endpoint label constraint");
+
+                data.put(
+                        "enforcedLabel",
+                        anonymizer.label(
+                                tokens.labelGetName(relationshipEndpointLabelConstraintDescriptor.endpointLabelId()),
+                                relationshipEndpointLabelConstraintDescriptor.endpointLabelId()));
                 data.put(
                         "endpointType",
                         relationshipEndpointLabelConstraintDescriptor
@@ -89,6 +96,9 @@ final class ConstraintSubSection {
                 break;
             case NODE_LABEL_EXISTENCE:
                 data.put("type", "Node label existence constraint");
+                var requiredLabelId =
+                        constraint.asNodeLabelExistenceConstraint().requiredLabelId();
+                data.put("enforcedLabel", anonymizer.label(tokens.labelGetName(requiredLabelId), requiredLabelId));
             default:
         }
 

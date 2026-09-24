@@ -19,38 +19,55 @@
  */
 package org.neo4j.importer;
 
-import static java.util.Collections.emptySet;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.neo4j.logging.log4j.LogConfig.DEBUG_LOG;
+import static org.neo4j.io.ByteUnit.kibiBytes;
 import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_ID;
 
-import java.io.ByteArrayOutputStream;
+import blue.strategic.parquet.ParquetWriter;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.charset.Charset;
 import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.SequencedSet;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
 import org.apache.commons.io.output.NullPrintStream;
+import org.apache.parquet.schema.LogicalTypeAnnotation;
+import org.apache.parquet.schema.MessageType;
+import org.apache.parquet.schema.PrimitiveType;
+import org.apache.parquet.schema.Type;
+import org.apache.parquet.schema.Types;
+import org.assertj.core.api.AbstractThrowableAssert;
+import org.junit.jupiter.api.Named;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.neo4j.batchimport.api.input.FileGroup;
+import org.neo4j.batchimport.api.input.FileGroup.NumberedFile;
 import org.neo4j.cli.ExecutionContext;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.csv.reader.Configuration;
+import org.neo4j.importer.FileImporter.FileInputType;
 import org.neo4j.internal.batchimport.input.InputException;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.context.FixedVersionContextSupplier;
 import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
-import org.neo4j.kernel.impl.transaction.log.files.TransactionLogFilesHelper;
+import org.neo4j.kernel.database.NormalizedDatabaseName;
+import org.neo4j.storageengine.api.StorageEngineFactory;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.Neo4jLayoutExtension;
 import org.neo4j.test.utils.TestDirectory;
+import org.neo4j.wal.files.TransactionLogFilesHelper;
 
 @Neo4jLayoutExtension
 class FileImporterTest {
@@ -62,34 +79,45 @@ class FileImporterTest {
 
     @Test
     void writesReportToSpecifiedReportFile() throws Exception {
-
-        Path logDir = testDir.directory("logs");
         Path reportLocation = testDir.file("the_report");
-
         Path inputFile = testDir.file("foobar.csv");
-        List<String> lines = Collections.singletonList("foo\\tbar\\tbaz");
+        List<String> lines = Collections.singletonList(":ID\tfoo\\tbar\\tbaz");
         Files.write(inputFile, lines, Charset.defaultCharset());
+        Config config = dbConfig();
 
-        Config config = Config.defaults(GraphDatabaseSettings.logs_directory, logDir.toAbsolutePath());
-
-        try (var logProvider = FileImporter.createLogProvider(testDir.getFileSystem(), config)) {
-            final var csvImporter = FileImporter.builder()
-                    .withDatabaseLayout(databaseLayout.getNeo4jLayout().databaseLayout("foodb"))
+        var databaseName = "foodb";
+        try (var importContext = ImportContext.create(
+                testDir.getFileSystem(),
+                new NormalizedDatabaseName(databaseName),
+                null,
+                config,
+                reportLocation,
+                List.of(),
+                false,
+                false,
+                true)) {
+            var csvImporter = importerBuilder(databaseLayout.getNeo4jLayout().databaseLayout(databaseName))
                     .withDatabaseConfig(config)
                     .withReportFile(reportLocation.toAbsolutePath())
                     .withCsvConfig(Configuration.TABS)
-                    .withFileSystem(testDir.getFileSystem())
                     .withStdOut(NullPrintStream.INSTANCE)
                     .withStdErr(NullPrintStream.INSTANCE)
-                    .withLogProvider(logProvider)
-                    .addNodeFiles(emptySet(), new Path[] {inputFile.toAbsolutePath()})
+                    .withLogProvider(importContext)
+                    .addNodeFiles(
+                            new LinkedHashSet<>(),
+                            new FileGroup(new FileGroup.NumberedFile(0, inputFile.toAbsolutePath())))
                     .build();
 
-            csvImporter.doImport(fullImport());
+            csvImporter.doImport(fullImport(), false, false);
+
+            assertThat(importContext.baseDir()).exists();
+            assertThat(importContext.logPath())
+                    .exists()
+                    .content()
+                    .contains("[" + databaseName + "]", "Import starting");
         }
 
-        assertTrue(Files.exists(reportLocation));
-        assertThat(Files.readString(logDir.resolve(DEBUG_LOG))).contains("[foodb] Import starting");
+        assertThat(reportLocation).exists();
     }
 
     @Test
@@ -100,83 +128,264 @@ class FileImporterTest {
         Files.write(file, lines, Charset.defaultCharset());
         Path reportLocation = testDir.file("the_report");
 
-        var rawOut = new ByteArrayOutputStream();
-        var rawErr = new ByteArrayOutputStream();
-        try (var out = new PrintStream(rawOut);
-                var err = new PrintStream(rawErr)) {
-            FileImporter.Builder csvImporterBuilder = FileImporter.builder()
-                    .withDatabaseConfig(Config.defaults(GraphDatabaseSettings.neo4j_home, testDir.homePath()))
-                    .withDatabaseLayout(databaseLayout)
-                    .withCsvConfig(Configuration.TABS)
-                    .withFileSystem(testDir.getFileSystem())
-                    .withStdOut(new PrintStream(rawOut))
-                    .withStdErr(new PrintStream(rawErr))
-                    .withReportFile(reportLocation.toAbsolutePath());
-            assertThatThrownBy(() -> csvImporterBuilder.build().doImport(fullImport()))
-                    .hasCauseInstanceOf(DirectoryNotEmptyException.class);
-            out.flush();
-            err.flush();
+        var dbConfig = dbConfig();
 
-            // Then
-            assertThat(rawErr.toString().contains("Database already exist. Re-run with `--overwrite-destination`"))
-                    .isTrue();
-            assertThatCode(() -> csvImporterBuilder.withForce(true).build().doImport(fullImport()))
-                    .doesNotThrowAnyException();
-        }
+        FileImporter.Builder csvImporterBuilder = importerBuilder()
+                .withDatabaseConfig(Config.defaults(GraphDatabaseSettings.neo4j_home, testDir.homePath()))
+                .withCsvConfig(Configuration.TABS)
+                .withDatabaseConfig(dbConfig)
+                .withReportFile(reportLocation.toAbsolutePath());
+        // Then
+        assertThatThrownBy(() -> csvImporterBuilder.build().doImport(fullImport(), false, false))
+                .isInstanceOf(FileImporter.CsvImportException.class)
+                .hasCauseInstanceOf(DirectoryNotEmptyException.class)
+                .hasMessageContaining("Database already exist. Re-run with `--overwrite-destination`");
+        assertThatCode(() -> csvImporterBuilder.withForce(true).build().doImport(fullImport(), false, false))
+                .doesNotThrowAnyException();
     }
 
     @Test
     void tracePageCacheAccessOnCsvImport() throws IOException {
-        Path logDir = testDir.directory("logs");
         Path reportLocation = testDir.file("the_report");
-        Path inputFile = writeFileWithLines("foobar.csv", "foo;bar;baz");
-
-        Config config = Config.defaults(GraphDatabaseSettings.logs_directory, logDir.toAbsolutePath());
+        Path inputFile = writeFileWithLines("foobar.csv", ":Id,foo;bar;baz");
+        Config config = dbConfig();
 
         var cacheTracer = new DefaultPageCacheTracer();
-        FileImporter fileImporter = FileImporter.builder()
-                .withDatabaseLayout(databaseLayout)
+        FileImporter fileImporter = importerBuilder()
                 .withDatabaseConfig(config)
                 .withReportFile(reportLocation.toAbsolutePath())
-                .withFileSystem(testDir.getFileSystem())
                 .withStdOut(NullPrintStream.INSTANCE)
                 .withStdErr(NullPrintStream.INSTANCE)
                 .withPageCacheTracer(cacheTracer)
                 .withCursorContextFactory(
                         new CursorContextFactory(cacheTracer, new FixedVersionContextSupplier(BASE_TX_ID)))
-                .addNodeFiles(emptySet(), new Path[] {inputFile.toAbsolutePath()})
+                .addNodeFiles(
+                        new LinkedHashSet<>(), new FileGroup(new FileGroup.NumberedFile(0, inputFile.toAbsolutePath())))
                 .build();
 
-        fileImporter.doImport(fullImport());
+        fileImporter.doImport(fullImport(), false, false);
 
         long pins = cacheTracer.pins();
-        assertThat(pins).isGreaterThan(0);
+        assertThat(pins).isPositive();
         assertThat(cacheTracer.unpins()).isEqualTo(pins);
-        assertThat(cacheTracer.hits()).isGreaterThan(0).isLessThanOrEqualTo(pins);
-        assertThat(cacheTracer.faults()).isGreaterThan(0).isLessThanOrEqualTo(pins);
+        assertThat(cacheTracer.hits()).isPositive().isLessThanOrEqualTo(pins);
+        assertThat(cacheTracer.faults()).isPositive().isLessThanOrEqualTo(pins);
     }
 
     @Test
     void shouldEnforceBadTolerance() throws IOException {
         // given
         var nodes = writeFileWithLines("nodes.csv", ":ID", "abc", "abc", "abc", "abc", "abc", "abc");
-        var importer = FileImporter.builder()
+        var importer = importerBuilder()
                 .withDatabaseConfig(Config.defaults(GraphDatabaseSettings.neo4j_home, testDir.homePath()))
-                .withDatabaseLayout(databaseLayout)
-                .withFileSystem(testDir.getFileSystem())
                 .withStdOut(NullPrintStream.INSTANCE)
                 .withStdErr(NullPrintStream.INSTANCE)
                 .withReportFile(testDir.file("report.txt"))
-                .addNodeFiles(emptySet(), new Path[] {nodes.toAbsolutePath()})
+                .addNodeFiles(
+                        new LinkedHashSet<>(), new FileGroup(new FileGroup.NumberedFile(0, nodes.toAbsolutePath())))
                 .withBadTolerance(4)
                 .withSkipDuplicateNodes(true)
                 .build();
 
         // when
-        assertThatThrownBy(() -> importer.doImport(fullImport()))
+        assertThatThrownBy(() -> importer.doImport(fullImport(), false, false))
                 .hasRootCauseInstanceOf(InputException.class)
                 .hasMessageContaining("Too many bad entries");
     }
+
+    @ParameterizedTest
+    @MethodSource
+    void shouldPreventImportIfVectorDataExists(VectorDataContext context) throws IOException {
+        var nodeFile = context.writeVectorData(testDir);
+
+        var importerBuilder = importerBuilder()
+                .withDatabaseConfig(Config.defaults(GraphDatabaseSettings.neo4j_home, testDir.homePath()))
+                .withFileInputType(FileInputType.PARQUET)
+                .withStdOut(NullPrintStream.INSTANCE)
+                .withStdErr(NullPrintStream.INSTANCE)
+                .withReportFile(testDir.file("report.txt"))
+                .addNodeFiles(
+                        new LinkedHashSet<>(), new FileGroup(new FileGroup.NumberedFile(0, nodeFile.toAbsolutePath())))
+                .withBadTolerance(4)
+                .withSkipDuplicateNodes(true);
+        context.configure(importerBuilder);
+        var importer = importerBuilder.build();
+
+        var throwableAssert = assertThatThrownBy(() -> importer.doImport(fullImport(), false, false));
+        context.assertException(throwableAssert);
+    }
+
+    @Test
+    void nodeFileGroupsAreTraversedInTheOrderTheyWereAdded() {
+        var importer = importerBuilder()
+                .withDatabaseConfig(dbConfig())
+                .withReportFile(testDir.file("report.txt"))
+                .addNodeFiles(labels("Person"), fileGroup(0))
+                .addNodeFiles(labels("Actor"), fileGroup(1))
+                .addNodeFiles(labels("Movie"), fileGroup(2, 3))
+                .addNodeFiles(new LinkedHashSet<>(), fileGroup(4))
+                .addNodeFiles(labels("Actor"), fileGroup(5))
+                .build();
+
+        // Groups sharing the same additional labels are traversed together, at the position where those labels
+        // were first added
+        assertThat(traversalOrder(importer.nodeFiles().values())).containsExactly(0, 1, 5, 2, 3, 4);
+    }
+
+    @Test
+    void relationshipFileGroupsAreTraversedInTheOrderTheyWereAdded() {
+        var importer = importerBuilder()
+                .withDatabaseConfig(dbConfig())
+                .withReportFile(testDir.file("report.txt"))
+                .addRelationshipFiles("KNOWS", fileGroup(0))
+                .addRelationshipFiles("DIRECTED", fileGroup(1, 2))
+                .addRelationshipFiles("ACTED_IN", fileGroup(3))
+                .addRelationshipFiles("KNOWS", fileGroup(4))
+                .build();
+
+        assertThat(traversalOrder(importer.relationshipFiles().values())).containsExactly(0, 4, 1, 2, 3);
+    }
+
+    @Test
+    void nodeFilesIsUnmodifiable() {
+        var importer = importerBuilder()
+                .withDatabaseConfig(dbConfig())
+                .withReportFile(testDir.file("report.txt"))
+                .addNodeFiles(labels("Person"), fileGroup(0))
+                .build();
+
+        var nodeFiles = importer.nodeFiles();
+        assertThatThrownBy(() -> nodeFiles.put(labels("Actor"), List.of()))
+                .isInstanceOf(UnsupportedOperationException.class);
+        assertThatThrownBy(() -> nodeFiles.values().iterator().next().add(fileGroup(9)))
+                .isInstanceOf(UnsupportedOperationException.class);
+        assertThatThrownBy(() -> nodeFiles.keySet().iterator().next().add("Extra"))
+                .isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test
+    void relationshipFilesIsUnmodifiable() {
+        var importer = importerBuilder()
+                .withDatabaseConfig(dbConfig())
+                .withReportFile(testDir.file("report.txt"))
+                .addRelationshipFiles("KNOWS", fileGroup(0))
+                .build();
+
+        var relationshipFiles = importer.relationshipFiles();
+        assertThatThrownBy(() -> relationshipFiles.put("ACTED_IN", List.of()))
+                .isInstanceOf(UnsupportedOperationException.class);
+        assertThatThrownBy(() -> relationshipFiles.values().iterator().next().add(fileGroup(9)))
+                .isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    private static SequencedSet<String> labels(String... labels) {
+        return new LinkedHashSet<>(List.of(labels));
+    }
+
+    private FileGroup fileGroup(int... globalIds) {
+        return new FileGroup(IntStream.of(globalIds)
+                .mapToObj(id -> new NumberedFile(id, testDir.file("file" + id)))
+                .toArray(NumberedFile[]::new));
+    }
+
+    private static List<Integer> traversalOrder(Collection<? extends List<FileGroup>> fileGroups) {
+        return fileGroups.stream()
+                .flatMap(List::stream)
+                .flatMap(fileGroup -> Stream.of(fileGroup.files()))
+                .map(NumberedFile::globalId)
+                .toList();
+    }
+
+    private Config dbConfig() {
+        return Config.newBuilder()
+                .set(GraphDatabaseSettings.neo4j_home, testDir.homePath())
+                .set(GraphDatabaseSettings.logical_log_rotation_threshold, kibiBytes(256))
+                .build();
+    }
+
+    static Stream<Named<VectorDataContext>> shouldPreventImportIfVectorDataExists() {
+        return Stream.of(Named.of("csv", CSV_VECTOR_DATA_CONTEXT), Named.of("parquet", PARQUET_VECTOR_DATA_CONTEXT));
+    }
+
+    private interface VectorDataContext {
+        Path writeVectorData(TestDirectory testDirectory) throws IOException;
+
+        void configure(FileImporter.Builder builder);
+
+        void assertException(AbstractThrowableAssert<?, ? extends Throwable> throwableAssert);
+    }
+
+    private static final VectorDataContext CSV_VECTOR_DATA_CONTEXT = new VectorDataContext() {
+        @Override
+        public Path writeVectorData(TestDirectory testDirectory) throws IOException {
+            var path = testDirectory.file("embeddings.csv");
+            try (var out = new PrintStream(testDirectory.getFileSystem().openAsOutputStream(path, false))) {
+                out.println(":ID,\"embedding:vector{coordinateType:float,dimensions:2}\"");
+                out.println("1,1;23");
+            }
+            return path;
+        }
+
+        @Override
+        public void configure(FileImporter.Builder builder) {
+            builder.withFileInputType(FileInputType.CSV);
+        }
+
+        @Override
+        public void assertException(AbstractThrowableAssert<?, ? extends Throwable> throwableAssert) {
+            // CSV can only check after having processed the headers. But, at the same time, we also
+            // sample data already, which also provides for an early abort, but with a different exception.
+            // Here, we get the more concrete message that aligned does not support vectors.
+            throwableAssert
+                    .isInstanceOf(FileImporter.CsvImportException.class)
+                    .hasMessageContaining("storing properties of type vector is not supported in aligned store format");
+        }
+    };
+
+    private static final FileImporterTest.VectorDataContext PARQUET_VECTOR_DATA_CONTEXT = new VectorDataContext() {
+        @Override
+        public Path writeVectorData(TestDirectory testDirectory) throws IOException {
+            var path = testDirectory.file("embeddings.parquet");
+            var fields = List.<Type>of(
+                    Types.required(PrimitiveType.PrimitiveTypeName.INT32).named(":ID"),
+                    Types.required(PrimitiveType.PrimitiveTypeName.BINARY)
+                            .as(LogicalTypeAnnotation.stringType())
+                            .named("embedding:vector{coordinateType:float,dimensions:2}"));
+            var data = Collections.singletonList(new Object[] {1, "1;23"});
+
+            try (var writer = ParquetWriter.writeFile(
+                    new MessageType("something", fields), path.toFile(), (record, valueWriter) -> {
+                        var recordData = (Object[]) record;
+                        for (int i = 0; i < fields.size(); i++) {
+                            Type type = fields.get(i);
+                            Object value = recordData[i];
+                            if (value != null) {
+                                valueWriter.write(type.getName(), value);
+                            }
+                        }
+                    })) {
+                for (Object[] datum : data) {
+                    writer.write(datum);
+                }
+            }
+            return path;
+        }
+
+        @Override
+        public void configure(FileImporter.Builder builder) {
+            builder.withFileInputType(FileInputType.PARQUET);
+        }
+
+        @Override
+        public void assertException(AbstractThrowableAssert<?, ? extends Throwable> throwableAssert) {
+            // Parquet can check early, just be looking at the headers. It will not process any data and get the
+            // more generic exception from FileImporter.
+            throwableAssert
+                    .isInstanceOf(UnsupportedOperationException.class)
+                    .hasMessage("Provided input is known to contain vector value data, which is not supported by the"
+                            + " target storage engine.");
+        }
+    };
 
     private Path writeFileWithLines(String fileName, String... lines) throws IOException {
         var path = testDir.file(fileName);
@@ -191,5 +400,16 @@ class FileImporterTest {
                 NullPrintStream.INSTANCE,
                 NullPrintStream.INSTANCE,
                 testDir.getFileSystem()));
+    }
+
+    private FileImporter.Builder importerBuilder() {
+        return importerBuilder(databaseLayout);
+    }
+
+    private FileImporter.Builder importerBuilder(DatabaseLayout layout) {
+        return FileImporter.builder()
+                .withStorageEngineFactory(StorageEngineFactory.defaultStorageEngine())
+                .withDatabaseLayout(layout)
+                .withFileSystem(testDir.getFileSystem());
     }
 }

@@ -21,21 +21,23 @@ package org.neo4j.procedure.impl.memory;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.withinPercentage;
+import static org.github.jamm.MemoryMeter.Guess.INSTRUMENTATION_AND_SPECIFICATION;
 
 import java.util.Arrays;
 import org.github.jamm.MemoryMeter;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.procedure.memory.HeapEstimator;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.values.storable.ValueGroup;
 import org.neo4j.values.storable.ValueType;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class ProcedureHeapEstimatorTest {
-    private final MemoryMeter meter = MemoryMeter.builder().build();
+    private final MemoryMeter meter = MemoryMeter.builder()
+            .withGuessing(INSTRUMENTATION_AND_SPECIFICATION)
+            .build();
     private final HeapEstimator estimator = ProcedureHeapEstimator.INSTANCE;
 
     @Inject
@@ -48,7 +50,7 @@ class ProcedureHeapEstimatorTest {
 
     @Test
     void shallowSizeRandomNeo4jValues() {
-        for (final var type : ValueType.values()) {
+        for (final var type : ValueType.ALL_TYPES) {
             final var value = rand.nextValue(type);
 
             assertThat(estimator.shallowSize(value))
@@ -60,7 +62,7 @@ class ProcedureHeapEstimatorTest {
     @Test
     void shallowSizeRandomJavaValues() {
         for (final var type :
-                Arrays.stream(ValueType.values()).filter(t -> !t.arrayType).toList()) {
+                Arrays.stream(ValueType.ALL_TYPES).filter(t -> !t.arrayType).toList()) {
             final var value = rand.nextValue(type).asObjectCopy();
 
             assertThat(estimator.shallowSize(value))

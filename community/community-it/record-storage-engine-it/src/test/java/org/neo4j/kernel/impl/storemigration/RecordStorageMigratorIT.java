@@ -26,6 +26,7 @@ import static org.neo4j.configuration.GraphDatabaseInternalSettings.counts_store
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
 import static org.neo4j.configuration.GraphDatabaseSettings.db_format;
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.CursorContextFactory.NULL_CONTEXT_FACTORY;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
@@ -49,7 +50,6 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.neo4j.configuration.Config;
-import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.counts.CountsUpdater;
 import org.neo4j.exceptions.KernelException;
@@ -60,8 +60,8 @@ import org.neo4j.internal.counts.DegreesRebuilder;
 import org.neo4j.internal.counts.GBPTreeCountsStore;
 import org.neo4j.internal.counts.GBPTreeGenericCountsStore;
 import org.neo4j.internal.counts.GBPTreeRelationshipGroupDegreesStore;
-import org.neo4j.internal.id.DefaultIdGeneratorFactory;
 import org.neo4j.internal.id.ScanOnOpenOverwritingIdGeneratorFactory;
+import org.neo4j.internal.recordstorage.RecordStorageEngineFactory;
 import org.neo4j.io.ByteUnit;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseLayout;
@@ -70,22 +70,20 @@ import org.neo4j.io.layout.recordstorage.RecordDatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
-import org.neo4j.io.pagecache.tracing.FileFlushEvent;
+import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.database.DatabaseTracers;
 import org.neo4j.kernel.impl.store.MetaDataStore;
 import org.neo4j.kernel.impl.store.NeoStores;
 import org.neo4j.kernel.impl.store.StoreFactory;
-import org.neo4j.kernel.impl.store.StoreType;
 import org.neo4j.kernel.impl.store.format.FormatFamily;
 import org.neo4j.kernel.impl.store.format.RecordFormats;
 import org.neo4j.kernel.impl.store.format.standard.Standard;
 import org.neo4j.kernel.impl.store.format.standard.StandardV4_3;
-import org.neo4j.kernel.impl.transaction.log.EmptyLogTailMetadata;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.kernel.recovery.LogTailExtractor;
+import org.neo4j.kernel.recovery.RecoveryStartupChecker;
 import org.neo4j.logging.AssertableLogProvider;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.logging.internal.LogService;
@@ -108,12 +106,15 @@ import org.neo4j.test.extension.pagecache.PageCacheExtension;
 import org.neo4j.test.scheduler.ThreadPoolJobScheduler;
 import org.neo4j.test.tags.RecordFormatOverrideTag;
 import org.neo4j.test.utils.TestDirectory;
+import org.neo4j.wal.EmptyLogTailMetadata;
+import org.neo4j.wal.LogTailMetadata;
 
 @PageCacheExtension
 @Neo4jLayoutExtension
 class RecordStorageMigratorIT {
     private static final String MIGRATION_DIRECTORY = StoreMigrator.MIGRATION_DIRECTORY;
-    private static final Config CONFIG = Config.defaults(GraphDatabaseSettings.pagecache_memory, ByteUnit.mebiBytes(8));
+    private static final long MAX_OFF_HEAP_MEMORY = ByteUnit.mebiBytes(80);
+    private static final Config CONFIG = Config.defaults(GraphDatabaseSettings.pagecache_memory, MAX_OFF_HEAP_MEMORY);
 
     @Inject
     private TestDirectory testDirectory;
@@ -173,7 +174,8 @@ class RecordStorageMigratorIT {
                 contextFactory,
                 batchImporterFactory,
                 INSTANCE,
-                false);
+                false,
+                MAX_OFF_HEAP_MEMORY);
         StoreVersion migrateTo = getVersionToMigrateTo();
         migrator.migrate(
                 databaseLayout,
@@ -196,7 +198,7 @@ class RecordStorageMigratorIT {
                 logService.getInternalLogProvider(),
                 contextFactory,
                 false,
-                loadLogTail(databaseLayout, CONFIG, storageEngine));
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
         try (NeoStores neoStores = storeFactory.openAllNeoStores()) {
             MetaDataStore metaDataStore = neoStores.getMetaDataStore();
             assertEquals(
@@ -229,7 +231,8 @@ class RecordStorageMigratorIT {
                 contextFactory,
                 batchImporterFactory,
                 INSTANCE,
-                false);
+                false,
+                MAX_OFF_HEAP_MEMORY);
         StoreVersion migrateTo = getVersionToMigrateTo();
         migrator.migrate(
                 databaseLayout,
@@ -252,7 +255,7 @@ class RecordStorageMigratorIT {
                 logService.getInternalLogProvider(),
                 contextFactory,
                 false,
-                loadLogTail(databaseLayout, CONFIG, storageEngine));
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
         try (NeoStores neoStores = storeFactory.openAllNeoStores()) {
             MetaDataStore metaDataStore = neoStores.getMetaDataStore();
             StoreId storeId = metaDataStore.getStoreId();
@@ -269,10 +272,9 @@ class RecordStorageMigratorIT {
         StoreId storeId;
         ExternalStoreId externalStoreId;
         UUID databaseUUID = UUID.randomUUID();
-        var dbms = new TestDatabaseManagementServiceBuilder(databaseLayout)
+        try (var dbms = new TestDatabaseManagementServiceBuilder(databaseLayout)
                 .setConfig(db_format, FormatFamily.STANDARD.name())
-                .build();
-        try {
+                .build()) {
             GraphDatabaseAPI database = (GraphDatabaseAPI) dbms.database(DEFAULT_DATABASE_NAME);
             MetadataProvider metadataProvider =
                     database.getDependencyResolver().resolveDependency(MetadataProvider.class);
@@ -280,8 +282,6 @@ class RecordStorageMigratorIT {
             externalStoreId = metadataProvider.getExternalStoreId();
 
             metadataProvider.setDatabaseIdUuid(databaseUUID, NULL_CONTEXT);
-        } finally {
-            dbms.shutdown();
         }
 
         LogService logService = NullLogService.getInstance();
@@ -293,7 +293,6 @@ class RecordStorageMigratorIT {
         RecordStoreVersion versionToMigrateTo = new RecordStoreVersion(toFormat);
 
         Config config = Config.defaults(GraphDatabaseSettings.pagecache_memory, ByteUnit.mebiBytes(8));
-        config.set(GraphDatabaseInternalSettings.include_versions_under_development, true);
 
         StorageEngineFactory storageEngine = StorageEngineFactory.defaultStorageEngine();
         FileSystemAbstraction fs = testDirectory.getFileSystem();
@@ -307,7 +306,8 @@ class RecordStorageMigratorIT {
                 contextFactory,
                 batchImporterFactory,
                 INSTANCE,
-                false);
+                false,
+                MAX_OFF_HEAP_MEMORY);
         migrator.migrate(
                 databaseLayout,
                 migrationLayout,
@@ -329,7 +329,7 @@ class RecordStorageMigratorIT {
                 logService.getInternalLogProvider(),
                 contextFactory,
                 false,
-                loadLogTail(databaseLayout, config, storageEngine));
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
         try (NeoStores neoStores = storeFactory.openAllNeoStores()) {
             MetaDataStore metaDataStore = neoStores.getMetaDataStore();
             StoreId newStoreId = metaDataStore.getStoreId();
@@ -371,7 +371,8 @@ class RecordStorageMigratorIT {
                 contextFactory,
                 batchImporterFactory,
                 INSTANCE,
-                false);
+                false,
+                MAX_OFF_HEAP_MEMORY);
 
         // WHEN migrating
         var engineFactory = StorageEngineFactory.defaultStorageEngine();
@@ -392,8 +393,7 @@ class RecordStorageMigratorIT {
         migrator.postMigration(databaseLayout, versionToMigrateTo, txIdBeforeMigration, txIdAfterMigration);
 
         // THEN starting the new store should be successful
-        assertThat(testDirectory.getFileSystem().fileExists(databaseLayout.relationshipGroupDegreesStore()))
-                .isTrue();
+        assertThat(databaseLayout.relationshipGroupDegreesStore().exists(fs)).isTrue();
         var migratedStoreOpenOptions = engineFactory.getStoreOpenOptions(fs, pageCache, databaseLayout, contextFactory);
         var noCountsRebuildAssertion = new CountsBuilder() {
             @Override
@@ -444,7 +444,7 @@ class RecordStorageMigratorIT {
                 logService.getInternalLogProvider(),
                 contextFactory,
                 false,
-                loadLogTail(databaseLayout, CONFIG, engineFactory));
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
         storeFactory.openAllNeoStores().close();
         assertThat(logProvider).forLevel(ERROR).doesNotHaveAnyLogs();
     }
@@ -475,7 +475,8 @@ class RecordStorageMigratorIT {
                 contextFactory,
                 batchImporterFactory,
                 INSTANCE,
-                false);
+                false,
+                MAX_OFF_HEAP_MEMORY);
         var engineFactory = StorageEngineFactory.defaultStorageEngine();
         var logTailMetadata = loadLogTail(databaseLayout, CONFIG, engineFactory);
         var txIdBeforeMigration = logTailMetadata.getLastCommittedTransaction().id();
@@ -499,8 +500,7 @@ class RecordStorageMigratorIT {
         migrator.postMigration(databaseLayout, versionToMigrateTo, txIdBeforeMigration, txIdAfterMigration);
 
         // THEN starting the new store should be successful
-        assertThat(testDirectory.getFileSystem().fileExists(databaseLayout.relationshipGroupDegreesStore()))
-                .isTrue();
+        assertThat(databaseLayout.relationshipGroupDegreesStore().exists(fs)).isTrue();
         var countsStoreNeedsRebuild = new MutableBoolean();
         var countsRebuildAssertion = new CountsBuilder() {
             @Override
@@ -565,7 +565,8 @@ class RecordStorageMigratorIT {
                 contextFactory,
                 batchImporterFactory,
                 INSTANCE,
-                false);
+                false,
+                MAX_OFF_HEAP_MEMORY);
         migrator.migrate(
                 databaseLayout,
                 migrationLayout,
@@ -595,7 +596,7 @@ class RecordStorageMigratorIT {
                 logService.getInternalLogProvider(),
                 contextFactory,
                 false,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL);
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
         storeFactory.openAllNeoStores().close();
     }
 
@@ -623,7 +624,8 @@ class RecordStorageMigratorIT {
                 contextFactory,
                 batchImporterFactory,
                 INSTANCE,
-                false);
+                false,
+                MAX_OFF_HEAP_MEMORY);
 
         // when
         migrator.migrate(
@@ -638,21 +640,13 @@ class RecordStorageMigratorIT {
                 migrationLayout, databaseLayout, versionToMigrateFrom, versionToMigrateTo, EmptyMemoryTracker.INSTANCE);
 
         // then
-        try (NeoStores neoStores = new StoreFactory(
-                        databaseLayout,
-                        Config.defaults(),
-                        new DefaultIdGeneratorFactory(fs, immediate(), cacheTracer, databaseLayout.getDatabaseName()),
-                        pageCache,
-                        cacheTracer,
+        LogTailMetadata tailMetadata = new LogTailExtractor(
                         fs,
-                        NullLogProvider.getInstance(),
-                        contextFactory,
-                        false,
-                        LogTailLogVersionsMetadata.EMPTY_LOG_TAIL)
-                .openNeoStores(StoreType.META_DATA)) {
-            neoStores.start(NULL_CONTEXT);
-            assertThat(neoStores.getMetaDataStore().getCheckpointLogVersion()).isEqualTo(0);
-        }
+                        CONFIG,
+                        StorageEngineFactory.selectStorageEngine(RecordStorageEngineFactory.ID),
+                        DatabaseTracers.EMPTY)
+                .getTailMetadata(databaseLayout, INSTANCE);
+        assertThat(tailMetadata.getCheckpointLogVersion()).isEqualTo(0);
     }
 
     private static StoreVersion getVersionToMigrateFrom(RecordStoreVersionCheck check) {
@@ -694,7 +688,7 @@ class RecordStorageMigratorIT {
             for (long txId = fromTxId + 1; txId <= toTxId; txId++) {
                 store.updater(txId, true, NULL_CONTEXT).close();
             }
-            store.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            store.checkpoint(DatabaseFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
         }
         try (var store =
                 openGroupDegreesStore(PageCacheTracer.NULL, NULL_CONTEXT_FACTORY, openOptions, new DegreesRebuilder() {
@@ -713,7 +707,7 @@ class RecordStorageMigratorIT {
             for (long txId = fromTxId + 1; txId <= toTxId; txId++) {
                 store.updater(txId, true, NULL_CONTEXT).close();
             }
-            store.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            store.checkpoint(DatabaseFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
         }
     }
 
@@ -736,7 +730,8 @@ class RecordStorageMigratorIT {
                 NullLogProvider.getInstance(),
                 contextFactory,
                 cacheTracer,
-                migratedStoreOpenOptions);
+                migratedStoreOpenOptions,
+                RecoveryStartupChecker.EMPTY_CHECKER);
     }
 
     private GBPTreeCountsStore openCountsStore(
@@ -758,6 +753,7 @@ class RecordStorageMigratorIT {
                 NullLogProvider.getInstance(),
                 contextFactory,
                 cacheTracer,
-                migratedStoreOpenOptions);
+                migratedStoreOpenOptions,
+                RecoveryStartupChecker.EMPTY_CHECKER);
     }
 }

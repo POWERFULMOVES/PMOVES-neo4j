@@ -19,11 +19,11 @@
  */
 package org.neo4j.internal.kernel.api;
 
-import java.util.Objects;
 import org.eclipse.collections.api.map.primitive.IntObjectMap;
 import org.eclipse.collections.api.set.primitive.IntSet;
 import org.neo4j.exceptions.KernelException;
-import org.neo4j.internal.kernel.api.exceptions.EntityAlreadyExistsException;
+import org.neo4j.graphdb.Direction;
+import org.neo4j.graphdb.Vector;
 import org.neo4j.internal.kernel.api.exceptions.EntityNotFoundException;
 import org.neo4j.internal.kernel.api.exceptions.schema.ConstraintValidationException;
 import org.neo4j.values.storable.Value;
@@ -41,15 +41,6 @@ public interface Write {
     long nodeCreate();
 
     /**
-     * Create a node with a specific ID.
-     * This method is considered advanced in nature and shouldn't be used in a typical transactional environment.
-     *
-     * @param nodeId the internal ID this node will have.
-     * @throws EntityAlreadyExistsException if the node with this {@code nodeId} already exists.
-     */
-    void nodeWithSpecificIdCreate(long nodeId) throws EntityAlreadyExistsException;
-
-    /**
      * Create a node, and assign it the given array of labels.
      * <p>
      * This method differs from a {@link #nodeCreate()} and {@link #nodeAddLabel(long, int)} sequence, in that we will
@@ -62,20 +53,26 @@ public interface Write {
     long nodeCreateWithLabels(int[] labels) throws ConstraintValidationException;
 
     /**
-     * Create a node with a specific ID, and assign it the given array of labels.
-     * <p>
-     * This method differs from a {@link #nodeCreate()} and {@link #nodeAddLabel(long, int)} sequence, in that we will
-     * avoid taking the "unlabelled node lock" of the {@code nodeCreate}, and we will avoid taking the exclusive node
-     * lock in the {@code nodeAddLabel} method.
-     * <p>
-     * This method is considered advanced in nature and shouldn't be used in a typical transactional environment.
-     *
-     * @param nodeId the internal ID this node will have.
-     * @param labels The labels to assign to the newly created node.
-     * @throws EntityAlreadyExistsException if the node with this {@code nodeId} already exists.
+     *  Returns node id of node found in the unique index, or else one will be created.
+     *  <p>
+     *   Note that this is a very special method and should be used with caution. It has special locking semantics in
+     *   order to facilitate unique creation of nodes. If a node is found, a shared lock for the index entry will be
+     *   held, whereas if no node is found - we will hold onto an exclusive lock until the close of the transaction.
+     * @param index {@link IndexReadSession} for the index to query.
+     * @param cursor cursor to use for performing the index seek
+     * @param predicates predicates Combination of {@link PropertyIndexQuery.ExactPredicate index queries} to run against referenced index.
+     * @param onMatchProperties if relationships exists, these properties will be set on the existing relationship
+     * @param onCreateProperties if no relationship exists, these properties will be set on the newly created relationship
+     * @return a node id of either found in the unique index, or a newly created one.
      */
-    void nodeWithSpecificIdCreateWithLabels(long nodeId, int[] labels)
-            throws EntityAlreadyExistsException, ConstraintValidationException;
+    long uniqueNodeMerge(
+            IndexReadSession index,
+            NodeValueIndexCursor cursor,
+            PropertyIndexQuery.ExactPredicate[] predicates,
+            IntObjectMap<Value> onMatchProperties,
+            IntObjectMap<Value> onCreateProperties,
+            MutationCallback onMutation)
+            throws KernelException;
 
     /**
      * Delete a node.
@@ -91,31 +88,7 @@ public interface Write {
      * @param node the node to delete
      * @return the number of deleted relationships
      */
-    default int nodeDetachDelete(long node) throws KernelException {
-        return nodeDetachDelete(node, (long id, int type, long sourceNodeReference, long targetNodeReference) -> {});
-    }
-
-    @FunctionalInterface
-    interface DetachDeleteConsumer {
-        void accept(long id, int type, long sourceNodeReference, long targetNodeReference);
-
-        default DetachDeleteConsumer andThen(DetachDeleteConsumer after) {
-            Objects.requireNonNull(after);
-            return (long id, int type, long sourceNodeReference, long targetNodeReference) -> {
-                accept(id, type, sourceNodeReference, targetNodeReference);
-                after.accept(id, type, sourceNodeReference, targetNodeReference);
-            };
-        }
-    }
-    /**
-     * Deletes the node and all relationships connecting the node, calls deletedRelationshipConsumer passing
-     * information about each deleted relationship
-     *
-     * @param node the node to delete
-     * @param deletedRelationshipConsumer consumer for deleted rel data
-     * @return the number of deleted relationships
-     */
-    int nodeDetachDelete(long node, DetachDeleteConsumer deletedRelationshipConsumer) throws KernelException;
+    int nodeDetachDelete(long node) throws KernelException;
 
     /**
      * Create a relationship between two nodes.
@@ -129,24 +102,43 @@ public interface Write {
     long relationshipCreate(long sourceNode, int relationshipType, long targetNode) throws EntityNotFoundException;
 
     /**
-     * Create a relationship between two nodes, with a specific ID.
-     * This method is considered advanced in nature and shouldn't be used in a typical transactional environment.
-     *
-     * @param sourceNode the source internal node id
-     * @param relationshipType the type of the relationship to create
-     * @param targetNode the target internal node id
-     * @throws EntityNotFoundException if any of the nodes doesn't exist.
-     * @throws EntityAlreadyExistsException if the relationship with the given {@code relationshipId} already exists.
-     */
-    void relationshipWithSpecificIdCreate(long relationshipId, long sourceNode, int relationshipType, long targetNode)
-            throws EntityAlreadyExistsException, EntityNotFoundException;
-
-    /**
      * Delete a relationship
      *
      * @param relationship the internal id of the relationship to delete
      */
     boolean relationshipDelete(long relationship);
+
+    /**
+     * Finds all relationships connecting source and target with the given type and direction.
+     * If no such relationship exists - it will be created.
+     * <p>
+     * Apart from finding or creating relationship, properties will also be set on the matched and/or
+     * created relationships.
+     * <p>
+     * NOTE: This method should only ever be called on Block-format.
+     * @param nodeCursor NodeCursor to be used for looking up connecting relationship
+     * @param traversalCursor RelationshipTraversalCursor to be used for looking up relationship
+     * @param propertyCursor PropertyCursor to be used for setting properties.
+     * @param sourceNode the source node of the relationships
+     * @param type the type of the relationships
+     * @param direction the direction of the relationships
+     * @param targetNode the target node of the relationships
+     * @param onMatchProperties if relationships exists, these properties will be set on the existing relationship
+     * @param onCreateProperties if no relationship exists, these properties will be set on the newly created relationship
+     * @return a MutatingEntityCursor to be used to iterate over the connecting relationships.
+     * @throws EntityNotFoundException if source or target node is missing
+     */
+    MutatingEntityCursor relationshipMergeInto(
+            NodeCursor nodeCursor,
+            RelationshipTraversalCursor traversalCursor,
+            PropertyCursor propertyCursor,
+            long sourceNode,
+            int type,
+            Direction direction,
+            long targetNode,
+            IntObjectMap<Value> onMatchProperties,
+            IntObjectMap<Value> onCreateProperties)
+            throws EntityNotFoundException;
 
     /**
      * Add a label to a node
@@ -174,7 +166,8 @@ public interface Write {
      * @param propertyKey the property key id
      * @param value       the value to set
      */
-    void nodeSetProperty(long node, int propertyKey, Value value) throws KernelException;
+    void nodeSetProperty(long node, int propertyKey, Value value)
+            throws EntityNotFoundException, ConstraintValidationException;
 
     /**
      * Applies multiple label and property changes to a node in one call, checking constraints on the resulting data, not the intermediary state,
@@ -226,4 +219,12 @@ public interface Write {
      * @return The removed value, or Values.NO_VALUE if the relationship did not have the property before
      */
     Value relationshipRemoveProperty(long relationship, int propertyKey) throws EntityNotFoundException;
+
+    /**
+     * Create a vector store for the given coordinate type and dimensions.
+     * Note that the vector store only gets created during commit of the transaction, not during this call.
+     * A transaction is only allowed to create a single vector store. Calling this method more than once in
+     * a transaction will throw an Exception.
+     */
+    void createVectorStore(Vector.CoordinateType coordinateType, int dimensions);
 }

@@ -42,10 +42,11 @@ import org.neo4j.common.EntityType;
 import org.neo4j.common.TokenNameLookup;
 import org.neo4j.configuration.Config;
 import org.neo4j.exceptions.KernelException;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.internal.id.DefaultIdGeneratorFactory;
 import org.neo4j.internal.id.IdGenerator;
 import org.neo4j.internal.id.IdType;
-import org.neo4j.internal.id.SchemaIdType;
 import org.neo4j.internal.kernel.api.exceptions.schema.DuplicateSchemaRuleException;
 import org.neo4j.internal.kernel.api.exceptions.schema.SchemaRuleNotFoundException;
 import org.neo4j.internal.schema.ConstraintDescriptor;
@@ -58,6 +59,7 @@ import org.neo4j.io.pagecache.PageCursor;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.store.DynamicAllocatorProvider;
 import org.neo4j.kernel.impl.store.DynamicAllocatorProviders;
 import org.neo4j.kernel.impl.store.NeoStores;
@@ -67,7 +69,6 @@ import org.neo4j.kernel.impl.store.StoreType;
 import org.neo4j.kernel.impl.store.cursor.CachedStoreCursors;
 import org.neo4j.kernel.impl.store.record.AbstractBaseRecord;
 import org.neo4j.kernel.impl.store.record.RecordLoad;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
@@ -83,11 +84,11 @@ import org.neo4j.token.api.TokenHolder;
 @EphemeralNeo4jLayoutExtension
 class SchemaStorageTest {
     private static final String LABEL1 = "Label1";
-    private static final int LABEL1_ID = 1;
+    private static final int LABEL1_ID = 2;
     private static final String TYPE1 = "Type1";
-    private static final int TYPE1_ID = 1;
+    private static final int TYPE1_ID = 2;
     private static final String PROP1 = "prop1";
-    private static final int PROP1_ID = 1;
+    private static final int PROP1_ID = 2;
 
     @Inject
     private PageCache pageCache;
@@ -110,7 +111,7 @@ class SchemaStorageTest {
     private DynamicAllocatorProvider allocatorProvider;
 
     @BeforeEach
-    void before() {
+    void before() throws KernelException {
         var pageCacheTracer = PageCacheTracer.NULL;
         var storeFactory = new StoreFactory(
                 databaseLayout,
@@ -122,7 +123,7 @@ class SchemaStorageTest {
                 NullLogProvider.getInstance(),
                 new CursorContextFactory(pageCacheTracer, EMPTY_CONTEXT_SUPPLIER),
                 false,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL);
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
         neoStores = storeFactory.openNeoStores(
                 StoreType.SCHEMA,
                 StoreType.PROPERTY_KEY_TOKEN,
@@ -130,10 +131,19 @@ class SchemaStorageTest {
                 StoreType.RELATIONSHIP_TYPE_TOKEN);
         allocatorProvider = DynamicAllocatorProviders.nonTransactionalAllocator(neoStores);
 
-        var tokenHolders = new TokenHolders(
-                new RegisteringCreatingTokenHolder(new SimpleTokenCreator(), TokenHolder.TYPE_PROPERTY_KEY),
-                new RegisteringCreatingTokenHolder(new SimpleTokenCreator(), TokenHolder.TYPE_LABEL),
-                new RegisteringCreatingTokenHolder(new SimpleTokenCreator(), TokenHolder.TYPE_RELATIONSHIP_TYPE));
+        final var propertyKeyTokens =
+                new RegisteringCreatingTokenHolder(new SimpleTokenCreator(), TokenHolder.TYPE_PROPERTY_KEY);
+        final var labelTokens = new RegisteringCreatingTokenHolder(new SimpleTokenCreator(), TokenHolder.TYPE_LABEL);
+        final var relationshipTypeTokens =
+                new RegisteringCreatingTokenHolder(new SimpleTokenCreator(), TokenHolder.TYPE_RELATIONSHIP_TYPE);
+
+        // SimpleTokenCreator will assign 2 as the first ID, which happens to be equal to PROP1_ID, LABEL1_ID, and
+        // TYPE1_ID
+        propertyKeyTokens.getOrCreateId(PROP1);
+        labelTokens.getOrCreateId(LABEL1);
+        relationshipTypeTokens.getOrCreateId(TYPE1);
+
+        var tokenHolders = new TokenHolders(propertyKeyTokens, labelTokens, relationshipTypeTokens);
         storage = new SchemaStorage(neoStores.getSchemaStore(), tokenHolders);
         storeCursors = new CachedStoreCursors(neoStores, NULL_CONTEXT);
     }
@@ -147,14 +157,16 @@ class SchemaStorageTest {
     void shouldThrowExceptionOnNodeRuleNotFound() {
         TokenNameLookup tokenNameLookup = getDefaultTokenNameLookup();
 
-        var e = assertThrows(
-                SchemaRuleNotFoundException.class,
-                () -> storage.constraintsGetSingle(
+        var exceptionAssert = ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> storage.constraintsGetSingle(
                         ConstraintDescriptorFactory.existsForLabel(false, LABEL1_ID, PROP1_ID),
                         StoreCursors.NULL,
-                        EmptyMemoryTracker.INSTANCE));
+                        EmptyMemoryTracker.INSTANCE))
+                .isInstanceOf(SchemaRuleNotFoundException.class)
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_50N21)
+                .hasStatusDescription(
+                        "error: general processing exception - no such schema descriptor. The label property existence constraint was not found for '(:Label1 {prop1})'. Verify that the spelling is correct.");
 
-        assertThat(e, tokenNameLookup)
+        assertThat(exceptionAssert.getActual(), tokenNameLookup)
                 .hasUserMessage("No label property existence constraint was found for (:Label1 {prop1}).");
     }
 
@@ -289,7 +301,7 @@ class SchemaStorageTest {
     private static IdType[] expectedUsedIdTypes(SchemaRule schemaRule) {
         var expectedIdTypes = new ArrayList<IdType>();
         expectedIdTypes.add(RecordIdType.PROPERTY);
-        expectedIdTypes.add(SchemaIdType.SCHEMA);
+        expectedIdTypes.add(RecordIdType.SCHEMA);
         if (schemaRule.getName().length() > 36) {
             expectedIdTypes.add(RecordIdType.STRING_BLOCK);
         }

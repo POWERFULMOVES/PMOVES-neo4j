@@ -19,6 +19,8 @@
  */
 package org.neo4j.io.pagecache;
 
+import static org.neo4j.util.Preconditions.requirePowerOfTwo;
+
 import com.sun.nio.file.ExtendedOpenOption;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
@@ -62,5 +64,13 @@ public enum PageCacheOpenOptions implements OpenOption {
     /**
      * Update context with version information in non multi_versioned mapped file
      */
-    CONTEXT_VERSION_UPDATES
+    CONTEXT_VERSION_UPDATES,
+
+    MVCC_MULTI_WRITER;
+
+    public record SegmentedOpenOption(long pagesPerSegment) implements OpenOption {
+        public SegmentedOpenOption {
+            requirePowerOfTwo(pagesPerSegment);
+        }
+    }
 }

@@ -34,14 +34,15 @@ import org.neo4j.internal.schema.SchemaNameUtil;
 import org.neo4j.internal.schema.SchemaUserDescription;
 import org.neo4j.string.Mask;
 
-final class NodeLabelExistenceConstraintDescriptorImplementation implements NodeLabelExistenceConstraintDescriptor {
-    private final long id;
+final class NodeLabelExistenceConstraintDescriptorImplementation extends ConstraintDescriptorAdaptor
+        implements NodeLabelExistenceConstraintDescriptor {
     private final String name;
     private final NodeLabelExistenceSchemaDescriptor schema;
     private final int requiredLabelId;
 
-    NodeLabelExistenceConstraintDescriptorImplementation(
+    private NodeLabelExistenceConstraintDescriptorImplementation(
             NodeLabelExistenceSchemaDescriptor schema, long id, int requiredLabelId, String name) {
+        super(id);
         if (requiredLabelId < 0) {
             throw new IllegalArgumentException("requiredLabelId cannot be negative");
         }
@@ -50,7 +51,6 @@ final class NodeLabelExistenceConstraintDescriptorImplementation implements Node
             throw new IllegalArgumentException("requiredLabelId cannot be same as schema labelId");
         }
         this.requiredLabelId = requiredLabelId;
-        this.id = id;
         this.name = name;
     }
 
@@ -74,118 +74,8 @@ final class NodeLabelExistenceConstraintDescriptorImplementation implements Node
     }
 
     @Override
-    public boolean enforcesUniqueness() {
-        return false;
-    }
-
-    @Override
-    public boolean enforcesPropertyExistence() {
-        return false;
-    }
-
-    @Override
-    public boolean enforcesPropertyType() {
-        return false;
-    }
-
-    @Override
-    public boolean isPropertyTypeConstraint() {
-        return false;
-    }
-
-    @Override
-    public boolean isRelationshipEndpointLabelConstraint() {
-        return false;
-    }
-
-    @Override
     public boolean isNodeLabelExistenceConstraint() {
         return true;
-    }
-
-    @Override
-    public boolean isNodePropertyTypeConstraint() {
-        return false;
-    }
-
-    @Override
-    public boolean isRelationshipPropertyTypeConstraint() {
-        return false;
-    }
-
-    @Override
-    public TypeConstraintDescriptor asPropertyTypeConstraint() {
-        throw conversionException(TypeConstraintDescriptor.class);
-    }
-
-    @Override
-    public boolean isPropertyExistenceConstraint() {
-        return false;
-    }
-
-    @Override
-    public boolean isRelationshipPropertyExistenceConstraint() {
-        return false;
-    }
-
-    @Override
-    public boolean isNodePropertyExistenceConstraint() {
-        return false;
-    }
-
-    @Override
-    public ExistenceConstraintDescriptor asPropertyExistenceConstraint() {
-        throw conversionException(ExistenceConstraintDescriptor.class);
-    }
-
-    @Override
-    public boolean isUniquenessConstraint() {
-        return false;
-    }
-
-    @Override
-    public boolean isNodeUniquenessConstraint() {
-        return false;
-    }
-
-    @Override
-    public boolean isRelationshipUniquenessConstraint() {
-        return false;
-    }
-
-    @Override
-    public UniquenessConstraintDescriptor asUniquenessConstraint() {
-        throw conversionException(UniquenessConstraintDescriptor.class);
-    }
-
-    @Override
-    public boolean isNodeKeyConstraint() {
-        return false;
-    }
-
-    @Override
-    public boolean isRelationshipKeyConstraint() {
-        return false;
-    }
-
-    @Override
-    public boolean isIndexBackedConstraint() {
-        return false;
-    }
-
-    @Override
-    public IndexBackedConstraintDescriptor asIndexBackedConstraint() {
-        throw conversionException(IndexBackedConstraintDescriptor.class);
-    }
-
-    @Override
-    public boolean isKeyConstraint() {
-        return false;
-    }
-
-    @Override
-    public KeyConstraintDescriptor asKeyConstraint() {
-        throw conversionException(KeyConstraintDescriptor.class);
     }
 
     @Override
@@ -208,11 +98,6 @@ final class NodeLabelExistenceConstraintDescriptorImplementation implements Node
     }
 
     @Override
-    public RelationshipEndpointLabelConstraintDescriptor asRelationshipEndpointLabelConstraint() {
-        throw conversionException(RelationshipEndpointLabelConstraintDescriptor.class);
-    }
-
-    @Override
     public NodeLabelExistenceConstraintDescriptor asNodeLabelExistenceConstraint() {
         return this;
     }
@@ -222,29 +107,42 @@ final class NodeLabelExistenceConstraintDescriptorImplementation implements Node
         if (!(o instanceof NodeLabelExistenceConstraintDescriptor that)) {
             return false;
         }
+        return equalsIgnoreName(that) && Objects.equals(this.name, that.getName());
+    }
 
-        if (this.requiredLabelId != that.requiredLabelId()) {
+    @Override
+    public boolean equalsIgnoreName(ConstraintDescriptor that) {
+        // ugly, needed since equalsIgnoreName might be called from something else than equals
+        if (!that.isNodeLabelExistenceConstraint()) {
             return false;
         }
 
-        if (!this.schema().equals(that.schema())) {
+        if (this.requiredLabelId != that.asNodeLabelExistenceConstraint().requiredLabelId()) {
             return false;
         }
 
-        return true;
+        return this.schema().equals(that.schema());
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(schema);
+        return Objects.hash(schema, requiredLabelId, name);
     }
 
+    // It is not allowed to have a label be the constrained label for one constraint and required label for another
+    // constraint
     @Override
-    public long getId() {
-        if (id == NO_ID) {
-            throw new IllegalStateException("This constraint descriptor have no id assigned: " + this);
+    public boolean conflictsWith(ConstraintDescriptor other) {
+        if (other.graphTypeDependence() == GraphTypeDependence.DEPENDENT) {
+            if (other.isNodeLabelExistenceConstraint()) {
+                NodeLabelExistenceConstraintDescriptor that = other.asNodeLabelExistenceConstraint();
+                return this.schema().getLabelId() == that.requiredLabelId()
+                        || this.requiredLabelId() == that.schema().getLabelId();
+            } else if (other.isNodePropertyTypeConstraint() || other.isNodePropertyExistenceConstraint()) {
+                return this.requiredLabelId() == other.schema().getLabelId();
+            }
         }
-        return id;
+        return false;
     }
 
     @Override
@@ -255,6 +153,11 @@ final class NodeLabelExistenceConstraintDescriptorImplementation implements Node
     @Override
     public int requiredLabelId() {
         return requiredLabelId;
+    }
+
+    @Override
+    public int schemaLabelId() {
+        return schema.getLabelId();
     }
 
     @Override
@@ -275,19 +178,17 @@ final class NodeLabelExistenceConstraintDescriptorImplementation implements Node
                 name,
                 ConstraintType.NODE_LABEL_EXISTENCE,
                 schema,
+                graphTypeDependence(),
                 null,
                 null,
                 tokenNameLookup.labelGetName(requiredLabelId),
+                null,
+                null,
                 mask);
     }
 
     @Override
     public String userDescription(TokenNameLookup tokenNameLookup) {
-        return userDescription(TOKEN_ID_NAME_LOOKUP, Mask.NO);
-    }
-
-    private IllegalStateException conversionException(Class<? extends ConstraintDescriptor> targetType) {
-        return new IllegalStateException("Cannot cast this schema to a " + targetType
-                + " because it does not match that structure: " + this + ".");
+        return userDescription(tokenNameLookup, Mask.NO);
     }
 }

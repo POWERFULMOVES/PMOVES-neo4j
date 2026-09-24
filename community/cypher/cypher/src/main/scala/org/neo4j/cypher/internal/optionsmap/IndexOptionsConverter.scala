@@ -19,13 +19,13 @@
  */
 package org.neo4j.cypher.internal.optionsmap
 
+import org.neo4j.configuration.Config
+import org.neo4j.configuration.GraphDatabaseInternalSettings
 import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.MapValueOps.Ops
+import org.neo4j.cypher.internal.notification.DeprecatedIndexProviderOption
+import org.neo4j.cypher.internal.notification.InternalNotification
 import org.neo4j.cypher.internal.runtime.IndexProviderContext
-import org.neo4j.cypher.internal.util.DeprecatedIndexProviderOption
-import org.neo4j.cypher.internal.util.InternalNotification
-import org.neo4j.gqlstatus.GqlHelper
-import org.neo4j.gqlstatus.GqlParams
 import org.neo4j.graphdb.schema.IndexSetting
 import org.neo4j.graphdb.schema.IndexSettingImpl.FULLTEXT_ANALYZER
 import org.neo4j.graphdb.schema.IndexSettingImpl.FULLTEXT_EVENTUALLY_CONSISTENT
@@ -37,10 +37,12 @@ import org.neo4j.graphdb.schema.IndexSettingImpl.SPATIAL_WGS84_3D_MAX
 import org.neo4j.graphdb.schema.IndexSettingImpl.SPATIAL_WGS84_3D_MIN
 import org.neo4j.graphdb.schema.IndexSettingImpl.SPATIAL_WGS84_MAX
 import org.neo4j.graphdb.schema.IndexSettingImpl.SPATIAL_WGS84_MIN
+import org.neo4j.graphdb.schema.IndexSettingImpl.VECTOR_DEFAULT_SEARCH_EXPANSION_FACTOR
 import org.neo4j.graphdb.schema.IndexSettingImpl.VECTOR_DIMENSIONS
 import org.neo4j.graphdb.schema.IndexSettingImpl.VECTOR_HNSW_EF_CONSTRUCTION
 import org.neo4j.graphdb.schema.IndexSettingImpl.VECTOR_HNSW_M
 import org.neo4j.graphdb.schema.IndexSettingImpl.VECTOR_QUANTIZATION_ENABLED
+import org.neo4j.graphdb.schema.IndexSettingImpl.VECTOR_QUANTIZATION_TYPE
 import org.neo4j.graphdb.schema.IndexSettingImpl.VECTOR_SIMILARITY_FUNCTION
 import org.neo4j.graphdb.schema.IndexSettingUtil
 import org.neo4j.internal.schema.IndexConfig
@@ -62,33 +64,63 @@ import scala.math.Ordering.comparatorToOrdering
 trait IndexOptionsConverter[T] extends OptionsConverter[T] {
   protected def context: IndexProviderContext
 
+  protected def getAlwaysUseLatestIndexProvider(config: Option[Config]): Boolean = {
+    config match {
+      case Some(cfg) => Boolean unbox cfg.get(GraphDatabaseInternalSettings.always_use_latest_index_provider)
+      case None      => true
+    }
+  }
+
   protected def getOptionsParts(
     options: MapValue,
     schemaType: String,
     indexType: IndexType,
-    version: CypherVersion
+    version: CypherVersion,
+    alwaysUseLatestIndexProvider: Boolean
   ): (Option[IndexProviderDescriptor], IndexConfig, Set[InternalNotification]) = {
-    var optionName = ""
-    if (
-      options.exists { case (k, _) =>
-        optionName = k
-        !optionName.equalsIgnoreCase("indexProvider") && !optionName.equalsIgnoreCase("indexConfig")
-      }
-    ) {
-      throw InvalidArgumentsException.invalidIndexOptionValue(optionName, schemaType)
+
+    val (validOptions, errorMessageOverride) =
+      if (version == CypherVersion.Cypher5)
+        (
+          Seq("indexProvider", "indexConfig"),
+          Some(
+            s"Failed to create $schemaType: Invalid option provided, valid options are `indexProvider` and `indexConfig`."
+          )
+        )
+      else (Seq("indexConfig"), None)
+
+    val invalidOption: Option[String] = options.collectFirst {
+      case (k, _) if !validOptions.exists(_.equalsIgnoreCase(k)) => k
     }
+
+    invalidOption.foreach(k =>
+      throw InvalidArgumentsException.invalidIndexOptionValue(
+        k,
+        validOptions.asJava,
+        errorMessageOverride.orNull
+      )
+    )
+
+    // User provided index provider is deprecated in Cypher 5, and removed in Cypher 25.
+    // Should use the actual index provider for index configuration validation.
+    // By default the latest index provider is used, but is configurable with internal setting.
     val maybeIndexProvider = options.getOption("indexprovider")
+    val deprecatedUserProvidedIndexProvider =
+      maybeIndexProvider.map(assertValidIndexProvider(_, schemaType, indexType, version))
+    val indexProvider: Option[IndexProviderDescriptor] = deprecatedUserProvidedIndexProvider match {
+      case Some(_) if alwaysUseLatestIndexProvider => None
+      case any                                     => any
+    }
+
     // If there are mandatory options we should call convert with empty options to throw expected errors
     val maybeConfig = options.getOption("indexconfig").orElse(Option.when(hasMandatoryOptions)(VirtualValues.EMPTY_MAP))
-
-    val indexProvider = maybeIndexProvider.map(assertValidIndexProvider(_, schemaType, indexType, version))
     val indexConfig =
       maybeConfig.map(assertValidAndTransformConfig(_, schemaType, indexProvider)).getOrElse(IndexConfig.empty)
-    if (indexProvider.nonEmpty) {
-      (indexProvider, indexConfig, Set(DeprecatedIndexProviderOption()))
-    } else {
-      (indexProvider, indexConfig, Set())
-    }
+
+    val notifications: Set[InternalNotification] =
+      if (deprecatedUserProvidedIndexProvider.nonEmpty) Set(DeprecatedIndexProviderOption()) else Set.empty
+
+    (indexProvider, indexConfig, notifications)
   }
 
   protected def toIndexConfig: java.util.Map[String, Object] => IndexConfig =
@@ -108,18 +140,7 @@ trait IndexOptionsConverter[T] extends OptionsConverter[T] {
   ): IndexProviderDescriptor = indexProvider match {
     case indexProviderValue: TextValue =>
       context.validateIndexProvider(schemaType, indexProviderValue.stringValue(), indexType, version)
-    case _ =>
-      val pp = new PrettyPrinter
-      indexProvider.writeTo(pp)
-      val gql = GqlHelper.getGql22G03_22N27(
-        pp.value,
-        GqlParams.StringParam.cmd.process("indexProvider"),
-        java.util.List.of("STRING")
-      )
-      throw new InvalidArgumentsException(
-        gql,
-        s"Could not create $schemaType with specified index provider '$indexProvider'. Expected String value."
-      )
+    case _ => throw InvalidArgumentsException.invalidIndexProvider(schemaType, indexProvider)
   }
 
   protected val validPointConfigSettingNames: SortedSet[String] = indexSettingsToCaseInsensitiveNames(
@@ -133,12 +154,14 @@ trait IndexOptionsConverter[T] extends OptionsConverter[T] {
     SPATIAL_WGS84_3D_MAX
   )
 
-  def getValidConfigNames(idxType: IndexType): java.util.List[String] = {
+  private def getValidConfigNames(idxType: IndexType): java.util.List[String] = {
     idxType match {
       case IndexType.FULLTEXT => validFulltextConfigSettingNames.toList.asJava
       case IndexType.VECTOR   => validVectorConfigSettingNames.toList.asJava
       case IndexType.POINT    => validPointConfigSettingNames.toList.asJava
-      case _ => java.util.List.of("no values") // this should not happen if the method is called correctly
+      // No other index types have valid settings,
+      // but we get here if you give fulltext, vector or point in their configs
+      case _ => java.util.List.of()
     }
   }
 
@@ -194,7 +217,9 @@ trait IndexOptionsConverter[T] extends OptionsConverter[T] {
     indexSettingsToCaseInsensitiveNames(
       VECTOR_DIMENSIONS,
       VECTOR_SIMILARITY_FUNCTION,
+      VECTOR_DEFAULT_SEARCH_EXPANSION_FACTOR,
       VECTOR_QUANTIZATION_ENABLED,
+      VECTOR_QUANTIZATION_TYPE,
       VECTOR_HNSW_M,
       VECTOR_HNSW_EF_CONSTRUCTION
     )
@@ -223,14 +248,6 @@ trait IndexOptionsConverter[T] extends OptionsConverter[T] {
       getValidConfigNames(originIndexType)
     )
   }
-
-  protected def invalidConfigValueString(pp: PrettyPrinter, value: AnyValue, schemaType: String): String = {
-    value.writeTo(pp)
-    invalidConfigValueString(pp.value(), schemaType)
-  }
-
-  protected def invalidConfigValueString(value: String, schemaType: String): String =
-    s"Could not create $schemaType with specified index config '$value'"
 
   protected def assertEmptyConfig(
     config: AnyValue,
@@ -261,17 +278,7 @@ trait IndexOptionsConverter[T] extends OptionsConverter[T] {
         itemsMap.writeTo(pp)
         throw InvalidArgumentsException.invalidIndexConfig(schemaType, pp.value(), indexString)
       case _: MapValue => IndexConfig.empty
-      case unknown =>
-        unknown.writeTo(pp)
-        val gql = GqlHelper.getGql22G03_22N27(
-          pp.value,
-          GqlParams.StringParam.cmd.process("indexConfig"),
-          java.util.List.of("MAP")
-        )
-        throw new InvalidArgumentsException(
-          gql,
-          s"Could not create $schemaType with specified index config '${pp.value()}'. Expected a map."
-        )
+      case unknown     => throw InvalidArgumentsException.invalidIndexConfigExpectedMap(schemaType, unknown)
     }
   }
 

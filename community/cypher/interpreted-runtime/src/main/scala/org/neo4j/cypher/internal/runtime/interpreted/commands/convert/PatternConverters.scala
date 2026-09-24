@@ -22,6 +22,7 @@ package org.neo4j.cypher.internal.runtime.interpreted.commands.convert
 import org.neo4j.cypher.internal
 import org.neo4j.cypher.internal.label_expressions.LabelExpression.containsGpmSpecificRelType
 import org.neo4j.cypher.internal.label_expressions.LabelExpression.getRelTypes
+import org.neo4j.cypher.internal.logical.plans.TraversalPathMode.Trail
 import org.neo4j.cypher.internal.runtime.interpreted.commands
 import org.neo4j.cypher.internal.runtime.interpreted.commands.SingleNode
 import org.neo4j.cypher.internal.runtime.interpreted.commands.values.KeyToken
@@ -76,7 +77,8 @@ object PatternConverters {
         allowZeroLength,
         maxDepth,
         part.single,
-        relIteratorName
+        relIteratorName,
+        Trail // Hardcoded since ShortestPathExpression currently only supports Trail mode
       ))
     }
   }
@@ -110,8 +112,11 @@ object PatternConverters {
           m.items.map(p => (p._1.name, converter.toCommandExpression(id, p._2))).toMap
         case Some(p: internal.expressions.Parameter) =>
           Map[String, commands.expressions.Expression]("*" -> converter.toCommandExpression(id, p))
-        case Some(p) => throw new SyntaxException(s"Properties of a node must be a map or parameter (${p.position})")
-        case None    => Map[String, commands.expressions.Expression]()
+        case Some(p) => throw SyntaxException.internalError(
+            this.getClass.getSimpleName,
+            s"Properties of a node must be a map or parameter (${p.position})"
+          )
+        case None => Map[String, commands.expressions.Expression]()
       }
   }
 }

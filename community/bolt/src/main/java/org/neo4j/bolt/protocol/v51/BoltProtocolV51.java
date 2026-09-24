@@ -20,7 +20,7 @@
 package org.neo4j.bolt.protocol.v51;
 
 import org.neo4j.bolt.fsm.StateMachineConfiguration;
-import org.neo4j.bolt.negotiation.ProtocolVersion;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 import org.neo4j.bolt.protocol.AbstractBoltProtocol;
 import org.neo4j.bolt.protocol.common.connector.connection.Connection;
 import org.neo4j.bolt.protocol.common.fsm.States;
@@ -33,14 +33,28 @@ import org.neo4j.bolt.protocol.common.fsm.transition.ready.RouteStateTransition;
 import org.neo4j.bolt.protocol.common.fsm.transition.ready.TelemetryStateTransition;
 import org.neo4j.bolt.protocol.common.message.decoder.generic.TelemetryMessageDecoder;
 import org.neo4j.bolt.protocol.common.message.encoder.FailureMessageEncoder;
-import org.neo4j.bolt.protocol.common.message.request.RequestMessage;
-import org.neo4j.bolt.protocol.common.message.response.ResponseMessage;
+import org.neo4j.bolt.protocol.io.pipeline.WriterPipeline;
+import org.neo4j.bolt.protocol.io.reader.struct.DateReader;
+import org.neo4j.bolt.protocol.io.reader.struct.DateTimeReader;
+import org.neo4j.bolt.protocol.io.reader.struct.DateTimeZoneIdReader;
+import org.neo4j.bolt.protocol.io.reader.struct.DurationReader;
+import org.neo4j.bolt.protocol.io.reader.struct.LocalDateTimeReader;
+import org.neo4j.bolt.protocol.io.reader.struct.LocalTimeReader;
+import org.neo4j.bolt.protocol.io.reader.struct.Point2dReader;
+import org.neo4j.bolt.protocol.io.reader.struct.Point3dReader;
+import org.neo4j.bolt.protocol.io.reader.struct.TimeReader;
+import org.neo4j.bolt.protocol.io.writer.UUIDUnknownTypeVersionedValueWriter;
+import org.neo4j.bolt.protocol.io.writer.VectorUnknownTypeVersionedValueWriter;
 import org.neo4j.bolt.protocol.v40.message.encoder.FailureMessageEncoderV40;
 import org.neo4j.bolt.protocol.v44.fsm.response.metadata.MetadataHandlerV44;
 import org.neo4j.bolt.protocol.v44.message.decoder.transaction.RunMessageDecoderV44;
 import org.neo4j.bolt.protocol.v50.message.decoder.transaction.BeginMessageDecoderV50;
 import org.neo4j.bolt.protocol.v51.message.decoder.authentication.HelloMessageDecoderV51;
+import org.neo4j.boltmessages.request.RequestMessage;
+import org.neo4j.boltmessages.response.ResponseMessage;
+import org.neo4j.packstream.io.Type;
 import org.neo4j.packstream.struct.StructRegistry;
+import org.neo4j.values.storable.Value;
 
 public final class BoltProtocolV51 extends AbstractBoltProtocol {
     private static final BoltProtocolV51 INSTANCE = new BoltProtocolV51();
@@ -90,7 +104,34 @@ public final class BoltProtocolV51 extends AbstractBoltProtocol {
     }
 
     @Override
+    public void registerStructReaders(StructRegistry.Builder<Connection, Value> builder) {
+        builder.register(DateReader.getInstance())
+                .register(DurationReader.getInstance())
+                .register(LocalDateTimeReader.getInstance())
+                .register(LocalTimeReader.getInstance())
+                .register(Point2dReader.getInstance())
+                .register(Point3dReader.getInstance())
+                .register(TimeReader.getInstance())
+                .register(DateTimeReader.getInstance())
+                .register(DateTimeZoneIdReader.getInstance());
+    }
+
+    @Override
+    @SuppressWarnings("removal")
+    public void registerStructWriters(WriterPipeline pipeline) {
+        pipeline.addLast(VectorUnknownTypeVersionedValueWriter.getInstance())
+                .addLast(UUIDUnknownTypeVersionedValueWriter.getInstance());
+
+        super.registerStructWriters(pipeline);
+    }
+
+    @Override
     public MetadataHandler metadataHandler() {
         return MetadataHandlerV44.getInstance();
+    }
+
+    @Override
+    public boolean supportsPackstreamType(Type type) {
+        return type != Type.UUID;
     }
 }

@@ -20,32 +20,45 @@
 package org.neo4j.kernel.recovery;
 
 import java.io.IOException;
-import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
-import org.neo4j.kernel.impl.transaction.CommittedCommandBatchRepresentation;
-import org.neo4j.kernel.impl.transaction.log.CommandBatchCursor;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
+import org.neo4j.kernel.impl.transaction.CommittedCommandBatchRepresentation.BatchInformation;
 import org.neo4j.storageengine.AppendIndexProvider;
 import org.neo4j.storageengine.api.TransactionApplicationMode;
+import org.neo4j.wal.CommandBatchCursor;
+import org.neo4j.wal.LogPosition;
+import org.neo4j.wal.RecoveryOutcome;
 
 public interface RecoveryService {
     CommandBatchCursor getCommandBatches(long appendIndex) throws IOException;
 
-    CommandBatchCursor getCommandBatches(LogPosition recoveryFromPosition) throws IOException;
+    CommandBatchCursor getCommandBatches(
+            LogPosition recoveryFromPosition, LogPosition maxPosition, boolean treatBrokenLastEntryAsCorruption)
+            throws IOException;
 
-    CommandBatchCursor getCommandBatchesInReverseOrder(LogPosition recoveryFromPosition) throws IOException;
+    CommandBatchCursor getCommandBatchesInReverseOrder(LogPosition recoveryFromPosition, LogPosition maxPosition)
+            throws IOException;
 
     RecoveryStartInformation getRecoveryStartInformation() throws IOException;
 
     RecoveryApplier getRecoveryApplier(
             TransactionApplicationMode mode, CursorContextFactory contextFactory, String tracerTag) throws Exception;
 
+    void checkMissingStoreFiles();
+
+    void missingLogs();
+
+    /**
+     * @param highestTransactionRecoveredBatch information about the highest recovered transaction.
+     * @param lastRecoveredBatch information about the actual last recovered batch, which may differ from
+     * {@code highestTransactionRecoveredBatch} if the last batch was a rollback or a not-yet-committed chunk of a
+     * bigger transaction.
+     */
     void transactionsRecovered(
-            CommittedCommandBatchRepresentation.BatchInformation highestTransactionRecoveredBatch,
+            BatchInformation highestTransactionRecoveredBatch,
+            BatchInformation lastRecoveredBatch,
             AppendIndexProvider recoverAppendIndexProvider,
             LogPosition lastTransactionPosition,
             LogPosition positionAfterLastRecoveredTransaction,
             LogPosition checkpointPosition,
-            boolean missingLogs,
-            CursorContext cursorContext);
+            RecoveryOutcome recoveryOutcome);
 }

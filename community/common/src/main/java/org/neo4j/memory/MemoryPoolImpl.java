@@ -19,7 +19,6 @@
  */
 package org.neo4j.memory;
 
-import static org.neo4j.kernel.api.exceptions.Status.General.MemoryPoolOutOfMemoryError;
 import static org.neo4j.util.Preconditions.requirePositive;
 
 import java.util.concurrent.atomic.AtomicLong;
@@ -75,8 +74,18 @@ public class MemoryPoolImpl implements MemoryPool {
     }
 
     @Override
+    public void reserveHeapNoThrow(long bytes) {
+        usedHeapBytes.addAndGet(bytes);
+    }
+
+    @Override
     public void reserveNative(long bytes) {
         reserveMemory(bytes, usedNativeBytes, usedHeapBytes);
+    }
+
+    @Override
+    public void reserveNativeNoThrow(long bytes) {
+        usedNativeBytes.addAndGet(bytes);
     }
 
     private void reserveMemory(long bytes, AtomicLong poolCounter, AtomicLong complementPoolValue) {
@@ -87,8 +96,8 @@ public class MemoryPoolImpl implements MemoryPool {
             long localTotal = newCounterValue + complementPoolValue.getAcquire();
             if (localTotal > max) {
                 poolCounter.addAndGet(-bytes);
-                throw new MemoryLimitExceededException(
-                        bytes, max, localTotal - bytes, MemoryPoolOutOfMemoryError, limitSettingName);
+                throw MemoryLimitExceededException.memoryPoolOutOfMemoryExceeded(
+                        bytes, max, localTotal - bytes, limitSettingName);
             }
         }
     }
@@ -103,7 +112,7 @@ public class MemoryPoolImpl implements MemoryPool {
         maxMemory.setRelease(validateSize(size));
     }
 
-    private static long validateSize(long size) {
+    long validateSize(long size) {
         if (size == 0) {
             return Long.MAX_VALUE;
         }

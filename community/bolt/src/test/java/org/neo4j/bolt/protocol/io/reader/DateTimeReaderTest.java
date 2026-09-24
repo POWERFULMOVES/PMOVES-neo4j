@@ -22,10 +22,12 @@ package org.neo4j.bolt.protocol.io.reader;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.neo4j.bolt.testing.util.ErrorUtil.useNewMessage;
 
 import java.time.temporal.ChronoField;
 import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.neo4j.bolt.protocol.io.reader.struct.DateTimeReader;
 import org.neo4j.packstream.error.reader.PackstreamReaderException;
 import org.neo4j.packstream.error.struct.IllegalStructArgumentException;
 import org.neo4j.packstream.error.struct.IllegalStructSizeException;
@@ -61,7 +63,8 @@ class DateTimeReaderTest {
 
         assertThatThrownBy(() -> DateTimeReader.getInstance().read(null, buf, new StructHeader(3, (short) 0x42)))
                 .isInstanceOf(IllegalStructArgumentException.class)
-                .hasMessage("Illegal value for field \"nanoseconds\": Value is out of bounds")
+                .hasMessage(useNewMessage("08N06: General network protocol error.")
+                        .whenLegacyFallbackTo("Illegal value for field \"nanoseconds\": Value is out of bounds"))
                 .hasNoCause()
                 .satisfies(ex -> assertThat(((IllegalStructArgumentException) ex).getFieldName())
                         .isEqualTo("nanoseconds"));
@@ -76,7 +79,8 @@ class DateTimeReaderTest {
 
         assertThatThrownBy(() -> DateTimeReader.getInstance().read(null, buf, new StructHeader(3, (short) 0x42)))
                 .isInstanceOf(IllegalStructArgumentException.class)
-                .hasMessage("Illegal value for field \"nanoseconds\": Value is out of bounds")
+                .hasMessage(useNewMessage("08N06: General network protocol error.")
+                        .whenLegacyFallbackTo("Illegal value for field \"nanoseconds\": Value is out of bounds"))
                 .hasNoCause()
                 .satisfies(ex -> assertThat(((IllegalStructArgumentException) ex).getFieldName())
                         .isEqualTo("nanoseconds"));
@@ -88,7 +92,8 @@ class DateTimeReaderTest {
 
         assertThatThrownBy(() -> DateTimeReader.getInstance().read(null, buf, new StructHeader(3, (short) 0x42)))
                 .isInstanceOf(IllegalStructArgumentException.class)
-                .hasMessage("Illegal value for field \"tz_offset_seconds\": Value is out of bounds")
+                .hasMessage(useNewMessage("08N06: General network protocol error.")
+                        .whenLegacyFallbackTo("Illegal value for field \"tz_offset_seconds\": Value is out of bounds"))
                 .hasNoCause()
                 .satisfies(ex -> assertThat(((IllegalStructArgumentException) ex).getFieldName())
                         .isEqualTo("tz_offset_seconds"));
@@ -100,7 +105,8 @@ class DateTimeReaderTest {
 
         assertThatThrownBy(() -> DateTimeReader.getInstance().read(null, buf, new StructHeader(3, (short) 0x42)))
                 .isInstanceOf(IllegalStructArgumentException.class)
-                .hasMessage("Illegal value for field \"tz_offset_seconds\": Value is out of bounds")
+                .hasMessage(useNewMessage("08N06: General network protocol error.")
+                        .whenLegacyFallbackTo("Illegal value for field \"tz_offset_seconds\": Value is out of bounds"))
                 .hasNoCause()
                 .satisfies(ex -> assertThat(((IllegalStructArgumentException) ex).getFieldName())
                         .isEqualTo("tz_offset_seconds"));
@@ -112,7 +118,9 @@ class DateTimeReaderTest {
 
         assertThatExceptionOfType(IllegalStructSizeException.class)
                 .isThrownBy(() -> reader.read(null, PackstreamBuf.allocUnpooled(), new StructHeader(0, (short) 0x42)))
-                .withMessage("Illegal struct size: Expected struct to be 3 fields but got 0")
+                .withMessage(useNewMessage(
+                                "08N11: The request is invalid and could not be processed by the server. See cause for further details.")
+                        .whenLegacyFallbackTo("Illegal struct size: Expected struct to be 3 fields but got 0"))
                 .withNoCause();
     }
 
@@ -122,7 +130,9 @@ class DateTimeReaderTest {
 
         assertThatExceptionOfType(IllegalStructSizeException.class)
                 .isThrownBy(() -> reader.read(null, PackstreamBuf.allocUnpooled(), new StructHeader(2, (short) 0x42)))
-                .withMessage("Illegal struct size: Expected struct to be 3 fields but got 2")
+                .withMessage(useNewMessage(
+                                "08N11: The request is invalid and could not be processed by the server. See cause for further details.")
+                        .whenLegacyFallbackTo("Illegal struct size: Expected struct to be 3 fields but got 2"))
                 .withNoCause();
     }
 
@@ -132,7 +142,9 @@ class DateTimeReaderTest {
 
         assertThatExceptionOfType(IllegalStructSizeException.class)
                 .isThrownBy(() -> reader.read(null, PackstreamBuf.allocUnpooled(), new StructHeader(4, (short) 0x42)))
-                .withMessage("Illegal struct size: Expected struct to be 3 fields but got 4")
+                .withMessage(useNewMessage(
+                                "08N11: The request is invalid and could not be processed by the server. See cause for further details.")
+                        .whenLegacyFallbackTo("Illegal struct size: Expected struct to be 3 fields but got 4"))
                 .withNoCause();
     }
 }

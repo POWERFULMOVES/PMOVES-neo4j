@@ -102,6 +102,8 @@ class IdRangeMarker implements IdGenerator.TransactionalMarker, IdGenerator.Cont
      */
     private final AtomicLong highestWrittenId;
 
+    private final AtomicLong highId;
+
     /**
      * Whether or not to bridge gaps between previously highest written id and id being written as updates comes in.
      */
@@ -128,6 +130,7 @@ class IdRangeMarker implements IdGenerator.TransactionalMarker, IdGenerator.Cont
     private final IndexedIdGenerator.Monitor monitor;
 
     private final boolean respectsReservedIds;
+    private final boolean isPowerOfTwo;
 
     /**
      * Current type of operations. As various "mark" operations comes in they modify the {@link #key} and {@link #value}
@@ -147,6 +150,7 @@ class IdRangeMarker implements IdGenerator.TransactionalMarker, IdGenerator.Cont
             FreeIdFindState freeIdFindState,
             long generation,
             AtomicLong highestWrittenId,
+            AtomicLong highId,
             boolean bridgeIdGaps,
             boolean deleteAlsoFrees,
             IndexedIdGenerator.Monitor monitor) {
@@ -161,11 +165,18 @@ class IdRangeMarker implements IdGenerator.TransactionalMarker, IdGenerator.Cont
         this.freeIdFindState = freeIdFindState;
         this.generation = generation;
         this.highestWrittenId = highestWrittenId;
+        this.highId = highId;
         this.bridgeIdGaps = bridgeIdGaps;
         this.deleteAlsoFrees = deleteAlsoFrees;
         this.monitor = monitor;
-        this.idsPerEntryShift = Long.numberOfTrailingZeros(idsPerEntry);
-        this.idOffsetMask = (1 << idsPerEntryShift) - 1;
+        this.isPowerOfTwo = Integer.bitCount(idsPerEntry) == 1;
+        if (isPowerOfTwo) {
+            this.idsPerEntryShift = Long.numberOfTrailingZeros(idsPerEntry);
+            this.idOffsetMask = (1 << idsPerEntryShift) - 1;
+        } else {
+            this.idsPerEntryShift = 0;
+            this.idOffsetMask = 0;
+        }
     }
 
     @Override
@@ -206,14 +217,17 @@ class IdRangeMarker implements IdGenerator.TransactionalMarker, IdGenerator.Cont
     }
 
     @Override
-    public void markDeleted(long id, int numberOfIds) {
+    public void markDeleted(long id, int numberOfIds, boolean bridgeOnDelete) {
         if (!deleteAlsoFrees) {
+            if (bridgeOnDelete) {
+                bridgeGapBetweenHighestWrittenIdAndThisId(id, numberOfIds, false);
+            }
             if (!hasReservedIdInRange(id, id + numberOfIds)) {
                 markWithSupportForLargerThanRange(TYPE_DELETED, id, numberOfIds, ADDITION_ALL, BITSET_COMMIT, -1);
                 monitor.markedAsDeleted(id, numberOfIds);
             }
         } else {
-            markDeletedAndFree(id, numberOfIds);
+            markDeletedAndFree(id, numberOfIds, bridgeOnDelete);
         }
     }
 
@@ -253,7 +267,10 @@ class IdRangeMarker implements IdGenerator.TransactionalMarker, IdGenerator.Cont
     }
 
     @Override
-    public void markDeletedAndFree(long id, int numberOfIds) {
+    public void markDeletedAndFree(long id, int numberOfIds, boolean bridgeOnDelete) {
+        if (bridgeOnDelete) {
+            bridgeGapBetweenHighestWrittenIdAndThisId(id, numberOfIds, false);
+        }
         if (!hasReservedIdInRange(id, id + numberOfIds)) {
             markWithSupportForLargerThanRange(
                     TYPE_DELETED_AND_FREE, id, numberOfIds, ADDITION_ALL, BITSET_COMMIT, BITSET_REUSE);
@@ -309,18 +326,24 @@ class IdRangeMarker implements IdGenerator.TransactionalMarker, IdGenerator.Cont
         } else if (type != TYPE_NONE) {
             writer.merge(key, value, merger);
             if (type == TYPE_FREE || type == TYPE_DELETED_AND_FREE || type == TYPE_UNALLOCATED) {
-                freeIdFindState.notifySeenFreedId(merger.largestSeenFreeIdsSlotSize());
+                freeIdFindState.recordFreedIds(merger.largestSeenFreeIdsSlotSize());
             }
         }
         type = TYPE_NONE;
     }
 
     private long idRangeIndex(long id) {
-        return id >> idsPerEntryShift;
+        if (isPowerOfTwo) {
+            return id >> idsPerEntryShift;
+        }
+        return id / idsPerEntry;
     }
 
     private int idOffset(long id) {
-        return (int) (id & idOffsetMask);
+        if (isPowerOfTwo) {
+            return (int) (id & idOffsetMask);
+        }
+        return (int) (id % idsPerEntry);
     }
 
     /**
@@ -369,7 +392,9 @@ class IdRangeMarker implements IdGenerator.TransactionalMarker, IdGenerator.Cont
             // Well, we bridged the gap up and including id - 1, but we know that right after this the actual id
             // will be written so to try to isolate updates to highestWrittenId to this method we can might as well
             // do that right here.
-            this.highestWrittenId.set(id + numberOfIds - 1);
+            long highestWritten = id + numberOfIds - 1;
+            this.highestWrittenId.set(highestWritten);
+            this.highId.accumulateAndGet(highestWritten + 1, Math::max);
         }
     }
 }

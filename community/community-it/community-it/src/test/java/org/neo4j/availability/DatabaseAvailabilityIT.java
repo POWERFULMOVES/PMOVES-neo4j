@@ -36,7 +36,6 @@ import org.neo4j.graphdb.TransactionFailureException;
 import org.neo4j.kernel.availability.AvailabilityGuard;
 import org.neo4j.kernel.availability.AvailabilityRequirement;
 import org.neo4j.kernel.availability.CompositeDatabaseAvailabilityGuard;
-import org.neo4j.kernel.availability.DatabaseAvailability;
 import org.neo4j.kernel.availability.DatabaseAvailabilityGuard;
 import org.neo4j.kernel.database.AbstractDatabase;
 import org.neo4j.kernel.database.NamedDatabaseId;
@@ -60,7 +59,7 @@ class DatabaseAvailabilityIT {
 
     @Test
     void anyOfDatabaseUnavailabilityIsGlobalUnavailability() {
-        AvailabilityRequirement outerSpaceRequirement = () -> "outer space";
+        AvailabilityRequirement outerSpaceRequirement = new AvailabilityRequirement("outer space");
         DependencyResolver dependencyResolver = database.getDependencyResolver();
         DatabaseContextProvider<?> databaseContextProvider = getDatabaseManager(dependencyResolver);
         CompositeDatabaseAvailabilityGuard compositeGuard =
@@ -109,9 +108,9 @@ class DatabaseAvailabilityIT {
         DatabaseContext databaseContext = databaseContextProvider
                 .getDatabaseContext(defaultNamedDatabaseId)
                 .get();
-        DatabaseAvailability databaseAvailability =
-                databaseContext.database().getDependencyResolver().resolveDependency(DatabaseAvailability.class);
-        databaseAvailability.stop();
+        DatabaseAvailabilityGuard databaseAvailabilityGuard =
+                databaseContext.database().getDependencyResolver().resolveDependency(DatabaseAvailabilityGuard.class);
+        databaseAvailabilityGuard.stop();
 
         TransactionFailureException exception =
                 assertThrows(TransactionFailureException.class, () -> database.beginTx());

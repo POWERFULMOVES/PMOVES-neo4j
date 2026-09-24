@@ -30,14 +30,14 @@ import org.neo4j.cypher.internal.compiler.planner.logical.PlannerDefaults.DEFAUL
 import org.neo4j.cypher.internal.compiler.planner.logical.PlannerDefaults.DEFAULT_MULTIPLIER
 import org.neo4j.cypher.internal.compiler.planner.logical.PlannerDefaults.DEFAULT_SKIP_ROW_COUNT
 import org.neo4j.cypher.internal.compiler.planner.logical.StatisticsBackedCardinalityModel.CardinalityAndInput
+import org.neo4j.cypher.internal.compiler.planner.logical.schema.GraphSchemaOptimizations
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.IndexCompatiblePredicatesProviderContext
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
-import org.neo4j.cypher.internal.expressions.FunctionName
 import org.neo4j.cypher.internal.expressions.IntegerLiteral
 import org.neo4j.cypher.internal.expressions.ListLiteral
 import org.neo4j.cypher.internal.expressions.LogicalVariable
-import org.neo4j.cypher.internal.expressions.Namespace
+import org.neo4j.cypher.internal.expressions.Parameter
 import org.neo4j.cypher.internal.ir.AbstractProcedureCallProjection
 import org.neo4j.cypher.internal.ir.AggregatingQueryProjection
 import org.neo4j.cypher.internal.ir.CallSubqueryHorizon
@@ -57,8 +57,12 @@ import org.neo4j.cypher.internal.ir.SinglePlannerQuery
 import org.neo4j.cypher.internal.ir.UnionQuery
 import org.neo4j.cypher.internal.ir.UnwindProjection
 import org.neo4j.cypher.internal.util.Cardinality
+import org.neo4j.cypher.internal.util.FunctionName
 import org.neo4j.cypher.internal.util.Multiplier
+import org.neo4j.cypher.internal.util.Namespace
+import org.neo4j.cypher.internal.util.WithSizeHint
 import org.neo4j.cypher.internal.util.helpers.MapSupport.PowerMap
+import org.neo4j.cypher.internal.util.symbols.ListType
 
 class StatisticsBackedCardinalityModel(
   queryGraphCardinalityModel: QueryGraphCardinalityModel,
@@ -72,7 +76,8 @@ class StatisticsBackedCardinalityModel(
     relTypeInfo: RelTypeInfo,
     semanticTable: SemanticTable,
     indexPredicateProviderContext: IndexCompatiblePredicatesProviderContext,
-    cardinalityModel: CardinalityModel
+    cardinalityModel: CardinalityModel,
+    graphSchemaOptimizations: GraphSchemaOptimizations
   ): Cardinality = query match {
     case singlePlannerQuery: SinglePlannerQuery =>
       singlePlannerQueryCardinality(
@@ -81,13 +86,30 @@ class StatisticsBackedCardinalityModel(
         relTypeInfo,
         semanticTable,
         indexPredicateProviderContext,
-        cardinalityModel
+        cardinalityModel,
+        graphSchemaOptimizations
       )
     case uq @ UnionQuery(lhs, rhs, _, _) =>
       combineUnion(
         uq,
-        apply(lhs, labelInfo, relTypeInfo, semanticTable, indexPredicateProviderContext, cardinalityModel),
-        apply(rhs, labelInfo, relTypeInfo, semanticTable, indexPredicateProviderContext, cardinalityModel)
+        apply(
+          lhs,
+          labelInfo,
+          relTypeInfo,
+          semanticTable,
+          indexPredicateProviderContext,
+          cardinalityModel,
+          graphSchemaOptimizations
+        ),
+        apply(
+          rhs,
+          labelInfo,
+          relTypeInfo,
+          semanticTable,
+          indexPredicateProviderContext,
+          cardinalityModel,
+          graphSchemaOptimizations
+        )
       )
   }
 
@@ -97,7 +119,8 @@ class StatisticsBackedCardinalityModel(
     relTypeInfo: RelTypeInfo,
     semanticTable: SemanticTable,
     indexPredicateProviderContext: IndexCompatiblePredicatesProviderContext,
-    cardinalityModel: CardinalityModel
+    cardinalityModel: CardinalityModel,
+    graphSchemaOptimizations: GraphSchemaOptimizations
   ): Cardinality = {
     val output = query.fold(CardinalityAndInput(Cardinality.SINGLE, labelInfo, relTypeInfo)) {
       case (CardinalityAndInput(inboundCardinality, labelInfo, relTypeInfo), plannerQuery) =>
@@ -108,7 +131,8 @@ class StatisticsBackedCardinalityModel(
             relTypeInfo,
             semanticTable,
             indexPredicateProviderContext,
-            cardinalityModel
+            cardinalityModel,
+            graphSchemaOptimizations
           )
         val beforeHorizonCardinality = qgCardinality * inboundCardinality
         val afterHorizon = calculateCardinalityForQueryHorizon(
@@ -117,7 +141,8 @@ class StatisticsBackedCardinalityModel(
           semanticTable,
           indexPredicateProviderContext,
           cardinalityModel,
-          plannerQuery.queryGraph.argumentIds
+          plannerQuery.queryGraph.argumentIds,
+          graphSchemaOptimizations
         )
         afterHorizon.withFusedLabelInfo(plannerQuery.addHeadQueryLabelInfo(afterHorizon.labelInfo))
     }
@@ -139,7 +164,8 @@ class StatisticsBackedCardinalityModel(
     semanticTable: SemanticTable,
     indexPredicateProviderContext: IndexCompatiblePredicatesProviderContext,
     cardinalityModel: CardinalityModel,
-    argumentIds: Set[LogicalVariable]
+    argumentIds: Set[LogicalVariable],
+    graphSchemaOptimizations: GraphSchemaOptimizations
   ): CardinalityAndInput = horizon match {
     case projection: QueryProjection =>
       val cardinalityBeforeSkip = queryProjectionCardinalityBeforeLimit(cardinalityAndInput.cardinality, projection)
@@ -152,17 +178,20 @@ class StatisticsBackedCardinalityModel(
         semanticTable,
         indexPredicateProviderContext,
         cardinalityModel,
-        argumentIds
+        argumentIds,
+        graphSchemaOptimizations
       )
 
     // Unwind
-    case UnwindProjection(_, expression) =>
+    case UnwindProjection(_, expression, _) =>
       val multiplier = expression match {
         case ListLiteral(expressions) => Multiplier(expressions.size)
         case FunctionInvocation(
             FunctionName(Namespace(Seq()), "range"),
             _,
             Seq(from: IntegerLiteral, to: IntegerLiteral),
+            _,
+            _,
             _,
             _
           ) =>
@@ -173,12 +202,15 @@ class StatisticsBackedCardinalityModel(
             _,
             Seq(from: IntegerLiteral, to: IntegerLiteral, step: IntegerLiteral),
             _,
+            _,
+            _,
             _
           ) =>
           val diff = to.value - from.value
           val steps = diff / step.value + 1
           Multiplier(Math.max(0, steps))
-        case _ => DEFAULT_MULTIPLIER
+        case Parameter(_, _: ListType, WithSizeHint(sizeHint)) => Multiplier(sizeHint)
+        case _                                                 => DEFAULT_MULTIPLIER
       }
       cardinalityAndInput.copy(cardinality = cardinalityAndInput.cardinality * multiplier)
 
@@ -203,19 +235,20 @@ class StatisticsBackedCardinalityModel(
     case _: PassthroughAllHorizon =>
       cardinalityAndInput
 
-    case CallSubqueryHorizon(subquery, _, true, _, _, _) =>
+    case CallSubqueryHorizon(subquery, _, true, _, _, _, _) =>
       val subQueryCardinality = apply(
         subquery,
         cardinalityAndInput.labelInfo,
         cardinalityAndInput.relTypeInfo,
         semanticTable,
         indexPredicateProviderContext,
-        cardinalityModel
+        cardinalityModel,
+        graphSchemaOptimizations
       )
       // Cardinality of the subquery times current cardinality is the result
       cardinalityAndInput.copy(cardinality = cardinalityAndInput.cardinality * subQueryCardinality)
 
-    case CallSubqueryHorizon(_, _, false, _, _, _) =>
+    case CallSubqueryHorizon(_, _, false, _, _, _, _) =>
       // Unit subquery call does not affect the driving table
       cardinalityAndInput
   }
@@ -275,7 +308,8 @@ class StatisticsBackedCardinalityModel(
     semanticTable: SemanticTable,
     indexPredicateProviderContext: IndexCompatiblePredicatesProviderContext,
     cardinalityModel: CardinalityModel,
-    argumentIds: Set[LogicalVariable]
+    argumentIds: Set[LogicalVariable],
+    graphSchemaOptimizations: GraphSchemaOptimizations
   ): CardinalityAndInput = {
     val inboundCardinality = inputBeforeSelection.cardinality
     val fusedInput = inputBeforeSelection.withFusedLabelInfo(where.labelInfo)
@@ -286,7 +320,8 @@ class StatisticsBackedCardinalityModel(
       semanticTable,
       indexPredicateProviderContext,
       cardinalityModel,
-      argumentIds
+      argumentIds,
+      graphSchemaOptimizations: GraphSchemaOptimizations
     )
     val cardinality = inboundCardinality * whereSelectivity
     CardinalityAndInput(cardinality, fusedInput.labelInfo, fusedInput.relTypeInfo)
@@ -298,7 +333,8 @@ class StatisticsBackedCardinalityModel(
     relTypeInfo: RelTypeInfo,
     semanticTable: SemanticTable,
     indexPredicateProviderContext: IndexCompatiblePredicatesProviderContext,
-    cardinalityModel: CardinalityModel
+    cardinalityModel: CardinalityModel,
+    graphSchemaOptimizations: GraphSchemaOptimizations
   ): CardinalityAndInput = {
     val fusedRelTypeInfo = relTypeInfo ++ graph.patternRelationshipTypes
     val cardinality =
@@ -308,7 +344,8 @@ class StatisticsBackedCardinalityModel(
         fusedRelTypeInfo,
         semanticTable,
         indexPredicateProviderContext,
-        cardinalityModel
+        cardinalityModel,
+        graphSchemaOptimizations
       )
     val fusedLabelInfo = labelInfo.fuse(graph.patternNodeLabels)(_ ++ _)
     CardinalityAndInput(cardinality, fusedLabelInfo, fusedRelTypeInfo)

@@ -25,6 +25,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.neo4j.bolt.testing.assertions.BoltConnectionAssertions.assertThat;
 import static org.neo4j.configuration.SettingValueParsers.TRUE;
 import static org.neo4j.server.helpers.CommunityWebContainerBuilder.serverOnRandomPorts;
+import static org.neo4j.test.extension.SkipOnSpd.Note.incompatible;
 
 import io.netty.channel.unix.DomainSocketAddress;
 import java.io.IOException;
@@ -38,14 +39,17 @@ import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.neo4j.bolt.BoltServer;
+import org.neo4j.bolt.protocol.common.connector.transport.NioConnectorTransport;
 import org.neo4j.bolt.testing.client.BoltTestConnection;
 import org.neo4j.bolt.testing.client.SocketConnection;
 import org.neo4j.bolt.testing.client.UnixDomainSocketConnection;
+import org.neo4j.bolt.testing.messages.BoltWire;
 import org.neo4j.configuration.connectors.BoltConnector;
 import org.neo4j.configuration.connectors.ConnectorPortRegister;
 import org.neo4j.configuration.connectors.ConnectorType;
 import org.neo4j.server.helpers.TestWebContainer;
 import org.neo4j.server.rest.domain.JsonHelper;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.test.server.ExclusiveWebContainerTestBase;
 
 class BoltIT extends ExclusiveWebContainerTestBase {
@@ -102,6 +106,9 @@ class BoltIT extends ExclusiveWebContainerTestBase {
     }
 
     @Test
+    @SkipOnSpd(
+            reason = "We bind to more addresses",
+            notes = {incompatible})
     void shouldBindToMultipleAddresses() throws Exception {
         testWebContainer = serverOnRandomPorts()
                 .withProperty(BoltConnector.enabled.name(), TRUE)
@@ -126,9 +133,10 @@ class BoltIT extends ExclusiveWebContainerTestBase {
             BoltTestConnection connection = null;
             try {
                 if (addr instanceof InetSocketAddress socketAddress) {
-                    connection = new SocketConnection(socketAddress);
+                    connection = new SocketConnection(new NioConnectorTransport(), BoltWire.latest(), socketAddress);
                 } else if (addr instanceof DomainSocketAddress domainSocketAddress) {
-                    connection = new UnixDomainSocketConnection(domainSocketAddress);
+                    connection = new UnixDomainSocketConnection(
+                            new NioConnectorTransport(), BoltWire.latest(), domainSocketAddress);
                 } else {
                     throw new AssertionError("Encountered connector with unsupported socket address type: "
                             + addr.getClass() + " (" + addr + ")");
@@ -138,7 +146,7 @@ class BoltIT extends ExclusiveWebContainerTestBase {
                 assertThat(connection).negotiatesDefaultVersion();
             } finally {
                 if (connection != null) {
-                    connection.close();
+                    connection.disconnect();
                 }
             }
 
@@ -164,7 +172,8 @@ class BoltIT extends ExclusiveWebContainerTestBase {
     }
 
     private static void assertEventuallyServerResponds(String host, int port) throws Exception {
-        try (var connection = new SocketConnection(new InetSocketAddress(host, port))) {
+        try (var connection = new SocketConnection(
+                new NioConnectorTransport(), BoltWire.latest(), new InetSocketAddress(host, port))) {
             connection.connect().sendDefaultProtocolVersion();
 
             assertThat(connection).negotiatesDefaultVersion();

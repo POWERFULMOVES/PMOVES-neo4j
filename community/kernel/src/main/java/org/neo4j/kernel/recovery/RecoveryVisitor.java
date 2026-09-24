@@ -27,6 +27,8 @@ import org.neo4j.kernel.impl.api.CompleteTransaction;
 import org.neo4j.kernel.impl.api.chunk.ChunkedTransaction;
 import org.neo4j.kernel.impl.transaction.CommittedCommandBatchRepresentation;
 import org.neo4j.kernel.impl.transaction.CompleteBatchRepresentation;
+import org.neo4j.kernel.impl.transaction.EmptyBatchRepresentation;
+import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.StorageEngine;
 import org.neo4j.storageengine.api.StorageEngineTransaction;
 import org.neo4j.storageengine.api.TransactionApplicationMode;
@@ -52,15 +54,16 @@ final class RecoveryVisitor implements RecoveryApplier {
     @Override
     public boolean visit(CommittedCommandBatchRepresentation batch) throws Exception {
         StorageEngineTransaction storageEngineTransaction = commandToApply(batch);
-        storageEngine.apply(storageEngineTransaction, mode);
+        storageEngine.apply(storageEngineTransaction, mode, EmptyMemoryTracker.INSTANCE);
         return false;
     }
 
     private StorageEngineTransaction commandToApply(CommittedCommandBatchRepresentation batch) {
-        var commandsToApply = batch instanceof CompleteBatchRepresentation
+        var commandsToApply = batch instanceof CompleteBatchRepresentation || batch instanceof EmptyBatchRepresentation
                 ? new CompleteTransaction(batch, cursorContext, storeCursors)
                 : new ChunkedTransaction(batch, cursorContext, storeCursors);
         cursorContext.getVersionContext().initWrite(commandsToApply.transactionId());
+        cursorContext.getVersionContext().initChunkId(batch.commandBatch().chunkId());
         return commandsToApply;
     }
 

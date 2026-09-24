@@ -22,10 +22,10 @@ package org.neo4j.kernel.api;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.neo4j.internal.kernel.api.IndexQueryConstraints.unorderedValues;
-import static org.neo4j.kernel.api.KernelTransaction.Type.EXPLICIT;
 
+import java.util.ArrayList;
+import java.util.List;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.graphdb.Label;
 import org.neo4j.graphdb.Node;
@@ -36,7 +36,6 @@ import org.neo4j.internal.kernel.api.PropertyIndexQuery;
 import org.neo4j.internal.kernel.api.QueryContext;
 import org.neo4j.internal.kernel.api.Read;
 import org.neo4j.internal.kernel.api.exceptions.schema.IndexNotFoundKernelException;
-import org.neo4j.internal.kernel.api.security.LoginContext;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.kernel.impl.coreapi.schema.IndexDefinitionImpl;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
@@ -44,10 +43,10 @@ import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.DbmsExtension;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
 @DbmsExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class KernelAPIParallelNodeValueIndexScanStressIT {
     private static final int N_THREADS = 10;
     private static final int N_NODES = 10_000;
@@ -64,37 +63,27 @@ class KernelAPIParallelNodeValueIndexScanStressIT {
     @Test
     void shouldDoParallelIndexScans() throws Throwable {
         // Given
+        List<String> labelNames = new ArrayList<>();
         try (org.neo4j.graphdb.Transaction tx = db.beginTx()) {
-            createLabeledNodes(tx, N_NODES, "LABEL1", "prop");
-            createLabeledNodes(tx, N_NODES, "LABEL2", "prop");
-            createLabeledNodes(tx, N_NODES, "LABEL3", "prop");
+            for (int i = 0; i < 3; i++) {
+                String labelName = "LABEL" + (i + 1);
+                createLabeledNodes(tx, N_NODES, labelName, "prop");
+                labelNames.add(labelName);
+            }
             tx.commit();
         }
 
-        IndexDescriptor index1;
-        IndexDescriptor index2;
-        IndexDescriptor index3;
+        List<IndexDescriptor> indexes = new ArrayList<>();
         try (org.neo4j.graphdb.Transaction tx = db.beginTx()) {
-            index1 = unwrap(
-                    tx.schema().indexFor(Label.label("LABEL1")).on("prop").create());
-            index2 = unwrap(
-                    tx.schema().indexFor(Label.label("LABEL2")).on("prop").create());
-            index3 = unwrap(
-                    tx.schema().indexFor(Label.label("LABEL3")).on("prop").create());
+            for (String labelName : labelNames) {
+                indexes.add(unwrap(
+                        tx.schema().indexFor(Label.label(labelName)).on("prop").create()));
+            }
             tx.commit();
         }
 
         try (org.neo4j.graphdb.Transaction tx = db.beginTx()) {
             tx.schema().awaitIndexesOnline(10, MINUTES);
-            tx.commit();
-        }
-
-        // when & then
-        IndexReadSession[] indexes = new IndexReadSession[3];
-        try (KernelTransaction tx = kernel.beginTransaction(EXPLICIT, LoginContext.AUTH_DISABLED)) {
-            indexes[0] = indexReadSession(tx, index1);
-            indexes[1] = indexReadSession(tx, index2);
-            indexes[2] = indexReadSession(tx, index3);
             tx.commit();
         }
 
@@ -104,18 +93,28 @@ class KernelAPIParallelNodeValueIndexScanStressIT {
                 tx -> {
                     var statement = tx.acquireStatement();
                     var executionContext = tx.createExecutionContext();
-                    var cursor = tx.cursors()
+                    var cursor = executionContext
+                            .cursors()
                             .allocateNodeValueIndexCursor(
                                     executionContext.cursorContext(), EmptyMemoryTracker.INSTANCE);
                     return new WorkerContext<>(cursor, executionContext, tx, statement);
                 },
-                (read, workerContext) -> indexSeek(
-                        read,
-                        new WorkerQueryContext(
-                                workerContext.getTransaction().queryContext(),
-                                workerContext.getContext().cursorContext()),
-                        workerContext,
-                        indexes[random.nextInt(indexes.length)]));
+                (read, workerContext) -> {
+                    IndexReadSession indexReadSession;
+                    try {
+                        indexReadSession = indexReadSession(workerContext.getTransaction(), random.among(indexes));
+                    } catch (IndexNotFoundKernelException e) {
+                        throw new RuntimeException(e);
+                    }
+
+                    return indexSeek(
+                            read,
+                            new WorkerQueryContext(
+                                    workerContext.getTransaction().queryContext(),
+                                    workerContext.getContext().cursorContext()),
+                            workerContext,
+                            indexReadSession);
+                });
     }
 
     private static IndexDescriptor unwrap(IndexDefinition indexDefinition) {

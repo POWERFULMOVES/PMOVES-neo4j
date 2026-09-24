@@ -38,6 +38,7 @@ import static org.neo4j.packstream.io.TypeMarker.BYTES32;
 import static org.neo4j.packstream.io.TypeMarker.BYTES8;
 import static org.neo4j.packstream.io.TypeMarker.BYTES_TYPES;
 import static org.neo4j.packstream.io.TypeMarker.FALSE;
+import static org.neo4j.packstream.io.TypeMarker.FLOAT32;
 import static org.neo4j.packstream.io.TypeMarker.FLOAT64;
 import static org.neo4j.packstream.io.TypeMarker.INT16;
 import static org.neo4j.packstream.io.TypeMarker.INT32;
@@ -62,6 +63,7 @@ import static org.neo4j.packstream.io.TypeMarker.TINY_LIST;
 import static org.neo4j.packstream.io.TypeMarker.TINY_MAP;
 import static org.neo4j.packstream.io.TypeMarker.TINY_STRING;
 import static org.neo4j.packstream.io.TypeMarker.TRUE;
+import static org.neo4j.packstream.io.TypeMarker.UUID;
 import static org.neo4j.packstream.io.TypeMarker.decodeLengthNibble;
 import static org.neo4j.packstream.io.TypeMarker.encodeLengthNibble;
 import static org.neo4j.packstream.io.TypeMarker.requireEncodableLength;
@@ -77,6 +79,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -149,7 +152,7 @@ public final class PackstreamBuf implements ReferenceCounted {
         return new PackstreamBuf(delegate.retain());
     }
 
-    public ByteBuf getTarget() {
+    public ByteBuf raw() {
         return this.delegate;
     }
 
@@ -196,7 +199,7 @@ public final class PackstreamBuf implements ReferenceCounted {
             case NONE -> this.skipNull();
             case BOOLEAN -> this.skipBoolean();
             case BYTES -> this.skipBytes(-1);
-            case FLOAT -> this.skipFloat();
+            case FLOAT -> this.skipFloat64();
             case INT -> this.skipInt();
             case LIST -> this.skipList(-1);
             case MAP -> this.skipMap(-1);
@@ -432,7 +435,7 @@ public final class PackstreamBuf implements ReferenceCounted {
         }
 
         if (payload instanceof Float f) {
-            return this.writeFloat((double) f);
+            return this.writeFloat64((double) f);
         }
 
         if (payload instanceof Byte b) {
@@ -728,13 +731,30 @@ public final class PackstreamBuf implements ReferenceCounted {
         return this;
     }
 
+    public float readFloat32() throws UnexpectedTypeMarkerException {
+        this.readExpectedMarker(FLOAT32);
+        return this.delegate.readFloat();
+    }
+
+    public PackstreamBuf skipFloat32() throws UnexpectedTypeMarkerException {
+        this.readExpectedMarker(FLOAT32);
+        this.delegate.skipBytes(4);
+        return this;
+    }
+
+    public PackstreamBuf writeFloat32(float value) {
+        this.writeMarker(FLOAT32);
+        this.delegate.writeFloat(value);
+        return this;
+    }
+
     /**
      * Retrieves a 64-bit float value from this buffer.
      *
      * @return a float payload.
      * @throws UnexpectedTypeMarkerException when the value type does not meet the expectation.
      */
-    public double readFloat() throws UnexpectedTypeMarkerException {
+    public double readFloat64() throws UnexpectedTypeMarkerException {
         this.readExpectedMarker(FLOAT64);
         return this.delegate.readDouble();
     }
@@ -744,7 +764,7 @@ public final class PackstreamBuf implements ReferenceCounted {
      * @return a reference to this buffer.
      * @throws UnexpectedTypeMarkerException when the value type does not meet the expectation.
      */
-    public PackstreamBuf skipFloat() throws UnexpectedTypeMarkerException {
+    public PackstreamBuf skipFloat64() throws UnexpectedTypeMarkerException {
         this.readExpectedMarker(FLOAT64);
         this.delegate.skipBytes(8);
         return this;
@@ -756,7 +776,7 @@ public final class PackstreamBuf implements ReferenceCounted {
      * @param payload a float payload.
      * @return a reference to this buffer.
      */
-    public PackstreamBuf writeFloat(double payload) {
+    public PackstreamBuf writeFloat64(double payload) {
         this.writeMarker(FLOAT64);
         this.delegate.writeDouble(payload);
         return this;
@@ -1565,6 +1585,23 @@ public final class PackstreamBuf implements ReferenceCounted {
         }
 
         return this.writeMarker(MAP32, payload.size()).writeMapValue(payload, writer);
+    }
+
+    public UUID readUUID() throws PackstreamReaderException {
+        this.readExpectedMarker(UUID);
+
+        var msb = this.raw().readLong();
+        var lsb = this.raw().readLong();
+
+        return new UUID(msb, lsb);
+    }
+
+    public PackstreamBuf writeUUID(long mostSignificantBits, long leastSignificantBits) {
+        this.writeMarker(UUID);
+
+        this.raw().writeLong(mostSignificantBits).writeLong(leastSignificantBits);
+
+        return this;
     }
 
     /**

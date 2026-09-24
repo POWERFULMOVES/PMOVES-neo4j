@@ -22,11 +22,9 @@ package org.neo4j.internal.batchimport;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.neo4j.batchimport.api.Configuration.DEFAULT;
 import static org.neo4j.configuration.Config.defaults;
-import static org.neo4j.internal.batchimport.DefaultAdditionalIds.EMPTY;
 import static org.neo4j.internal.batchimport.store.BatchingNeoStores.batchingNeoStoresWithExternalPageCache;
 import static org.neo4j.io.pagecache.context.CursorContextFactory.NULL_CONTEXT_FACTORY;
 import static org.neo4j.io.pagecache.tracing.PageCacheTracer.NULL;
-import static org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata.EMPTY_LOG_TAIL;
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
 
 import java.io.ByteArrayOutputStream;
@@ -35,7 +33,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.neo4j.internal.batchimport.cache.idmapping.IdMappers;
-import org.neo4j.internal.batchimport.input.Collectors;
+import org.neo4j.internal.batchimport.input.BadCollector;
 import org.neo4j.internal.batchimport.store.BatchingNeoStores;
 import org.neo4j.io.layout.recordstorage.RecordDatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
@@ -64,8 +62,6 @@ class RelationshipImporterTest {
                 RecordDatabaseLayout.ofFlat(directory.homePath()),
                 DEFAULT,
                 NullLogService.getInstance(),
-                EMPTY,
-                EMPTY_LOG_TAIL,
                 defaults(),
                 INSTANCE);
         stores.createNew();
@@ -77,13 +73,14 @@ class RelationshipImporterTest {
     }
 
     @Test
-    void shouldReportMissingNodeForActualIds() {
+    void shouldReportMissingNodeForActualIds() throws IOException {
         // given
         var idMapper = IdMappers.actual();
         var monitor = new DataImporter.Monitor();
         var output = new ByteArrayOutputStream();
-        try (var collector = Collectors.badCollector(output, 1);
+        try (var collector = BadCollector.create(output, 1);
                 var importer = new RelationshipImporter(
+                        0,
                         stores,
                         idMapper,
                         new DataStatistics(monitor, new DataStatistics.RelationshipTypeCount[0]),
@@ -93,7 +90,7 @@ class RelationshipImporterTest {
                         false,
                         NULL_CONTEXT_FACTORY,
                         INSTANCE,
-                        SchemaMonitor.NO_MONITOR); ) {
+                        SchemaMonitor.NO_MONITOR)) {
 
             // when
             importer.startId(1);
@@ -102,6 +99,6 @@ class RelationshipImporterTest {
         }
 
         // then
-        assertThat(output.toString()).contains("1 (null)-[2]->null (null) is missing data");
+        assertThat(output.toString()).contains("(1)-[2]->(null) is missing data");
     }
 }

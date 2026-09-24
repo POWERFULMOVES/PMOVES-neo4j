@@ -35,7 +35,6 @@ import java.util.BitSet;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.eclipse.collections.api.factory.Sets;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.batchimport.api.Configuration;
 import org.neo4j.internal.batchimport.staging.BatchSender;
 import org.neo4j.internal.batchimport.staging.ProcessorStep;
@@ -60,16 +59,16 @@ import org.neo4j.kernel.impl.index.schema.DatabaseIndexContext;
 import org.neo4j.kernel.impl.index.schema.IndexFiles;
 import org.neo4j.kernel.impl.index.schema.TokenIndexAccessor;
 import org.neo4j.memory.MemoryTracker;
-import org.neo4j.storageengine.api.IndexEntryUpdate;
+import org.neo4j.storageengine.api.TokenIndexEntryUpdate;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.Neo4jLayoutExtension;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.extension.pagecache.PageCacheExtension;
 import org.neo4j.test.utils.TestDirectory;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 @PageCacheExtension
 @Neo4jLayoutExtension
 class ReadEntityIdsStepUsingTokenIndexTest {
@@ -133,7 +132,8 @@ class ReadEntityIdsStepUsingTokenIndexTest {
         try (IndexUpdater updater = indexAccessor.newUpdater(ONLINE, CursorContext.NULL_CONTEXT, false)) {
             long id = 0;
             for (int i = 0; i < count; i++) {
-                updater.process(IndexEntryUpdate.change(id, INDEX_DESCRIPTOR, EMPTY_INT_ARRAY, new int[] {TOKEN_ID}));
+                updater.process(
+                        TokenIndexEntryUpdate.tokenChange(id, INDEX_DESCRIPTOR, EMPTY_INT_ARRAY, new int[] {TOKEN_ID}));
                 entityIds.set((int) id);
                 id += random.nextInt(1, 5);
             }
@@ -162,7 +162,7 @@ class ReadEntityIdsStepUsingTokenIndexTest {
                 for (int i = 0; i < numIds; i++) {
                     long candidateId = currentlyIndexedNodeId + i + 1;
                     if (!expectedEntityIds.get((int) candidateId)) {
-                        updater.process(IndexEntryUpdate.change(
+                        updater.process(TokenIndexEntryUpdate.tokenChange(
                                 candidateId, INDEX_DESCRIPTOR, EMPTY_INT_ARRAY, new int[] {TOKEN_ID}));
                         expectedEntityIds.set((int) candidateId);
                     }

@@ -20,8 +20,9 @@
 package org.neo4j.fabric
 
 import org.neo4j.configuration.Config
+import org.neo4j.configuration.GraphDatabaseInternalSettings
 import org.neo4j.configuration.GraphDatabaseSettings
-import org.neo4j.cypher.internal.PreParsedQuery
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast
 import org.neo4j.cypher.internal.ast.AstConstructionTestSupport
 import org.neo4j.cypher.internal.ast.Query
@@ -30,21 +31,26 @@ import org.neo4j.cypher.internal.ast.SubqueryCall
 import org.neo4j.cypher.internal.ast.UseGraph
 import org.neo4j.cypher.internal.ast.semantics.SemanticState
 import org.neo4j.cypher.internal.ast.semantics.SemanticTable
+import org.neo4j.cypher.internal.ast.semantics.scoping.ScopeState
+import org.neo4j.cypher.internal.cache.CypherQueryCaches.CacheStrategy
 import org.neo4j.cypher.internal.cache.ExecutorBasedCaffeineCacheFactory
 import org.neo4j.cypher.internal.config.CypherConfiguration
 import org.neo4j.cypher.internal.expressions.AutoExtractedParameter
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.frontend.PlannerName
 import org.neo4j.cypher.internal.frontend.phases.BaseState
-import org.neo4j.cypher.internal.frontend.phases.InternalSyntaxUsageStatsNoOp
+import org.neo4j.cypher.internal.frontend.phases.InternalUsageStatsNoOp
+import org.neo4j.cypher.internal.frontend.phases.LocalDefinitionsDirectory
+import org.neo4j.cypher.internal.frontend.phases.PipelineDebugInfo
 import org.neo4j.cypher.internal.frontend.phases.ProcedureSignatureResolver
 import org.neo4j.cypher.internal.frontend.phases.ScopedProcedureSignatureResolver
+import org.neo4j.cypher.internal.notification.devNullLogger
+import org.neo4j.cypher.internal.preparser.PreParsedQuery
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.cypher.internal.util.CancellationChecker
 import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.ObfuscationMetadata
 import org.neo4j.cypher.internal.util.StepSequencer
-import org.neo4j.cypher.internal.util.devNullLogger
 import org.neo4j.cypher.internal.util.symbols.AnyType
 import org.neo4j.cypher.internal.util.symbols.IntegerType
 import org.neo4j.fabric.eval.Catalog
@@ -81,14 +87,16 @@ trait FragmentTestUtils {
     def apply(
       fragmentInheritUse: Use => Fragment,
       inTransactionsParameters: Option[SubqueryCall.InTransactionsParameters] = None,
+      optional: Boolean = false,
+      importMode: Fragment.SubqueryImport = Fragment.SubqueryImport.ImportingWith,
       pos: InputPosition = InputPosition.NONE
-    ): Apply = Apply(input, fragmentInheritUse(input.use), inTransactionsParameters)(pos)
+    ): Apply = Apply(input, fragmentInheritUse(input.use), inTransactionsParameters, optional, importMode)(pos)
 
     def leaf(clauses: Seq[ast.Clause], outputColumns: Seq[String], pos: InputPosition = InputPosition.NONE): Leaf =
       Leaf(input, clauses, outputColumns)(pos)
 
     def exec(query: Query, outputColumns: Seq[String]): Exec =
-      Exec(input, query, dummyLocalQuery, dummyRemoteQuery, false, outputColumns)
+      Exec(input, query, dummyRemoteQuery, false, outputColumns)
   }
 
   val dummyLocalQuery: BaseState = DummyState
@@ -105,19 +113,29 @@ trait FragmentTestUtils {
     override val maybeProcedureSignatureVersion: Option[Long] = Option.empty
     override val maybeStatement: Option[Statement] = Option.empty
     override val maybeReturnColumns: Option[Seq[String]] = Option.empty
+    override val maybeScopeState: Option[ScopeState] = Option.empty
+    override val maybeLocalDefinitions: Option[LocalDefinitionsDirectory] = Option.empty
     override val maybeSemantics: Option[SemanticState] = Option.empty
     override val maybeExtractedParams: Option[Map[AutoExtractedParameter, Expression]] = Option.empty
+    override val maybeResolvedParams: Option[Set[String]] = Option.empty
     override val maybeSemanticTable: Option[SemanticTable] = Option.empty
     override val maybeObfuscationMetadata: Option[ObfuscationMetadata] = Option.empty
+    override val maybeDebugInfo: Option[PipelineDebugInfo] = Option.empty
     override val accumulatedConditions: Set[StepSequencer.Condition] = Set.empty
     override val anonymousVariableNameGenerator: AnonymousVariableNameGenerator = new AnonymousVariableNameGenerator()
+    override val semanticsUpToDate: Boolean = false
     override def withStatement(s: Statement): BaseState = this
     override def withReturnColumns(cols: Seq[String]): BaseState = this
+    override def withScopeState(s: ScopeState): BaseState = this
+    override def withLocalDefinitions(localDefinitionsDirectory: LocalDefinitionsDirectory): BaseState = this
     override def withSemanticTable(s: SemanticTable): BaseState = this
     override def withSemanticState(s: SemanticState): BaseState = this
     override def withParams(p: Map[AutoExtractedParameter, Expression]): BaseState = this
+    override protected def withResolvedParams(p: Set[String]): BaseState = this
     override def withObfuscationMetadata(o: ObfuscationMetadata): BaseState = this
+    override def withDebugInfo(d: PipelineDebugInfo): BaseState = this
     override def withProcedureSignatureVersion(signatureVersion: Option[Long]): BaseState = this
+    override def withSemanticsUpToDate(b: Boolean): BaseState = this
   }
 
   implicit class FragBuilderInit(input: Fragment.Init) {
@@ -136,10 +154,10 @@ trait FragmentTestUtils {
 
   private object AstUtils extends AstConstructionTestSupport
 
-  def use(name: String): UseGraph = AstUtils.use(List(name))
+  def use(name: String, resolveStrictly: Boolean): UseGraph = AstUtils.use(List(name), resolveStrictly)
 
   val defaultGraphName: String = "default"
-  val defaultGraph: UseGraph = use(defaultGraphName)
+  val defaultGraph: UseGraph = use(defaultGraphName, resolveStrictly = true)
   val defaultUse: Use.Inherited = Use.Inherited(Use.Default(defaultGraph))(InputPosition.NONE)
 
   val defaultRef = new DatabaseReferenceImpl.Internal(
@@ -155,39 +173,56 @@ trait FragmentTestUtils {
   def signatures: ProcedureSignatureResolver
   def scopedSignatures: ScopedProcedureSignatureResolver
 
-  val cypherConfig: CypherConfiguration = CypherConfiguration.fromConfig(Config.defaults())
+  val cypherConfig: CypherConfiguration = CypherConfiguration.fromConfig(Config.defaults(
+    // Might need to be enabled when the next experimental version appear: GraphDatabaseInternalSettings.enable_experimental_cypher_versions, java.lang.Boolean.TRUE
+  ))
 
   val cypherConfigWithQueryObfuscation: CypherConfiguration =
     CypherConfiguration.fromConfig(Config.newBuilder()
       .set(GraphDatabaseSettings.log_queries_obfuscate_literals, java.lang.Boolean.TRUE)
+      // Might need to be enabled when the next experimental version appear: .set(GraphDatabaseInternalSettings.enable_experimental_cypher_versions, java.lang.Boolean.TRUE)
       .build())
+
+  val hugeQuerySizeLimit: Long = 1000L
+
+  val cypherConfigWithQuerySizeLimit: CypherConfiguration =
+    CypherConfiguration.fromConfig(Config.newBuilder()
+      .set(GraphDatabaseInternalSettings.query_cache_max_query_text_size, java.lang.Long.valueOf(hugeQuerySizeLimit))
+      // Might need to be enabled when the next experimental version appear: .set(GraphDatabaseInternalSettings.enable_experimental_cypher_versions, java.lang.Boolean.TRUE)
+      .build())
+
   val monitors: Monitors = new Monitors
 
   val cacheFactory = new ExecutorBasedCaffeineCacheFactory(Executors.newWorkStealingPool)
   val frontend: FabricFrontEnd = FabricFrontEnd(cypherConfig, () => false, monitors, cacheFactory)
+  val cacheStrategy: CacheStrategy = CacheStrategy.default.withConfig(cypherConfig)
 
-  def pipeline(query: String): frontend.Pipeline =
+  def pipeline(query: String, defaultLanguage: CypherVersion): frontend.Pipeline =
     frontend.Pipeline(
       scopedSignatures,
-      frontend.preParsing.preParse(query, devNullLogger),
+      frontend.preParsing.preParse(query, devNullLogger, defaultLanguage, cacheStrategy),
       params,
       CancellationChecker.NeverCancelled,
       devNullLogger,
-      InternalSyntaxUsageStatsNoOp,
-      null
+      InternalUsageStatsNoOp,
+      null,
+      Set.empty
     )
+
+  def pipeline(query: String): frontend.Pipeline = pipeline(query, cypherConfig.systemDefaultLanguage)
 
   def fragment(query: String): Fragment = {
     val state = pipeline(query).parseAndPrepare.process()
-    val fragmenter = new FabricFragmenter(defaultGraphName, query, state.statement(), state.semantics())
+    val fragmenter = new FabricFragmenter(defaultGraphName, state.statement(), state.semantics())
     fragmenter.fragment
   }
 
   def parse(query: String): Statement =
     pipeline(query).parseAndPrepare.process().statement()
 
-  def preParse(query: String): PreParsedQuery =
-    frontend.preParsing.preParse(query, devNullLogger)
+  def preParse(query: String, dbDefaultVersion: CypherVersion): PreParsedQuery =
+    frontend.preParsing.preParse(query, devNullLogger, dbDefaultVersion, cacheStrategy)
+  def preParse(query: String): PreParsedQuery = preParse(query, cypherConfig.systemDefaultLanguage)
 
   implicit class FragmentOps[F <: Fragment](fragment: F) {
 
@@ -195,7 +230,7 @@ trait FragmentTestUtils {
       fragment
         .rewritten
         .topDown {
-          case e: Fragment.Exec => e.copy(localQuery = dummyLocalQuery, remoteQuery = dummyRemoteQuery)
+          case e: Fragment.Exec => e.copy(remoteQuery = dummyRemoteQuery)
         }
   }
 

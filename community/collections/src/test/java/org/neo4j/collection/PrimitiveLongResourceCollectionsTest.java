@@ -19,10 +19,15 @@
  */
 package org.neo4j.collection;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.fail;
 
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.neo4j.graphdb.Resource;
 
 class PrimitiveLongResourceCollectionsTest {
@@ -42,7 +47,7 @@ class PrimitiveLongResourceCollectionsTest {
         iterator.close();
 
         // Then
-        assertEquals(1, resource.closeCount(), "exactly one call to close");
+        assertThat(resource.closeCount()).as("exactly one call to close").isOne();
     }
 
     // FILTER
@@ -66,15 +71,50 @@ class PrimitiveLongResourceCollectionsTest {
         concat.close();
 
         // Then
-        assertEquals(2, resource.closeCount(), "all concatenated iterators are closed");
+        assertThat(resource.closeCount())
+                .as("all concatenated iterators are closed")
+                .isEqualTo(2);
+    }
+
+    public static Stream<Arguments> complement() {
+        return Stream.of(
+                Arguments.of(new long[] {1, 2}, 5, new long[] {0, 3, 4}),
+                Arguments.of(new long[] {1, 2, 3}, 5, new long[] {0, 4}),
+                Arguments.of(new long[] {0, 2, 3}, 5, new long[] {1, 4}),
+                Arguments.of(new long[] {2}, 5, new long[] {0, 1, 3, 4}),
+                Arguments.of(new long[] {0, 1, 2}, 3, new long[] {}),
+                Arguments.of(new long[] {0, 1}, 3, new long[] {2}),
+                Arguments.of(new long[] {1, 2}, 3, new long[] {0}),
+                Arguments.of(new long[] {2}, 3, new long[] {0, 1}),
+                Arguments.of(new long[] {}, 3, new long[] {0, 1, 2}),
+                Arguments.of(new long[] {}, 1, new long[] {0}),
+                Arguments.of(new long[] {0}, 1, new long[] {}),
+                Arguments.of(new long[] {}, 0, new long[] {}));
+    }
+
+    @ParameterizedTest
+    @MethodSource
+    void complement(long[] original, long max, long[] expected) {
+        // Given
+        CountingResource resource = new CountingResource();
+        var originalIterator = PrimitiveLongResourceCollections.iterator(resource, original);
+
+        // When
+        var inverse = PrimitiveLongResourceCollections.complement(originalIterator, max);
+
+        assertContent(inverse, expected);
     }
 
     private static void assertContent(PrimitiveLongResourceIterator iterator, long... expected) {
         int i = 0;
         while (iterator.hasNext()) {
-            assertEquals(expected[i++], iterator.next(), "has expected value");
+            if (i >= expected.length) {
+                fail("More values than expected: " + iterator.next());
+                return;
+            }
+            assertThat(iterator.next()).as("has expected value").isEqualTo(expected[i++]);
         }
-        assertEquals(expected.length, i, "has all expected values");
+        assertThat(i).as("has all expected values").isEqualTo(expected.length);
     }
 
     private static class CountingResource implements Resource {

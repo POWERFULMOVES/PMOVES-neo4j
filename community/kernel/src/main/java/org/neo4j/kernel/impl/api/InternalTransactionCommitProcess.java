@@ -20,19 +20,21 @@
 package org.neo4j.kernel.impl.api;
 
 import static org.neo4j.kernel.api.exceptions.Status.Transaction.TransactionCommitFailed;
-import static org.neo4j.kernel.api.exceptions.Status.Transaction.TransactionLogError;
 
 import java.util.function.BooleanSupplier;
 import org.neo4j.internal.kernel.api.exceptions.TransactionFailureException;
 import org.neo4j.io.pagecache.OutOfDiskSpaceException;
 import org.neo4j.kernel.api.exceptions.Status;
-import org.neo4j.kernel.impl.transaction.log.LogAppendEvent;
-import org.neo4j.kernel.impl.transaction.log.TransactionAppender;
 import org.neo4j.kernel.impl.transaction.tracing.StoreApplyEvent;
 import org.neo4j.kernel.impl.transaction.tracing.TransactionWriteEvent;
+import org.neo4j.logging.Log;
+import org.neo4j.logging.LogProvider;
+import org.neo4j.memory.MemoryTracker;
 import org.neo4j.storageengine.api.StorageEngine;
 import org.neo4j.storageengine.api.StorageEngineTransaction;
 import org.neo4j.storageengine.api.TransactionApplicationMode;
+import org.neo4j.wal.LogAppendEvent;
+import org.neo4j.wal.TransactionAppender;
 
 public class InternalTransactionCommitProcess implements TransactionCommitProcess {
     private final TransactionAppender appender;
@@ -40,42 +42,48 @@ public class InternalTransactionCommitProcess implements TransactionCommitProces
     private final boolean preAllocateSpaceInStores;
     private final CommandCommitListeners commandCommitListeners;
     private final BooleanSupplier prefetchCommands;
+    private final Log log;
 
     public InternalTransactionCommitProcess(
             TransactionAppender appender,
             StorageEngine storageEngine,
             boolean preAllocateSpaceInStores,
             CommandCommitListeners commandCommitListeners,
-            BooleanSupplier prefetchCommands) {
+            BooleanSupplier prefetchCommands,
+            LogProvider logProvider) {
         this.appender = appender;
         this.storageEngine = storageEngine;
         this.preAllocateSpaceInStores = preAllocateSpaceInStores;
         this.commandCommitListeners = commandCommitListeners;
         this.prefetchCommands = prefetchCommands;
+        this.log = logProvider.getLog(getClass());
     }
 
     @Override
     public long commit(
             StorageEngineTransaction batch,
             TransactionWriteEvent transactionWriteEvent,
-            TransactionApplicationMode mode)
+            TransactionApplicationMode mode,
+            MemoryTracker memoryTracker)
             throws TransactionFailureException {
         try {
             if (preAllocateSpaceInStores) {
-                preAllocateSpaceInStores(batch, transactionWriteEvent, mode);
+                preAllocateSpaceInStores(batch, mode);
             }
             if (prefetchCommands.getAsBoolean()) {
                 storageEngine.prefetchPagesForCommands(batch, mode);
             }
 
             long lastAppendIndex = appendToLog(batch, transactionWriteEvent);
+            memoryTracker.setTrackingOnly(true);
             try {
-                applyToStore(batch, transactionWriteEvent, mode);
+                applyToStore(batch, transactionWriteEvent, mode, memoryTracker);
             } finally {
                 close(batch);
+                memoryTracker.setTrackingOnly(false);
             }
 
-            commandCommitListeners.registerSuccess(batch, lastAppendIndex);
+            commandCommitListeners.registerSuccess(batch);
             return lastAppendIndex;
         } catch (Exception e) {
             commandCommitListeners.registerFailure(batch, e);
@@ -86,45 +94,37 @@ public class InternalTransactionCommitProcess implements TransactionCommitProces
     private long appendToLog(StorageEngineTransaction batch, TransactionWriteEvent transactionWriteEvent)
             throws TransactionFailureException {
         try (LogAppendEvent logAppendEvent = transactionWriteEvent.beginLogAppend()) {
-            return appender.append(batch, logAppendEvent);
+            return appender.register(batch, logAppendEvent);
         } catch (Throwable cause) {
-            throw new TransactionFailureException(
-                    TransactionLogError, cause, "Could not append transaction: " + batch + " to log.");
+            throw TransactionFailureException.couldNotAppendTransaction(batch.toString(), cause, log);
         }
     }
 
     protected void applyToStore(
             StorageEngineTransaction batch,
             TransactionWriteEvent transactionWriteEvent,
-            TransactionApplicationMode mode)
+            TransactionApplicationMode mode,
+            MemoryTracker memoryTracker)
             throws TransactionFailureException {
         try (StoreApplyEvent storeApplyEvent = transactionWriteEvent.beginStoreApply()) {
-            storageEngine.apply(batch, mode);
+            storageEngine.apply(batch, mode, memoryTracker);
         } catch (Throwable cause) {
-            throw new TransactionFailureException(
-                    TransactionCommitFailed,
-                    cause,
-                    "Could not apply the transaction: " + batch + " to the store after written to log.");
+            throw TransactionFailureException.couldNotApplyTransaction(batch.toString(), cause, log);
         }
     }
 
-    private void preAllocateSpaceInStores(
-            StorageEngineTransaction batch,
-            TransactionWriteEvent transactionWriteEvent,
-            TransactionApplicationMode mode)
+    private void preAllocateSpaceInStores(StorageEngineTransaction batch, TransactionApplicationMode mode)
             throws TransactionFailureException {
         // FIXME ODP - add function to commitEvent to be able to trace?
         try {
             storageEngine.preAllocateStoreFilesForCommands(batch, mode);
         } catch (OutOfDiskSpaceException oods) {
-            throw new TransactionFailureException(
-                    // FIXME ODP - add an out of disk space status when we are ready to expose this functionality
-                    Status.General.UnknownError,
-                    oods,
-                    "Could not preallocate disk space for the transaction: " + batch);
+            // FIXME ODP - add an out of disk space status when we are ready to expose this functionality
+            throw TransactionFailureException.couldNotPreallocateDiskSpace(
+                    batch.toString(), Status.General.UnknownError, oods, log);
         } catch (Throwable cause) {
-            throw new TransactionFailureException(
-                    TransactionCommitFailed, cause, "Could not preallocate disk space for the transaction: " + batch);
+            throw TransactionFailureException.couldNotPreallocateDiskSpace(
+                    batch.toString(), TransactionCommitFailed, cause, log);
         }
     }
 

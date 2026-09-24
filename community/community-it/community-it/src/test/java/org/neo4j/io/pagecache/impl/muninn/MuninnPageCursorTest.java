@@ -43,10 +43,12 @@ import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.PageCacheOpenOptions;
 import org.neo4j.io.pagecache.PageCursor;
 import org.neo4j.io.pagecache.PageEvictionCallback;
-import org.neo4j.io.pagecache.PageSwapper;
-import org.neo4j.io.pagecache.PageSwapperFactory;
 import org.neo4j.io.pagecache.PagedFile;
-import org.neo4j.io.pagecache.impl.SingleFilePageSwapperFactory;
+import org.neo4j.io.pagecache.impl.muninn.swapper.PageSwapper;
+import org.neo4j.io.pagecache.impl.muninn.swapper.PageSwapperFactory;
+import org.neo4j.io.pagecache.impl.muninn.swapper.SingleFilePageSwapperFactory;
+import org.neo4j.io.pagecache.impl.muninn.swapper.SwapperIdProvider;
+import org.neo4j.io.pagecache.segment.FileSegmentTracker;
 import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
 import org.neo4j.kernel.impl.scheduler.JobSchedulerFactory;
 import org.neo4j.kernel.lifecycle.LifeSupport;
@@ -94,7 +96,7 @@ class MuninnPageCursorTest {
         };
         try (PageCache pageCache = startPageCache(customSwapper(defaultPageSwapperFactory(), onReadAction));
                 PagedFile pagedFile = pageCache.map(
-                        file,
+                        new StoreFile(file),
                         PageCache.PAGE_SIZE,
                         DEFAULT_DATABASE_NAME,
                         Sets.immutable.of(StandardOpenOption.CREATE))) {
@@ -125,9 +127,9 @@ class MuninnPageCursorTest {
 
     private void testByteOrder(ByteOrder byteOrder) throws IOException {
         Path file = directory.file("file" + byteOrder);
-        try (PageCache pageCache = startPageCache(customSwapper(defaultPageSwapperFactory(), () -> {}))) {
-            try (PagedFile pagedFile =
-                    pageCache.map(file, PageCache.PAGE_SIZE, DEFAULT_DATABASE_NAME, getOpenOptions(byteOrder))) {
+        try (PageCache pageCache = startPageCache()) {
+            try (PagedFile pagedFile = pageCache.map(
+                    new StoreFile(file), PageCache.PAGE_SIZE, DEFAULT_DATABASE_NAME, getOpenOptions(byteOrder))) {
                 // Write cursor
                 try (PageCursor cursor = pagedFile.io(0, PagedFile.PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
                     assertThat(cursor.getByteOrder()).isEqualTo(byteOrder);
@@ -147,14 +149,22 @@ class MuninnPageCursorTest {
         return Sets.immutable.of(StandardOpenOption.CREATE, PageCacheOpenOptions.BIG_ENDIAN);
     }
 
-    private PageCache startPageCache(PageSwapperFactory pageSwapperFactory) {
-        return new MuninnPageCache(pageSwapperFactory, jobScheduler, MuninnPageCache.config(1_000));
+    private PageCache startPageCache() {
+        return createPageCacheWithConfig(MuninnPageCache.forPages(1_000));
+    }
+
+    private PageCache startPageCache(PageSwapperFactory swapperFactory) {
+        return createPageCacheWithConfig(MuninnPageCache.forPages(1_000).swapperFactory(swapperFactory));
+    }
+
+    private MuninnPageCache createPageCacheWithConfig(MuninnPageCache.Configuration config) {
+        return new MuninnPageCache(fs, jobScheduler, config);
     }
 
     private void createSomeData(Path file) throws IOException {
-        try (PageCache pageCache = startPageCache(defaultPageSwapperFactory());
+        try (PageCache pageCache = startPageCache();
                 PagedFile pagedFile = pageCache.map(
-                        file,
+                        new StoreFile(file),
                         PageCache.PAGE_SIZE,
                         DEFAULT_DATABASE_NAME,
                         Sets.immutable.of(StandardOpenOption.CREATE));
@@ -177,9 +187,11 @@ class MuninnPageCursorTest {
                     PageEvictionCallback onEviction,
                     boolean createIfNotExist,
                     boolean useDirectIO,
+                    long pagesPerSegment,
                     IOController ioController,
                     EvictionBouncer evictionBouncer,
-                    SwapperSet swappers)
+                    SwapperIdProvider swapperIdProvider,
+                    FileSegmentTracker segmentTracker)
                     throws IOException {
                 PageSwapper actualSwapper = actual.createPageSwapper(
                         path,
@@ -187,9 +199,11 @@ class MuninnPageCursorTest {
                         onEviction,
                         createIfNotExist,
                         useDirectIO,
+                        pagesPerSegment,
                         ioController,
                         evictionBouncer,
-                        swappers);
+                        swapperIdProvider,
+                        segmentTracker);
                 return new DelegatingPageSwapper(actualSwapper) {
                     @Override
                     public long read(long filePageId, long bufferAddress) throws IOException {

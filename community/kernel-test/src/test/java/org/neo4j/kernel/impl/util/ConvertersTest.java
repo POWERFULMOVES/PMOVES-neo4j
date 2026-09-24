@@ -23,15 +23,21 @@ import static org.apache.commons.lang3.SystemUtils.IS_OS_WINDOWS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
-import static org.neo4j.kernel.impl.util.Converters.regexFiles;
+import static org.neo4j.io.fs.FileSystemAbstraction.PatternStyle.GLOB;
+import static org.neo4j.io.fs.FileSystemAbstraction.PatternStyle.NONE;
+import static org.neo4j.io.fs.FileSystemAbstraction.PatternStyle.REGEX;
+import static org.neo4j.kernel.impl.util.Converters.patternMatchFiles;
 import static org.neo4j.kernel.impl.util.Converters.toFiles;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.function.Function;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
@@ -51,7 +57,7 @@ class ConvertersTest {
         Path file32 = existenceOfFile("file32");
 
         // WHEN
-        Path[] files = regexFiles(directory.getFileSystem(), true)
+        Path[] files = patternMatchFiles(directory.getFileSystem(), true, REGEX)
                 .apply(directory.file("file").toAbsolutePath() + ".*");
 
         // THEN
@@ -64,7 +70,7 @@ class ConvertersTest {
         Path file = existenceOfFile("file");
 
         // when
-        Path[] files = regexFiles(directory.getFileSystem(), true).apply(file.toString());
+        Path[] files = patternMatchFiles(directory.getFileSystem(), true, REGEX).apply(file.toString());
 
         // then
         assertThat(files).containsExactly(file);
@@ -79,10 +85,10 @@ class ConvertersTest {
         Path file12 = existenceOfFile("file_12");
 
         // when
-        Path[] files =
-                regexFiles(directory.getFileSystem(), true).apply(file1.getParent() + File.separator + "file_\\d+");
-        Path[] files2 =
-                regexFiles(directory.getFileSystem(), true).apply(file1.getParent() + File.separator + "file_\\d{1,5}");
+        Path[] files = patternMatchFiles(directory.getFileSystem(), true, REGEX)
+                .apply(file1.getParent() + File.separator + "file_\\d+");
+        Path[] files2 = patternMatchFiles(directory.getFileSystem(), true, REGEX)
+                .apply(file1.getParent() + File.separator + "file_\\d{1,5}");
 
         // then
         assertThat(files).containsExactly(file1, file3, file12);
@@ -97,9 +103,9 @@ class ConvertersTest {
         Path file12 = existenceOfFile("file_12");
 
         // when
-        Path[] files =
-                regexFiles(directory.getFileSystem(), true).apply(file1.getParent() + File.separator + "file_\\\\d+");
-        Path[] files2 = regexFiles(directory.getFileSystem(), true)
+        Path[] files = patternMatchFiles(directory.getFileSystem(), true, REGEX)
+                .apply(file1.getParent() + File.separator + "file_\\\\d+");
+        Path[] files2 = patternMatchFiles(directory.getFileSystem(), true, REGEX)
                 .apply(file1.getParent() + File.separator + "file_\\\\d{1,5}");
 
         // then
@@ -116,8 +122,8 @@ class ConvertersTest {
         Path file12 = existenceOfFile("file_12.csv");
 
         // when
-        Function<String, Path[]> regexMatcher = regexFiles(directory.getFileSystem(), true);
-        Function<String, Path[]> converter = toFiles(",", regexMatcher);
+        Function<String, Path[]> matcher = patternMatchFiles(directory.getFileSystem(), true, REGEX);
+        Function<String, Path[]> converter = toFiles(",", matcher);
         Path[] files = converter.apply(header + ",'" + header.getParent() + File.separator + "file_\\\\d{1,5}.csv'");
 
         // then
@@ -138,9 +144,82 @@ class ConvertersTest {
                 .hasMessageContaining("no matching end quote");
     }
 
+    @Test
+    void shouldFindPathsWithGlobbingPattern() throws IOException {
+        // given
+        var abc = existenceOfFile("abc");
+        var bcd = existenceOfFile("bcd");
+        var qwer0 = existenceOfFile(new String[] {"sub1"}, "qwer.0");
+        var qwer1 = existenceOfFile(new String[] {"sub1", "sub2"}, "qwer.1");
+        var qwer2 = existenceOfFile(new String[] {"sub2"}, "qwer.2");
+        var qwer10 = existenceOfFile(new String[] {"sub1"}, "qwer.10");
+
+        // when
+        Function<String, Path[]> matcher = patternMatchFiles(directory.getFileSystem(), true, GLOB);
+        Function<String, Path[]> converter = toFiles(",", matcher);
+        Path[] cFiles = converter.apply(directory.homePath() + File.separator + "*c*");
+        Path[] qwerFiles = converter.apply(directory.homePath() + File.separator + "**/qwer.*");
+
+        // then
+        assertThat(cFiles).containsExactly(abc, bcd);
+        assertThat(qwerFiles).containsExactly(qwer0, qwer10, qwer1, qwer2);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void shouldDoExactPathMatching(boolean quoteHeader) throws IOException {
+        var header = existenceOfFile("header.csv");
+        var file1 = existenceOfFile("file_1.csv");
+        var file3 = existenceOfFile("file_3.csv");
+        var file12 = existenceOfFile("file_12.csv");
+
+        var pathsToSplit = new StringBuilder();
+        if (quoteHeader) {
+            pathsToSplit
+                    .append("'")
+                    .append(header)
+                    .append("',")
+                    .append(file1)
+                    .append(",")
+                    .append(file3)
+                    .append(",")
+                    .append(file12);
+        } else {
+            pathsToSplit
+                    .append(header)
+                    .append(",")
+                    .append(file1)
+                    .append(",")
+                    .append(file3)
+                    .append(",")
+                    .append(file12);
+        }
+
+        Function<String, Path[]> matcherSorted = patternMatchFiles(directory.getFileSystem(), true, NONE);
+        Function<String, Path[]> matcherUnsorted = patternMatchFiles(directory.getFileSystem(), false, NONE);
+
+        assertThat(toFiles(",", matcherSorted).apply(pathsToSplit.toString()))
+                .as("sorting is ignored for exact path matching")
+                .containsExactly(header, file1, file3, file12);
+        assertThat(toFiles(",", matcherUnsorted).apply(pathsToSplit.toString()))
+                .as("sorting is ignored for exact path matching")
+                .containsExactly(header, file1, file3, file12);
+    }
+
     private Path existenceOfFile(String name) throws IOException {
-        Path file = directory.file(name);
-        Files.createFile(file);
-        return file;
+        return existenceOfFile(new String[0], name);
+    }
+
+    private Path existenceOfFile(String[] subDirs, String name) throws IOException {
+        Path base = directory.homePath();
+        for (String subDir : subDirs) {
+            base = base.resolve(subDir);
+            try {
+                Files.createDirectory(base);
+            } catch (FileAlreadyExistsException e) {
+                // it's OK
+            }
+        }
+        return Files.createFile(base.resolve(name));
     }
 }

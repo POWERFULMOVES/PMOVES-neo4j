@@ -70,6 +70,7 @@ public class CompositeDatabaseAvailabilityGuard extends LifecycleAdapter impleme
         started = false;
         // Propagate iops limit removal for all io controllers that monitor this property
         config.set(GraphDatabaseSettings.check_point_iops_limit, -1);
+        config.set(GraphDatabaseSettings.check_point_throughput_limit, null);
     }
 
     @Override
@@ -106,11 +107,12 @@ public class CompositeDatabaseAvailabilityGuard extends LifecycleAdapter impleme
             guard.await(Math.max(0, millis - totalWait));
             totalWait += clock.millis() - startMillis;
             if (totalWait > millis) {
-                throw new UnavailableException(getUnavailableMessage());
+                throw UnavailableException.databaseUnavailable(guard.databaseName(), getUnavailableMessage());
             }
         }
         if (!started) {
-            throw new UnavailableException(getUnavailableMessage());
+            // No database name to report. The whole DBMS is unavailable.
+            throw UnavailableException.databaseUnavailable("", getUnavailableMessage());
         }
     }
 

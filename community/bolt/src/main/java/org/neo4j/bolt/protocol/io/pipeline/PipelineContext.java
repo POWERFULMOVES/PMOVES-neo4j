@@ -25,10 +25,12 @@ import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.OffsetTime;
 import java.time.ZonedDateTime;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 import org.neo4j.bolt.protocol.common.connector.connection.Connection;
 import org.neo4j.packstream.io.PackstreamBuf;
 import org.neo4j.values.AnyValue;
 import org.neo4j.values.storable.CoordinateReferenceSystem;
+import org.neo4j.values.storable.Float16Format;
 import org.neo4j.values.storable.TextArray;
 import org.neo4j.values.storable.TextValue;
 import org.neo4j.values.virtual.MapValue;
@@ -75,4 +77,22 @@ public interface PipelineContext {
     void writeUnboundRelationship(String elementId, long relId, String type, MapValue properties);
 
     void writePath(NodeValue[] nodes, RelationshipValue[] relationships);
+
+    void writeVector(byte[] values);
+
+    void writeVector(short[] values);
+
+    void writeVector(int[] values);
+
+    void writeVector(long[] values);
+
+    void writeFloatingPointVector(Float16Format format, short[] values);
+
+    void writeVector(float[] values);
+
+    void writeVector(double[] values);
+
+    void writeUUID(long msb, long lsb);
+
+    void writeUnsupportedType(String typeName, ProtocolVersion supportedSinceVersion, String message);
 }

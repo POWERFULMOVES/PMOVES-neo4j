@@ -26,6 +26,7 @@ import org.neo4j.batchimport.api.InputIterator;
 import org.neo4j.batchimport.api.input.Collector;
 import org.neo4j.batchimport.api.input.IdType;
 import org.neo4j.batchimport.api.input.InputChunk;
+import org.neo4j.common.EntityType;
 import org.neo4j.csv.reader.Configuration;
 import org.neo4j.csv.reader.Extractors;
 import org.neo4j.csv.reader.MultiReadable;
@@ -43,7 +44,9 @@ public class CsvGroupInputIterator implements InputIterator {
     private final Collector badCollector;
     private final Groups groups;
     private final boolean autoSkipHeaders;
+    private final boolean delimitIds;
     private final Monitor monitor;
+    private final EntityType entityType;
     private CsvInputIterator current;
     private int groupId;
 
@@ -55,7 +58,9 @@ public class CsvGroupInputIterator implements InputIterator {
             Collector badCollector,
             Groups groups,
             boolean autoSkipHeaders,
-            Monitor monitor) {
+            boolean delimitIds,
+            Monitor monitor,
+            EntityType entityType) {
         this.source = source;
         this.headerFactory = headerFactory;
         this.idType = idType;
@@ -63,7 +68,9 @@ public class CsvGroupInputIterator implements InputIterator {
         this.badCollector = badCollector;
         this.groups = groups;
         this.autoSkipHeaders = autoSkipHeaders;
+        this.delimitIds = delimitIds;
         this.monitor = monitor;
+        this.entityType = entityType;
     }
 
     @Override
@@ -72,7 +79,7 @@ public class CsvGroupInputIterator implements InputIterator {
     }
 
     static Extractors extractors(Configuration config) {
-        return new Extractors(config.arrayDelimiter(), config.emptyQuotedStringsAsNull());
+        return new Extractors(config.arrayDelimiter(), config.vectorDelimiter(), config.emptyQuotedStringsAsNull());
     }
 
     @Override
@@ -94,7 +101,9 @@ public class CsvGroupInputIterator implements InputIterator {
                         extractors(config),
                         groupId++,
                         autoSkipHeaders,
-                        monitor);
+                        delimitIds,
+                        monitor,
+                        entityType);
             }
 
             if (current.next((CsvInputChunkProxy) chunk)) {

@@ -37,6 +37,21 @@ public class DuplicatingLog implements InternalLog {
     }
 
     @Override
+    public boolean isWarnEnabled() {
+        return log1.isWarnEnabled() || log2.isWarnEnabled();
+    }
+
+    @Override
+    public boolean isInfoEnabled() {
+        return log1.isInfoEnabled() || log2.isInfoEnabled();
+    }
+
+    @Override
+    public boolean isErrorEnabled() {
+        return log1.isErrorEnabled() || log2.isErrorEnabled();
+    }
+
+    @Override
     public void debug(String message) {
         log1.debug(message);
         log2.debug(message);
@@ -115,21 +130,9 @@ public class DuplicatingLog implements InternalLog {
     }
 
     @Override
-    public void debug(Neo4jMessageSupplier supplier) {
-        log1.debug(supplier);
-        log2.debug(supplier);
-    }
-
-    @Override
     public void info(Neo4jLogMessage message) {
         log1.info(message);
         log2.info(message);
-    }
-
-    @Override
-    public void info(Neo4jMessageSupplier supplier) {
-        log1.info(supplier);
-        log2.info(supplier);
     }
 
     @Override
@@ -139,21 +142,9 @@ public class DuplicatingLog implements InternalLog {
     }
 
     @Override
-    public void warn(Neo4jMessageSupplier supplier) {
-        log1.warn(supplier);
-        log2.warn(supplier);
-    }
-
-    @Override
     public void error(Neo4jLogMessage message) {
         log1.error(message);
         log2.error(message);
-    }
-
-    @Override
-    public void error(Neo4jMessageSupplier supplier) {
-        log1.error(supplier);
-        log2.error(supplier);
     }
 
     @Override

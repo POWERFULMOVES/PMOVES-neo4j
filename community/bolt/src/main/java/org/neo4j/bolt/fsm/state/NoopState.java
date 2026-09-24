@@ -23,7 +23,7 @@ import org.neo4j.bolt.fsm.Context;
 import org.neo4j.bolt.fsm.error.StateMachineException;
 import org.neo4j.bolt.fsm.error.state.IllegalTransitionException;
 import org.neo4j.bolt.protocol.common.fsm.response.ResponseHandler;
-import org.neo4j.bolt.protocol.common.message.request.RequestMessage;
+import org.neo4j.boltmessages.request.RequestMessage;
 
 final class NoopState extends AbstractState {
 
@@ -34,7 +34,7 @@ final class NoopState extends AbstractState {
     @Override
     public StateReference process(Context ctx, RequestMessage message, ResponseHandler handler)
             throws StateMachineException {
-        throw new IllegalTransitionException(this, message);
+        throw IllegalTransitionException.illegalTransition(this, message);
     }
 
     @Override

@@ -21,10 +21,12 @@ package org.neo4j.dbms.archive.backup;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Path;
 import java.util.List;
-import java.util.Optional;
-import org.neo4j.dbms.archive.ArchiveFormat;
-import org.neo4j.function.ThrowingSupplier;
+import org.neo4j.dbms.archive.ArchiveInput;
+import org.neo4j.dbms.archive.ArchiveInput.FileInput;
+import org.neo4j.dbms.archive.DumpFormatSelector;
+import org.neo4j.io.fs.FileSystemAbstraction;
 
 public class BackupFormatSelector {
 
@@ -35,32 +37,56 @@ public class BackupFormatSelector {
                 new BackupZstdFormatV1(), new BackupTarFormatV1(), new BackupZstdFormatV2(), new BackupTarFormatV2());
     }
 
-    public static BackupCompressionFormat selectFormat(boolean compress) {
+    public static BackupCompressionFormat selectWriteFormat(boolean compress) {
         return compress ? new BackupZstdFormatV2() : new BackupTarFormatV2();
     }
 
-    public static BackupDescription readDescription(InputStream inputStream) throws IOException {
-        return selectFormat(inputStream).readMetadata(inputStream);
+    public static BackupDescription readDescription(FileSystemAbstraction fs, Path path) throws IOException {
+        return readDescription(FileInput.of(fs, path));
     }
 
-    public static InputStream decompress(ThrowingSupplier<InputStream, IOException> streamSupplier) throws IOException {
-        InputStream inputStream = streamSupplier.get();
-        return selectFormat(inputStream).decompress(inputStream);
+    public static BackupDescription readDescription(ArchiveInput input) throws IOException {
+        try (ArchiveInput.OpenedArchive opened = input.open()) {
+            return readDescription(opened);
+        }
     }
 
-    private static BackupCompressionFormat selectFormat(InputStream inputStream) throws IOException {
-        String magicPrefix = new String(inputStream.readNBytes(ArchiveFormat.MAGIC_PREFIX_LENGTH));
-        return selectFormat(magicPrefix)
-                .orElseThrow(() -> new IllegalArgumentException("Unsupported format backup format: " + magicPrefix));
+    public static BackupDescription readDescription(ArchiveInput.OpenedArchive opened) throws IOException {
+        return requireFormat(opened.magic()).readMetadata(opened.stream());
     }
 
-    public static Optional<BackupCompressionFormat> selectFormat(String magicPrefix) {
-        return switch (magicPrefix) {
-            case BackupZstdFormatV1.MAGIC_HEADER -> Optional.of(new BackupZstdFormatV1());
-            case BackupTarFormatV1.MAGIC_HEADER -> Optional.of(new BackupTarFormatV1());
-            case BackupZstdFormatV2.MAGIC_HEADER -> Optional.of(new BackupZstdFormatV2());
-            case BackupTarFormatV2.MAGIC_HEADER -> Optional.of(new BackupTarFormatV2());
-            default -> Optional.empty();
-        };
+    public static InputStream decompress(ArchiveInput input) throws IOException {
+        ArchiveInput.OpenedArchive opened = input.open();
+        try {
+            return requireFormat(opened.magic()).decompress(opened.stream());
+        } catch (IOException e) {
+            opened.stream().close();
+            throw e;
+        }
+    }
+
+    private static BackupCompressionFormat requireFormat(byte[] magicPrefix) {
+        BackupCompressionFormat format = selectReadFormat(magicPrefix);
+        if (format == null) {
+            DumpFormatSelector.throwUnsupported(magicPrefix);
+        }
+        return format;
+    }
+
+    public static BackupCompressionFormat selectReadFormat(byte[] bytes) {
+        if (BackupZstdFormatV2.MAGIC_HEADER.matches(bytes)) {
+            return new BackupZstdFormatV2();
+        }
+        if (BackupZstdFormatV1.MAGIC_HEADER.matches(bytes)) {
+            return new BackupZstdFormatV1();
+        }
+        if (BackupTarFormatV2.MAGIC_HEADER.matches(bytes)) {
+            return new BackupTarFormatV2();
+        }
+        if (BackupTarFormatV1.MAGIC_HEADER.matches(bytes)) {
+            return new BackupTarFormatV1();
+        }
+
+        return null;
     }
 }

@@ -20,6 +20,7 @@
 package org.neo4j.cypher.internal.compiler.planner.logical.steps
 
 import org.neo4j.cypher.internal.compiler.planner.logical.LogicalPlanningContext
+import org.neo4j.cypher.internal.compiler.planner.logical.RemoteBatchingResult
 import org.neo4j.cypher.internal.compiler.planner.logical.irExpressionRewriter
 import org.neo4j.cypher.internal.compiler.planner.logical.ordering.InterestingOrderConfig
 import org.neo4j.cypher.internal.compiler.planner.logical.plannerQueryPlanner
@@ -45,7 +46,9 @@ import org.neo4j.cypher.internal.ir.ast.IRExpression
 import org.neo4j.cypher.internal.ir.ast.ListIRExpression
 import org.neo4j.cypher.internal.logical.plans.Argument
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
-import org.neo4j.cypher.internal.macros.AssertMacros
+import org.neo4j.cypher.internal.logical.plans.RewrittenSubQueryPredicates
+import org.neo4j.cypher.internal.logical.plans.RewrittenSubQueryPredicates.RewrittenSubQueryPredicatesMap
+import org.neo4j.cypher.internal.macros.AssertMacros3
 import org.neo4j.cypher.internal.util.Foldable.FoldableAny
 import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.Rewriter
@@ -476,12 +479,12 @@ object SubqueryExpressionSolver {
       inner: LogicalPlan,
       expressions: Seq[Expression],
       context: LogicalPlanningContext
-    ): (Seq[Expression], LogicalPlan) = {
+    ): (RewrittenSubQueryPredicatesMap, LogicalPlan) = {
       if (expressions.isEmpty) {
-        (expressions, inner)
+        (RewrittenSubQueryPredicates.empty, inner)
       } else {
         val solver = SubqueryExpressionSolver.solverFor(inner, context)
-        val rewrittenExpressions: Seq[Expression] = expressions.map(solver.solve(_))
+        val rewrittenExpressions = RewrittenSubQueryPredicates.forMap(expressions.map(e => solver.solve(e) -> e).toMap)
         val rewrittenInner = solver.rewrittenPlan()
         (rewrittenExpressions, rewrittenInner)
       }
@@ -496,18 +499,17 @@ object SubqueryExpressionSolver {
       context: LogicalPlanningContext
     ): (Expression, LogicalPlan) = {
       val solver = SubqueryExpressionSolver.solverFor(inner, context)
-      val rewrittenExpression = solver.solve(expression)
+      val solvedExpr = solver.solve(expression)
       val rewrittenInner = solver.rewrittenPlan()
-      context.settings.remoteBatchPropertiesStrategy.planBatchPropertiesForExpressionWithLookahead(
-        context.staticComponents.planningAttributes.solveds.get(rewrittenInner.id).asSinglePlannerQuery.queryGraph,
-        rewrittenInner,
-        context,
-        rewrittenExpression
-      ) match {
-        case (rewrittenExprWithProperties: Expression, planWithProperties: LogicalPlan) =>
-          (rewrittenExprWithProperties, planWithProperties)
-        case _ => (rewrittenExpression, rewrittenInner)
-      }
+      val RemoteBatchingResult(rewrittenExprWithProperties, planWithProperties) =
+        context.settings.remoteBatchPropertiesStrategy.planBatchPropertiesForExpressionsWithLookahead(
+          context.staticComponents.planningAttributes.solveds.get(rewrittenInner.id).asSinglePlannerQuery.queryGraph,
+          rewrittenInner,
+          context,
+          Iterable(solvedExpr)
+        )
+
+      (rewrittenExprWithProperties.rewrittenExpressionOrSelf(solvedExpr), planWithProperties)
     }
   }
 
@@ -515,7 +517,7 @@ object SubqueryExpressionSolver {
 
     def solve(
       lhs: LogicalPlan,
-      unsolvedPredicates: Seq[Expression],
+      unsolvedPredicates: Iterable[Expression],
       interestingOrderConfig: InterestingOrderConfig,
       context: LogicalPlanningContext
     ): (Seq[Expression], LogicalPlan) = {
@@ -539,7 +541,7 @@ object SubqueryExpressionSolver {
           if (existsExpressions.nonEmpty) {
             val (planWithPredicates, solvedPredicates) =
               planPredicates(plan, existsExpressions, expressions, None, interestingOrderConfig, context)
-            AssertMacros.checkOnlyWhenAssertionsAreEnabled(
+            AssertMacros3.checkOnlyWhenAssertionsAreEnabled(
               exprs.forall(solvedPredicates.contains),
               "planPredicates is supposed to solve all predicates in an OR clause."
             )

@@ -19,13 +19,12 @@
  */
 package org.neo4j.cypher.internal.compiler.planner.logical.plans.rewriter
 
+import org.neo4j.cypher.internal.compiler.planner.logical.ExpressionEvaluator
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.skipAndLimit.planLimitOnTopOf
 import org.neo4j.cypher.internal.expressions.Add
 import org.neo4j.cypher.internal.expressions.ContainerIndex
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
-import org.neo4j.cypher.internal.expressions.FunctionName
 import org.neo4j.cypher.internal.expressions.ListSlice
-import org.neo4j.cypher.internal.expressions.Namespace
 import org.neo4j.cypher.internal.expressions.SignedDecimalIntegerLiteral
 import org.neo4j.cypher.internal.expressions.functions.Head
 import org.neo4j.cypher.internal.expressions.functions.IsEmpty
@@ -37,6 +36,8 @@ import org.neo4j.cypher.internal.logical.plans.PartialTop
 import org.neo4j.cypher.internal.logical.plans.Top
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.Cardinalities
 import org.neo4j.cypher.internal.util.Cardinality
+import org.neo4j.cypher.internal.util.FunctionName
+import org.neo4j.cypher.internal.util.Namespace
 import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.Rewriter.BottomUpMergeableRewriter
 import org.neo4j.cypher.internal.util.attribution.Attributes
@@ -46,8 +47,11 @@ import org.neo4j.cypher.internal.util.bottomUp
  * Places a Limit inside of NestedPlanExpressions, if the NestedPlanExpressions is inside an expression that does not need the whole list as a result.
  * These expressions are `head`, `ContainerIndex`, and `ListSlice`.
  */
-case class limitNestedPlanExpressions(cardinalities: Cardinalities, otherAttributes: Attributes[LogicalPlan])
-    extends Rewriter with BottomUpMergeableRewriter {
+case class limitNestedPlanExpressions(
+  cardinalities: Cardinalities,
+  otherAttributes: Attributes[LogicalPlan],
+  expressionEvaluator: ExpressionEvaluator
+) extends Rewriter with BottomUpMergeableRewriter {
   override def apply(input: AnyRef): AnyRef = instance.apply(input)
 
   /**
@@ -66,26 +70,26 @@ case class limitNestedPlanExpressions(cardinalities: Cardinalities, otherAttribu
         _,
         IndexedSeq(npe @ NestedPlanCollectExpression(plan, _, _)),
         _,
+        _,
+        _,
         _
       ) if shouldInsertLimitOnTopOf(plan) =>
-      val newPlan =
-        planLimitOnTopOf(plan, SignedDecimalIntegerLiteral("1")(npe.position))(otherAttributes.copy(plan.id))
+      val count = SignedDecimalIntegerLiteral("1")(npe.position.zeroLength)
+      val newPlan = planLimitOnTopOf(plan, count, expressionEvaluator)(otherAttributes.copy(plan.id))
       cardinalities.set(newPlan.id, Cardinality.SINGLE)
       fi.copy(args = IndexedSeq(npe.copy(newPlan)(npe.position)))(fi.position)
 
     case ci @ ContainerIndex(npe @ NestedPlanCollectExpression(plan, _, _), index)
       if shouldInsertLimitOnTopOf(plan) && index.isConstantForQuery =>
-      val newPlan = planLimitOnTopOf(plan, Add(SignedDecimalIntegerLiteral("1")(npe.position), index)(npe.position))(
-        otherAttributes.copy(plan.id)
-      )
+      val count = Add(SignedDecimalIntegerLiteral("1")(npe.position.zeroLength), index)(npe.position)
+      val newPlan = planLimitOnTopOf(plan, count, expressionEvaluator)(otherAttributes.copy(plan.id))
       cardinalities.set(newPlan.id, Cardinality.SINGLE)
       ci.copy(expr = npe.copy(newPlan)(npe.position))(ci.position)
 
     case ls @ ListSlice(npe @ NestedPlanCollectExpression(plan, _, _), _, Some(to))
       if shouldInsertLimitOnTopOf(plan) && to.isConstantForQuery =>
-      val newPlan = planLimitOnTopOf(plan, Add(SignedDecimalIntegerLiteral("1")(npe.position), to)(npe.position))(
-        otherAttributes.copy(plan.id)
-      )
+      val count = Add(SignedDecimalIntegerLiteral("1")(npe.position.zeroLength), to)(npe.position)
+      val newPlan = planLimitOnTopOf(plan, count, expressionEvaluator)(otherAttributes.copy(plan.id))
       cardinalities.set(newPlan.id, Cardinality.SINGLE)
       ls.copy(list = npe.copy(newPlan)(npe.position))(ls.position)
 
@@ -94,10 +98,16 @@ case class limitNestedPlanExpressions(cardinalities: Cardinalities, otherAttribu
         _,
         IndexedSeq(npe @ NestedPlanCollectExpression(plan, _, _)),
         _,
+        _,
+        _,
         _
       ) if shouldInsertLimitOnTopOf(plan) =>
       val newPlan =
-        planLimitOnTopOf(plan, SignedDecimalIntegerLiteral("1")(npe.position))(otherAttributes.copy(plan.id))
+        planLimitOnTopOf(
+          plan,
+          SignedDecimalIntegerLiteral("1")(npe.position.zeroLength),
+          expressionEvaluator
+        )(otherAttributes.copy(plan.id))
       cardinalities.set(newPlan.id, Cardinality.SINGLE)
       fi.copy(args = IndexedSeq(npe.copy(newPlan)(npe.position)))(fi.position)
   }

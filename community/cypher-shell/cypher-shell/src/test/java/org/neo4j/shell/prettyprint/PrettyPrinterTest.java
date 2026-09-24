@@ -68,7 +68,7 @@ class PrettyPrinterTest {
         String actual = verbosePrinter.format(result);
 
         // then
-        assertThat(actual).contains("Added 10 nodes, Added 1 labels");
+        assertThat(actual).contains("Created 10 nodes, added 1 label");
     }
 
     @Test
@@ -100,8 +100,7 @@ class PrettyPrinterTest {
         String actual = plainPrinter.format(result);
 
         // then
-        String expected =
-                """
+        String expected = """
                 Plan: "PROFILE"
                 Statement: "READ_ONLY"
                 Version: "3.1"
@@ -142,8 +141,7 @@ class PrettyPrinterTest {
         String actual = plainPrinter.format(result);
 
         // then
-        String expected =
-                """
+        String expected = """
                 Plan: "PROFILE"
                 Statement: "READ_ONLY"
                 Version: "3.1"
@@ -181,8 +179,7 @@ class PrettyPrinterTest {
         String actual = plainPrinter.format(result);
 
         // then
-        String expected =
-                """
+        String expected = """
                 Plan: "EXPLAIN"
                 Statement: "READ_ONLY"
                 Version: "3.1"

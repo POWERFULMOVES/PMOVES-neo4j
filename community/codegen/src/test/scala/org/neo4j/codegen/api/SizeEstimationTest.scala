@@ -20,6 +20,7 @@
 package org.neo4j.codegen.api
 
 import org.neo4j.codegen.ByteCodeVisitor
+import org.neo4j.codegen.CodeGenerator
 import org.neo4j.codegen.TypeReference
 import org.neo4j.codegen.api.IntermediateRepresentation.add
 import org.neo4j.codegen.api.IntermediateRepresentation.and
@@ -62,12 +63,12 @@ import org.neo4j.codegen.api.IntermediateRepresentation.or
 import org.neo4j.codegen.api.IntermediateRepresentation.self
 import org.neo4j.codegen.api.IntermediateRepresentation.setField
 import org.neo4j.codegen.api.IntermediateRepresentation.subtract
+import org.neo4j.codegen.api.IntermediateRepresentation.tableSwitch
 import org.neo4j.codegen.api.IntermediateRepresentation.ternary
 import org.neo4j.codegen.api.IntermediateRepresentation.tryCatch
 import org.neo4j.codegen.api.IntermediateRepresentation.typeRefOf
 import org.neo4j.codegen.api.IntermediateRepresentation.unbox
 import org.neo4j.codegen.api.SizeEstimationTest.arrayField
-import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 import org.neo4j.memory.Measurable
 import org.neo4j.values.storable.LongValue
 import org.objectweb.asm.Opcodes
@@ -76,8 +77,8 @@ import java.nio.ByteBuffer
 
 import scala.util.Random
 
-class SizeEstimationTest extends CypherFunSuite {
-  private val codeGeneration = CodeGeneration.codeGeneration()
+class SizeEstimationTest extends CodegenTestSuite {
+  private val codeGeneration = CodeGeneration.codeGeneration(new CodeGenerator.Stats)
   private val sizeComputer = new ByteSizeComputer
   val generator = codeGeneration.createGenerator()
   generator.setByteCodeVisitor(sizeComputer)
@@ -1130,6 +1131,29 @@ class SizeEstimationTest extends CypherFunSuite {
         assign("e", block(once, load[Int]("a"))),
         declare[Int]("f"),
         assign("f", block(once, load[Int]("a")))
+      )
+
+    sizeOf(instructions) should equal(computeSize(instructions))
+  }
+
+  test("tableSwitch") {
+    val instructions =
+      block(
+        declare[Boolean]("a"),
+        assign("a", constant(false)),
+        declare[Int]("i"),
+        assign("i", constant(3)),
+        tableSwitch(
+          load[Int]("i"),
+          Seq(
+            assign("a", constant(false)),
+            assign("a", constant(false)),
+            assign("a", constant(true)),
+            assign("a", constant(false)),
+            assign("a", constant(false)),
+            assign("a", constant(false))
+          )
+        )
       )
 
     sizeOf(instructions) should equal(computeSize(instructions))

@@ -23,28 +23,10 @@ package org.neo4j.dbms.admissioncontrol;
  * This interface abstracts the entrypoint into the admission control process which is to ensure a minimum QoS and stop
  * server being overloaded by requests.
  */
-public interface AdmissionControlService {
-
+public interface AdmissionControlService extends AdmissionControlTokenProcessor {
     /**
-     * Request a new admission control token, admission control tokens can be returned already released or may be
-     * released later.
-     * Implementations must be fast to complete as this can be invoked frequently and in performance critical components
-     * such as on the bolt IO thread.
+     * Removes the tenant from this admission control services tracking.
+     * @param tenant tenant to be removed.
      */
-    AdmissionControlToken requestToken();
-
-    /**
-     * Await the release of a token, tokens that are already completed will return immediately, otherwise the
-     * caller will be blocked until the token is released.
-     * @param token The token to await the release of.
-     * @return The response of the token release, this can be interpreted by the caller to decide appropriate
-     * response.
-     */
-    AdmissionControlResponse awaitRelease(AdmissionControlToken token);
-
-    /**
-     * When not enabled tokens must not be requested or awaited.
-     * @return Whether admission control is enabled.
-     */
-    boolean enabled();
+    void removeTenant(Tenant tenant);
 }

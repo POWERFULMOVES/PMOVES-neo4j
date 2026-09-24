@@ -19,236 +19,323 @@
  */
 package org.neo4j.dbms.archive;
 
+import static java.nio.file.StandardOpenOption.CREATE_NEW;
+import static java.nio.file.StandardOpenOption.WRITE;
 import static java.util.Objects.requireNonNull;
+import static org.neo4j.dbms.archive.ArchiveFormat.SPLIT_FILE_PREFIX;
 import static org.neo4j.dbms.archive.LoggingArchiveProgressPrinter.createProgressPrinter;
 import static org.neo4j.dbms.archive.Utils.checkWritableDirectory;
-import static org.neo4j.dbms.archive.Utils.copy;
-import static org.neo4j.io.fs.FileVisitors.justContinue;
-import static org.neo4j.io.fs.FileVisitors.onDirectory;
-import static org.neo4j.io.fs.FileVisitors.onFile;
-import static org.neo4j.io.fs.FileVisitors.onlyMatching;
-import static org.neo4j.io.fs.FileVisitors.throwExceptions;
 
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.PrintStream;
-import java.nio.file.Files;
+import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.Iterator;
+import java.util.Set;
+import java.util.UUID;
 import java.util.function.Predicate;
-import org.apache.commons.compress.archivers.ArchiveEntry;
-import org.apache.commons.compress.archivers.ArchiveOutputStream;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
+import org.apache.commons.io.output.CloseShieldOutputStream;
+import org.neo4j.cli.ExecutionContext;
 import org.neo4j.commandline.Util;
+import org.neo4j.configuration.Config;
+import org.neo4j.configuration.GraphDatabaseInternalSettings;
+import org.neo4j.configuration.GraphDatabaseSettings;
+import org.neo4j.dbms.archive.Manifest.FileRecord;
 import org.neo4j.dbms.archive.printer.OutputProgressPrinter;
 import org.neo4j.dbms.archive.printer.ProgressPrinters;
-import org.neo4j.function.Predicates;
-import org.neo4j.function.ThrowingConsumer;
 import org.neo4j.graphdb.Resource;
+import org.neo4j.io.ByteUnit;
+import org.neo4j.io.SplittingOutputStream;
 import org.neo4j.io.fs.FileSystemAbstraction;
+import org.neo4j.io.fs.filename.SequentialFileNameHelper;
 import org.neo4j.logging.InternalLogProvider;
+import org.neo4j.util.Preconditions;
 
 public class Dumper {
     public static final String DUMP_EXTENSION = ".dump";
     public static final String TAR_EXTENSION = ".tar";
 
-    private final List<ArchiveOperation> operations = new ArrayList<>();
-
     private final FileSystemAbstraction fs;
     private final ArchiveProgressPrinter progressPrinter;
+    private final boolean deleteAfterCopy;
 
     public Dumper(FileSystemAbstraction fs) {
-        this(fs, ProgressPrinters.emptyPrinter());
+        this(fs, ProgressPrinters.emptyPrinter(), false);
     }
 
     public Dumper(FileSystemAbstraction fs, PrintStream output) {
-        this(fs, ProgressPrinters.printStreamPrinter(output));
+        this(fs, ProgressPrinters.printStreamPrinter(output), false);
     }
 
     public Dumper(FileSystemAbstraction fs, InternalLogProvider logProvider) {
-        this(fs, ProgressPrinters.logProviderPrinter(logProvider.getLog(Dumper.class)));
+        this(fs, ProgressPrinters.logProviderPrinter(logProvider.getLog(Dumper.class)), false);
     }
 
-    private Dumper(FileSystemAbstraction fs, OutputProgressPrinter progressPrinter) {
+    public Dumper(FileSystemAbstraction fs, InternalLogProvider logProvider, boolean deleteAfterCopy) {
+        this(fs, ProgressPrinters.logProviderPrinter(logProvider.getLog(Dumper.class)), deleteAfterCopy);
+    }
+
+    private Dumper(FileSystemAbstraction fs, OutputProgressPrinter progressPrinter, boolean deleteAfterCopy) {
+        this(fs, createProgressPrinter(progressPrinter), deleteAfterCopy);
+    }
+
+    public Dumper(FileSystemAbstraction fs, ArchiveProgressPrinter progressPrinter) {
+        this(fs, progressPrinter, false);
+    }
+
+    public Dumper(FileSystemAbstraction fs, ArchiveProgressPrinter progressPrinter, boolean deleteAfterCopy) {
         this.fs = requireNonNull(fs);
-        this.progressPrinter = createProgressPrinter(progressPrinter);
-    }
-
-    public void dump(Path path, Path archive, CompressionFormat format, boolean deleteAfterCopy) throws IOException {
-        dump(path, path, openForDump(archive), format, Predicates.alwaysFalse(), deleteAfterCopy);
-    }
-
-    public void dump(
-            Path dbPath,
-            Path transactionalLogsPath,
-            OutputStream out,
-            CompressionFormat format,
-            Predicate<Path> exclude)
-            throws IOException {
-        dump(dbPath, transactionalLogsPath, out, format, exclude, false);
-    }
-
-    public OutputStream openForDump(Path archive) throws IOException {
-        return openForDump(archive, false);
-    }
-
-    public OutputStream openForDump(Path archive, boolean overwriteDestination) throws IOException {
-        checkWritableDirectory(archive.getParent());
-
-        if (overwriteDestination) {
-            return fs.openAsOutputStream(archive, false);
-        }
-
-        // StandardOpenOption.CREATE_NEW is important here because it atomically asserts that the file doesn't
-        // exist as it is opened, avoiding a TOCTOU race condition which results in a security vulnerability. I
-        // can't see a way to write a test to verify that we are using this option rather than just implementing
-        // the check ourselves non-atomically.
-        return Files.newOutputStream(archive, StandardOpenOption.CREATE_NEW);
+        this.progressPrinter = requireNonNull(progressPrinter);
+        this.deleteAfterCopy = deleteAfterCopy;
     }
 
     /**
-     * @param dbPath                store file location
-     * @param transactionalLogsPath tx logs location
-     * @param out                   output stream, will be closed by this method
-     * @param format                compression format
-     * @param exclude               exclusion predicate
-     * @param deleteAfterCopy       delete file after copying to backup
-     * @throws IOException in case of error
+     * Tells whether a given path is a valid dump (based on file extension)
+     * @param dump should be a dump
+     * @return <code>true</code> if the provided path is a dump
      */
-    private void dump(
-            Path dbPath,
-            Path transactionalLogsPath,
-            OutputStream out,
-            CompressionFormat format,
-            Predicate<Path> exclude,
-            boolean deleteAfterCopy)
+    public static boolean isDumpFile(Path dump) {
+        return dump.toString().endsWith(DUMP_EXTENSION);
+    }
+
+    public static Manifest collectManifest(Path dbPath) throws IOException {
+        return Manifest.builder().addContentsOf(dbPath).build();
+    }
+
+    public static Manifest collectManifest(Path dbPath, Path transactionalLogsPath, Predicate<Path> exclude)
             throws IOException {
-        operations.clear();
-
-        visitPath(dbPath, exclude, deleteAfterCopy);
-        if (!Util.isSameOrChildFile(dbPath, transactionalLogsPath)) {
-            visitPath(transactionalLogsPath, exclude, deleteAfterCopy);
+        Manifest.Builder mfb = Manifest.builder();
+        if (Util.isSameOrChildFile(dbPath, transactionalLogsPath)) {
+            mfb.addContentsOf(Predicate.not(exclude), dbPath);
+        } else {
+            mfb.addContentsOf(Predicate.not(exclude), dbPath);
+            mfb.addContentsOf(Predicate.not(exclude), transactionalLogsPath);
         }
-
-        dump(out, format);
+        return mfb.build();
     }
 
     /**
-     * @param out    output stream, will be closed by this method
+     * @param dot    Dump output type
      * @param format compression format
      * @throws IOException in case of error
      */
-    public void dump(OutputStream out, CompressionFormat format) throws IOException {
+    public void dump(DumpOutput dot, DumpFormat format, Manifest mf) throws IOException {
         progressPrinter.reset();
-        for (ArchiveOperation operation : operations) {
-            progressPrinter.maxBytes(progressPrinter.maxBytes() + operation.size);
-            progressPrinter.maxFiles(progressPrinter.maxFiles() + (operation.isFile ? 1 : 0));
+        long numFiles = 0;
+        long numBytes = 0;
+        for (Manifest.ManifestRecord record : mf.files()) {
+            if (record instanceof FileRecord fileRecord) {
+                numFiles += 1;
+                numBytes += fileRecord.size();
+            }
         }
+        progressPrinter.maxBytes(numBytes);
+        progressPrinter.maxFiles(numFiles);
 
-        try (var stream = wrapArchiveOut(out, format);
-                Resource ignore = progressPrinter.startPrinting()) {
-            for (ArchiveOperation operation : operations) {
-                operation.addToArchive(stream);
+        try (OutputStream compress = format.compress(dot.stream())) {
+            // Add enough archive meta-data that the load command can print a meaningful progress indicator.
+            if (StandardCompressionFormat.ZSTD.isFormat(compress)) {
+                writeArchiveMetadata(compress, numFiles, numBytes);
+            }
+
+            Tarball.Writer progressWriter = (pth, os) -> {
+                try (var is = fs.openAsInputStream(pth)) {
+                    Utils.copy(is, os, progressPrinter);
+                }
+                if (deleteAfterCopy) {
+                    fs.deleteFile(pth);
+                }
+            };
+
+            try (Resource ignore = progressPrinter.startPrinting()) {
+                Tarball.create(compress, null, progressWriter, mf);
             }
         }
     }
 
     /**
-     * @param folderPath      folder to archive
-     * @param exclude         exclusion predicate
-     * @param deleteAfterCopy will delete file immediately after dumping file
-     * @throws IOException in case of error
-     */
-    public void visitPath(Path folderPath, Predicate<Path> exclude, boolean deleteAfterCopy) throws IOException {
-        Files.walkFileTree(
-                folderPath,
-                onlyMatching(
-                        exclude.negate(),
-                        throwExceptions(onDirectory(
-                                dir -> dumpDirectory(folderPath, dir),
-                                onFile(file -> dumpFile(folderPath, file, deleteAfterCopy), justContinue())))));
-    }
-
-    private ArchiveOutputStream wrapArchiveOut(OutputStream out, CompressionFormat format) throws IOException {
-        OutputStream compress = format.compress(out);
-
-        // Add enough archive meta-data that the load command can print a meaningful progress indicator.
-        if (StandardCompressionFormat.ZSTD.isFormat(compress)) {
-            writeArchiveMetadata(compress);
-        }
-
-        TarArchiveOutputStream tarball = new TarArchiveOutputStream(compress);
-        tarball.setLongFileMode(TarArchiveOutputStream.LONGFILE_POSIX);
-        tarball.setBigNumberMode(TarArchiveOutputStream.BIGNUMBER_POSIX);
-        return tarball;
-    }
-
-    /**
      * @see Loader#readArchiveSizeMetadata(InputStream)
      */
-    void writeArchiveMetadata(OutputStream stream) throws IOException {
+    void writeArchiveMetadata(OutputStream stream, long numFiles, long numBytes) throws IOException {
         DataOutputStream metadata = new DataOutputStream(stream); // Unbuffered. No need for flushing.
         metadata.writeInt(1); // Archive format version. Increment whenever the metadata format changes.
-        metadata.writeLong(progressPrinter.maxFiles());
-        metadata.writeLong(progressPrinter.maxBytes());
+        metadata.writeLong(numFiles);
+        metadata.writeLong(numBytes);
     }
 
-    private void dumpFile(Path root, Path file, boolean deleteAfterCopy) throws IOException {
-        withEntry(
-                stream -> {
-                    writeFile(file, stream);
-                    if (deleteAfterCopy) {
-                        fs.delete(file);
+    public interface DumpFormat extends CompressionFormat {}
+
+    public interface DumpOutput {
+        OutputStream stream() throws IOException;
+
+        String description();
+    }
+
+    public record FileOutput(FileSystemAbstraction fs, Path path) implements DumpOutput {
+        public FileOutput {
+            Preconditions.checkState(
+                    !fs.isDirectory(path), "FileOutput must target a file, not a directory: %s".formatted(path));
+        }
+
+        @Override
+        public OutputStream stream() throws IOException {
+            // Always create the file to be sure that we are the owner.
+            checkWritableDirectory(path.getParent());
+            return fs.openAsOutputStream(path, Set.of(WRITE, CREATE_NEW));
+        }
+
+        @Override
+        public String description() {
+            return path.toString();
+        }
+
+        public static FileOutput of(FileSystemAbstraction fs, Path path) {
+            return new FileOutput(fs, path);
+        }
+    }
+
+    public record StdoutOutput(ExecutionContext ctx) implements DumpOutput {
+
+        @Override
+        public OutputStream stream() throws IOException {
+            return CloseShieldOutputStream.wrap(ctx.out());
+        }
+
+        @Override
+        public String description() {
+            return "writing to stdout";
+        }
+    }
+
+    public record SplitFileOutput(
+            FileSystemAbstraction fs, Path baseArtifact, long maxArtifactSize, SplitFileGeneratorMonitor monitor)
+            implements DumpOutput {
+        public static final MagicSignature MAGIC_MANIFEST_HEADER = MagicSignature.of(SPLIT_FILE_PREFIX + "MV1");
+        public static final MagicSignature MAGIC_DATA_HEADER = MagicSignature.of(SPLIT_FILE_PREFIX + "DV1");
+        public static final int HEADER_SIZE = ArchiveFormat.MAGIC_PREFIX_LENGTH + 4 + 16; // header + index + uuid
+
+        /** If changed remember to update the documentation in {@link GraphDatabaseSettings#split_archive_part_size}
+         * and {@link org.neo4j.cli.CommandOptionDescriptions.SplitArchiveOption} */
+        private static final long MIN_SPLIT_ARTIFACT_SIZE = ByteUnit.gibiBytes(1);
+
+        public static long determineSplitArtifactSize(Config config, long overrideArchiveSplitSize) {
+            long splitSize = config.get(GraphDatabaseSettings.split_archive_part_size);
+            if (overrideArchiveSplitSize > 0) {
+                splitSize = overrideArchiveSplitSize;
+            }
+            if (splitSize > 0
+                    && splitSize < MIN_SPLIT_ARTIFACT_SIZE
+                    && !config.get(GraphDatabaseInternalSettings.allow_small_split_archive_size)) {
+                throw new IllegalArgumentException(
+                        "Can't split archive in sizes smaller than " + ByteUnit.bytesToString(MIN_SPLIT_ARTIFACT_SIZE));
+            }
+            return splitSize;
+        }
+
+        public static SplitFileOutput of(FileSystemAbstraction fs, Path baseArtifact, long maxArtifactSize) {
+            return new SplitFileOutput(fs, baseArtifact, maxArtifactSize, SplitFileGeneratorMonitor.NO_MONITOR);
+        }
+
+        public static SplitFileOutput of(
+                FileSystemAbstraction fs, Path baseArtifact, long maxArtifactSize, SplitFileGeneratorMonitor monitor) {
+            return new SplitFileOutput(fs, baseArtifact, maxArtifactSize, monitor);
+        }
+
+        @Override
+        public OutputStream stream() throws IOException {
+            checkWritableDirectory(baseArtifact.getParent());
+            SplitFileGenerator fileGenerator = new SplitFileGenerator(baseArtifact, fs, monitor);
+            Runnable onClose = () -> {
+                try {
+                    fileGenerator.writeCountToFirstFile();
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            };
+            return new SplittingOutputStream(fileGenerator, maxArtifactSize - HEADER_SIZE, onClose);
+        }
+
+        @Override
+        public String description() {
+            return "split archive: " + baseArtifact;
+        }
+
+        public interface SplitFileGeneratorMonitor {
+            void openedPath(Path pth);
+
+            SplitFileGeneratorMonitor NO_MONITOR = pth -> {};
+        }
+
+        private static final class SplitFileGenerator implements Iterator<OutputStream> {
+            private final FileSystemAbstraction fs;
+            private final SplitFileGeneratorMonitor monitor;
+            private final SequentialFileNameHelper fileNameHelper;
+            private final Path baseArtifact;
+            private final UUID id;
+            private int count = 0;
+
+            SplitFileGenerator(Path basePath, FileSystemAbstraction fs, SplitFileGeneratorMonitor monitor) {
+                this.fs = fs;
+                this.fileNameHelper = new SequentialFileNameHelper(
+                        basePath.getParent(), basePath.getFileName().toString());
+                this.baseArtifact = basePath;
+                this.id = UUID.randomUUID();
+                this.monitor = monitor;
+            }
+
+            @Override
+            public boolean hasNext() {
+                return count < Integer.MAX_VALUE;
+            }
+
+            @Override
+            public OutputStream next() {
+                OutputStream stream = null;
+                try {
+                    count++;
+                    Path p = fileNameHelper.getFileForVersion(count);
+                    stream = fs.openAsOutputStream(p, Set.of(WRITE, CREATE_NEW));
+                    monitor.openedPath(p);
+                    stream.write(MAGIC_DATA_HEADER.getBytes()); // header to signal split artifact
+                    stream.write(intToByteArray(count)); // index of this file in the split artifact, starting from 1
+                    stream.write(uuidBytes()); // unique id of the split artifacts
+                    return stream;
+                } catch (IOException e) {
+                    if (stream != null) {
+                        try {
+                            stream.close();
+                        } catch (IOException ex) {
+                            e.addSuppressed(ex);
+                        }
                     }
-                },
-                root,
-                file);
-    }
+                    throw new UncheckedIOException(e);
+                }
+            }
 
-    private void dumpDirectory(Path root, Path dir) throws IOException {
-        withEntry(stream -> {}, root, dir);
-    }
+            private byte[] uuidBytes() {
+                ByteBuffer buffer = ByteBuffer.allocate(16);
+                buffer.putLong(id.getMostSignificantBits());
+                buffer.putLong(id.getLeastSignificantBits());
+                return buffer.array();
+            }
 
-    private void withEntry(ThrowingConsumer<ArchiveOutputStream, IOException> operation, Path root, Path file)
-            throws IOException {
-        operations.add(new ArchiveOperation(operation, root, file));
-    }
+            private byte[] intToByteArray(int value) {
+                return new byte[] {(byte) (value >>> 24), (byte) (value >>> 16), (byte) (value >>> 8), (byte) value};
+            }
 
-    private void writeFile(Path file, ArchiveOutputStream archiveStream) throws IOException {
-        try (var in = fs.openAsInputStream(file)) {
-            copy(in, archiveStream, progressPrinter);
-        }
-    }
-
-    private static class ArchiveOperation {
-        final ThrowingConsumer<ArchiveOutputStream, IOException> operation;
-        final long size;
-        final boolean isFile;
-        final Path root;
-        final Path file;
-
-        private ArchiveOperation(ThrowingConsumer<ArchiveOutputStream, IOException> operation, Path root, Path file)
-                throws IOException {
-            this.operation = operation;
-            this.isFile = Files.isRegularFile(file);
-            this.size = isFile ? Files.size(file) : 0;
-            this.root = root;
-            this.file = file;
-        }
-
-        void addToArchive(ArchiveOutputStream stream) throws IOException {
-            ArchiveEntry entry = createEntry(file, root, stream);
-            stream.putArchiveEntry(entry);
-            operation.accept(stream);
-            stream.closeArchiveEntry();
-        }
-
-        private static ArchiveEntry createEntry(Path file, Path root, ArchiveOutputStream archive) throws IOException {
-            return archive.createArchiveEntry(file.toFile(), "./" + root.relativize(file));
+            void writeCountToFirstFile() throws IOException {
+                // The first file contains header, total artifact count and uuid
+                try (var stream = fs.openAsOutputStream(baseArtifact, Set.of(WRITE, CREATE_NEW))) {
+                    monitor.openedPath(baseArtifact);
+                    stream.write(MAGIC_MANIFEST_HEADER.getBytes());
+                    stream.write(intToByteArray(count));
+                    stream.write(uuidBytes());
+                }
+            }
         }
     }
 }

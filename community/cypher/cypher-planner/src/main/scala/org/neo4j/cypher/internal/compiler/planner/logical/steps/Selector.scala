@@ -60,10 +60,10 @@ case class Selector(
       }
 
       candidates match {
-        case Seq()                              => plan
-        case Seq(candidate)                     => candidate.plan
-        case candidates if candidates.size <= 3 =>
-          // If we have only 2 or 3 candidates we can cost compare all alternative orders of applying the selections.
+        case Seq()                                                                       => plan
+        case Seq(candidate)                                                              => candidate.plan
+        case candidates if candidates.size <= context.settings.selectorCandidatesMaximum =>
+          // If we have at most 'selectorCandidatesMaximum' candidates (default is 3) we can cost compare all alternative orders of applying the selections.
           val candidatesWithAllSelectionsApplied = candidates.map {
             case SelectionCandidate(plan, solvedPredicates) =>
               selectIt(plan, stillUnsolvedPredicates -- solvedPredicates)
@@ -106,7 +106,7 @@ case class Selector(
 
 }
 
-trait SelectionCandidateGenerator extends {
+trait SelectionCandidateGenerator {
 
   /**
    * Generate candidates which solve a predicate.

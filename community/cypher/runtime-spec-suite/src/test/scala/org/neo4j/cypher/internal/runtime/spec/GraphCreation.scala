@@ -20,17 +20,23 @@
 package org.neo4j.cypher.internal.runtime.spec
 
 import org.neo4j.cypher.internal.RuntimeContext
-import org.neo4j.cypher.internal.runtime.graphtemplate.InstantiatedGraph
-import org.neo4j.cypher.internal.runtime.graphtemplate.TransactionTemplateInstantiator
-import org.neo4j.cypher.internal.runtime.graphtemplate.parsing.GraphTemplateParser
 import org.neo4j.cypher.internal.runtime.spec.GraphCreation.ComplexGraph
+import org.neo4j.cypher.internal.runtime.spec.GraphCreation.Connectivity
+import org.neo4j.cypher.internal.runtime.spec.GraphCreation.NodeConnections
+import org.neo4j.cypher.internal.runtime.spec.GraphCreation.NodeSpec
+import org.neo4j.cypher.internal.runtime.spec.GraphCreation.NodeSpec.WithLabel
+import org.neo4j.cypher.internal.runtime.spec.GraphCreation.NodeSpec.WithProperty
 import org.neo4j.cypher.internal.util.Rewriter
+import org.neo4j.cypher.internal.util.test_helpers.graphtemplate.NamedEntites
+import org.neo4j.cypher.internal.util.test_helpers.graphtemplate.TemplateInstantiator
+import org.neo4j.cypher.internal.util.test_helpers.graphtemplate.parsing.GraphTemplateParser
 import org.neo4j.cypher.internal.util.topDown
 import org.neo4j.graphdb.Label
 import org.neo4j.graphdb.Label.label
 import org.neo4j.graphdb.Node
 import org.neo4j.graphdb.Relationship
 import org.neo4j.graphdb.RelationshipType
+import org.neo4j.graphdb.Transaction
 import org.neo4j.graphdb.schema.ConstraintCreator
 import org.neo4j.graphdb.schema.IndexCreator
 import org.neo4j.graphdb.schema.IndexType
@@ -39,6 +45,7 @@ import org.neo4j.kernel.api.KernelTransaction
 import java.util.concurrent.TimeUnit
 
 import scala.collection.mutable.ArrayBuffer
+import scala.language.implicitConversions
 import scala.util.Random
 
 /**
@@ -121,7 +128,7 @@ trait GraphCreation[CONTEXT <: RuntimeContext] {
 
   // GRAPHS
 
-  def fromTemplate(str: String, defaultRelType: String = "R"): InstantiatedGraph[Node, Relationship] = {
+  def fromTemplate(str: String, defaultRelType: String = "R"): NamedEntites[Node, Relationship] = {
     GraphTemplateParser
       .parse(str)
       .instantiate(new TransactionTemplateInstantiator(runtimeTestSupport.tx, defaultRelType))
@@ -462,8 +469,8 @@ trait GraphCreation[CONTEXT <: RuntimeContext] {
       }
     }
 
-    val startMiddle = start.createRelationshipTo(middle, A)
-    val endMiddle = end.createRelationshipTo(middle, A)
+    val startMiddle = start.createRelationshipTo(middle, A) // 0
+    val endMiddle = end.createRelationshipTo(middle, A) // 1
 
     val sa1 = runtimeTestSupport.tx.createNode() // 3
     val sb1 = runtimeTestSupport.tx.createNode() // 4
@@ -472,20 +479,20 @@ trait GraphCreation[CONTEXT <: RuntimeContext] {
     val sc2 = runtimeTestSupport.tx.createNode() // 7
     val sc3 = runtimeTestSupport.tx.createNode() // 8
 
-    chain(A, start, sa1, middle)
-    chain(B, start, sb1, sb2, middle)
-    chain(A, middle, sc3, sc2, sc1, start)
+    chain(A, start, sa1, middle) // 2, 3
+    chain(B, start, sb1, sb2, middle) // 4, 5, 6
+    chain(A, middle, sc3, sc2, sc1, start) // 7, 8, 9, 10
 
-    val ea1 = runtimeTestSupport.tx.createNode()
-    val eb1 = runtimeTestSupport.tx.createNode()
-    val eb2 = runtimeTestSupport.tx.createNode()
-    val ec1 = runtimeTestSupport.tx.createNode()
-    val ec2 = runtimeTestSupport.tx.createNode()
-    val ec3 = runtimeTestSupport.tx.createNode()
+    val ea1 = runtimeTestSupport.tx.createNode() // 9
+    val eb1 = runtimeTestSupport.tx.createNode() // 10
+    val eb2 = runtimeTestSupport.tx.createNode() // 11
+    val ec1 = runtimeTestSupport.tx.createNode() // 12
+    val ec2 = runtimeTestSupport.tx.createNode() // 13
+    val ec3 = runtimeTestSupport.tx.createNode() // 14
 
-    chain(A, middle, ea1, end)
-    chain(B, middle, eb1, eb2, end)
-    chain(A, middle, ec1, ec2, ec3, end)
+    chain(A, middle, ea1, end) // 11, 12
+    chain(B, middle, eb1, eb2, end) // 13, 14, 15
+    chain(A, middle, ec1, ec2, ec3, end) // 16, 17, 18, 19
 
     SineGraph(start, middle, end, sa1, sb1, sb2, sc1, sc2, sc3, ea1, eb1, eb2, ec1, ec2, ec3, startMiddle, endMiddle)
   }
@@ -690,15 +697,6 @@ trait GraphCreation[CONTEXT <: RuntimeContext] {
     (globalCenter, nNodes)
   }
 
-  case class Connectivity(atLeast: Int, atMost: Int, relType: String)
-
-  /**
-   * All outgoing relationships of a node
-   * @param from the start node
-   * @param connections the end nodes rels, grouped by rel type
-   */
-  case class NodeConnections(from: Node, connections: Map[String, Seq[Node]])
-
   /**
    * Randomly connect nodes.
    * @param nodes all nodes to connect.
@@ -778,7 +776,7 @@ trait GraphCreation[CONTEXT <: RuntimeContext] {
     rels.map {
       case (from, to, typ, props) =>
         val r = nodes(from).createRelationshipTo(nodes(to), RelationshipType.withName(typ))
-        props.foreach((r.setProperty _).tupled)
+        props.foreach { case (key, value) => r.setProperty(key, value) }
         r
     }
   }
@@ -800,10 +798,22 @@ trait GraphCreation[CONTEXT <: RuntimeContext] {
     }
   }
 
+  def nodeIndex(name: String, indexType: IndexType, labels: Seq[String], properties: String*): Unit = {
+    nodeIndex(labels) { creator =>
+      properties.foldLeft(creator.withIndexType(indexType).withName(name)) { case (newCreator, prop) =>
+        newCreator.on(prop)
+      }
+    }
+  }
+
   def nodeIndex(label: String)(f: IndexCreator => IndexCreator): Unit = {
+    nodeIndex(Seq(label))(f)
+  }
+
+  def nodeIndex(labels: Seq[String])(f: IndexCreator => IndexCreator): Unit = {
     runtimeTestSupport.restartTx()
     try {
-      f(runtimeTestSupport.tx.schema().indexFor(Label.label(label))).create()
+      f(runtimeTestSupport.tx.schema().indexFor(labels.map(label => Label.label(label)): _*)).create()
     } finally {
       runtimeTestSupport.restartTx()
     }
@@ -828,6 +838,28 @@ trait GraphCreation[CONTEXT <: RuntimeContext] {
       runtimeTestSupport.restartTx()
     }
     runtimeTestSupport.tx.schema().awaitIndexesOnline(10, TimeUnit.MINUTES)
+  }
+
+  def relationshipIndex(relType: String)(f: IndexCreator => IndexCreator): Unit = relationshipIndex(Seq(relType))(f)
+
+  def relationshipIndex(relTypes: Seq[String])(f: IndexCreator => IndexCreator): Unit = {
+    runtimeTestSupport.restartTx()
+    try {
+      f(runtimeTestSupport.tx.schema().indexFor(relTypes.map(relType =>
+        RelationshipType.withName(relType)
+      ): _*)).create()
+    } finally {
+      runtimeTestSupport.restartTx()
+    }
+    runtimeTestSupport.tx.schema().awaitIndexesOnline(10, TimeUnit.MINUTES)
+  }
+
+  def relationshipIndex(name: String, indexType: IndexType, types: Seq[String], properties: String*): Unit = {
+    relationshipIndex(types) { creator =>
+      properties.foldLeft(creator.withIndexType(indexType).withName(name)) { case (newCreator, prop) =>
+        newCreator.on(prop)
+      }
+    }
   }
 
   /**
@@ -909,9 +941,43 @@ trait GraphCreation[CONTEXT <: RuntimeContext] {
       properties.foldLeft(creator) { case (acc, prop) => acc.assertPropertyIsNodeKey(prop) }
     }
   }
+
+  def newNode(params: NodeSpec*): Node = {
+    val (labels, props) = params.partitionMap {
+      case WithLabel(label)         => Left(label)
+      case WithProperty(key, value) => Right(key -> value)
+    }
+
+    val n = runtimeTestSupport.tx.createNode(labels: _*)
+    props.foreach { case (key, value) =>
+      n.setProperty(key, value)
+    }
+    n
+  }
 }
 
 object GraphCreation {
+
+  // The case classes are not defined in the trait above because the Scala 2.13 TASTy reader
+  // cannot resolve objects (including synthetic companions) nested in a Scala 3 trait.
+  case class Connectivity(atLeast: Int, atMost: Int, relType: String)
+
+  /**
+   * All outgoing relationships of a node
+   * @param from the start node
+   * @param connections the end nodes rels, grouped by rel type
+   */
+  case class NodeConnections(from: Node, connections: Map[String, Seq[Node]])
+
+  sealed trait NodeSpec
+
+  object NodeSpec {
+    case class WithLabel(label: Label) extends NodeSpec
+    case class WithProperty(key: String, value: Any) extends NodeSpec
+
+    implicit def labelStringToSpec(string: String): NodeSpec = WithLabel(Label.label(string))
+    implicit def propTupleToSpec(tuple: (String, Any)): NodeSpec = WithProperty(tuple._1, tuple._2)
+  }
 
   case class ComplexGraph(
     n0: Node,
@@ -954,3 +1020,13 @@ case class SineGraph(
   startMiddle: Relationship,
   endMiddle: Relationship
 )
+
+class TransactionTemplateInstantiator(tx: Transaction, defaultRelType: String = "R")
+    extends TemplateInstantiator[Node, Relationship] {
+
+  def createNode(labels: Seq[String]): Node =
+    tx.createNode(labels.map(Label.label): _*)
+
+  def createRel(from: Node, to: Node, relType: Option[String]): Relationship =
+    from.createRelationshipTo(to, RelationshipType.withName(relType.getOrElse(defaultRelType)))
+}

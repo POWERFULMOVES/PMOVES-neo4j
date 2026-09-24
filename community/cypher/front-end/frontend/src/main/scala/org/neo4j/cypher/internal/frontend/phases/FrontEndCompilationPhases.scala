@@ -16,100 +16,163 @@
  */
 package org.neo4j.cypher.internal.frontend.phases
 
-import org.neo4j.configuration.GraphDatabaseInternalSettings.ExtractLiteral
-import org.neo4j.cypher.internal.CypherVersion
+import org.neo4j.configuration.GraphDatabaseInternalSettings
 import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.AttributeBasedAccessControl
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.DisableTypeCheckingInSemanticAnalysis
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.EnableParsingOfObfuscatedLiterals
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.ExperimentalCypherVersions
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.GroupByClause
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.LocalCallables
 import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.MultipleDatabases
-import org.neo4j.cypher.internal.rewriting.Deprecations
-import org.neo4j.cypher.internal.rewriting.rewriters.Forced
-import org.neo4j.cypher.internal.rewriting.rewriters.IfNoParameter
-import org.neo4j.cypher.internal.rewriting.rewriters.LiteralExtractionStrategy
-import org.neo4j.cypher.internal.rewriting.rewriters.Never
-import org.neo4j.cypher.internal.util.symbols.ParameterTypeInfo
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.OidcCredentialForwarding
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.RelationshipPropertyValueAccessRules
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.ScopeQueries
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.SecretManager
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.ShowSetting
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.UserTags
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.UserTagsInPropertyRules
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.ValueInListProperty
+import org.neo4j.cypher.internal.frontend.phases.factories.ParsePipelineTransformerFactory
+import org.neo4j.cypher.internal.frontend.phases.factories.ParsingConfig
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.AstRewriting
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.ExtractLocalDefinitions
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.LiteralExtraction
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.Parse
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.ParsePipelineTransformer
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.ReplacePatternComprehensionWithCollectSubqueryRewriter
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.ResolveSimpleDynamicExpressions
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.SemanticAnalysis
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.scoping.ComputeExpressionDependencies
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.scoping.ScopeSurveyor
+import org.neo4j.cypher.internal.util.StepSequencer
+import org.neo4j.cypher.internal.util.StepSequencer.AccumulatedSteps
+import org.neo4j.graphdb.config.Setting
+import org.neo4j.values.virtual.MapValue
 
 trait FrontEndCompilationPhases {
 
-  val defaultSemanticFeatures: Seq[SemanticFeature.MultipleDatabases.type] = Seq(
-    MultipleDatabases
+  val defaultSemanticFeatures: Seq[String] = Seq(
+    MultipleDatabases.productPrefix,
+    ShowSetting.productPrefix,
+    OidcCredentialForwarding.productPrefix,
+    RelationshipPropertyValueAccessRules.productPrefix,
+    AttributeBasedAccessControl.productPrefix,
+    UserTags.productPrefix,
+    GroupByClause.productPrefix,
+    ValueInListProperty.productPrefix
   )
 
-  def enabledSemanticFeatures(extra: Set[String]): Seq[SemanticFeature] =
-    defaultSemanticFeatures ++ extra.map(SemanticFeature.fromString)
+  def enabledSemanticFeatures(features: Set[String]): Seq[SemanticFeature] =
+    features.map(SemanticFeature.fromString).toSeq
 
-  case class ParsingConfig(
-    cypherVersion: CypherVersion,
-    extractLiterals: ExtractLiteral = ExtractLiteral.ALWAYS,
-    /* TODO: This is not part of configuration - Move to BaseState */
-    parameterTypeMapping: Map[String, ParameterTypeInfo] = Map.empty,
-    semanticFeatures: Seq[SemanticFeature] = defaultSemanticFeatures,
-    obfuscateLiterals: Boolean = false,
-    antlrParserEnabled: Boolean = false
-  ) {
+  /**
+   * Steps in the parse pipeline that run before the obfuscator is ready. The obfuscator is
+   * wired onto the ExecutingQuery only after the post steps (including semantic analysis) complete,
+   * so on failure anywhere before that not carry the `query` field in the logs.
+   */
+  private def parsingBasePre(config: ParsingConfig): Transformer[BaseContext, BaseState, BaseState] =
+    Parse andThen ScopeSurveyor andThen
+      // Needs to be done before any other rewrites to not miss literals
+      ObfuscationMetadataCollection andThen
+      ParsePipelineTransformer.getPreObfuscatorTransformer(config)
 
-    def literalExtractionStrategy: LiteralExtractionStrategy = extractLiterals match {
-      case ExtractLiteral.ALWAYS          => Forced
-      case ExtractLiteral.NEVER           => Never
-      case ExtractLiteral.IF_NO_PARAMETER => IfNoParameter
-      case _ => throw new IllegalStateException(s"$extractLiterals is not a known strategy")
-    }
-  }
-
-  def parsingBase(config: ParsingConfig): Transformer[BaseContext, BaseState, BaseState] = {
-    Parse(config.antlrParserEnabled, config.cypherVersion) andThen
-      CollectSyntaxUsageMetrics andThen
-      SyntaxDeprecationWarningsAndReplacements(
-        Deprecations.SyntacticallyDeprecatedFeatures(config.cypherVersion)
-      ) andThen
-      PreparatoryRewriting andThen
-      If((_: BaseState) => config.obfuscateLiterals)(
-        extractSensitiveLiterals
-      ) andThen
-      SemanticAnalysis(warn = true, config.semanticFeatures: _*) andThen
-      RemoveDuplicateUseClauses andThen
-      SemanticTypeCheck(config.cypherVersion) andThen
-      SyntaxDeprecationWarningsAndReplacements(
-        Deprecations.SemanticallyDeprecatedFeatures(config.cypherVersion)
-      ) andThen
-      IsolateSubqueriesInMutatingPatterns andThen
-      SemanticAnalysis(warn = false, config.semanticFeatures: _*)
-  }
-
-  // Phase 1
-  def parsing(
+  /**
+   * Steps in the parse pipeline that include semantic analysis, semantics-dependent rewriting, and
+   * obfuscation metadata collection. These run before the obfuscator is wired onto the
+   * ExecutingQuery, so a failure here (e.g. a semantic error) leaves the query text withheld from
+   * the debug log under obfuscation.
+   */
+  private def parsingBasePost(
     config: ParsingConfig,
-    resolver: Option[ScopedProcedureSignatureResolver] = None
+    parameters: MapValue
   ): Transformer[BaseContext, BaseState, BaseState] = {
-    parsingBase(config) andThen
+    ParsePipelineTransformer.getPostObfuscatorTransformer(config) andThen
+      If((_: BaseState) => config.resolveSimpleDynamicExpressions)(
+        IfChangedSetSemantics.using(ResolveSimpleDynamicExpressions(parameters))
+      ) andThen
+      SemanticAnalysis.ifSemanticsNotUpToDate(warn = Some(false))
+  }
+
+  // Phase 1 — pre-obfuscator portion.
+  def parsingPre(config: ParsingConfig): Transformer[BaseContext, BaseState, BaseState] = parsingBasePre(config)
+
+  // Phase 1 — post-obfuscator portion.
+  def parsingPost(
+    config: ParsingConfig,
+    parameters: MapValue = MapValue.EMPTY
+  ): Transformer[BaseContext, BaseState, BaseState] =
+    parsingBasePost(config, parameters) andThen
       AstRewriting(parameterTypeMapping = config.parameterTypeMapping) andThen
       LiteralExtraction(config.literalExtractionStrategy) andThen
-      /*
-       * With query router we log the query early and therefore need to resolve
-       * procedure calls early in order to obfuscate sensitive procedure params
-       * in the query log.
-       */
-      If((_: BaseState) => resolver.isDefined)(TryRewriteProcedureCalls(resolver.orNull)) andThen
-      ObfuscationMetadataCollection
-  }
+      SetReturnColumns
+
+  // Phase 1 — full chain. Convenience for callers that don't need to interpose at the boundary.
+  def parsing(
+    config: ParsingConfig,
+    parameters: MapValue = MapValue.EMPTY
+  ): Transformer[BaseContext, BaseState, BaseState] =
+    parsingPre(config) andThen parsingPost(config, parameters)
 
   // Phase 1 (Fabric)
   def fabricParsing(
     config: ParsingConfig,
-    resolver: ScopedProcedureSignatureResolver
+    parameters: MapValue
   ): Transformer[BaseContext, BaseState, BaseState] = {
-    parsingBase(config) andThen
-      ExpandStarRewriter andThen
-      TryRewriteProcedureCalls(resolver) andThen
-      ObfuscationMetadataCollection andThen
-      SemanticAnalysis(warn = true, config.semanticFeatures: _*)
+    parsingBasePre(config) andThen
+      parsingBasePost(config, parameters) andThen
+      SemanticAnalysis(warn = Some(true)) andThen
+      SetReturnColumns
   }
 
+  private val fabricFinalizeStepSet: Set[StepSequencer.Step & ParsePipelineTransformerFactory] = Set(
+    ScopeSurveyor,
+    ResolveCallables,
+    LiteralExtraction,
+    SemanticAnalysis,
+    ReplacePatternComprehensionWithCollectSubqueryRewriter,
+    AstRewriting,
+    ComputeExpressionDependencies,
+    ObfuscationMetadataCollection,
+    ExtractLocalDefinitions
+  )
+
+  private val AccumulatedSteps(fabricFinalizeSteps, _) =
+    StepSequencer[StepSequencer.Step & ParsePipelineTransformerFactory]().orderSteps(
+      fabricFinalizeStepSet,
+      initialConditions =
+        ParsePipelineTransformer.postObfuscatorPostConditions -- fabricFinalizeStepSet.flatMap(_.postConditions)
+    )
+
   // Phase 1.1 (Fabric)
-  def fabricFinalize(config: ParsingConfig): Transformer[BaseContext, BaseState, BaseState] = {
-    SemanticAnalysis(warn = true, config.semanticFeatures: _*) andThen
-      AstRewriting(parameterTypeMapping = config.parameterTypeMapping) andThen
-      LiteralExtraction(config.literalExtractionStrategy) andThen
-      SemanticAnalysis(warn = false, config.semanticFeatures: _*)
+  def fabricFinalize(
+    config: ParsingConfig,
+    resolver: ScopedProcedureSignatureResolver
+  ): Transformer[BaseContext, BaseState, BaseState] = {
+    val finalizeConfig = config.copy(resolveCallables = StrictResolveCallables(resolver), isFabricPipeline = false)
+    Chainer.chainTransformers(fabricFinalizeSteps.map(_.getCheckedTransformer(finalizeConfig)))
+      .asInstanceOf[Transformer[BaseContext, BaseState, BaseState]]
   }
 }
 
-object FrontEndCompilationPhases extends FrontEndCompilationPhases
+object FrontEndCompilationPhases extends FrontEndCompilationPhases {
+
+  def settingToFeatureMapping: Seq[(Setting[java.lang.Boolean], String)] = {
+    Seq(
+      GraphDatabaseInternalSettings.show_setting -> ShowSetting.productPrefix,
+      GraphDatabaseInternalSettings.oidc_credential_forwarding_enabled -> OidcCredentialForwarding.productPrefix,
+      GraphDatabaseInternalSettings.enable_experimental_cypher_versions -> ExperimentalCypherVersions.productPrefix,
+      GraphDatabaseInternalSettings.relationship_property_value_access_rules -> RelationshipPropertyValueAccessRules.productPrefix,
+      GraphDatabaseInternalSettings.cypher_group_by_clause_enabled -> GroupByClause.productPrefix,
+      GraphDatabaseInternalSettings.cypher_enable_local_callables -> LocalCallables.productPrefix,
+      GraphDatabaseInternalSettings.cypher_enable_scope_queries -> ScopeQueries.productPrefix,
+      GraphDatabaseInternalSettings.cypher_enable_parsing_of_obfuscated_literals -> EnableParsingOfObfuscatedLiterals.productPrefix,
+      GraphDatabaseInternalSettings.cypher_disable_type_checking -> DisableTypeCheckingInSemanticAnalysis.productPrefix,
+      GraphDatabaseInternalSettings.attribute_based_access_control -> AttributeBasedAccessControl.productPrefix,
+      GraphDatabaseInternalSettings.user_tags -> UserTags.productPrefix,
+      GraphDatabaseInternalSettings.value_in_list_property -> ValueInListProperty.productPrefix,
+      GraphDatabaseInternalSettings.user_tags_in_property_rules -> UserTagsInPropertyRules.productPrefix,
+      GraphDatabaseInternalSettings.secrets_manager_enabled -> SecretManager.productPrefix
+    )
+  }
+}

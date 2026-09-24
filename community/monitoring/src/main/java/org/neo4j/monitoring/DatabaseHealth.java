@@ -20,9 +20,12 @@
 package org.neo4j.monitoring;
 
 import java.util.Objects;
+import java.util.function.BiFunction;
 import org.neo4j.internal.helpers.Exceptions;
 import org.neo4j.kernel.lifecycle.LifecycleAdapter;
 import org.neo4j.logging.InternalLog;
+import org.neo4j.logging.Neo4jInternalErrorLogMessage;
+import org.neo4j.logging.log4j.Neo4jLogMarkers;
 
 public class DatabaseHealth extends LifecycleAdapter implements Panic, OutOfDiskSpace {
     private static final String panicMessage = "The database has encountered a critical error, "
@@ -53,6 +56,21 @@ public class DatabaseHealth extends LifecycleAdapter implements Panic, OutOfDisk
         }
     }
 
+    /**
+     * Asserts that the database is in good health. If that is not the case then the cause of the
+     * unhealthy state is wrapped in an exception calling the given disguise function.
+     *
+     * @param panicDisguise a function returning the desired exception, given the panic message and cause.
+     * @throws EXCEPTION exception type to wrap cause in.
+     */
+    @Override
+    public <EXCEPTION extends Throwable> void assertNoPanic(BiFunction<String, Throwable, EXCEPTION> panicDisguise)
+            throws EXCEPTION {
+        if (hasPanic) {
+            throw panicDisguise.apply(panicMessage, causeOfPanic);
+        }
+    }
+
     @Override
     public synchronized void panic(Throwable cause) {
         if (hasPanic) {
@@ -62,7 +80,7 @@ public class DatabaseHealth extends LifecycleAdapter implements Panic, OutOfDisk
         Objects.requireNonNull(cause, "Must provide a non null cause for the database panic");
         this.causeOfPanic = cause;
         this.hasPanic = true;
-        log.error("Database panic: " + panicMessage, cause);
+        log.error(new Neo4jInternalErrorLogMessage(Neo4jLogMarkers.KERNEL, "Database panic: " + panicMessage, cause));
         healthEventGenerator.panic(cause);
     }
 

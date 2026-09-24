@@ -20,54 +20,28 @@
 package org.neo4j.queryapi;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.neo4j.queryapi.QueryApiTestUtil.setupLogging;
 import static org.neo4j.server.queryapi.response.format.Fieldnames.VALUES_KEY;
 
 import java.io.IOException;
 import java.util.List;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.neo4j.configuration.connectors.BoltConnector;
-import org.neo4j.configuration.connectors.BoltConnectorInternalSettings;
-import org.neo4j.configuration.connectors.ConnectorPortRegister;
-import org.neo4j.configuration.connectors.ConnectorType;
-import org.neo4j.configuration.connectors.HttpConnector;
-import org.neo4j.configuration.helpers.SocketAddress;
 import org.neo4j.dbms.api.DatabaseManagementService;
 import org.neo4j.graphdb.Label;
-import org.neo4j.queryapi.testclient.QueryAPITestClient;
-import org.neo4j.queryapi.testclient.QueryRequest;
+import org.neo4j.queryapi.test.annotation.QueryAPITestExtension;
+import org.neo4j.queryapi.test.testclient.QueryAPITestClient;
+import org.neo4j.queryapi.test.testclient.QueryContentType;
+import org.neo4j.queryapi.test.testclient.QueryRequest;
 import org.neo4j.server.queryapi.response.format.Fieldnames;
-import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 
+@QueryAPITestExtension(enabledFeatureFlagForUUID = true)
 class QueryResourcePlainJsonIT {
 
-    private static DatabaseManagementService dbms;
-    private static QueryAPITestClient testClient;
+    private final DatabaseManagementService dbms;
+    private final QueryAPITestClient testClient;
 
-    @BeforeAll
-    static void beforeAll() {
-        setupLogging();
-        var builder = new TestDatabaseManagementServiceBuilder();
-        dbms = builder.setConfig(HttpConnector.enabled, true)
-                .setConfig(HttpConnector.listen_address, new SocketAddress("localhost", 0))
-                .setConfig(
-                        BoltConnectorInternalSettings.local_channel_address,
-                        QueryResourcePlainJsonIT.class.getSimpleName())
-                .impermanent()
-                .setConfig(BoltConnector.enabled, true)
-                .build();
-        var portRegister = QueryApiTestUtil.resolveDependency(dbms, ConnectorPortRegister.class);
-        var queryEndpoint =
-                "http://" + portRegister.getLocalAddress(ConnectorType.HTTP) + "/db/{databaseName}/query/v2";
-        testClient = new QueryAPITestClient(queryEndpoint);
-    }
-
-    @AfterAll
-    static void teardown() {
-        dbms.shutdown();
+    QueryResourcePlainJsonIT(DatabaseManagementService dbms, QueryAPITestClient testClient) {
+        this.dbms = dbms;
+        this.testClient = testClient;
     }
 
     @Test
@@ -78,6 +52,7 @@ class QueryResourcePlainJsonIT {
 
         QueryResponseAssertions.assertThat(response)
                 .wasSuccessful()
+                .hasTimers()
                 .hasFieldNames("bool", "number", "float", "string")
                 .hasRecords(List.of(List.of(true, 1, 1.23f, "hello")));
     }
@@ -87,9 +62,9 @@ class QueryResourcePlainJsonIT {
         var response = testClient.autoCommit(
                 QueryRequest.newBuilder().statement("RETURN null as aNull").build());
 
-        QueryResponseAssertions.assertThat(response).wasSuccessful().hasFieldNames("aNull");
+        QueryResponseAssertions.assertThat(response).wasSuccessful().hasTimers().hasFieldNames("aNull");
 
-        assertTrue(response.body().data().get(VALUES_KEY).get(0).get(0).isNull());
+        assertThat(response.body().data().get(VALUES_KEY).get(0).get(0).isNull());
     }
 
     @Test
@@ -97,6 +72,7 @@ class QueryResourcePlainJsonIT {
         var response = testClient.autoCommit(QueryRequest.newBuilder()
                 .statement("RETURN datetime('2015-06-24T12:50:35.556+0100') AS theOffsetDateTime, "
                         + "datetime('2015-11-21T21:40:32.142[Antarctica/Troll]') AS theZonedDateTime,"
+                        + "datetime('2025-10-26T02:30:00+01:00[Europe/Stockholm]') AS theZonedDateTimeOnDSTSwitch,"
                         + "localdatetime('2015185T19:32:24') AS theLocalDateTime,"
                         + "date('+2015-W13-4') AS theDate,"
                         + "time('125035.556+0100') AS theTime,"
@@ -105,22 +81,25 @@ class QueryResourcePlainJsonIT {
 
         QueryResponseAssertions.assertThat(response)
                 .wasSuccessful()
+                .hasTimers()
                 .hasFieldNames(
                         "theOffsetDateTime",
                         "theZonedDateTime",
+                        "theZonedDateTimeOnDSTSwitch",
                         "theLocalDateTime",
                         "theDate",
                         "theTime",
                         "theLocalTime");
 
         var results = response.body().data().get(VALUES_KEY).get(0);
-        assertThat(results.size()).isEqualTo(6);
+        assertThat(results.size()).isEqualTo(7);
         assertThat(results.get(0).asText()).isEqualTo("2015-06-24T12:50:35.556+01:00");
         assertThat(results.get(1).asText()).isEqualTo("2015-11-21T21:40:32.142Z");
-        assertThat(results.get(2).asText()).isEqualTo("2015-07-04T19:32:24");
-        assertThat(results.get(3).asText()).isEqualTo("2015-03-26");
-        assertThat(results.get(4).asText()).isEqualTo("12:50:35.556+01:00");
-        assertThat(results.get(5).asText()).isEqualTo("12:50:35.556");
+        assertThat(results.get(2).asText()).isEqualTo("2025-10-26T02:30:00+01:00");
+        assertThat(results.get(3).asText()).isEqualTo("2015-07-04T19:32:24");
+        assertThat(results.get(4).asText()).isEqualTo("2015-03-26");
+        assertThat(results.get(5).asText()).isEqualTo("12:50:35.556+01:00");
+        assertThat(results.get(6).asText()).isEqualTo("12:50:35.556");
     }
 
     @Test
@@ -135,7 +114,7 @@ class QueryResourcePlainJsonIT {
                         + "point({longitude: 56.7, latitude: 12.78, height: 8})")
                 .build());
 
-        QueryResponseAssertions.assertThat(response).wasSuccessful();
+        QueryResponseAssertions.assertThat(response).wasSuccessful().hasTimers();
 
         var results = response.body().data().get(VALUES_KEY).get(0);
         assertThat(results.get(0).asText()).isEqualTo("SRID=7203;POINT (2.3 4.5)");
@@ -154,7 +133,7 @@ class QueryResourcePlainJsonIT {
                 .statement("RETURN duration('P14DT16H12M') AS theDuration")
                 .build());
 
-        QueryResponseAssertions.assertThat(response).wasSuccessful().hasFieldNames("theDuration");
+        QueryResponseAssertions.assertThat(response).wasSuccessful().hasTimers().hasFieldNames("theDuration");
 
         var results = response.body().data().get(VALUES_KEY);
         assertThat(results.get(0).get(0).asText()).isEqualTo("P14DT16H12M");
@@ -170,7 +149,7 @@ class QueryResourcePlainJsonIT {
         var response = testClient.autoCommit(
                 QueryRequest.newBuilder().statement("MATCH (n:FindMe) return n").build());
 
-        QueryResponseAssertions.assertThat(response).wasSuccessful();
+        QueryResponseAssertions.assertThat(response).wasSuccessful().hasTimers();
 
         var results = response.body().data().get(VALUES_KEY);
         assertThat(results.get(0)
@@ -187,7 +166,7 @@ class QueryResourcePlainJsonIT {
                 .statement("RETURN {key: 'Value', listKey: [{inner: 'Map1'}, {inner: 'Map2'}]} AS map")
                 .build());
 
-        QueryResponseAssertions.assertThat(response).wasSuccessful().hasFieldNames("map");
+        QueryResponseAssertions.assertThat(response).wasSuccessful().hasTimers().hasFieldNames("map");
 
         var values = response.body().data().get(VALUES_KEY);
         assertThat(values.get(0).get(0).get("key").asText()).isEqualTo("Value");
@@ -203,7 +182,7 @@ class QueryResourcePlainJsonIT {
                 .statement("RETURN [1,true,'hello',date('+2015-W13-4')] as list")
                 .build());
 
-        QueryResponseAssertions.assertThat(response).wasSuccessful().hasFieldNames("list");
+        QueryResponseAssertions.assertThat(response).wasSuccessful().hasTimers().hasFieldNames("list");
 
         var resultArray = response.body().data().get(VALUES_KEY).get(0).get(0);
         assertThat(resultArray.size()).isEqualTo(4);
@@ -219,7 +198,7 @@ class QueryResourcePlainJsonIT {
                 .statement("CREATE (n:MyLabel {aNumber: 1234}) RETURN n")
                 .build());
 
-        QueryResponseAssertions.assertThat(response).wasSuccessful();
+        QueryResponseAssertions.assertThat(response).wasSuccessful().hasTimers();
 
         var node = response.body().data().get(VALUES_KEY).get(0).get(0);
         assertThat(node.get("elementId").asText()).isNotBlank();
@@ -234,7 +213,7 @@ class QueryResourcePlainJsonIT {
                 .statement("CREATE (a)-[r:RELTYPE {onFire: true}]->(b) RETURN r")
                 .build());
 
-        QueryResponseAssertions.assertThat(response).wasSuccessful();
+        QueryResponseAssertions.assertThat(response).wasSuccessful().hasTimers();
 
         var rel = response.body().data().get(VALUES_KEY).get(0).get(0);
         assertThat(rel.get("elementId").asText()).isNotBlank();
@@ -262,5 +241,18 @@ class QueryResourcePlainJsonIT {
         assertThat(path.get(2).get("labels").get(0).asText()).isEqualTo("LabelB");
         assertThat(path.get(3).get("type").asText()).isEqualTo("RELCB");
         assertThat(path.get(4).get("labels").get(0).asText()).isEqualTo("LabelC");
+    }
+
+    @Test
+    void uuid() throws IOException, InterruptedException {
+        var response = testClient.autoCommit(QueryRequest.newBuilder()
+                .statement("RETURN UUID('ca3d9a43-09e3-4b66-9384-87ea25e27d01') AS theUUID")
+                .build());
+
+        QueryResponseAssertions.assertThat(response)
+                .hasContentType(QueryContentType.UNTYPED)
+                .wasSuccessful()
+                .hasFieldNames("theUUID")
+                .hasRecords(List.of(List.of("ca3d9a43-09e3-4b66-9384-87ea25e27d01")));
     }
 }

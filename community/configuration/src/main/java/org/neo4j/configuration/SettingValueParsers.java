@@ -145,6 +145,36 @@ public final class SettingValueParsers {
         }
     };
 
+    public static final SettingValueParser<Byte> UNSIGNED_BYTE = new SettingValueParser<>() {
+        @Override
+        public Byte parse(String value) {
+            try {
+                int number = Integer.parseInt(value.trim());
+                if (number < 0 || number > 255) {
+                    throw new IllegalArgumentException(format("'%d' must be between 0 and 255", number));
+                }
+                return (byte) number;
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(format("'%s' is not a valid byte value", value), e);
+            }
+        }
+
+        @Override
+        public Class<Byte> getType() {
+            return Byte.class;
+        }
+
+        @Override
+        public String getDescription() {
+            return "an unsigned byte";
+        }
+
+        @Override
+        public String valueToString(Byte value) {
+            return Integer.toString(Byte.toUnsignedInt(value));
+        }
+    };
+
     public static final SettingValueParser<Integer> INT = new SettingValueParser<>() {
         @Override
         public Integer parse(String value) {
@@ -263,7 +293,7 @@ public final class SettingValueParsers {
         }
 
         private static void addToken(List<String> tokens, StringBuilder sb) {
-            if (sb.length() > 0) {
+            if (!sb.isEmpty()) {
                 tokens.add(sb.toString());
                 sb.setLength(0);
             }
@@ -767,7 +797,33 @@ public final class SettingValueParsers {
                     + "with a length between "
                     + DatabaseNameValidator.MINIMUM_DATABASE_NAME_LENGTH + " and "
                     + DatabaseNameValidator.MAXIMUM_DATABASE_NAME_LENGTH
-                    + " characters, " + "starting with an alphabetic character but not with the name `system`";
+                    + " characters, "
+                    + "starting with an alphabetic character or number but not with the name `system`";
+        }
+
+        @Override
+        public Class<String> getType() {
+            return String.class;
+        }
+    };
+
+    public static final SettingValueParser<String> DATABASE_NAME_PATTERN = new SettingValueParser<>() {
+        @Override
+        public String parse(String name) {
+            validate(name);
+            return name;
+        }
+
+        @Override
+        public void validate(String value) {
+            DatabaseNameValidator.validateDatabaseNamePattern(value);
+        }
+
+        @Override
+        public String getDescription() {
+            return "a valid database name pattern containing only alphabetic characters, numbers, dots, question marks, asterisks, and dashes "
+                    + "with a length between " + 1 + " and "
+                    + DatabaseNameValidator.MAXIMUM_DATABASE_NAME_LENGTH + " characters";
         }
 
         @Override
@@ -854,6 +910,13 @@ public final class SettingValueParsers {
         public Class<Map<String, String>> getType() {
             return (Class<Map<String, String>>) (Class) Map.class;
         }
+
+        @Override
+        public String valueToString(Map<String, String> value) {
+            return value.entrySet().stream()
+                    .map(e -> e.getKey() + "=" + e.getValue())
+                    .collect(Collectors.joining(";"));
+        }
     }
 
     public static final SettingValueParser<Map<String, String>> MAP_PATTERN = new MapPattern();
@@ -874,8 +937,9 @@ public final class SettingValueParsers {
             case "k" -> ByteUnit.KibiByte;
             case "m" -> ByteUnit.MebiByte;
             case "g" -> ByteUnit.GibiByte;
-            default -> throw new IllegalArgumentException(
-                    "Illegal unit '" + unit + "' for number '" + numberWithPotentialUnit + "'");
+            default ->
+                throw new IllegalArgumentException(
+                        "Illegal unit '" + unit + "' for number '" + numberWithPotentialUnit + "'");
         };
     }
 

@@ -23,15 +23,25 @@ import static java.util.Collections.emptyList;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;
+import org.neo4j.cypher.internal.CypherVersion;
 
 class CompilerInfoTest {
     @Test
     void plannerInfoShouldBeInSmallCase() {
-        // given
-        CompilerInfo compilerInfo = new CompilerInfo("PLANNER", "RUNTIME", emptyList());
+        CompilerInfo compilerInfo = new CompilerInfo(
+                "PLANNER", "2026.04", RuntimeName.PIPELINED, emptyList(), CypherVersion.Legacy.legacyVersion());
 
-        // then
         assertThat(compilerInfo.planner()).isEqualTo("planner");
-        assertThat(compilerInfo.runtime()).isEqualTo("runtime");
+        assertThat(compilerInfo.runtime()).isEqualTo("pipelined");
+        assertThat(compilerInfo.isParallelRuntime()).isFalse();
+    }
+
+    @Test
+    void isParallelRuntimeShouldReturnTrueForParallel() {
+        CompilerInfo compilerInfo = new CompilerInfo(
+                "PLANNER", "2026.04", RuntimeName.PARALLEL, emptyList(), CypherVersion.Legacy.legacyVersion());
+
+        assertThat(compilerInfo.isParallelRuntime()).isTrue();
+        assertThat(compilerInfo.runtime()).isEqualTo("parallel");
     }
 }

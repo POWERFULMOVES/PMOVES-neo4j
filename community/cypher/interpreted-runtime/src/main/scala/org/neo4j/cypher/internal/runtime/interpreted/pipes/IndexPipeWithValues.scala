@@ -24,8 +24,10 @@ import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.runtime.QueryContext
 import org.neo4j.internal.kernel.api.NodeValueIndexCursor
 import org.neo4j.internal.kernel.api.RelationshipValueIndexCursor
+import org.neo4j.kernel.impl.util.ValueUtils
 import org.neo4j.values.virtual.VirtualNodeValue
 import org.neo4j.values.virtual.VirtualRelationshipValue
+import org.neo4j.values.virtual.VirtualValues
 
 /**
  * Provides a helper method for index pipes that get nodes together with actual property values.
@@ -33,7 +35,7 @@ import org.neo4j.values.virtual.VirtualRelationshipValue
 trait IndexPipeWithValues extends Pipe {
 
   // Name of the entity variable
-  val ident: String
+  val ident: Option[String]
   // all indices where the index can provide values
   val indexPropertyIndices: Array[Int]
   // the cached properties where we will get values
@@ -46,9 +48,15 @@ trait IndexPipeWithValues extends Pipe {
     cursor: NodeValueIndexCursor
   ) extends IndexIteratorBase[CypherRow](cursor) {
 
+    private val newRow: NodeValueIndexCursor => CypherRow = ident match {
+      case Some(node) => (cursor: NodeValueIndexCursor) =>
+          rowFactory.copyWith(baseContext, node, queryContext.nodeById(cursor.nodeReference()))
+      case None => (_: NodeValueIndexCursor) => baseContext
+    }
+
     override protected def fetchNext(): CypherRow = {
       if (cursor.next()) {
-        val newContext = rowFactory.copyWith(baseContext, ident, queryContext.nodeById(cursor.nodeReference()))
+        val newContext = newRow(cursor)
         var i = 0
         while (i < indexPropertyIndices.length) {
           newContext.setCachedProperty(
@@ -65,46 +73,89 @@ trait IndexPipeWithValues extends Pipe {
   }
 
   class RelIndexIterator(
-    state: QueryState,
-    startNode: String,
-    endNode: String,
+    startNode: Option[String],
+    endNode: Option[String],
     baseContext: CypherRow,
     cursor: RelationshipValueIndexCursor
   ) extends IndexIteratorBase[CypherRow](cursor) {
-    private val queryContext = state.query
+    private val relationshipWriter = Relationships.compileRelationshipWriter(ident, startNode, endNode)
 
     override protected def fetchNext(): CypherRow = {
-      while (cursor.next()) {
-
-        val relationship = queryContext.relationshipById(cursor.relationshipReference())
-        if (cursor.readFromStore()) {
-          val source = queryContext.nodeById(cursor.sourceNodeReference())
-          val target = queryContext.nodeById(cursor.targetNodeReference())
-          val newContext = rowFactory.copyWith(baseContext, ident, relationship, startNode, source, endNode, target)
-          var i = 0
-          while (i < indexPropertyIndices.length) {
-            newContext.setCachedProperty(
-              indexCachedProperties(i).runtimeKey,
-              cursor.propertyValue(indexPropertyIndices(i))
-            )
-            i += 1
-          }
-          return newContext
+      while (cursor.next() && cursor.readFromStore()) {
+        val newContext =
+          relationshipWriter.writeRow(
+            rowFactory,
+            baseContext,
+            cursor
+          )
+        var i = 0
+        while (i < indexPropertyIndices.length) {
+          newContext.setCachedProperty(
+            indexCachedProperties(i).runtimeKey,
+            cursor.propertyValue(indexPropertyIndices(i))
+          )
+          i += 1
         }
+        return newContext
       }
       null
     }
   }
 
+  private class NonStoreAccessingRelIndexIterator(
+    baseContext: CypherRow,
+    cursor: RelationshipValueIndexCursor
+  ) extends IndexIteratorBase[CypherRow](cursor) {
+    private val relationshipWriter = Relationships.compileRelationshipWriter(ident, None, None)
+
+    override protected def fetchNext(): CypherRow = {
+      if (cursor.next()) {
+        val newContext =
+          relationshipWriter.writeRow(
+            rowFactory,
+            baseContext,
+            cursor
+          )
+        var i = 0
+        while (i < indexPropertyIndices.length) {
+          newContext.setCachedProperty(
+            indexCachedProperties(i).runtimeKey,
+            cursor.propertyValue(indexPropertyIndices(i))
+          )
+          i += 1
+        }
+        newContext
+      } else {
+        null
+      }
+    }
+  }
+
+  object RelIndexIterator {
+
+    def apply(
+      startNode: Option[String],
+      endNode: Option[String],
+      baseContext: CypherRow,
+      cursor: RelationshipValueIndexCursor
+    ): IndexIteratorBase[CypherRow] = {
+      if (startNode.isEmpty && endNode.isEmpty) {
+        new NonStoreAccessingRelIndexIterator(baseContext, cursor)
+      } else {
+        new RelIndexIterator(startNode, endNode, baseContext, cursor)
+      }
+    }
+  }
+
   class UndirectedRelIndexIterator(
-    startNode: String,
-    endNode: String,
-    state: QueryState,
+    startNode: Option[String],
+    endNode: Option[String],
     baseContext: CypherRow,
     cursor: RelationshipValueIndexCursor
   ) extends IndexIteratorBase[CypherRow](cursor) {
 
-    private val queryContext = state.query
+    private val relationshipWriter = Relationships.compileRelationshipWriter(ident, startNode, endNode)
+
     private var emitSibling: Boolean = false
     private var lastRelationship: VirtualRelationshipValue = _
     private var lastStart: VirtualNodeValue = _
@@ -114,19 +165,32 @@ trait IndexPipeWithValues extends Pipe {
       val newContext =
         if (emitSibling) {
           emitSibling = false
-          rowFactory.copyWith(baseContext, ident, lastRelationship, startNode, lastEnd, endNode, lastStart)
+          relationshipWriter.writeRow(
+            rowFactory,
+            baseContext,
+            lastRelationship,
+            lastEnd,
+            lastStart
+          )
         } else {
           var ctx: CypherRow = null
           while (ctx == null && cursor.next()) {
-            lastRelationship = queryContext.relationshipById(cursor.relationshipReference())
             if (cursor.readFromStore()) {
+              lastRelationship = ValueUtils.fromRelationshipCursor(cursor)
               val start = cursor.sourceNodeReference()
               val end = cursor.targetNodeReference()
-              lastStart = queryContext.nodeById(start)
-              lastEnd = queryContext.nodeById(end)
+              lastStart = VirtualValues.node(start)
+              lastEnd = VirtualValues.node(end)
               // For self-loops, we don't emit sibling
               emitSibling = start != end
-              ctx = rowFactory.copyWith(baseContext, ident, lastRelationship, startNode, lastStart, endNode, lastEnd)
+              ctx = relationshipWriter.writeRow(
+                rowFactory,
+                baseContext,
+                lastRelationship,
+                lastStart,
+                lastEnd
+              )
+
             }
           }
           ctx

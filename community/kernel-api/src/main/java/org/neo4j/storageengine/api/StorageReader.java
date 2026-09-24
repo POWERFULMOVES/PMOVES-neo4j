@@ -30,6 +30,7 @@ import org.neo4j.internal.schema.ConstraintDescriptor;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.SchemaDescriptor;
 import org.neo4j.internal.schema.constraints.IndexBackedConstraintDescriptor;
+import org.neo4j.internal.schema.constraints.TypeConstraintDescriptor;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
@@ -73,6 +74,10 @@ public interface StorageReader extends AutoCloseable, StorageSchemaReader {
             boolean propertyKeyListIsComplete,
             EntityType entityType);
 
+    boolean hasAnyTypeConstraintWithDefaultValue(EntityType entityType);
+
+    Collection<TypeConstraintDescriptor> typeConstraintsWithDefaultValue(int entityTokenId, EntityType entityType);
+
     boolean hasRelatedSchema(int[] tokens, int propertyKey, EntityType entityType);
 
     boolean hasRelatedSchema(int token, EntityType entityType);
@@ -99,8 +104,6 @@ public interface StorageReader extends AutoCloseable, StorageSchemaReader {
      */
     long countsForNode(int labelId, CursorContext cursorContext);
 
-    long estimateCountsForNode(int labelId, CursorContext cursorContext);
-
     void visitAllCounts(CountsVisitor visitor, CursorContext cursorContext);
 
     /**
@@ -115,8 +118,6 @@ public interface StorageReader extends AutoCloseable, StorageSchemaReader {
      */
     long countsForRelationship(int startLabelId, int typeId, int endLabelId, CursorContext cursorContext);
 
-    long estimateCountsForRelationship(int startLabelId, int typeId, int endLabelId, CursorContext cursorContext);
-
     long nodesGetCount(CursorContext cursorContext);
 
     long relationshipsGetCount(CursorContext cursorTracer);
@@ -129,7 +130,7 @@ public interface StorageReader extends AutoCloseable, StorageSchemaReader {
 
     boolean nodeExists(long id, StoreCursors storeCursors);
 
-    boolean relationshipExists(long id, StoreCursors storeCursors);
+    boolean relationshipExists(long id, StoreCursors storeCursors, CursorContext context);
 
     <T> T getOrCreateSchemaDependantState(Class<T> type, Function<StorageReader, T> factory);
 

@@ -20,10 +20,10 @@
 package org.neo4j.values.virtual;
 
 import static org.neo4j.memory.HeapEstimator.sizeOf;
-import static org.neo4j.util.Preconditions.requirePositive;
 
 import java.util.HashMap;
 import java.util.Map;
+import org.neo4j.internal.helpers.collection.Iterables;
 import org.neo4j.values.AnyValue;
 
 public class MapValueBuilder {
@@ -35,7 +35,7 @@ public class MapValueBuilder {
     }
 
     public MapValueBuilder(int expectedSize) {
-        this.map = new HashMap<>(capacity(expectedSize));
+        this.map = HashMap.newHashMap(expectedSize);
     }
 
     public AnyValue add(String key, AnyValue value) {
@@ -54,14 +54,14 @@ public class MapValueBuilder {
     }
 
     public MapValue build() {
-        return new MapValue.MapWrappingMapValue(map, payloadSize);
-    }
-
-    private static int capacity(int expectedSize) {
-        if (expectedSize < 3) {
-            requirePositive(expectedSize);
-            return expectedSize + 1;
+        int size = map.size();
+        if (size == 0) {
+            return MapValue.EMPTY;
+        } else if (size == 1) {
+            var first = Iterables.first(map.entrySet());
+            return new SingletonMapValue(first.getKey(), first.getValue());
+        } else {
+            return new MapValue.MapWrappingMapValue(map, payloadSize);
         }
-        return (int) ((float) expectedSize / 0.75f + 1.0f);
     }
 }

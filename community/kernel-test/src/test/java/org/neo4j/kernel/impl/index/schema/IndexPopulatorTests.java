@@ -92,15 +92,15 @@ abstract class IndexPopulatorTests<KEY, VALUE, LAYOUT extends Layout<KEY, VALUE>
         // given
         byte[] someBytes = fileWithContent();
         var storeFile = indexFiles.getStoreFile();
-        assertThat(fs.fileExists(storeFile)).isTrue();
-        assertThat(fs.getFileSize(storeFile)).isEqualTo(someBytes.length);
+        assertThat(storeFile.exists(fs)).isTrue();
+        assertThat(storeFile.size(fs)).isEqualTo(someBytes.length);
 
         // when
         populator.create();
 
         // then
-        assertThat(fs.fileExists(storeFile)).isTrue();
-        assertThat(fs.getFileSize(storeFile)).isEqualTo(0);
+        assertThat(storeFile.exists(fs)).isTrue();
+        assertThat(storeFile.size(fs)).isEqualTo(0);
 
         populator.close(true, NULL_CONTEXT);
     }
@@ -133,7 +133,7 @@ abstract class IndexPopulatorTests<KEY, VALUE, LAYOUT extends Layout<KEY, VALUE>
     void addShouldHandleEmptyCollection() throws Exception {
         // given
         populator.create();
-        List<IndexEntryUpdate<?>> updates = Collections.emptyList();
+        List<IndexEntryUpdate> updates = Collections.emptyList();
 
         // when
         populator.add(updates, NULL_CONTEXT);
@@ -251,7 +251,7 @@ abstract class IndexPopulatorTests<KEY, VALUE, LAYOUT extends Layout<KEY, VALUE>
         populator.markAsFailed("");
 
         // then
-        var e = assertThrows(RuntimeException.class, () -> populator.close(true, NULL_CONTEXT));
+        RuntimeException e = assertThrows(RuntimeException.class, () -> populator.close(true, NULL_CONTEXT));
         assertTrue(
                 hasCause(e, IllegalStateException.class), "Expected cause to contain " + IllegalStateException.class);
         populator.close(false, NULL_CONTEXT);
@@ -308,7 +308,7 @@ abstract class IndexPopulatorTests<KEY, VALUE, LAYOUT extends Layout<KEY, VALUE>
         assertFileNotPresent();
 
         // when
-        var e = assertThrows(RuntimeException.class, () -> populator.close(true, NULL_CONTEXT));
+        RuntimeException e = assertThrows(RuntimeException.class, () -> populator.close(true, NULL_CONTEXT));
         assertTrue(
                 hasCause(e, IllegalStateException.class), "Expected cause to contain " + IllegalStateException.class);
     }
@@ -336,7 +336,7 @@ abstract class IndexPopulatorTests<KEY, VALUE, LAYOUT extends Layout<KEY, VALUE>
         populator.drop();
 
         // then
-        var e = assertThrows(RuntimeException.class, () -> populator.close(true, NULL_CONTEXT));
+        RuntimeException e = assertThrows(RuntimeException.class, () -> populator.close(true, NULL_CONTEXT));
         assertTrue(
                 hasCause(e, IllegalStateException.class), "Expected cause to contain " + IllegalStateException.class);
     }
@@ -350,14 +350,14 @@ abstract class IndexPopulatorTests<KEY, VALUE, LAYOUT extends Layout<KEY, VALUE>
         populator.drop();
 
         // then
-        var e = assertThrows(RuntimeException.class, () -> populator.close(false, NULL_CONTEXT));
+        RuntimeException e = assertThrows(RuntimeException.class, () -> populator.close(false, NULL_CONTEXT));
         assertTrue(
                 hasCause(e, IllegalStateException.class), "Expected cause to contain " + IllegalStateException.class);
     }
 
     private void assertNoHeader() {
         NativeIndexHeaderReader headerReader = new NativeIndexHeaderReader(failureByte());
-        var e = catchThrowable(() -> GBPTree.readHeader(
+        Throwable e = catchThrowable(() -> GBPTree.readHeader(
                 pageCache, indexFiles.getStoreFile(), headerReader, "db", NULL_CONTEXT, immutable.empty()));
         assertThat(e).isInstanceOf(MetadataMismatchException.class);
     }
@@ -365,7 +365,8 @@ abstract class IndexPopulatorTests<KEY, VALUE, LAYOUT extends Layout<KEY, VALUE>
     private void assertHeader(InternalIndexState expectedState, String failureMessage, boolean messageTruncated)
             throws IOException {
         NativeIndexHeaderReader headerReader = new NativeIndexHeaderReader(failureByte());
-        try (GBPTree<KEY, VALUE> ignored = new GBPTreeBuilder<>(pageCache, fs, indexFiles.getStoreFile(), layout)
+        try (GBPTree<KEY, VALUE> ignored = new GBPTreeBuilder<>(
+                        pageCache, fs, indexFiles.getStoreFile().baseSegment(), layout)
                 .with(headerReader)
                 .build()) {
             switch (expectedState) {
@@ -409,7 +410,7 @@ abstract class IndexPopulatorTests<KEY, VALUE, LAYOUT extends Layout<KEY, VALUE>
     private byte[] fileWithContent() throws IOException {
         int size = 1000;
         indexFiles.ensureDirectoryExist();
-        try (StoreChannel storeChannel = fs.write(indexFiles.getStoreFile())) {
+        try (StoreChannel storeChannel = fs.write(indexFiles.getStoreFile().baseSegment())) {
             byte[] someBytes = new byte[size];
             new Random().nextBytes(someBytes);
             storeChannel.writeAll(ByteBuffer.wrap(someBytes));

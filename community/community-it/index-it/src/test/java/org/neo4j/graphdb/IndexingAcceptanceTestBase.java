@@ -54,15 +54,15 @@ abstract class IndexingAcceptanceTestBase<TOKEN, ENTITY extends Entity> {
     @Inject
     protected GraphDatabaseAPI db;
 
-    protected TOKEN TOKEN1;
-    protected TOKEN TOKEN2;
-    protected TOKEN TOKEN3;
+    protected TOKEN token1;
+    protected TOKEN token2;
+    protected TOKEN token3;
 
     @BeforeEach
     void setupLabels(TestInfo testInfo) {
-        TOKEN1 = createToken("TOKEN1-" + testInfo.getDisplayName());
-        TOKEN2 = createToken("TOKEN2-" + testInfo.getDisplayName());
-        TOKEN3 = createToken("TOKEN3-" + testInfo.getDisplayName());
+        token1 = createToken("TOKEN1-" + testInfo.getDisplayName());
+        token2 = createToken("TOKEN2-" + testInfo.getDisplayName());
+        token3 = createToken("TOKEN3-" + testInfo.getDisplayName());
     }
 
     /* This test is a bit interesting. It tests a case where we've got a property that sits in one
@@ -81,9 +81,10 @@ abstract class IndexingAcceptanceTestBase<TOKEN, ENTITY extends Entity> {
         // GIVEN
         long smallValue = 10L;
         long bigValue = 1L << 62;
-        ENTITY entity;
+        String entityId;
         try (Transaction tx = db.beginTx()) {
-            entity = createEntity(tx, TOKEN1);
+            ENTITY entity = createEntity(tx, token1);
+            entityId = entity.getElementId();
             entity.setProperty("pad0", true);
             entity.setProperty("pad1", true);
             entity.setProperty("pad2", true);
@@ -93,21 +94,21 @@ abstract class IndexingAcceptanceTestBase<TOKEN, ENTITY extends Entity> {
             tx.commit();
         }
 
-        createIndex(db, indexType(), TOKEN1, "key");
+        createIndex(db, indexType(), token1, "key");
 
         // WHEN
         try (Transaction tx = db.beginTx()) {
             // A big long value which will occupy two property blocks
 
-            getEntity(tx, entity.getId()).setProperty("key", bigValue);
+            getEntity(tx, entityId).setProperty("key", bigValue);
             tx.commit();
         }
 
         try (Transaction transaction = db.beginTx()) {
             // THEN
-            assertThat(findEntitiesByTokenAndProperty(transaction, TOKEN1, "key", bigValue))
-                    .containsOnly(entity);
-            assertThat(findEntitiesByTokenAndProperty(transaction, TOKEN1, "key", smallValue))
+            assertThat(findEntitiesByTokenAndProperty(transaction, token1, "key", bigValue))
+                    .containsOnly(getEntity(transaction, entityId));
+            assertThat(findEntitiesByTokenAndProperty(transaction, token1, "key", smallValue))
                     .isEmpty();
         }
     }
@@ -115,25 +116,25 @@ abstract class IndexingAcceptanceTestBase<TOKEN, ENTITY extends Entity> {
     @Test
     void searchingForEntityByPropertyShouldWorkWithoutIndex() {
         // Given
-        var entity = createEntity(db, map("name", "Hawking"), TOKEN1);
+        String entityId = createEntity(db, map("name", "Hawking"), token1);
 
         // When
         try (Transaction transaction = db.beginTx()) {
-            assertThat(findEntitiesByTokenAndProperty(transaction, TOKEN1, "name", "Hawking"))
-                    .containsOnly(entity);
+            assertThat(findEntitiesByTokenAndProperty(transaction, token1, "name", "Hawking"))
+                    .containsOnly(getEntity(transaction, entityId));
         }
     }
 
     @Test
     void searchingUsesIndexWhenItExists() {
         // Given
-        var entity = createEntity(db, map("name", "Hawking"), TOKEN1);
-        createIndex(db, indexType(), TOKEN1, "name");
+        String entityId = createEntity(db, map("name", "Hawking"), token1);
+        createIndex(db, indexType(), token1, "name");
 
         // When
         try (Transaction transaction = db.beginTx()) {
-            assertThat(findEntitiesByTokenAndProperty(transaction, TOKEN1, "name", "Hawking"))
-                    .containsOnly(entity);
+            assertThat(findEntitiesByTokenAndProperty(transaction, token1, "name", "Hawking"))
+                    .containsOnly(getEntity(transaction, entityId));
         }
     }
 
@@ -141,7 +142,7 @@ abstract class IndexingAcceptanceTestBase<TOKEN, ENTITY extends Entity> {
     void searchingByLabelAndPropertyReturnsEmptyWhenMissingLabelOrProperty() {
         // When/Then
         try (Transaction transaction = db.beginTx()) {
-            assertThat(findEntitiesByTokenAndProperty(transaction, TOKEN1, "name", "Hawking"))
+            assertThat(findEntitiesByTokenAndProperty(transaction, token1, "name", "Hawking"))
                     .isEmpty();
         }
     }
@@ -149,34 +150,34 @@ abstract class IndexingAcceptanceTestBase<TOKEN, ENTITY extends Entity> {
     @Test
     void shouldSeeIndexUpdatesWhenQueryingOutsideTransaction() {
         // GIVEN
-        createIndex(db, indexType(), TOKEN1, "name");
-        var firstEntity = createEntity(db, map("name", "Mattias"), TOKEN1);
+        createIndex(db, indexType(), token1, "name");
+        String firstEntityId = createEntity(db, map("name", "Mattias"), token1);
 
         // WHEN THEN
         try (Transaction transaction = db.beginTx()) {
-            assertThat(findEntitiesByTokenAndProperty(transaction, TOKEN1, "name", "Mattias"))
-                    .containsOnly(firstEntity);
+            assertThat(findEntitiesByTokenAndProperty(transaction, token1, "name", "Mattias"))
+                    .containsOnly(getEntity(transaction, firstEntityId));
         }
-        var secondEntity = createEntity(db, map("name", "Taylor"), TOKEN1);
+        String secondEntityId = createEntity(db, map("name", "Taylor"), token1);
         try (Transaction transaction = db.beginTx()) {
-            assertThat(findEntitiesByTokenAndProperty(transaction, TOKEN1, "name", "Taylor"))
-                    .containsOnly(secondEntity);
+            assertThat(findEntitiesByTokenAndProperty(transaction, token1, "name", "Taylor"))
+                    .containsOnly(getEntity(transaction, secondEntityId));
         }
     }
 
     @Test
     void createdEntityShouldShowUpWithinTransaction() {
         // GIVEN
-        createIndex(db, indexType(), TOKEN1, "name");
+        createIndex(db, indexType(), token1, "name");
 
         // WHEN
         long sizeBeforeDelete;
         long sizeAfterDelete;
         try (Transaction tx = db.beginTx()) {
-            var entity = createEntity(db, map("name", "Mattias"), TOKEN1);
-            sizeBeforeDelete = count(findEntities(tx, TOKEN1, "name", "Mattias"));
-            deleteEntity(tx, entity.getId());
-            sizeAfterDelete = count(findEntities(tx, TOKEN1, "name", "Mattias"));
+            String entityId = createEntity(db, map("name", "Mattias"), token1);
+            sizeBeforeDelete = count(findEntities(tx, token1, "name", "Mattias"));
+            deleteEntity(tx, entityId);
+            sizeAfterDelete = count(findEntities(tx, token1, "name", "Mattias"));
             tx.commit();
         }
 
@@ -188,16 +189,16 @@ abstract class IndexingAcceptanceTestBase<TOKEN, ENTITY extends Entity> {
     @Test
     void deletedEntityShouldShowUpWithinTransaction() {
         // GIVEN
-        createIndex(db, indexType(), TOKEN1, "name");
-        var entity = createEntity(db, map("name", "Mattias"), TOKEN1);
+        createIndex(db, indexType(), token1, "name");
+        String entityId = createEntity(db, map("name", "Mattias"), token1);
 
         // WHEN
         long sizeBeforeDelete;
         long sizeAfterDelete;
         try (Transaction tx = db.beginTx()) {
-            sizeBeforeDelete = count(findEntities(tx, TOKEN1, "name", "Mattias"));
-            deleteEntity(tx, entity.getId());
-            sizeAfterDelete = count(findEntities(tx, TOKEN1, "name", "Mattias"));
+            sizeBeforeDelete = count(findEntities(tx, token1, "name", "Mattias"));
+            deleteEntity(tx, entityId);
+            sizeAfterDelete = count(findEntities(tx, token1, "name", "Mattias"));
             tx.commit();
         }
 
@@ -209,18 +210,18 @@ abstract class IndexingAcceptanceTestBase<TOKEN, ENTITY extends Entity> {
     @Test
     void createdEntityShouldShowUpInIndexQuery() {
         // GIVEN
-        createIndex(db, indexType(), TOKEN1, "name");
-        createEntity(db, map("name", "Mattias"), TOKEN1);
+        createIndex(db, indexType(), token1, "name");
+        createEntity(db, map("name", "Mattias"), token1);
 
         // WHEN
         long sizeBeforeCreate;
         long sizeAfterCreate;
         try (Transaction transaction = db.beginTx()) {
-            sizeBeforeCreate = count(findEntities(transaction, TOKEN1, "name", "Mattias"));
+            sizeBeforeCreate = count(findEntities(transaction, token1, "name", "Mattias"));
         }
-        createEntity(db, map("name", "Mattias"), TOKEN1);
+        createEntity(db, map("name", "Mattias"), token1);
         try (Transaction transaction = db.beginTx()) {
-            sizeAfterCreate = count(findEntities(transaction, TOKEN1, "name", "Mattias"));
+            sizeAfterCreate = count(findEntities(transaction, token1, "name", "Mattias"));
         }
 
         // THEN
@@ -232,63 +233,63 @@ abstract class IndexingAcceptanceTestBase<TOKEN, ENTITY extends Entity> {
     void shouldBeAbleToQuerySupportedPropertyTypes() {
         // GIVEN
         String property = "name";
-        createIndex(db, indexType(), TOKEN1, property);
+        createIndex(db, indexType(), token1, property);
 
         // WHEN & THEN
-        assertCanCreateAndFind(db, TOKEN1, property, "A String");
-        assertCanCreateAndFind(db, TOKEN1, property, true);
-        assertCanCreateAndFind(db, TOKEN1, property, false);
-        assertCanCreateAndFind(db, TOKEN1, property, (byte) 56);
-        assertCanCreateAndFind(db, TOKEN1, property, 'z');
-        assertCanCreateAndFind(db, TOKEN1, property, (short) 12);
-        assertCanCreateAndFind(db, TOKEN1, property, 12);
-        assertCanCreateAndFind(db, TOKEN1, property, 12L);
-        assertCanCreateAndFind(db, TOKEN1, property, (float) 12.);
-        assertCanCreateAndFind(db, TOKEN1, property, 12.);
-        assertCanCreateAndFind(db, TOKEN1, property, SpatialMocks.mockPoint(12.3, 45.6, mockWGS84()));
-        assertCanCreateAndFind(db, TOKEN1, property, SpatialMocks.mockPoint(123, 456, mockCartesian()));
-        assertCanCreateAndFind(db, TOKEN1, property, SpatialMocks.mockPoint(12.3, 45.6, 100.0, mockWGS84_3D()));
-        assertCanCreateAndFind(db, TOKEN1, property, SpatialMocks.mockPoint(123, 456, 789, mockCartesian_3D()));
-        assertCanCreateAndFind(db, TOKEN1, property, Values.pointValue(CoordinateReferenceSystem.WGS_84, 12.3, 45.6));
-        assertCanCreateAndFind(db, TOKEN1, property, Values.pointValue(CoordinateReferenceSystem.CARTESIAN, 123, 456));
+        assertCanCreateAndFind(db, token1, property, "A String");
+        assertCanCreateAndFind(db, token1, property, true);
+        assertCanCreateAndFind(db, token1, property, false);
+        assertCanCreateAndFind(db, token1, property, (byte) 56);
+        assertCanCreateAndFind(db, token1, property, 'z');
+        assertCanCreateAndFind(db, token1, property, (short) 12);
+        assertCanCreateAndFind(db, token1, property, 12);
+        assertCanCreateAndFind(db, token1, property, 12L);
+        assertCanCreateAndFind(db, token1, property, 12.0f);
+        assertCanCreateAndFind(db, token1, property, 12.0);
+        assertCanCreateAndFind(db, token1, property, SpatialMocks.mockPoint(12.3, 45.6, mockWGS84()));
+        assertCanCreateAndFind(db, token1, property, SpatialMocks.mockPoint(123, 456, mockCartesian()));
+        assertCanCreateAndFind(db, token1, property, SpatialMocks.mockPoint(12.3, 45.6, 100.0, mockWGS84_3D()));
+        assertCanCreateAndFind(db, token1, property, SpatialMocks.mockPoint(123, 456, 789, mockCartesian_3D()));
+        assertCanCreateAndFind(db, token1, property, Values.pointValue(CoordinateReferenceSystem.WGS_84, 12.3, 45.6));
+        assertCanCreateAndFind(db, token1, property, Values.pointValue(CoordinateReferenceSystem.CARTESIAN, 123, 456));
         assertCanCreateAndFind(
-                db, TOKEN1, property, Values.pointValue(CoordinateReferenceSystem.WGS_84_3D, 12.3, 45.6, 100.0));
+                db, token1, property, Values.pointValue(CoordinateReferenceSystem.WGS_84_3D, 12.3, 45.6, 100.0));
         assertCanCreateAndFind(
-                db, TOKEN1, property, Values.pointValue(CoordinateReferenceSystem.CARTESIAN_3D, 123, 456, 789));
+                db, token1, property, Values.pointValue(CoordinateReferenceSystem.CARTESIAN_3D, 123, 456, 789));
 
-        assertCanCreateAndFind(db, TOKEN1, property, new String[] {"A String"});
-        assertCanCreateAndFind(db, TOKEN1, property, new boolean[] {true});
-        assertCanCreateAndFind(db, TOKEN1, property, new Boolean[] {false});
-        assertCanCreateAndFind(db, TOKEN1, property, new byte[] {56});
-        assertCanCreateAndFind(db, TOKEN1, property, new Byte[] {57});
-        assertCanCreateAndFind(db, TOKEN1, property, new char[] {'a'});
-        assertCanCreateAndFind(db, TOKEN1, property, new Character[] {'b'});
-        assertCanCreateAndFind(db, TOKEN1, property, new short[] {12});
-        assertCanCreateAndFind(db, TOKEN1, property, new Short[] {13});
-        assertCanCreateAndFind(db, TOKEN1, property, new int[] {14});
-        assertCanCreateAndFind(db, TOKEN1, property, new Integer[] {15});
-        assertCanCreateAndFind(db, TOKEN1, property, new long[] {16L});
-        assertCanCreateAndFind(db, TOKEN1, property, new Long[] {17L});
-        assertCanCreateAndFind(db, TOKEN1, property, new float[] {(float) 18.});
-        assertCanCreateAndFind(db, TOKEN1, property, new Float[] {(float) 19.});
-        assertCanCreateAndFind(db, TOKEN1, property, new double[] {20.});
-        assertCanCreateAndFind(db, TOKEN1, property, new Double[] {21.});
-        assertCanCreateAndFind(db, TOKEN1, property, new Point[] {SpatialMocks.mockPoint(12.3, 45.6, mockWGS84())});
-        assertCanCreateAndFind(db, TOKEN1, property, new Point[] {SpatialMocks.mockPoint(123, 456, mockCartesian())});
+        assertCanCreateAndFind(db, token1, property, new String[] {"A String"});
+        assertCanCreateAndFind(db, token1, property, new boolean[] {true});
+        assertCanCreateAndFind(db, token1, property, new Boolean[] {false});
+        assertCanCreateAndFind(db, token1, property, new byte[] {56});
+        assertCanCreateAndFind(db, token1, property, new Byte[] {57});
+        assertCanCreateAndFind(db, token1, property, new char[] {'a'});
+        assertCanCreateAndFind(db, token1, property, new Character[] {'b'});
+        assertCanCreateAndFind(db, token1, property, new short[] {12});
+        assertCanCreateAndFind(db, token1, property, new Short[] {13});
+        assertCanCreateAndFind(db, token1, property, new int[] {14});
+        assertCanCreateAndFind(db, token1, property, new Integer[] {15});
+        assertCanCreateAndFind(db, token1, property, new long[] {16L});
+        assertCanCreateAndFind(db, token1, property, new Long[] {17L});
+        assertCanCreateAndFind(db, token1, property, new float[] {18.0f});
+        assertCanCreateAndFind(db, token1, property, new Float[] {19.0f});
+        assertCanCreateAndFind(db, token1, property, new double[] {20.0});
+        assertCanCreateAndFind(db, token1, property, new Double[] {21.0});
+        assertCanCreateAndFind(db, token1, property, new Point[] {SpatialMocks.mockPoint(12.3, 45.6, mockWGS84())});
+        assertCanCreateAndFind(db, token1, property, new Point[] {SpatialMocks.mockPoint(123, 456, mockCartesian())});
         assertCanCreateAndFind(
-                db, TOKEN1, property, new Point[] {SpatialMocks.mockPoint(12.3, 45.6, 100.0, mockWGS84_3D())});
+                db, token1, property, new Point[] {SpatialMocks.mockPoint(12.3, 45.6, 100.0, mockWGS84_3D())});
         assertCanCreateAndFind(
-                db, TOKEN1, property, new Point[] {SpatialMocks.mockPoint(123, 456, 789, mockCartesian_3D())});
+                db, token1, property, new Point[] {SpatialMocks.mockPoint(123, 456, 789, mockCartesian_3D())});
         assertCanCreateAndFind(
-                db, TOKEN1, property, new PointValue[] {Values.pointValue(CoordinateReferenceSystem.WGS_84, 12.3, 45.6)
+                db, token1, property, new PointValue[] {Values.pointValue(CoordinateReferenceSystem.WGS_84, 12.3, 45.6)
                 });
         assertCanCreateAndFind(
-                db, TOKEN1, property, new PointValue[] {Values.pointValue(CoordinateReferenceSystem.CARTESIAN, 123, 456)
+                db, token1, property, new PointValue[] {Values.pointValue(CoordinateReferenceSystem.CARTESIAN, 123, 456)
                 });
-        assertCanCreateAndFind(db, TOKEN1, property, new PointValue[] {
+        assertCanCreateAndFind(db, token1, property, new PointValue[] {
             Values.pointValue(CoordinateReferenceSystem.WGS_84_3D, 12.3, 45.6, 100.0)
         });
-        assertCanCreateAndFind(db, TOKEN1, property, new PointValue[] {
+        assertCanCreateAndFind(db, token1, property, new PointValue[] {
             Values.pointValue(CoordinateReferenceSystem.CARTESIAN_3D, 123, 456, 789)
         });
     }
@@ -298,21 +299,21 @@ abstract class IndexingAcceptanceTestBase<TOKEN, ENTITY extends Entity> {
         // this test was included here for now as a precondition for the following test
 
         // given
-        createIndex(db, indexType(), TOKEN1, "name");
+        createIndex(db, indexType(), token1, "name");
 
         ENTITY entity1;
         ENTITY entity2;
         try (Transaction tx = db.beginTx()) {
-            entity1 = createEntity(tx, TOKEN1);
+            entity1 = createEntity(tx, token1);
             entity1.setProperty("name", "Stefan");
 
-            entity2 = createEntity(tx, TOKEN1);
+            entity2 = createEntity(tx, token1);
             entity2.setProperty("name", "Stefan");
             tx.commit();
         }
 
         try (Transaction tx = db.beginTx()) {
-            var result = findEntities(tx, TOKEN1, "name", "Stefan");
+            ResourceIterator<ENTITY> result = findEntities(tx, token1, "name", "Stefan");
             assertEquals(asSet(entity1, entity2), asSet(result));
 
             tx.commit();
@@ -322,32 +323,33 @@ abstract class IndexingAcceptanceTestBase<TOKEN, ENTITY extends Entity> {
     @Test
     void shouldThrowWhenMultipleResultsForSingleEntities() {
         // given
-        createIndex(db, indexType(), TOKEN1, "name");
+        createIndex(db, indexType(), token1, "name");
 
         ENTITY entity1;
         ENTITY entity2;
         try (Transaction tx = db.beginTx()) {
-            entity1 = createEntity(tx, TOKEN1);
+            entity1 = createEntity(tx, token1);
             entity1.setProperty("name", "Stefan");
 
-            entity2 = createEntity(tx, TOKEN1);
+            entity2 = createEntity(tx, token1);
             entity2.setProperty("name", "Stefan");
             tx.commit();
         }
 
         try (Transaction tx = db.beginTx()) {
-            var e = assertThrows(MultipleFoundException.class, () -> findEntity(tx, TOKEN1, "name", "Stefan"));
-            assertThat(e).hasMessage(format(getMultipleEntitiesMessageTemplate(), TOKEN1));
+            MultipleFoundException e =
+                    assertThrows(MultipleFoundException.class, () -> findEntity(tx, token1, "name", "Stefan"));
+            assertThat(e).hasMessage(format(getMultipleEntitiesMessageTemplate(), token1));
         }
     }
 
     protected void assertCanCreateAndFind(GraphDatabaseService db, TOKEN label, String propertyKey, Object value) {
-        var created = createEntity(db, map(propertyKey, value), label);
+        String createdId = createEntity(db, map(propertyKey, value), label);
 
         try (Transaction tx = db.beginTx()) {
-            var found = findEntity(tx, label, propertyKey, value);
-            assertThat(found).isEqualTo(created);
-            deleteEntity(tx, found.getId());
+            ENTITY found = findEntity(tx, label, propertyKey, value);
+            assertThat(found).isEqualTo(getEntity(tx, createdId));
+            deleteEntity(tx, createdId);
             tx.commit();
         }
     }
@@ -357,13 +359,13 @@ abstract class IndexingAcceptanceTestBase<TOKEN, ENTITY extends Entity> {
     protected abstract List<ENTITY> findEntitiesByTokenAndProperty(
             Transaction tx, TOKEN label, String propertyName, Object value);
 
-    protected abstract ENTITY createEntity(GraphDatabaseService db, Map<String, Object> properties, TOKEN label);
+    protected abstract String createEntity(GraphDatabaseService db, Map<String, Object> properties, TOKEN label);
 
     protected abstract ENTITY createEntity(Transaction tx, TOKEN token);
 
-    protected abstract void deleteEntity(Transaction tx, long id);
+    protected abstract void deleteEntity(Transaction tx, String id);
 
-    protected abstract ENTITY getEntity(Transaction tx, long id);
+    protected abstract ENTITY getEntity(Transaction tx, String id);
 
     protected abstract IndexDefinition createIndex(
             GraphDatabaseService db, IndexType indexType, TOKEN token, String... properties);

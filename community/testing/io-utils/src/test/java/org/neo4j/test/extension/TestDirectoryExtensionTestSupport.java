@@ -20,11 +20,6 @@
 package org.neo4j.test.extension;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.platform.engine.TestExecutionResult.Status.FAILED;
 import static org.junit.platform.engine.discovery.DiscoverySelectors.selectClass;
 import static org.junit.platform.engine.discovery.DiscoverySelectors.selectMethod;
@@ -38,9 +33,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.ExtensionConfigurationException;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.platform.engine.TestExecutionResult;
 import org.junit.platform.launcher.Launcher;
@@ -77,8 +76,23 @@ abstract class TestDirectoryExtensionTestSupport {
         }
 
         @Override
+        Class<? extends DirectoryExtensionLifecycleVerificationTest.AfterEachTestFail> getPerTestAfterEachClass() {
+            return DirectoryExtensionLifecycleVerificationTest.WithRealFs.PerClassAfterEachTest.class;
+        }
+
+        @Override
         Class<? extends DirectoryExtensionLifecycleVerificationTest.SecondTestFailTest> getPerMethodClass() {
             return DirectoryExtensionLifecycleVerificationTest.WithRealFs.PerMethodTest.class;
+        }
+
+        @Override
+        Class<? extends DirectoryExtensionLifecycleVerificationTest.AfterEachTestFail> getPerMethodAfterEachClass() {
+            return DirectoryExtensionLifecycleVerificationTest.WithRealFs.PerMethodAfterEachTest.class;
+        }
+
+        @Override
+        Class<? extends DirectoryExtensionLifecycleVerificationTest.AllPassTest> getAllPassClass() {
+            return DirectoryExtensionLifecycleVerificationTest.WithRealFs.PerMethodAllPass.class;
         }
 
         @Test
@@ -90,8 +104,8 @@ abstract class TestDirectoryExtensionTestSupport {
             execute("lockFileAndFailToDeleteDirectory", failedTestListener);
             Path lockedFile = ExecutionSharedContext.getValue(LOCKED_TEST_FILE_KEY);
 
-            assertNotNull(lockedFile);
-            assertTrue(lockedFile.toFile().setReadable(true, true));
+            assertThat(lockedFile).isNotNull();
+            assertThat(lockedFile.toFile().setReadable(true, true)).isTrue();
             FileUtils.deleteDirectory(lockedFile);
             failedTestListener.assertTestObserver();
         }
@@ -110,35 +124,102 @@ abstract class TestDirectoryExtensionTestSupport {
         }
 
         @Override
+        Class<? extends DirectoryExtensionLifecycleVerificationTest.AfterEachTestFail> getPerTestAfterEachClass() {
+            return DirectoryExtensionLifecycleVerificationTest.WithEphemeralFs.PerClassAfterEachTest.class;
+        }
+
+        @Override
         Class<? extends DirectoryExtensionLifecycleVerificationTest.SecondTestFailTest> getPerMethodClass() {
             return DirectoryExtensionLifecycleVerificationTest.WithEphemeralFs.PerMethodTest.class;
+        }
+
+        @Override
+        Class<? extends DirectoryExtensionLifecycleVerificationTest.AfterEachTestFail> getPerMethodAfterEachClass() {
+            return DirectoryExtensionLifecycleVerificationTest.WithEphemeralFs.PerMethodAfterEachTest.class;
+        }
+
+        @Override
+        Class<? extends DirectoryExtensionLifecycleVerificationTest.AllPassTest> getAllPassClass() {
+            return DirectoryExtensionLifecycleVerificationTest.WithEphemeralFs.PerMethodAllPass.class;
+        }
+
+        // EphemeralFs + PER_METHOD: anyFailure is sticky on the shared TestDirectory, so
+        // tests that pass AFTER a failure also have files copied to real FS.
+        // Only check that failed tests' files are preserved (passing tests' file existence
+        // depends on execution order relative to the first failure — pre-existing flakiness).
+        @Override
+        @Test
+        void perMethodNestedShouldKeepAllFilesWhenAnyTestFails() {
+            List<Pair<Path, Boolean>> pairs = executeAndReturnCreatedFiles(getPerMethodClass(), 6);
+            for (var pair : pairs) {
+                if (pair.other()) {
+                    assertThat(pair.first()).exists();
+                }
+            }
+        }
+
+        // WithEphemeralFs is PER_METHOD (not PER_CLASS like WithRealFs) because
+        // FileSystemExtension.afterAll() closes the EphemeralFS when fired for nested class
+        // contexts, which breaks the deferred cleanup that PER_CLASS relies on.
+        // The validation correctly rejects the PER_METHOD+PER_CLASS pattern,
+        // so these tests verify the rejection instead of the lifecycle behavior.
+        @Override
+        @Test
+        void failedTestShouldKeepDirectoryInPerClassLifecycle() {
+            FailureCaptureListener listener = new FailureCaptureListener();
+            LauncherDiscoveryRequest request = LauncherDiscoveryRequestBuilder.request()
+                    .selectors(selectClass(getPerTestClass()))
+                    .configurationParameter(TEST_TOGGLE, "true")
+                    .build();
+            Launcher launcher = LauncherFactory.create();
+            launcher.execute(request, listener);
+            assertThat(listener.getFailure())
+                    .isInstanceOf(ExtensionConfigurationException.class)
+                    .hasMessageContaining("PER_CLASS lifecycle")
+                    .hasMessageContaining("PER_METHOD lifecycle");
+        }
+
+        @Override
+        @Test
+        void failedTestAfterEachShouldKeepDirectoryInPerClassLifecycle() {
+            FailureCaptureListener listener = new FailureCaptureListener();
+            LauncherDiscoveryRequest request = LauncherDiscoveryRequestBuilder.request()
+                    .selectors(selectClass(getPerTestAfterEachClass()))
+                    .configurationParameter(TEST_TOGGLE, "true")
+                    .build();
+            Launcher launcher = LauncherFactory.create();
+            launcher.execute(request, listener);
+            assertThat(listener.getFailure())
+                    .isInstanceOf(ExtensionConfigurationException.class)
+                    .hasMessageContaining("PER_CLASS lifecycle")
+                    .hasMessageContaining("PER_METHOD lifecycle");
         }
     }
 
     @Test
     void testDirectoryInjectionWorks() {
-        assertNotNull(testDirectory);
+        assertThat(testDirectory).isNotNull();
     }
 
     @Test
     void testDirectoryInitialisedForUsage() {
         Path directory = testDirectory.homePath();
-        assertNotNull(directory);
-        assertTrue(fileSystem.fileExists(directory));
+        assertThat(directory).isNotNull();
+        assertThat(fileSystem.fileExists(directory)).isTrue();
         Path targetTestData = Paths.get("target", "test data");
-        assertTrue(directory.toAbsolutePath().toString().contains(targetTestData.toString()));
+        assertThat(directory.toAbsolutePath().toString()).contains(targetTestData.toString());
     }
 
     @Test
     void testDirectoryUsesFileSystemFromExtension() {
-        assertSame(fileSystem, testDirectory.getFileSystem());
+        assertThat(testDirectory.getFileSystem()).isSameAs(fileSystem);
     }
 
     @Test
     void createTestFile() {
         Path file = testDirectory.createFile("a");
-        assertEquals("a", file.getFileName().toString());
-        assertTrue(fileSystem.fileExists(file));
+        assertThat(file.getFileName()).hasToString("a");
+        assertThat(fileSystem.fileExists(file)).isTrue();
     }
 
     @Test
@@ -146,8 +227,8 @@ abstract class TestDirectoryExtensionTestSupport {
         ExecutionSharedContext.clear();
         execute("failAndKeepDirectory");
         Path failedFile = ExecutionSharedContext.getValue(CREATED_TEST_FILE_PAIRS_KEY);
-        assertNotNull(failedFile);
-        assertTrue(Files.exists(failedFile));
+        assertThat(failedFile).isNotNull();
+        assertThat(Files.exists(failedFile)).isTrue();
     }
 
     @Test
@@ -155,8 +236,8 @@ abstract class TestDirectoryExtensionTestSupport {
         ExecutionSharedContext.clear();
         execute("executeAndCleanupDirectory");
         Path greenTestFail = ExecutionSharedContext.getValue(SUCCESSFUL_TEST_FILE_KEY);
-        assertNotNull(greenTestFail);
-        assertFalse(Files.exists(greenTestFail));
+        assertThat(greenTestFail).isNotNull();
+        assertThat(Files.exists(greenTestFail)).isFalse();
     }
 
     @Test
@@ -168,14 +249,41 @@ abstract class TestDirectoryExtensionTestSupport {
     }
 
     @Test
-    void failedTestShouldNotKeepDirectoryInPerMethodLifecycle() {
+    void failedTestAfterEachShouldKeepDirectoryInPerClassLifecycle() {
+        List<Pair<Path, Boolean>> pairs = executeAndReturnCreatedFiles(getPerTestAfterEachClass(), 1);
+        for (var pair : pairs) {
+            assertThat(pair.first()).exists();
+        }
+    }
+
+    @Test
+    void failedTestAfterEachShouldKeepDirectoryInPerMethodLifecycle() {
+        List<Pair<Path, Boolean>> pairs = executeAndReturnCreatedFiles(getPerMethodAfterEachClass(), 1);
+        for (var pair : pairs) {
+            assertThat(pair.first()).exists();
+        }
+    }
+
+    @Test
+    void perMethodNestedShouldKeepAllFilesWhenAnyTestFails() {
         List<Pair<Path, Boolean>> pairs = executeAndReturnCreatedFiles(getPerMethodClass(), 6);
         for (var pair : pairs) {
-            if (pair.other()) {
-                assertThat(pair.first()).exists();
-            } else {
-                assertThat(pair.first()).doesNotExist();
-            }
+            assertThat(pair.first()).exists();
+        }
+    }
+
+    /**
+     * All-pass run: TestDirectory cleanup fires uniformly in both RealFs and EphemeralFs
+     * because the sticky anyFailure flag stays false, so no ephemeral override is needed
+     * unlike the mixed pass/fail test. If cleanup regresses, the ephemeral fallback that
+     * copies files to real FS before deleting the ephemeral directory would fire instead,
+     * so doesNotExist() against the returned path catches the regression in both variants.
+     */
+    @Test
+    void successfulTestsShouldCleanupFilesInPerMethodLifecycle() {
+        List<Pair<Path, Boolean>> pairs = executeAndReturnCreatedFiles(getAllPassClass(), 3);
+        for (var pair : pairs) {
+            assertThat(pair.first()).doesNotExist();
         }
     }
 
@@ -196,12 +304,26 @@ abstract class TestDirectoryExtensionTestSupport {
         assertThat(FileUtils.listPaths(path)).hasSize(3);
     }
 
+    @Test
+    void frameworkRejectsPerMethodOuterWithPerClassNestedTestDirectory() {
+        FailureCaptureListener listener = new FailureCaptureListener();
+        LauncherDiscoveryRequest request = LauncherDiscoveryRequestBuilder.request()
+                .selectors(selectClass(PerMethodOuterWithPerClassNested.class))
+                .configurationParameter(TEST_TOGGLE, "true")
+                .build();
+        Launcher launcher = LauncherFactory.create();
+        launcher.execute(request, listener);
+        assertThat(listener.getFailure())
+                .isInstanceOf(ExtensionConfigurationException.class)
+                .hasMessageContaining("PER_CLASS lifecycle")
+                .hasMessageContaining("PER_METHOD lifecycle");
+    }
+
     private static List<Pair<Path, Boolean>> executeAndReturnCreatedFiles(Class<?> testClass, int count) {
         ExecutionSharedContext.clear();
         executeClass(testClass);
         List<Pair<Path, Boolean>> pairs = ExecutionSharedContext.getValue(CREATED_TEST_FILE_PAIRS_KEY);
-        assertNotNull(pairs);
-        assertThat(pairs.size()).isEqualTo(count);
+        assertThat(pairs).isNotNull().hasSize(count);
         return pairs;
     }
 
@@ -209,7 +331,14 @@ abstract class TestDirectoryExtensionTestSupport {
 
     abstract Class<? extends DirectoryExtensionLifecycleVerificationTest.SecondTestFailTest> getPerTestClass();
 
+    abstract Class<? extends DirectoryExtensionLifecycleVerificationTest.AfterEachTestFail> getPerTestAfterEachClass();
+
     abstract Class<? extends DirectoryExtensionLifecycleVerificationTest.SecondTestFailTest> getPerMethodClass();
+
+    abstract Class<? extends DirectoryExtensionLifecycleVerificationTest.AfterEachTestFail>
+            getPerMethodAfterEachClass();
+
+    abstract Class<? extends DirectoryExtensionLifecycleVerificationTest.AllPassTest> getAllPassClass();
 
     protected void execute(String testName, TestExecutionListener... testExecutionListeners) {
         LauncherDiscoveryRequest discoveryRequest = LauncherDiscoveryRequestBuilder.request()
@@ -233,6 +362,38 @@ abstract class TestDirectoryExtensionTestSupport {
         launcher.execute(discoveryRequest, testExecutionListeners);
     }
 
+    @ExtendWith(DirectoryExtensionLifecycleVerificationTest.ConfigurationParameterCondition.class)
+    @ResourceLock(ExecutionSharedContext.SHARED_RESOURCE)
+    @TestDirectoryExtension
+    static class PerMethodOuterWithPerClassNested {
+        @Inject
+        TestDirectory directory;
+
+        @Nested
+        @TestInstance(TestInstance.Lifecycle.PER_CLASS)
+        class PerClassInner {
+            @Test
+            void shouldNeverRun() {
+                throw new AssertionError("Expected ExtensionConfigurationException before reaching this point");
+            }
+        }
+    }
+
+    private static class FailureCaptureListener implements TestExecutionListener {
+        private Throwable failure;
+
+        @Override
+        public void executionFinished(TestIdentifier testIdentifier, TestExecutionResult testExecutionResult) {
+            if (testExecutionResult.getStatus() == FAILED) {
+                testExecutionResult.getThrowable().ifPresent(t -> failure = t);
+            }
+        }
+
+        Throwable getFailure() {
+            return failure;
+        }
+    }
+
     private static class FailedTestExecutionListener implements TestExecutionListener {
         private int resultsObserved;
 
@@ -244,13 +405,12 @@ abstract class TestDirectoryExtensionTestSupport {
                         .getThrowable()
                         .map(Throwable::getMessage)
                         .orElse("");
-                assertThat(exceptionMessage)
-                        .contains("Fail to cleanup test directory for lockFileAndFailToDeleteDirectory");
+                assertThat(exceptionMessage).contains("Fail to cleanup test directory for WithRealFs");
             }
         }
 
         void assertTestObserver() {
-            assertEquals(1, resultsObserved);
+            assertThat(resultsObserved).isEqualTo(1);
         }
     }
 }

@@ -644,18 +644,22 @@ public final class UTF8StringValue extends StringValue {
         return ValueRepresentation.UTF8_TEXT;
     }
 
+    /**
+     * @return a copy of the relevant range of the underlying byte array.
+     */
     public byte[] bytes() {
-        return bytes;
+        return Arrays.copyOfRange(bytes, offset, offset + byteLength);
     }
 
     private static int codePoint(byte[] bytes, byte currentByte, int i, int bytesNeeded) {
         return switch (bytesNeeded) {
             case 2 -> (currentByte << 4) | (bytes[i + 1] & HIGH_BIT_MASK);
             case 3 -> (currentByte << 9) | ((bytes[i + 1] & HIGH_BIT_MASK) << 6) | (bytes[i + 2] & HIGH_BIT_MASK);
-            case 4 -> (currentByte << 14)
-                    | ((bytes[i + 1] & HIGH_BIT_MASK) << 12)
-                    | ((bytes[i + 2] & HIGH_BIT_MASK) << 6)
-                    | (bytes[i + 3] & HIGH_BIT_MASK);
+            case 4 ->
+                (currentByte << 14)
+                        | ((bytes[i + 1] & HIGH_BIT_MASK) << 12)
+                        | ((bytes[i + 2] & HIGH_BIT_MASK) << 6)
+                        | (bytes[i + 3] & HIGH_BIT_MASK);
             default -> throw new IllegalArgumentException("Malformed UTF8 value");
         };
     }

@@ -25,8 +25,8 @@ import org.neo4j.cypher.internal.ast.IfExistsDoNothing
 import org.neo4j.cypher.internal.ast.IfExistsInvalidSyntax
 import org.neo4j.cypher.internal.ast.IfExistsReplace
 import org.neo4j.cypher.internal.ast.IfExistsThrowError
+import org.neo4j.cypher.internal.expressions.PathLengthQuantifier
 import org.neo4j.cypher.internal.expressions.SemanticDirection
-import org.neo4j.cypher.internal.expressions.UnsignedDecimalIntegerLiteral
 import org.neo4j.cypher.internal.parser.AstRuleCtx
 import org.neo4j.cypher.internal.parser.lexer.CypherQueryAccess
 import org.neo4j.cypher.internal.parser.lexer.CypherToken
@@ -53,12 +53,12 @@ object Util {
     else throw new IllegalArgumentException(s"Unexpected size $size")
   }
 
-  def optUnsignedDecimalInt(token: Token): Option[UnsignedDecimalIntegerLiteral] = {
-    if (token != null) Some(unsignedDecimalInt(token)) else None
+  def optSafeUnsignedDecimalInt(token: Token): Option[PathLengthQuantifier] = {
+    if (token != null) Some(safeUnsignedDecimalInt(token)) else None
   }
 
-  def unsignedDecimalInt(token: Token): UnsignedDecimalIntegerLiteral = {
-    UnsignedDecimalIntegerLiteral(token.getText)(pos(token))
+  def safeUnsignedDecimalInt(token: Token): PathLengthQuantifier = {
+    PathLengthQuantifier(token.getText)(pos(token))
   }
 
   @inline def ctxChild(ctx: AstRuleCtx, index: Int): AstRuleCtx = ctx.getChild(index).asInstanceOf[AstRuleCtx]
@@ -175,7 +175,7 @@ object Util {
   @inline def rangePos(ctx: ParserRuleContext): InputPosition.Range = {
     val start = pos(ctx)
     val stopToken = ctx.stop.asInstanceOf[CypherToken]
-    start.withInputLength(stopToken.inputOffset(stopToken.getStopIndex) - start.offset + 1)
+    start.withInputLength(stopToken.inputOffset(stopToken.getStopIndex + 1) - start.offset)
   }
 
   def ifExistsDo(replace: Boolean, ifNotExists: Boolean): IfExistsDo = {

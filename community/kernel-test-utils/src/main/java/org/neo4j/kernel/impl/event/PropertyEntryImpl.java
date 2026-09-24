@@ -19,10 +19,10 @@
  */
 package org.neo4j.kernel.impl.event;
 
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.fail;
 
 import org.neo4j.graphdb.event.PropertyEntry;
 import org.neo4j.internal.helpers.Strings;
@@ -61,6 +61,16 @@ class PropertyEntryImpl<T> implements PropertyEntry<T> {
         return this.valueBeforeTx;
     }
 
+    @Override
+    public boolean hasPreviouslyCommittedValue() {
+        return true;
+    }
+
+    @Override
+    public boolean hasValue() {
+        return true;
+    }
+
     void compareToAssigned(PropertyEntry<T> entry) {
         basicCompareTo(entry);
         assertEqualsMaybeNull(entry.value(), value(), entry.entity(), entry.key());
@@ -68,12 +78,7 @@ class PropertyEntryImpl<T> implements PropertyEntry<T> {
 
     void compareToRemoved(PropertyEntry<T> entry) {
         basicCompareTo(entry);
-        try {
-            entry.value();
-            fail("Should throw IllegalStateException");
-        } catch (IllegalStateException e) {
-            // OK
-        }
+        assertThatThrownBy(entry::value).isInstanceOf(IllegalStateException.class);
         assertNull(value());
     }
 

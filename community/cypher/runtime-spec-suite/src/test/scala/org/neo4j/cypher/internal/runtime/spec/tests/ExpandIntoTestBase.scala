@@ -36,6 +36,9 @@ import org.neo4j.graphdb.Label
 import org.neo4j.graphdb.Node
 import org.neo4j.graphdb.RelationshipType
 import org.scalacheck.Gen
+import org.scalactic.anyvals.PosInt
+
+object ExpandIntoTestBase
 
 abstract class ExpandIntoTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
@@ -1169,7 +1172,7 @@ trait ExpandIntoRandomTest[CONTEXT <: RuntimeContext] extends CypherScalaCheckDr
     val aLovesB = expandIntoPlan("-[r:LOVES]->")
     val aLikesOrLovesB = expandIntoPlan("-[r:LIKES|LOVES]->")
 
-    forAll(genRandomGraph(Seq("LIKES", "LOVES")), minSuccessful(20)) { createGraph =>
+    forAll(genRandomGraph(Seq("LIKES", "LOVES")), minSuccessful(PosInt.from(20).get)) { createGraph =>
       val relationships = givenGraph {
         // Clean previous data
         tx.getAllRelationships.forEach(r => r.delete())

@@ -35,11 +35,12 @@ case class NodeIndexScanSlottedPipe(
   properties: Seq[SlottedIndexedProperty],
   queryIndexId: Int,
   indexOrder: IndexOrder,
-  slots: SlotConfiguration
+  slots: SlotConfiguration,
+  includeChangesFromThisTransaction: Boolean
 )(val id: Id = Id.INVALID_ID)
     extends Pipe with IndexSlottedPipeWithValues {
 
-  override val offset: Int = slots.longOffset(ident)
+  override val offset: Option[Int] = Some(slots.longOffset(ident))
 
   override val indexPropertySlotOffsets: Array[Int] = properties.flatMap(_.maybeCachedEntityPropertySlot).toArray
 
@@ -48,7 +49,13 @@ case class NodeIndexScanSlottedPipe(
   private val needsValues: Boolean = indexPropertyIndices.nonEmpty
 
   protected def internalCreateResults(state: QueryState): ClosingIterator[CypherRow] = {
-    val cursor = state.query.nodeIndexScan(state.queryIndexes(queryIndexId), needsValues, indexOrder)
+    val cursor =
+      state.query.nodeIndexScan(
+        state.queryIndexes(queryIndexId),
+        needsValues,
+        indexOrder,
+        includeChangesFromThisTransaction
+      )
     new SlottedNodeIndexIterator(state, cursor)
   }
 }

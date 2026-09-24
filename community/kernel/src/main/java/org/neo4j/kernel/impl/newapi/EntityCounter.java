@@ -29,9 +29,11 @@ import java.util.function.Predicate;
 import org.neo4j.common.EntityType;
 import org.neo4j.counts.CountsVisitor;
 import org.neo4j.exceptions.KernelException;
+import org.neo4j.internal.kernel.api.CursorFactory;
 import org.neo4j.internal.kernel.api.InternalIndexState;
+import org.neo4j.internal.kernel.api.NodeCursor;
 import org.neo4j.internal.kernel.api.Read;
-import org.neo4j.internal.kernel.api.RelationshipDataAccessor;
+import org.neo4j.internal.kernel.api.RelationshipCursor;
 import org.neo4j.internal.kernel.api.RelationshipIndexCursor;
 import org.neo4j.internal.kernel.api.RelationshipScanCursor;
 import org.neo4j.internal.kernel.api.SchemaRead;
@@ -42,6 +44,7 @@ import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexType;
 import org.neo4j.internal.schema.SchemaDescriptors;
 import org.neo4j.io.pagecache.context.CursorContext;
+import org.neo4j.kernel.api.AssertOpen;
 import org.neo4j.kernel.api.txstate.TransactionState;
 import org.neo4j.kernel.api.txstate.TxStateHolder;
 import org.neo4j.memory.MemoryTracker;
@@ -53,21 +56,26 @@ import org.neo4j.token.api.TokenConstants;
 
 final class EntityCounter {
 
+    // Specifies how often we should verify that the transaction is still open
+    private static final int CHECK_TX_INTERVAL = 100_000;
+
     private final boolean multiVersioned;
+    private final AssertOpen assertOpen;
 
     /**
      * Mulitversioned counter should return counts matching transaction visibility rules, which is impossible to get from
      * the current countstore. If {@param multiVersioned} is true all counting will by done via store or token index scan if possible.
      */
-    public EntityCounter(boolean multiVersioned) {
+    public EntityCounter(boolean multiVersioned, AssertOpen assertOpen) {
         this.multiVersioned = multiVersioned;
+        this.assertOpen = assertOpen;
     }
 
     long countsForNode(
             int labelId,
             AccessMode accessMode,
             StorageReader storageReader,
-            DefaultPooledCursors cursors,
+            CursorFactory cursors,
             CursorContext cursorContext,
             MemoryTracker memoryTracker,
             Read read,
@@ -78,9 +86,12 @@ final class EntityCounter {
             return storageReader.countsForNode(labelId, cursorContext)
                     + countsForNodeInTxState(
                             labelId, storageReader, cursorContext, storageCursors, txStateHolder, memoryTracker);
-        }
-        if (accessMode.disallowsTraverseLabel(labelId)) {
+        } else if (accessMode.disallowsTraverseLabel(labelId)) {
             // No nodes with the specified label can't be traversed, so the count only ones in transaction state
+            return countsForNodeInTxState(
+                    labelId, storageReader, cursorContext, storageCursors, txStateHolder, memoryTracker);
+        } else if (accessMode.hasNoTraverseNodePrivilege()) {
+            // Only able to see nodes in transaction state
             return countsForNodeInTxState(
                     labelId, storageReader, cursorContext, storageCursors, txStateHolder, memoryTracker);
         }
@@ -114,12 +125,8 @@ final class EntityCounter {
         return count;
     }
 
-    private static long countNodesByScan(
-            int labelId,
-            DefaultPooledCursors cursors,
-            CursorContext cursorContext,
-            MemoryTracker memoryTracker,
-            Read read) {
+    private long countNodesByScan(
+            int labelId, CursorFactory cursors, CursorContext cursorContext, MemoryTracker memoryTracker, Read read) {
         // We have a restriction on what part of the graph can be traversed, that can affect nodes with the
         // specified label.
         // This disables the count store entirely.
@@ -127,10 +134,14 @@ final class EntityCounter {
         // We cannot use a NodeLabelScan without an expensive post-filtering, since it is not guaranteed that all
         // nodes with the label can be traversed.
         long count = 0;
+        long scanned = 0;
         // DefaultNodeCursor already contains traversal checks within next()
-        try (DefaultNodeCursor nodes = cursors.allocateNodeCursor(cursorContext, memoryTracker)) {
+        try (NodeCursor nodes = cursors.allocateNodeCursor(cursorContext, memoryTracker)) {
             read.allNodesScan(nodes);
             while (nodes.next()) {
+                if ((++scanned % CHECK_TX_INTERVAL) == 0) {
+                    assertOpen.assertOpen();
+                }
                 if (labelId == TokenConstants.ANY_LABEL || nodes.hasLabel(labelId)) {
                     count++;
                 }
@@ -145,7 +156,7 @@ final class EntityCounter {
             int endLabelId,
             AccessMode accessMode,
             StorageReader storageReader,
-            DefaultPooledCursors cursors,
+            CursorFactory cursors,
             Read read,
             CursorContext cursorContext,
             MemoryTracker memoryTracker,
@@ -191,7 +202,7 @@ final class EntityCounter {
             int startLabelId,
             int typeId,
             int endLabelId,
-            DefaultPooledCursors cursors,
+            CursorFactory cursors,
             Read read,
             SchemaRead schemaRead,
             CursorContext cursorContext,
@@ -204,8 +215,8 @@ final class EntityCounter {
                     long count = 0;
                     try (var relationshipsWithType =
                                     cursors.allocateRelationshipTypeIndexCursor(cursorContext, memoryTracker);
-                            DefaultNodeCursor sourceNode = cursors.allocateNodeCursor(cursorContext, memoryTracker);
-                            DefaultNodeCursor targetNode = cursors.allocateNodeCursor(cursorContext, memoryTracker)) {
+                            NodeCursor sourceNode = cursors.allocateNodeCursor(cursorContext, memoryTracker);
+                            NodeCursor targetNode = cursors.allocateNodeCursor(cursorContext, memoryTracker)) {
                         var session = read.tokenReadSession(index);
                         read.relationshipTypeScan(
                                 session,
@@ -225,8 +236,8 @@ final class EntityCounter {
 
         long count;
         try (var rels = cursors.allocateRelationshipScanCursor(cursorContext, memoryTracker);
-                DefaultNodeCursor sourceNode = cursors.allocateFullAccessNodeCursor(cursorContext, memoryTracker);
-                DefaultNodeCursor targetNode = cursors.allocateFullAccessNodeCursor(cursorContext, memoryTracker)) {
+                NodeCursor sourceNode = cursors.allocateFullAccessNodeCursor(cursorContext, memoryTracker);
+                NodeCursor targetNode = cursors.allocateFullAccessNodeCursor(cursorContext, memoryTracker)) {
             read.allRelationshipsScan(rels);
             Predicate<RelationshipScanCursor> predicate =
                     typeId == TokenConstants.ANY_RELATIONSHIP_TYPE ? alwaysTrue() : CursorPredicates.hasType(typeId);
@@ -246,14 +257,18 @@ final class EntityCounter {
         return IndexDescriptor.NO_INDEX;
     }
 
-    private static long countRelationshipsWithEndLabels(
+    private long countRelationshipsWithEndLabels(
             RelationshipIndexCursor relationship,
-            DefaultNodeCursor sourceNode,
-            DefaultNodeCursor targetNode,
+            NodeCursor sourceNode,
+            NodeCursor targetNode,
             int startLabelId,
             int endLabelId) {
         long internalCount = 0;
+        long scanned = 0;
         while (relationship.next()) {
+            if ((++scanned % CHECK_TX_INTERVAL) == 0) {
+                assertOpen.assertOpen();
+            }
             if (relationship.readFromStore()
                     && matchesLabels(relationship, sourceNode, targetNode, startLabelId, endLabelId)) {
                 internalCount++;
@@ -262,14 +277,18 @@ final class EntityCounter {
         return internalCount;
     }
 
-    private static long countRelationshipsWithEndLabels(
+    private long countRelationshipsWithEndLabels(
             RelationshipScanCursor relationship,
-            DefaultNodeCursor sourceNode,
-            DefaultNodeCursor targetNode,
+            NodeCursor sourceNode,
+            NodeCursor targetNode,
             int startLabelId,
             int endLabelId) {
         long internalCount = 0;
+        long scanned = 0;
         while (relationship.next()) {
+            if ((++scanned % CHECK_TX_INTERVAL) == 0) {
+                assertOpen.assertOpen();
+            }
             if (matchesLabels(relationship, sourceNode, targetNode, startLabelId, endLabelId)) {
                 internalCount++;
             }
@@ -278,9 +297,9 @@ final class EntityCounter {
     }
 
     private static boolean matchesLabels(
-            RelationshipDataAccessor relationship,
-            DefaultNodeCursor sourceNode,
-            DefaultNodeCursor targetNode,
+            RelationshipCursor relationship,
+            NodeCursor sourceNode,
+            NodeCursor targetNode,
             int startLabelId,
             int endLabelId) {
         relationship.source(sourceNode);

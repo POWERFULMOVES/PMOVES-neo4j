@@ -25,18 +25,25 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.fail;
 import static org.neo4j.notifications.NotificationCodeWithDescription.aggregationSkippedNull;
 import static org.neo4j.notifications.NotificationCodeWithDescription.authProviderNotDefined;
+import static org.neo4j.notifications.NotificationCodeWithDescription.callableShadowing;
 import static org.neo4j.notifications.NotificationCodeWithDescription.cartesianProduct;
 import static org.neo4j.notifications.NotificationCodeWithDescription.codeGenerationFailed;
 import static org.neo4j.notifications.NotificationCodeWithDescription.commandHasNoEffectAssignPrivilege;
 import static org.neo4j.notifications.NotificationCodeWithDescription.commandHasNoEffectGrantRole;
+import static org.neo4j.notifications.NotificationCodeWithDescription.commandHasNoEffectGrantRoleToAuthRule;
 import static org.neo4j.notifications.NotificationCodeWithDescription.commandHasNoEffectRevokePrivilege;
 import static org.neo4j.notifications.NotificationCodeWithDescription.commandHasNoEffectRevokeRole;
+import static org.neo4j.notifications.NotificationCodeWithDescription.commandHasNoEffectRevokeRoleToAuthRule;
 import static org.neo4j.notifications.NotificationCodeWithDescription.cordonedServersExist;
 import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedBooleanCoercion;
 import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedConnectComponentsPlannerPreParserOption;
+import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedEagerAnalyzerPreParserOption;
+import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedExistingDataOption;
 import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedFormat;
+import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedFunctionNamespace;
 import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedFunctionWithReplacement;
 import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedFunctionWithoutReplacement;
+import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedGraphReferenceNotification;
 import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedIdentifierUnicode;
 import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedIdentifierWhitespaceUnicode;
 import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedImportingWithInSubqueryCall;
@@ -45,12 +52,14 @@ import static org.neo4j.notifications.NotificationCodeWithDescription.deprecated
 import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedNodeOrRelationshipOnRhsSetClause;
 import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedOptionInOptionMap;
 import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedPrecedenceOfLabelExpressionPredicate;
-import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedProcedureReturnField;
+import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedProcedureNamespace;
 import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedProcedureWithReplacement;
 import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedProcedureWithoutReplacement;
 import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedPropertyReferenceInCreate;
 import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedPropertyReferenceInMerge;
+import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedQuotedGraphByNameArgument;
 import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedRelationshipTypeSeparator;
+import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedRequestedFeature;
 import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedRuntimeOption;
 import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedSeedingOption;
 import static org.neo4j.notifications.NotificationCodeWithDescription.deprecatedShortestPathWithFixedLengthRelationship;
@@ -62,6 +71,7 @@ import static org.neo4j.notifications.NotificationCodeWithDescription.eagerLoadC
 import static org.neo4j.notifications.NotificationCodeWithDescription.exhaustiveShortestPath;
 import static org.neo4j.notifications.NotificationCodeWithDescription.externalAuthNotEnabled;
 import static org.neo4j.notifications.NotificationCodeWithDescription.homeDatabaseNotPresent;
+import static org.neo4j.notifications.NotificationCodeWithDescription.identifierShadowingVariable;
 import static org.neo4j.notifications.NotificationCodeWithDescription.impossibleRevokeCommand;
 import static org.neo4j.notifications.NotificationCodeWithDescription.indexHintUnfulfillable;
 import static org.neo4j.notifications.NotificationCodeWithDescription.indexLookupForDynamicProperty;
@@ -81,12 +91,19 @@ import static org.neo4j.notifications.NotificationCodeWithDescription.redundantO
 import static org.neo4j.notifications.NotificationCodeWithDescription.repeatedRelationshipReference;
 import static org.neo4j.notifications.NotificationCodeWithDescription.repeatedVarLengthRelationshipReference;
 import static org.neo4j.notifications.NotificationCodeWithDescription.requestedTopologyMatchedCurrentTopology;
+import static org.neo4j.notifications.NotificationCodeWithDescription.retiredPlannerVersionPreParserOption;
 import static org.neo4j.notifications.NotificationCodeWithDescription.runtimeUnsupported;
 import static org.neo4j.notifications.NotificationCodeWithDescription.serverAlreadyCordoned;
 import static org.neo4j.notifications.NotificationCodeWithDescription.serverAlreadyEnabled;
+import static org.neo4j.notifications.NotificationCodeWithDescription.shadowingInternalFunction;
 import static org.neo4j.notifications.NotificationCodeWithDescription.subqueryVariableShadowing;
 import static org.neo4j.notifications.NotificationCodeWithDescription.unboundedShortestPath;
 import static org.neo4j.notifications.NotificationCodeWithDescription.unsatisfiableRelationshipTypeExpression;
+import static org.neo4j.notifications.NotificationCodeWithDescription.vectorIndexDimensionsNotSpecified;
+import static org.neo4j.notifications.NotificationCodeWithDescription.waitServerCatchingUp;
+import static org.neo4j.notifications.NotificationCodeWithDescription.waitServerCaughtUp;
+import static org.neo4j.notifications.NotificationCodeWithDescription.waitServerFailed;
+import static org.neo4j.notifications.NotificationCodeWithDescription.waitServerUnavailable;
 import static org.neo4j.notifications.NotificationDetail.repeatedRelationship;
 import static org.neo4j.notifications.NotificationDetail.unsatisfiableRelTypeExpression;
 
@@ -459,6 +476,78 @@ class NotificationCodeWithDescriptionTest {
     }
 
     @Test
+    void shouldConstructNotificationsFor_DEPRECATED_FUNCTION_NAMESPACE() {
+        NotificationImplementation notification = deprecatedFunctionNamespace(InputPosition.empty, "point.function");
+
+        verifyNotification(
+                notification,
+                "This feature is deprecated and will be removed in future versions.",
+                SeverityLevel.WARNING,
+                "Neo.ClientNotification.Statement.FeatureDeprecationWarning",
+                "The namespace of the invoked user-defined function is deprecated. (point.function)",
+                NotificationCategory.DEPRECATION,
+                NotificationClassification.DEPRECATION,
+                "01N00",
+                new DiagnosticRecord(
+                                warning,
+                                NotificationClassification.DEPRECATION,
+                                -1,
+                                -1,
+                                -1,
+                                Map.of("feat1", "oldName", "feat2", "newName"))
+                        .asMap(),
+                "warn: feature deprecated. The namespace used by the user-defined function `point.function` is deprecated.");
+    }
+
+    @Test
+    void shouldConstructNotificationsFor_DEPRECATED_PROCEDURE_NAMESPACE() {
+        NotificationImplementation notification = deprecatedProcedureNamespace(InputPosition.empty, "point.procedure");
+
+        verifyNotification(
+                notification,
+                "This feature is deprecated and will be removed in future versions.",
+                SeverityLevel.WARNING,
+                "Neo.ClientNotification.Statement.FeatureDeprecationWarning",
+                "The namespace of the called user-defined procedure is deprecated. (point.procedure)",
+                NotificationCategory.DEPRECATION,
+                NotificationClassification.DEPRECATION,
+                "01N00",
+                new DiagnosticRecord(
+                                warning,
+                                NotificationClassification.DEPRECATION,
+                                -1,
+                                -1,
+                                -1,
+                                Map.of("feat1", "oldName", "feat2", "newName"))
+                        .asMap(),
+                "warn: feature deprecated. The namespace used by the user-defined procedure `point.procedure` is deprecated.");
+    }
+
+    @Test
+    void shouldConstructNotificationsFor_SHADOWING_INTERNAL_FUNCTION() {
+        NotificationImplementation notification = shadowingInternalFunction(InputPosition.empty, "point.function");
+
+        verifyNotification(
+                notification,
+                "This feature is deprecated and will be removed in future versions.",
+                SeverityLevel.WARNING,
+                "Neo.ClientNotification.Statement.FeatureDeprecationWarning",
+                "The namespace of the invoked user-defined function is deprecated and the function is shadowing an internal function. (point.function)",
+                NotificationCategory.DEPRECATION,
+                NotificationClassification.DEPRECATION,
+                "01N00",
+                new DiagnosticRecord(
+                                warning,
+                                NotificationClassification.DEPRECATION,
+                                -1,
+                                -1,
+                                -1,
+                                Map.of("feat1", "oldName", "feat2", "newName"))
+                        .asMap(),
+                "warn: feature deprecated. The namespace of the invoked user-defined function `point.function` is deprecated and the function is shadowing an internal function.");
+    }
+
+    @Test
     void shouldConstructNotificationsFor_DEPRECATED_RUNTIME_OPTION() {
         NotificationImplementation notification = deprecatedRuntimeOption(
                 InputPosition.empty, "option=deprecatedOption", "option=oldOption", "option=newOption");
@@ -506,31 +595,6 @@ class NotificationCodeWithDescriptionTest {
                                 Map.of("proc", "my.proc", "msg", "Warning from procedure."))
                         .asMap(),
                 "warn: procedure or function execution warning. Execution of the procedure my.proc() generated the warning Warning from procedure.");
-    }
-
-    @Test
-    void shouldConstructNotificationsFor_DEPRECATED_PROCEDURE_RETURN_FIELD() {
-        NotificationImplementation notification = deprecatedProcedureReturnField(
-                InputPosition.empty, "'field' returned by 'proc' is deprecated.", "proc", "field");
-
-        verifyNotification(
-                notification,
-                "This feature is deprecated and will be removed in future versions.",
-                SeverityLevel.WARNING,
-                "Neo.ClientNotification.Statement.FeatureDeprecationWarning",
-                "The query used a deprecated field from a procedure. ('field' returned by 'proc' is deprecated.)",
-                NotificationCategory.DEPRECATION,
-                NotificationClassification.DEPRECATION,
-                "01N03",
-                new DiagnosticRecord(
-                                warning,
-                                NotificationClassification.DEPRECATION,
-                                -1,
-                                -1,
-                                -1,
-                                Map.of("procField", "field", "proc", "proc"))
-                        .asMap(),
-                "warn: procedure field deprecated. The field `field` of procedure proc() is deprecated.");
     }
 
     @Test
@@ -623,7 +687,7 @@ class NotificationCodeWithDescriptionTest {
                 "This feature is deprecated and will be removed in future versions.",
                 SeverityLevel.WARNING,
                 "Neo.ClientNotification.Statement.FeatureDeprecationWarning",
-                "The `text-1.0` provider for text indexes is deprecated and will be removed in a future version. Please use `text-2.0` instead.",
+                "`text-1.0`, `text-2.0` providers for text indexes are deprecated and will be removed in a future version. Please use `text-3.0` instead.",
                 NotificationCategory.DEPRECATION,
                 NotificationClassification.DEPRECATION,
                 "01N01",
@@ -711,6 +775,24 @@ class NotificationCodeWithDescriptionTest {
     }
 
     @Test
+    void shouldConstructNotificationsFor_DEPRECATED_REQUESTED_FEATURE() {
+        NotificationImplementation notification =
+                deprecatedRequestedFeature(InputPosition.empty, "HTTP API", "Query API");
+
+        verifyNotification(
+                notification,
+                "This feature is deprecated and will be removed in future versions.",
+                SeverityLevel.WARNING,
+                "Neo.ClientNotification.Request.FeatureDeprecationWarning",
+                "HTTP API is deprecated. It is replaced by Query API.",
+                NotificationCategory.DEPRECATION,
+                NotificationClassification.DEPRECATION,
+                "01N01",
+                new DiagnosticRecord(warning, NotificationClassification.DEPRECATION, -1, -1, -1, Map.of()).asMap(),
+                "warn: feature deprecated with replacement. HTTP API is deprecated. It is replaced by Query API.");
+    }
+
+    @Test
     void shouldConstructNotificationsFor_DEPRECATED_IDENTIFIER_WHITESPACE_UNICODE() {
         NotificationImplementation notification =
                 deprecatedIdentifierWhitespaceUnicode(InputPosition.empty, 'a', "ana");
@@ -775,7 +857,7 @@ class NotificationCodeWithDescriptionTest {
     @Test
     void shouldConstructNotificationsFor_MISSING_LABEL() {
         NotificationImplementation notification =
-                missingLabel(InputPosition.empty, NotificationDetail.missingLabel("Label"), "Label");
+                missingLabel(InputPosition.empty, NotificationDetail.missingLabel("Label"), "Label", "myDb");
 
         verifyNotification(
                 notification,
@@ -788,15 +870,20 @@ class NotificationCodeWithDescriptionTest {
                 NotificationClassification.UNRECOGNIZED,
                 "01N50",
                 new DiagnosticRecord(
-                                warning, NotificationClassification.UNRECOGNIZED, -1, -1, -1, Map.of("label", "Label"))
+                                warning,
+                                NotificationClassification.UNRECOGNIZED,
+                                -1,
+                                -1,
+                                -1,
+                                Map.of("label", "Label", "db", "myDb"))
                         .asMap(),
-                "warn: label does not exist. The label `Label` does not exist. Verify that the spelling is correct.");
+                "warn: label does not exist. The label `Label` does not exist in database `myDb`. Verify that the spelling is correct.");
     }
 
     @Test
     void shouldConstructNotificationsFor_MISSING_REL_TYPE() {
         NotificationImplementation notification =
-                missingRelType(InputPosition.empty, NotificationDetail.missingRelationshipType("Rel"), "Rel");
+                missingRelType(InputPosition.empty, NotificationDetail.missingRelationshipType("Rel"), "Rel", "neo4j");
 
         verifyNotification(
                 notification,
@@ -809,15 +896,20 @@ class NotificationCodeWithDescriptionTest {
                 NotificationClassification.UNRECOGNIZED,
                 "01N51",
                 new DiagnosticRecord(
-                                warning, NotificationClassification.UNRECOGNIZED, -1, -1, -1, Map.of("relType", "Rel"))
+                                warning,
+                                NotificationClassification.UNRECOGNIZED,
+                                -1,
+                                -1,
+                                -1,
+                                Map.of("relType", "Rel", "db", "neo4j"))
                         .asMap(),
-                "warn: relationship type does not exist. The relationship type `Rel` does not exist. Verify that the spelling is correct.");
+                "warn: relationship type does not exist. The relationship type `Rel` does not exist in database `neo4j`. Verify that the spelling is correct.");
     }
 
     @Test
     void shouldConstructNotificationsFor_MISSING_PROPERTY_NAME() {
         NotificationImplementation notification =
-                missingPropertyName(InputPosition.empty, NotificationDetail.propertyName("prop"), "prop");
+                missingPropertyName(InputPosition.empty, NotificationDetail.propertyName("prop"), "prop", "myDb");
 
         verifyNotification(
                 notification,
@@ -831,9 +923,14 @@ class NotificationCodeWithDescriptionTest {
                 NotificationClassification.UNRECOGNIZED,
                 "01N52",
                 new DiagnosticRecord(
-                                warning, NotificationClassification.UNRECOGNIZED, -1, -1, -1, Map.of("propKey", "prop"))
+                                warning,
+                                NotificationClassification.UNRECOGNIZED,
+                                -1,
+                                -1,
+                                -1,
+                                Map.of("propKey", "prop", "db", "myDb"))
                         .asMap(),
-                "warn: property key does not exist. The property `prop` does not exist. Verify that the spelling is correct.");
+                "warn: property key does not exist. The property `prop` does not exist in database `myDb`. Verify that the spelling is correct.");
     }
 
     @Test
@@ -1004,9 +1101,43 @@ class NotificationCodeWithDescriptionTest {
     }
 
     @Test
+    void shouldConstructNotificationsFor_CODE_GENERATION_FAILED_defaultExpressionEngine() {
+        // The failing engine is configured as the default (not the literal "compiled"), which is the
+        // common case: the default expression engine still attempts compilation.
+        String preparserOptions1 = "expressionEngine=default";
+        String preparserOptions2 = "expressionEngine=interpreted";
+        String failingEnginetype = "expression";
+        String cause = "Failed to compile expression: ${regex:.*}";
+        NotificationImplementation notification =
+                codeGenerationFailed(InputPosition.empty, preparserOptions1, preparserOptions2, cause);
+
+        verifyNotification(
+                notification,
+                "The database was unable to generate code for the query. A stacktrace can be found in the debug.log.",
+                SeverityLevel.INFORMATION,
+                "Neo.ClientNotification.Statement.CodeGenerationFailed",
+                "The database was unable to generate code for the query. A stacktrace can be found in the debug.log. ("
+                        + cause + ")",
+                NotificationCategory.PERFORMANCE,
+                NotificationClassification.PERFORMANCE,
+                "03N96",
+                new DiagnosticRecord(
+                                info,
+                                NotificationClassification.PERFORMANCE,
+                                -1,
+                                -1,
+                                -1,
+                                Map.of("cfgSetting", failingEnginetype, "cause", cause))
+                        .asMap(),
+                String.format(
+                        "info: code generation failed. Failed to generate code, falling back to interpreted %s engine. A stacktrace can be found in the debug.log. Cause: %s.",
+                        failingEnginetype, cause));
+    }
+
+    @Test
     void shouldConstructNotificationsFor_SUBQUERY_VARIABLE_SHADOWING() {
         NotificationImplementation notification =
-                subqueryVariableShadowing(InputPosition.empty, NotificationDetail.shadowingVariable("v"), "v");
+                subqueryVariableShadowing(InputPosition.empty, NotificationDetail.shadowingVariable("v"), "CALL", "v");
 
         verifyNotification(
                 notification,
@@ -1015,13 +1146,13 @@ class NotificationCodeWithDescriptionTest {
                 "Neo.ClientNotification.Statement.SubqueryVariableShadowing",
                 "Variable in subquery is shadowing a variable with the same name from the outer scope. "
                         + "If you want to use that variable instead, it must be imported into the subquery using "
-                        + "importing WITH clause. (the shadowing variable is: v)",
+                        + "a variable scope clause. (the shadowing variable is: v)",
                 NotificationCategory.GENERIC,
                 NotificationClassification.GENERIC,
                 "03N60",
                 new DiagnosticRecord(info, NotificationClassification.GENERIC, -1, -1, -1, Map.of("variable", "v"))
                         .asMap(),
-                "info: subquery variable shadowing. The variable `v` in the subquery uses the same name as a variable from the outer query. Use 'WITH `v`' in the subquery to import the one from the outer scope unless you want it to be a new variable.");
+                "info: subquery variable shadowing. The variable `v` in the subquery uses the same name as a variable from the outer query. Use 'CALL (`v`)' to import the one from the outer scope unless you want it to be a new variable.");
     }
 
     @Test
@@ -1061,7 +1192,8 @@ class NotificationCodeWithDescriptionTest {
 
     @Test
     void shouldConstructNotificationsFor_DEPRECATED_IMPORTING_WITH_IN_SUBQUERY_CALL() {
-        NotificationImplementation notification = deprecatedImportingWithInSubqueryCall(InputPosition.empty, "a");
+        NotificationImplementation notification =
+                deprecatedImportingWithInSubqueryCall(InputPosition.empty, "CALL", "a");
 
         String message = "CALL subquery without a variable scope clause is deprecated. Use CALL (a) { ... }";
         verifyNotification(
@@ -1069,7 +1201,7 @@ class NotificationCodeWithDescriptionTest {
                 "This feature is deprecated and will be removed in future versions.",
                 SeverityLevel.WARNING,
                 "Neo.ClientNotification.Statement.FeatureDeprecationWarning",
-                "CALL subquery without a variable scope clause is now deprecated. Use CALL (a) { ... }",
+                "CALL subquery without a variable scope clause is deprecated. Use CALL (a) { ... }",
                 NotificationCategory.DEPRECATION,
                 NotificationClassification.DEPRECATION,
                 "01N00",
@@ -1199,6 +1331,50 @@ class NotificationCodeWithDescriptionTest {
     }
 
     @Test
+    void shouldConstructNotificationsFor_DEPRECATED_QUOTED_GRAPH_REFERENCE() {
+        NotificationImplementation notification = deprecatedGraphReferenceNotification(
+                "`alice's.composite`.alias", "`alice's.composite.alias`", InputPosition.empty);
+
+        String message =
+                "Graph references with separately backticked name parts (`alice's.composite`.alias) are deprecated. In future Cypher versions, use parameters or backtick the entire name (`alice's.composite.alias`).";
+        verifyNotification(
+                notification,
+                "This feature is deprecated and will be removed in future versions.",
+                SeverityLevel.WARNING,
+                "Neo.ClientNotification.Statement.FeatureDeprecationWarning",
+                message,
+                NotificationCategory.DEPRECATION,
+                NotificationClassification.DEPRECATION,
+                "01N00",
+                new DiagnosticRecord(
+                                warning, NotificationClassification.DEPRECATION, -1, -1, -1, Map.of("item", message))
+                        .asMap(),
+                String.format("warn: feature deprecated. %s".formatted(message), message));
+    }
+
+    @Test
+    void shouldConstructNotificationsFor_DEPRECATED_QUOTED_GRAPH_BY_NAME_GRAPH_BY_NAME() {
+        NotificationImplementation notification = deprecatedQuotedGraphByNameArgument(
+                InputPosition.empty, "`alice's.composite`.alias", "alice's.composite.alias");
+
+        String message =
+                "Graph references with separately backticked name parts (`alice's.composite`.alias) are deprecated. In future Cypher versions, remove the backticks (alice's.composite.alias).";
+        verifyNotification(
+                notification,
+                "This feature is deprecated and will be removed in future versions.",
+                SeverityLevel.WARNING,
+                "Neo.ClientNotification.Statement.FeatureDeprecationWarning",
+                message,
+                NotificationCategory.DEPRECATION,
+                NotificationClassification.DEPRECATION,
+                "01N00",
+                new DiagnosticRecord(
+                                warning, NotificationClassification.DEPRECATION, -1, -1, -1, Map.of("item", message))
+                        .asMap(),
+                String.format("warn: feature deprecated. %s".formatted(message), message));
+    }
+
+    @Test
     void shouldConstructNotificationsFor_UNSATISFIABLE_RELATIONSHIP_TYPE_EXPRESSION() {
         NotificationImplementation notification = unsatisfiableRelationshipTypeExpression(
                 InputPosition.empty, unsatisfiableRelTypeExpression("!%"), "!%");
@@ -1292,6 +1468,53 @@ class NotificationCodeWithDescriptionTest {
                                 Map.of("feat", "connectComponentsPlanner"))
                         .asMap(),
                 "warn: feature deprecated without replacement. connectComponentsPlanner is deprecated and will be removed without a replacement.");
+    }
+
+    @Test
+    void shouldConstructNotificationsFor_DEPRECATED_EAGER_ANALYZER_PRE_PARSER_OPTION() {
+        NotificationImplementation notification = deprecatedEagerAnalyzerPreParserOption(InputPosition.empty);
+
+        verifyNotification(
+                notification,
+                "This feature is deprecated and will be removed in future versions.",
+                SeverityLevel.WARNING,
+                "Neo.ClientNotification.Statement.FeatureDeprecationWarning",
+                "The Cypher query option `eagerAnalyzer` is deprecated. "
+                        + "It will be removed without a replacement. "
+                        + "The option is ignored, eagerness analysis is systematically performed on the logical plan "
+                        + "regardless of the value provided.",
+                NotificationCategory.DEPRECATION,
+                NotificationClassification.DEPRECATION,
+                "01N02",
+                new DiagnosticRecord(
+                                warning,
+                                NotificationClassification.DEPRECATION,
+                                -1,
+                                -1,
+                                -1,
+                                Map.of("feat", "eagerAnalyzer"))
+                        .asMap(),
+                "warn: feature deprecated without replacement. eagerAnalyzer is deprecated and will be removed without a replacement.");
+    }
+
+    @Test
+    void shouldConstructNotificationsFor_RETIRED_PLANNER_VERSION_PRE_PARSER_OPTION() {
+        NotificationImplementation notification = retiredPlannerVersionPreParserOption(InputPosition.empty, "2026.03");
+
+        verifyNotification(
+                notification,
+                "The requested planner version is no longer supported.",
+                SeverityLevel.WARNING,
+                "Neo.ClientNotification.Statement.PlannerVersionUnsupportedWarning",
+                "The Cypher planner version 2026.03 is no longer supported. The default planner version is used instead.",
+                NotificationCategory.UNSUPPORTED,
+                NotificationClassification.UNSUPPORTED,
+                "01N84",
+                new DiagnosticRecord(
+                                warning, NotificationClassification.UNSUPPORTED, -1, -1, -1, Map.of("value", "2026.03"))
+                        .asMap(),
+                "warn: unsupported planner version. The Cypher planner version 2026.03 is no longer supported. "
+                        + "The default planner version is used instead.");
     }
 
     @Test
@@ -1430,6 +1653,56 @@ class NotificationCodeWithDescriptionTest {
                                 Map.of("cmd", "REVOKE ROLE other FROM alice"))
                         .asMap(),
                 "note: successful completion - role or privilege not assigned. The command 'REVOKE ROLE other FROM alice' has no effect. The role or privilege is not assigned.");
+    }
+
+    @Test
+    void shouldConstructNotificationsFor_COMMAND_HAS_NO_EFFECT_GRANT_ROLE_TO_AUTH_RULE() {
+        NotificationImplementation notification =
+                commandHasNoEffectGrantRoleToAuthRule(InputPosition.empty, "GRANT ROLE role TO AUTH RULE authRule");
+
+        verifyNotification(
+                notification,
+                "`GRANT ROLE role TO AUTH RULE authRule` has no effect.",
+                SeverityLevel.INFORMATION,
+                "Neo.ClientNotification.Security.CommandHasNoEffect",
+                "The auth rule already has the role. See Status Codes documentation for more information.",
+                NotificationCategory.SECURITY,
+                NotificationClassification.SECURITY,
+                "00N70",
+                new DiagnosticRecord(
+                                info,
+                                NotificationClassification.SECURITY,
+                                -1,
+                                -1,
+                                -1,
+                                Map.of("cmd", "GRANT ROLE role TO AUTH RULE authRule"))
+                        .asMap(),
+                "note: successful completion - role or privilege already assigned. The command 'GRANT ROLE role TO AUTH RULE authRule' has no effect. The role or privilege is already assigned.");
+    }
+
+    @Test
+    void shouldConstructNotificationsFor_COMMAND_HAS_NO_EFFECT_REVOKE_ROLE_TO_AUTH_RULE() {
+        NotificationImplementation notification =
+                commandHasNoEffectRevokeRoleToAuthRule(InputPosition.empty, "REVOKE ROLE role FROM AUTH RULE authRule");
+
+        verifyNotification(
+                notification,
+                "`REVOKE ROLE role FROM AUTH RULE authRule` has no effect.",
+                SeverityLevel.INFORMATION,
+                "Neo.ClientNotification.Security.CommandHasNoEffect",
+                "The auth rule does not have the role. See Status Codes documentation for more information.",
+                NotificationCategory.SECURITY,
+                NotificationClassification.SECURITY,
+                "00N71",
+                new DiagnosticRecord(
+                                info,
+                                NotificationClassification.SECURITY,
+                                -1,
+                                -1,
+                                -1,
+                                Map.of("cmd", "REVOKE ROLE role FROM AUTH RULE authRule"))
+                        .asMap(),
+                "note: successful completion - role or privilege not assigned. The command 'REVOKE ROLE role FROM AUTH RULE authRule' has no effect. The role or privilege is not assigned.");
     }
 
     @Test
@@ -1729,6 +2002,29 @@ class NotificationCodeWithDescriptionTest {
     }
 
     @Test
+    void shouldConstructNotificationsFor_VECTOR_INDEX_DIMENSIONS_NOT_SPECIFIED() {
+        NotificationImplementation notification = vectorIndexDimensionsNotSpecified(InputPosition.empty);
+
+        verifyNotification(
+                notification,
+                "Vector index dimensions not specified.",
+                SeverityLevel.INFORMATION,
+                "Neo.ClientNotification.Schema.VectorIndexDimensionsNotSpecified",
+                "When creating a vector index, `vector.dimensions` should be specified. Omitting it is allowed, but specifying dimensions ensures that only vectors of that size are indexed and makes dimension mismatches fail clearly at query time. For example, set `OPTIONS { indexConfig: { `vector.dimensions`: 1536 } }` when creating the index.",
+                NotificationCategory.SCHEMA,
+                NotificationClassification.SCHEMA,
+                "00NA2",
+                new DiagnosticRecord(info, NotificationClassification.SCHEMA, -1, -1, -1).asMap(),
+                "note: successful completion - vector index dimensions not specified. When creating a vector index, `vector.dimensions` should be specified. Omitting it is allowed, but specifying dimensions ensures that only vectors of that size are indexed and makes dimension mismatches fail clearly at query time. For example, set `OPTIONS { indexConfig: { `vector.dimensions`: 1536 } }` when creating the index.");
+    }
+
+    @Test
+    void shouldKeep_VECTOR_INDEX_DIMENSIONS_NOT_SPECIFIED_description_in_sync_with_gql_status() {
+        assertThat(NotificationCodeWithDescription.VECTOR_INDEX_DIMENSIONS_NOT_SPECIFIED.getDescription(new Object[0]))
+                .isEqualTo(GqlStatusInfoCodes.STATUS_00NA2.getMessage(new Object[0]));
+    }
+
+    @Test
     void shouldConstructNotificationsFor_AGGREGATION_SKIPPED_NULL() {
         NotificationImplementation notification = aggregationSkippedNull();
 
@@ -1830,6 +2126,30 @@ class NotificationCodeWithDescriptionTest {
     }
 
     @Test
+    void shouldConstructNotificationsFor_DEPRECATED_EXISTING_DATA_OPTION() {
+        NotificationImplementation notification = deprecatedExistingDataOption();
+
+        verifyNotification(
+                notification,
+                "This feature is deprecated and will be removed in future versions.",
+                SeverityLevel.WARNING,
+                "Neo.ClientNotification.Statement.FeatureDeprecationWarning",
+                "`existingData` is deprecated. Use of existing data is implicit with seeding.",
+                NotificationCategory.DEPRECATION,
+                NotificationClassification.DEPRECATION,
+                "01N02",
+                new DiagnosticRecord(
+                                warning,
+                                NotificationClassification.DEPRECATION,
+                                -1,
+                                -1,
+                                -1,
+                                Map.of("feat1", "existingData"))
+                        .asMap(),
+                "warn: feature deprecated without replacement. existingData is deprecated and will be removed without a replacement.");
+    }
+
+    @Test
     void shouldConstructNotificationsFor_DEPRECATED_STORE_FORMAT() {
         NotificationImplementation notification = deprecatedStoreFormat("oldFormat");
 
@@ -1853,6 +2173,169 @@ class NotificationCodeWithDescriptionTest {
                                         "The targeted store format: oldFormat is deprecated. For details on deprecated store formats, see https://neo4j.com/docs/store-format-deprecations."))
                         .asMap(),
                 "warn: feature deprecated. The targeted store format: oldFormat is deprecated. For details on deprecated store formats, see https://neo4j.com/docs/store-format-deprecations.");
+    }
+
+    @Test
+    void shouldConstructNotificationsFor_WAIT_SERVER_UNAVAILABLE() {
+        NotificationImplementation notification = waitServerUnavailable("serverName");
+
+        verifyNotification(
+                notification,
+                "Server is not available.",
+                SeverityLevel.WARNING,
+                "Neo.ClientNotification.Cluster.ServerNotAvailable",
+                "Server `serverName` is not available.",
+                NotificationCategory.TOPOLOGY,
+                NotificationClassification.TOPOLOGY,
+                "01N82",
+                new DiagnosticRecord(
+                                warning,
+                                NotificationClassification.TOPOLOGY,
+                                -1,
+                                -1,
+                                -1,
+                                Map.of("item", "Server `serverName` is not available."))
+                        .asMap(),
+                "warn: server is not available. Server `'serverName'` is not available.");
+    }
+
+    @Test
+    void shouldConstructNotificationsFor_WAIT_SERVER_CATCHING_UP() {
+        NotificationImplementation notification = waitServerCatchingUp("serverName", "localhost:1234");
+
+        verifyNotification(
+                notification,
+                "Server is still catching up.",
+                SeverityLevel.WARNING,
+                "Neo.ClientNotification.Cluster.ServerCatchingUp",
+                "Server `serverName` at address `localhost:1234` is still catching up.",
+                NotificationCategory.TOPOLOGY,
+                NotificationClassification.TOPOLOGY,
+                "01N81",
+                new DiagnosticRecord(
+                                warning,
+                                NotificationClassification.TOPOLOGY,
+                                -1,
+                                -1,
+                                -1,
+                                Map.of("item", "Server `serverName` at address `'localhost:1234'` is catching up."))
+                        .asMap(),
+                "warn: server is catching up. Server `'serverName'` at address `'localhost:1234'` is still catching up.");
+    }
+
+    @Test
+    void shouldConstructNotificationsFor_WAIT_SERVER_FAILED() {
+        NotificationImplementation notification =
+                waitServerFailed("serverName", "localhost:1234", "Server failed because foo.");
+
+        verifyNotification(
+                notification,
+                "Server failed.",
+                SeverityLevel.WARNING,
+                "Neo.ClientNotification.Cluster.ServerFailed",
+                "Server `serverName` at address `localhost:1234` failed: Server failed because foo.",
+                NotificationCategory.TOPOLOGY,
+                NotificationClassification.TOPOLOGY,
+                "01N80",
+                new DiagnosticRecord(
+                                warning,
+                                NotificationClassification.TOPOLOGY,
+                                -1,
+                                -1,
+                                -1,
+                                Map.of(
+                                        "item",
+                                        "Server `serverName` at address `'localhost:1234'` failed: Server failed because foo."))
+                        .asMap(),
+                "warn: server failed. Server `'serverName'` at address `'localhost:1234'` failed: Server failed because foo.");
+    }
+
+    @Test
+    void shouldConstructNotificationsFor_WAIT_SERVER_CAUGHT_UP() {
+        NotificationImplementation notification = waitServerCaughtUp("serverName", "localhost:1234");
+
+        verifyNotification(
+                notification,
+                "Server has caught up.",
+                SeverityLevel.INFORMATION,
+                "Neo.ClientNotification.Cluster.ServerCaughtUp",
+                "Server `serverName` at address `localhost:1234` has caught up.",
+                NotificationCategory.TOPOLOGY,
+                NotificationClassification.TOPOLOGY,
+                "03N85",
+                new DiagnosticRecord(
+                                info,
+                                NotificationClassification.TOPOLOGY,
+                                -1,
+                                -1,
+                                -1,
+                                Map.of("item", "Server `serverName` at address `'localhost:1234'` has caught up."))
+                        .asMap(),
+                "info: server has caught up. Server `'serverName'` at address `'localhost:1234'` has caught up.");
+    }
+
+    @Test
+    void shouldConstructNotificationsFor_CALLABLE_SHADOWING() {
+        NotificationImplementation notification = callableShadowing(InputPosition.empty, "kind", "callableName");
+
+        verifyNotification(
+                notification,
+                "A callable is shadowing another callable in scope.",
+                SeverityLevel.INFORMATION,
+                "Neo.ClientNotification.Statement.CallableShadowing",
+                "Local kind `callableName` shadows a built-in or external kind with the same name.",
+                NotificationCategory.GENERIC,
+                NotificationClassification.GENERIC,
+                "03N64",
+                new DiagnosticRecord(
+                                info,
+                                NotificationClassification.GENERIC,
+                                -1,
+                                -1,
+                                -1,
+                                Map.of(
+                                        "item",
+                                        "Local kind `callableName` shadows a built-in or external kind with the same name."))
+                        .asMap(),
+                "info: callable shadowing. Local kind `callableName` shadows a built-in or external kind with the same name.");
+    }
+
+    @Test
+    void shouldConstructNotificationsFor_IDENTIFIER_SHADOWING_VARIABLE() {
+        NotificationImplementation notification =
+                identifierShadowingVariable(InputPosition.empty, "indexName", "VECTOR INDEX");
+
+        verifyNotification(
+                notification,
+                "An identifier is shadowing a variable in scope.",
+                SeverityLevel.INFORMATION,
+                "Neo.ClientNotification.Statement.IdentifierShadowingVariable",
+                "The identifier `indexName` in the `VECTOR INDEX` clause has the same name as a variable in scope. "
+                        + "Regardless of what the variable evaluates to, it is the literal `indexName` that will be used.",
+                NotificationCategory.GENERIC,
+                NotificationClassification.GENERIC,
+                "03N63",
+                new DiagnosticRecord(info, NotificationClassification.GENERIC, -1, -1, -1).asMap(),
+                "info: identifier shadowing variable. "
+                        + "The identifier `indexName` in the VECTOR INDEX clause has the same name as a variable in scope. "
+                        + "Regardless of what the variable evaluates to, it is the literal `indexName` that will be used.");
+    }
+
+    @Test
+    void shouldConstructNotificationsFor_VIRTUAL_GRAPH_POST_PROCESSING() {
+        final var notification = NotificationCodeWithDescription.graphEngineFallbackPostProcessing();
+
+        verifyNotification(
+                notification,
+                "The query plan against a virtual graph contains a potentially expensive post-processing step.",
+                SeverityLevel.INFORMATION,
+                "Neo.ClientNotification.Statement.VirtualGraphPostProcessing",
+                "The query execution plan contains a post-processing step that materialize intermediate results. This may transfer large amounts of data from the remote source and increase memory usage. Consider rewriting the query so that aggregation, `ORDER BY`, `DISTINCT`, and `LIMIT` can be pushed down to the remote source.",
+                NotificationCategory.PERFORMANCE,
+                NotificationClassification.PERFORMANCE,
+                "03N97",
+                new DiagnosticRecord(info, NotificationClassification.PERFORMANCE, -1, -1, -1).asMap(),
+                "info: virtual graph post-processing. The query execution plan contains a post-processing step that materialize intermediate results. This may transfer large amounts of data from the remote source and increase memory usage. Consider rewriting the query so that aggregation, `ORDER BY`, `DISTINCT`, and `LIMIT` can be pushed down to the remote source.");
     }
 
     private void verifyNotification(
@@ -1890,9 +2373,11 @@ class NotificationCodeWithDescriptionTest {
 
     @Test
     void noNotificationShouldHaveUnknownCategory() {
-        stream(NotificationCodeWithDescription.values()).forEach(notification -> assertThat(
-                        ((Status.NotificationCode) notification.getStatus().code()).getNotificationCategory())
-                .isNotEqualTo(NotificationCategory.UNKNOWN.name()));
+        stream(NotificationCodeWithDescription.values())
+                .forEach(notification -> assertThat(((Status.NotificationCode)
+                                        notification.getStatus().code())
+                                .getNotificationCategory())
+                        .isNotEqualTo(NotificationCategory.UNKNOWN.name()));
     }
 
     @Test
@@ -1919,7 +2404,7 @@ class NotificationCodeWithDescriptionTest {
                         .setMessageParameters(new String[] {})
                         .build())
                 .isExactlyInstanceOf(IllegalArgumentException.class)
-                .hasMessage("Expected parameterKeys: [relType] and parameterValues: [] to have the same length.");
+                .hasMessage("Expected parameterKeys: [relType, db] and parameterValues: [] to have the same length.");
     }
 
     @Test
@@ -1928,16 +2413,17 @@ class NotificationCodeWithDescriptionTest {
                 new NotificationImplementation.NotificationBuilder(NotificationCodeWithDescription.MISSING_REL_TYPE);
 
         assertThatThrownBy(() -> notificationBuilder
-                        .setMessageParameters(new String[] {"A", "B"})
+                        .setMessageParameters(new String[] {"A", "B", "C"})
                         .build())
                 .isExactlyInstanceOf(IllegalArgumentException.class)
-                .hasMessage("Expected parameterKeys: [relType] and parameterValues: [A, B] to have the same length.");
+                .hasMessage(
+                        "Expected parameterKeys: [relType, db] and parameterValues: [A, B, C] to have the same length.");
     }
 
     /**
      * If this test fails, you have added, changed or removed a notification.
      * To get it approved, follow the instructions on
-     * https://trello.com/c/9L3lbeSY/27-update-to-notification-name
+     * https://linear.app/neo4j/team/SURF/new?template=fb219e16-d9e6-4105-86b1-7dffb7442292
      * When your changes have been approved, please change the expected byte[] below.
      */
     @Test
@@ -1962,14 +2448,15 @@ class NotificationCodeWithDescriptionTest {
         byte[] notificationHash = DigestUtils.sha256(notificationBuilder.toString());
 
         byte[] expectedHash = new byte[] {
-            -78, -71, -88, 114, 105, 70, 45, -23, 72, -107, -56, -88, -83, -101, -37, 3, -70, -10, 94, -58, -39, 69, 89,
-            -104, 37, -103, 28, 35, 6, -2, 91, -108
+            19, 119, 23, -22, 90, -18, 7, -113, 64, 31, 65, 4, -109, 21, 122, -67, 99, 17, 123, -104, 56, -44, 115, -86,
+            55, 116, -86, 112, 61, -89, 72, -93
         };
 
         if (!Arrays.equals(notificationHash, expectedHash)) {
-            fail("Expected: " + Arrays.toString(expectedHash) + " \n Actual: " + Arrays.toString(notificationHash)
-                    + "\n If you have added, changed or removed a notification, "
-                    + "please follow the process on https://trello.com/c/9L3lbeSY/27-update-to-notification-name");
+            fail(
+                    "Expected: " + Arrays.toString(expectedHash) + " \n Actual: " + Arrays.toString(notificationHash)
+                            + "\n If you have added, changed or removed a notification, "
+                            + "please follow the process on https://linear.app/neo4j/team/SURF/new?template=fb219e16-d9e6-4105-86b1-7dffb7442292");
         }
     }
 }

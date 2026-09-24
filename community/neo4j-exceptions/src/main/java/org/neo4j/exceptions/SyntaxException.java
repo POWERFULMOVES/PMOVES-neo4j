@@ -22,9 +22,13 @@ package org.neo4j.exceptions;
 import static java.lang.System.lineSeparator;
 import static java.util.Objects.nonNull;
 
-import java.util.Optional;
+import java.util.List;
+import java.util.OptionalInt;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
+import org.neo4j.gqlstatus.GqlHelper;
 import org.neo4j.gqlstatus.GqlParams;
 import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.kernel.api.exceptions.Status;
@@ -33,15 +37,12 @@ public class SyntaxException extends Neo4jException {
 
     private final transient Integer offset;
     private final String query;
+    private String positionString = "";
 
-    @Deprecated
-    public SyntaxException(String message, String query, Integer offset, Throwable cause) {
-        super(message, cause);
-        this.offset = offset;
-        this.query = query;
-    }
+    public static final String QUOTE_MISMATCH_ERROR_MESSAGE =
+            "Failed to parse string literal. The query must contain an even number of non-escaped quotes.";
 
-    public SyntaxException(
+    protected SyntaxException(
             ErrorGqlStatusObject gqlStatusObject, String message, String query, Integer offset, Throwable cause) {
         super(gqlStatusObject, message, cause);
 
@@ -49,31 +50,39 @@ public class SyntaxException extends Neo4jException {
         this.query = query;
     }
 
-    @Deprecated
-    public SyntaxException(String message, String query, int offset) {
-        this(message, query, offset, null);
-    }
-
     public SyntaxException(ErrorGqlStatusObject gqlStatusObject, String message, String query, int offset) {
         this(gqlStatusObject, message, query, offset, null);
     }
 
-    @Deprecated
-    public SyntaxException(String message, Throwable cause) {
-        this(message, "", null, cause);
+    public SyntaxException(
+            ErrorGqlStatusObject gqlStatusObject,
+            String message,
+            String query,
+            String adjustedPosition,
+            int offset,
+            Throwable cause) {
+        this(gqlStatusObject, message, query, offset, cause);
+        if (nonNull(adjustedPosition)) {
+            this.positionString = String.format(" (%s)", adjustedPosition);
+        }
     }
 
-    public SyntaxException(ErrorGqlStatusObject gqlStatusObject, String message, Throwable cause) {
+    protected SyntaxException(ErrorGqlStatusObject gqlStatusObject, String message, Throwable cause) {
         this(gqlStatusObject, message, "", null, cause);
-    }
-
-    @Deprecated
-    public SyntaxException(String message) {
-        this(message, "", null, null);
     }
 
     public SyntaxException(ErrorGqlStatusObject gqlStatusObject, String message) {
         this(gqlStatusObject, message, "", null, null);
+    }
+
+    public static SyntaxException internalError(String msgTitle, String message, String query, int offset) {
+        var gql = GqlHelper.get50N00(msgTitle, message);
+        return new SyntaxException(gql, message, query, offset, null);
+    }
+
+    public static SyntaxException internalError(String msgTitle, String message) {
+        var gql = GqlHelper.get50N00(msgTitle, message);
+        return new SyntaxException(gql, message);
     }
 
     public static SyntaxException invalidShortestPathException(String start) {
@@ -88,13 +97,15 @@ public class SyntaxException extends Neo4jException {
                         start));
     }
 
-    public static SyntaxException wrongNumberOfArguments(
-            int expectedCount, int actualCount, String name, String signature) {
-        var msg = String.format(
-                "The procedure or function call does not provide the required number of arguments; expected %s but got %s. "
-                        + "The procedure or function `%s` has the signature: `%s`.",
-                expectedCount, actualCount, name, signature);
-        return wrongNumberOfArguments(expectedCount, actualCount, name, signature, msg);
+    public static SyntaxException invalidInput(
+            String input, List<String> expected, String legacyMessage, Integer offset) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42001)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42I06)
+                        .withParam(GqlParams.StringParam.input, input)
+                        .withParam(GqlParams.ListParam.valueList, expected)
+                        .build())
+                .build();
+        return new SyntaxException(gql, legacyMessage, input, offset);
     }
 
     public static SyntaxException wrongNumberOfArguments(
@@ -142,29 +153,127 @@ public class SyntaxException extends Neo4jException {
         return new SyntaxException(gql, legacyMessage, query, offset);
     }
 
+    public static SyntaxException stringLiteralWithInvalidQuotes() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42001)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42I19)
+                        .build())
+                .build();
+        return new SyntaxException(gql, QUOTE_MISMATCH_ERROR_MESSAGE);
+    }
+
+    public static SyntaxException cannotYieldFromVoidProcedure() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42001)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42I42)
+                        .build())
+                .build();
+        return new SyntaxException(gql, "Cannot yield value from void procedure.");
+    }
+
+    public static SyntaxException unknownFunction(String functionName, int offset, int line, int column) {
+        var gql = GqlHelper.getGql42001_42N48(functionName, offset, line, column);
+        return new SyntaxException(gql, String.format("Unknown function '%s'", functionName));
+    }
+
+    public static SyntaxException dynamicGraphReferenceUnsupported(
+            String legacyMsg, String query, int offset, int line, int column) {
+        var gql = GqlHelper.getGql42001_42N72(offset, line, column);
+        return new SyntaxException(gql, legacyMsg, query, offset);
+    }
+
+    public static SyntaxException invalidUseOfAggregateFunction(String functionType, String legacyMessage) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22000)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N34)
+                        .withParam(GqlParams.StringParam.funType, functionType)
+                        .build())
+                .build();
+        return new SyntaxException(gql, legacyMessage);
+    }
+
+    public static SyntaxException invalidPartInPBAC(String expression, String invalidPart) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NA0)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NAA)
+                        .withParam(GqlParams.StringParam.expr, expression)
+                        .withParam(GqlParams.StringParam.exprType, invalidPart)
+                        .build())
+                .build();
+        return new SyntaxException(
+                gql,
+                String.format(
+                        "The expression: `%s` is not supported. Lists containing %s values can not be used for property-based access control.",
+                        expression, invalidPart));
+    }
+
+    public static SyntaxException nanInPBAC(String expression) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NA0)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NA3)
+                        .build())
+                .build();
+        return new SyntaxException(
+                gql,
+                String.format(
+                        "The expression: `%s` is not supported. `NaN` is not supported for property-based access control.",
+                        expression));
+    }
+
+    public static SyntaxException nullInPBAC(String expression) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NA0)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NA4)
+                        .withParam(GqlParams.StringParam.pred, expression)
+                        .build())
+                .build();
+        return new SyntaxException(
+                gql,
+                String.format(
+                        "The expression: `%s` is not supported. `NULL` is not supported for property-based access control.",
+                        expression));
+    }
+
+    public static SyntaxException mixedListInPBAC(String expression) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NA0)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NAB)
+                        .withParam(GqlParams.StringParam.expr, expression)
+                        .build())
+                .build();
+        return new SyntaxException(
+                gql,
+                String.format(
+                        "The expression: `%s` is not supported. All elements in a list must be literals of the same type for property-based access control.",
+                        expression));
+    }
+
     @Override
     public Status status() {
         return Status.Statement.SyntaxError;
     }
 
-    public Optional<Integer> getOffset() {
-        return Optional.ofNullable(offset);
+    public OptionalInt getOffset() {
+        return offset == null ? OptionalInt.empty() : OptionalInt.of(offset);
     }
 
     @Override
     public String getMessage() {
+        return formatMessageWithPositionQueryAndOffset(super.getMessage());
+    }
+
+    @Override
+    public String legacyMessage() {
+        return formatMessageWithPositionQueryAndOffset(super.legacyMessage());
+    }
+
+    public String formatMessageWithPositionQueryAndOffset(String message) {
         if (nonNull(offset)) {
             // split can be empty if query = '\n'
             var split = query.split("\n");
-            return super.getMessage()
+            return message
+                    + positionString
                     + lineSeparator()
                     + findErrorLine(offset, split.length != 0 ? split : new String[] {""});
         } else {
-            return super.getMessage();
+            return message;
         }
     }
 
-    private static String findErrorLine(int offset, String[] message) {
+    public static String findErrorLine(int offset, String[] message) {
         int currentOffset = offset;
         if (message.length == 0) {
             throw new IllegalArgumentException("message converted to empty list");
@@ -189,11 +298,22 @@ public class SyntaxException extends Neo4jException {
     }
 
     private static void buildErrorString(StringBuilder builder, String element, int currentOffset) {
+
+        var nbrOfCarriageReturnsBeforeError = 0;
+        var elementBeforeError = element.substring(0, currentOffset);
+        Pattern pattern = Pattern.compile("\r");
+        Matcher matcher = pattern.matcher(elementBeforeError);
+        while (matcher.find()) {
+            nbrOfCarriageReturnsBeforeError++;
+        }
+
         builder.append("\"")
-                .append(element.stripTrailing()) // removes potential \r at the end
+                .append(element.stripTrailing().replace("\r", "\\r")) // stripTrailing() removes potential \r at the end
                 .append("\"")
                 .append(lineSeparator())
-                .append(" ".repeat(currentOffset + 1)) // extra space to compensate for an opening quote
+                // extra space to compensate for an opening quote and printed out carriage returns as these have width
+                // two
+                .append(" ".repeat(currentOffset + 1 + nbrOfCarriageReturnsBeforeError))
                 .append('^');
     }
 }

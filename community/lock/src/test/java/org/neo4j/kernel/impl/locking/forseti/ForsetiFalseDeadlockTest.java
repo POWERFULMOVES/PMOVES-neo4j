@@ -22,6 +22,7 @@ package org.neo4j.kernel.impl.locking.forseti;
 import static java.lang.Integer.max;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.neo4j.kernel.impl.locking.LockManager.Client;
+import static org.neo4j.kernel.impl.locking.LockMonitor.EMPTY_LOCK_MONITOR;
 import static org.neo4j.test.Race.throwing;
 
 import java.util.ArrayList;
@@ -38,7 +39,6 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestFactory;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.function.ThrowingConsumer;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseInternalSettings;
@@ -52,11 +52,11 @@ import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.test.Race;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.time.Clocks;
 import org.neo4j.util.concurrent.BinaryLatch;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class ForsetiFalseDeadlockTest {
     private static final int TEST_RUNS = 10;
     private static final ExecutorService executor = Executors.newCachedThreadPool(r -> {
@@ -82,7 +82,8 @@ class ForsetiFalseDeadlockTest {
     @Test
     void shouldManageToTakeSortedLocksWithoutFalseDeadlocks() throws Throwable {
         Config config = Config.defaults(GraphDatabaseInternalSettings.lock_manager_verbose_deadlocks, true);
-        ForsetiLockManager manager = new ForsetiLockManager(config, Clocks.nanoClock(), ResourceType.values());
+        ForsetiLockManager manager =
+                new ForsetiLockManager(config, Clocks.nanoClock(), EMPTY_LOCK_MONITOR, ResourceType.values());
         AtomicInteger txCount = new AtomicInteger();
         AtomicInteger numDeadlocks = new AtomicInteger();
         Race race = new Race().withEndCondition(() -> txCount.get() > 10000);
@@ -354,7 +355,7 @@ class ForsetiFalseDeadlockTest {
         FORSETI {
             @Override
             public LockManager create(ResourceType resourceType) {
-                return new ForsetiLockManager(Config.defaults(), Clocks.nanoClock(), resourceType);
+                return new ForsetiLockManager(Config.defaults(), Clocks.nanoClock(), EMPTY_LOCK_MONITOR, resourceType);
             }
         };
 

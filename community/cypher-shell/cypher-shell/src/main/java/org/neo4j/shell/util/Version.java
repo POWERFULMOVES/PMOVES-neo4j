@@ -21,8 +21,14 @@ package org.neo4j.shell.util;
 
 import static java.lang.String.format;
 
+import java.util.OptionalInt;
+
 @SuppressWarnings("WeakerAccess")
-public record Version(int major, int minor, int patch) implements Comparable<Version> {
+public record Version(int major, int minor, int patch, OptionalInt preRelease) implements Comparable<Version> {
+    public Version(int major, int minor, int patch) {
+        this(major, minor, patch, OptionalInt.empty());
+    }
+
     @Override
     public int compareTo(Version o) {
         int comp = Integer.compare(major, o.major);
@@ -30,6 +36,11 @@ public record Version(int major, int minor, int patch) implements Comparable<Ver
             comp = Integer.compare(minor, o.minor);
             if (comp == 0) {
                 comp = Integer.compare(patch, o.patch);
+                if (comp == 0) {
+                    if (preRelease.isEmpty()) comp = o.preRelease.isEmpty() ? 0 : -1;
+                    else if (o.preRelease.isEmpty()) comp = 1;
+                    else comp = Integer.compare(preRelease.getAsInt(), o.preRelease.getAsInt());
+                }
             }
         }
         return comp;
@@ -37,7 +48,9 @@ public record Version(int major, int minor, int patch) implements Comparable<Ver
 
     @Override
     public String toString() {
-        return format("%d.%d.%d", major, minor, patch);
+        return preRelease.isPresent()
+                ? format("%d.%d.%d-%d", major, minor, patch, preRelease.getAsInt())
+                : format("%d.%d.%d", major, minor, patch);
     }
 
     public String majorMinorString() {

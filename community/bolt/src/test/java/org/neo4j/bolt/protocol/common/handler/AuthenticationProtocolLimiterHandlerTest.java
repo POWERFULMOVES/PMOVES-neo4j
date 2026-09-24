@@ -25,9 +25,11 @@ import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.neo4j.bolt.protocol.error.ClientRequestComplexityExceeded;
+import org.neo4j.bolt.testing.util.ErrorUtil;
 import org.neo4j.packstream.error.reader.PackstreamReaderException;
 import org.neo4j.packstream.io.PackstreamBuf;
 import org.neo4j.packstream.struct.StructHeader;
+import org.neo4j.test.conditions.Conditions;
 
 class AuthenticationProtocolLimiterHandlerTest {
 
@@ -74,7 +76,10 @@ class AuthenticationProtocolLimiterHandlerTest {
                     this.channel.writeInbound(msg);
                     this.channel.checkException();
                 })
-                .withMessage("Encountered illegal root element: Expected struct");
+                .withMessage(
+                        ErrorUtil.useNewMessage("22N60: Encountered illegal root element. Reason: Expected struct.")
+                                .whenLegacyFallbackTo("Encountered illegal root element: Expected struct"))
+                .has(Conditions.condition(ex -> ex.gqlStatus().equals("22N60")));
     }
 
     @Test
@@ -88,7 +93,10 @@ class AuthenticationProtocolLimiterHandlerTest {
                     this.channel.writeInbound(msg);
                     this.channel.checkException();
                 })
-                .withMessage("Encountered illegal secondary root element within message");
+                .withMessage(ErrorUtil.useNewMessage(
+                                "22N60: Encountered illegal secondary root element. Reason: Excepted single root element.")
+                        .whenLegacyFallbackTo("Encountered illegal secondary root element within message"))
+                .has(Conditions.condition(ex -> ex.gqlStatus().equals("22N60")));
     }
 
     @Test
@@ -104,7 +112,10 @@ class AuthenticationProtocolLimiterHandlerTest {
                     this.channel.writeInbound(msg);
                     this.channel.checkException();
                 })
-                .withMessage("Encountered illegal map element: Expected string key");
+                .withMessage(
+                        ErrorUtil.useNewMessage("22N60: Encountered illegal map element. Reason: Expected string key.")
+                                .whenLegacyFallbackTo("Encountered illegal map element: Expected string key"))
+                .has(Conditions.condition(ex -> ex.gqlStatus().equals("22N60")));
     }
 
     @Test
@@ -114,7 +125,7 @@ class AuthenticationProtocolLimiterHandlerTest {
                 .writeNull()
                 .writeBytes(Unpooled.wrappedBuffer(new byte[] {21, 42, 84}))
                 .writeBoolean(true)
-                .writeFloat(42.25)
+                .writeFloat64(42.25)
                 .writeInt(42)
                 .writeString("foo");
 
@@ -167,7 +178,7 @@ class AuthenticationProtocolLimiterHandlerTest {
                 .writeInt(42)
                 // not_the_answer => 21.25
                 .writeString("not_the_answer")
-                .writeFloat(21.25)
+                .writeFloat64(21.25)
 
                 // Struct #1
                 .writeStructHeader(new StructHeader(4, (short) 0x21))
@@ -212,7 +223,7 @@ class AuthenticationProtocolLimiterHandlerTest {
                 .writeString("the_answer")
                 .writeInt(42)
                 .writeString("not_the_answer")
-                .writeFloat(21.25)
+                .writeFloat64(21.25)
                 // Struct #1
                 .writeString("fizz");
 
@@ -240,7 +251,7 @@ class AuthenticationProtocolLimiterHandlerTest {
                 .writeString("the_answer")
                 .writeInt(42)
                 .writeString("not_the_answer")
-                .writeFloat(21.25)
+                .writeFloat64(21.25)
                 // Struct #1
                 .writeString("fizz");
 

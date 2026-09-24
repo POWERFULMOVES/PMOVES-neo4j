@@ -20,12 +20,15 @@
 package org.neo4j.internal.kernel.api.exceptions.schema;
 
 import org.neo4j.common.TokenNameLookup;
+import org.neo4j.exceptions.InvalidArgumentException;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
 import org.neo4j.gqlstatus.GqlParams;
 import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.internal.schema.ConstraintDescriptor;
+import org.neo4j.internal.schema.EndpointType;
+import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.kernel.api.exceptions.Status;
 
 public class CreateConstraintFailureException extends SchemaKernelException {
@@ -33,76 +36,110 @@ public class CreateConstraintFailureException extends SchemaKernelException {
 
     private final String cause;
 
-    @Deprecated
-    public CreateConstraintFailureException(ConstraintDescriptor constraint, Throwable cause) {
-        super(
-                Status.Schema.ConstraintCreationFailed,
-                cause,
-                "Unable to create constraint %s: %s",
-                constraint,
-                cause.getMessage());
-        this.constraint = constraint;
-        this.cause = null;
-    }
-
-    public CreateConstraintFailureException(
-            ErrorGqlStatusObject gqlStatusObject, ConstraintDescriptor constraint, Throwable cause) {
+    private CreateConstraintFailureException(
+            ErrorGqlStatusObject gqlStatusObject,
+            ConstraintDescriptor constraint,
+            Throwable cause,
+            String causeString) {
         super(
                 gqlStatusObject,
                 Status.Schema.ConstraintCreationFailed,
                 cause,
                 "Unable to create constraint %s: %s",
                 constraint,
-                cause.getMessage());
+                causeString);
 
         this.constraint = constraint;
-        this.cause = null;
+        this.cause = causeString;
     }
 
+    // KNL-028
     public static CreateConstraintFailureException constraintCreationFailed(
-            ConstraintValidationException cause, TokenNameLookup tokenNameLookup) {
-        return constraintCreationFailed(cause.constraint, tokenNameLookup, cause.gqlStatusObject(), cause);
+            ConstraintDescriptor constraint, TokenNameLookup tokenNameLookup, Throwable cause) {
+        return constraintCreationFailed(constraint, tokenNameLookup, cause, cause.getMessage(), null);
     }
 
+    // KNL-028
     public static CreateConstraintFailureException constraintCreationFailed(
+            ConstraintDescriptor constraint, TokenNameLookup tokenNameLookup, String causeMessage) {
+        return constraintCreationFailed(constraint, tokenNameLookup, null, causeMessage, null);
+    }
+
+    public static CreateConstraintFailureException constraintCreationFailedOnCommunity(
+            ConstraintDescriptor constraint, TokenNameLookup tokenNameLookup, String causeMessage) {
+        String constraintType;
+        switch (constraint.type()) {
+            case EXISTS -> constraintType = "Property existence";
+            case PROPERTY_TYPE -> constraintType = "Property type";
+            case NODE_LABEL_EXISTENCE -> constraintType = "Node Label existence";
+            case RELATIONSHIP_ENDPOINT_LABEL -> {
+                EndpointType type =
+                        constraint.asRelationshipEndpointLabelConstraint().endpointType();
+                switch (type) {
+                    case START -> constraintType = "Relationship source label";
+                    case END -> constraintType = "Relationship target label";
+                    default ->
+                        throw InvalidArgumentException.internalError(
+                                CreateConstraintFailureException.class.getSimpleName(),
+                                String.format("Unexpected endpoint type: %s", type));
+                }
+            }
+            case UNIQUE_EXISTS -> constraintType = "Key";
+            default ->
+                throw InvalidArgumentException.internalError(
+                        CreateConstraintFailureException.class.getSimpleName(),
+                        String.format("Unexpected constraint type: %s", constraint.type()));
+        }
+
+        ErrorGqlStatusObject gqlStatusCause = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N27)
+                .withParam(GqlParams.StringParam.feat, String.format("%s constraint", constraintType))
+                .withParam(GqlParams.StringParam.edition, "community edition")
+                .build();
+        return constraintCreationFailed(constraint, tokenNameLookup, null, causeMessage, gqlStatusCause);
+    }
+
+    public static CreateConstraintFailureException droppingSimilarConstraint(
+            ConstraintDescriptor constraint, ConstraintDescriptor droppedConstraint, TokenNameLookup tokenNameLookup) {
+        String cause = String.format(
+                "Trying to create constraint '%s' in same transaction as dropping '%s'. "
+                        + "This is not supported because they are both backed by similar indexes. "
+                        + "Please drop constraint in a separate transaction before creating the new one.",
+                constraint.getName(), droppedConstraint.getName());
+        ErrorGqlStatusObject gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N66)
+                .withParam(GqlParams.StringParam.constrDescrOrName, droppedConstraint.userDescription(tokenNameLookup))
+                .build();
+        return constraintCreationFailed(constraint, tokenNameLookup, null, cause, gql);
+    }
+
+    public static CreateConstraintFailureException droppingSimilarIndex(
+            ConstraintDescriptor constraint, IndexDescriptor droppedIndex, TokenNameLookup tokenNameLookup) {
+        String cause = String.format(
+                "Trying to create constraint '%s' in same transaction as dropping '%s'. "
+                        + "This is not supported because the constraint is backed by an index similar to the dropped index. "
+                        + "Please drop index in a separate transaction before creating the index backed constraint.",
+                constraint.getName(), droppedIndex.getName());
+        ErrorGqlStatusObject gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N73)
+                .withParam(GqlParams.StringParam.idxDescrOrName, droppedIndex.userDescription(tokenNameLookup))
+                .build();
+        return constraintCreationFailed(constraint, tokenNameLookup, null, cause, gql);
+    }
+
+    private static CreateConstraintFailureException constraintCreationFailed(
             ConstraintDescriptor constraint,
             TokenNameLookup tokenNameLookup,
-            ErrorGqlStatusObject gqlCause,
-            Throwable cause) {
-        var constraintString = constraint.userDescription(tokenNameLookup);
-        return constraintCreationFailed(constraint, constraintString, gqlCause, cause);
-    }
-
-    public static CreateConstraintFailureException constraintCreationFailed(
-            ConstraintDescriptor constraint, String constraintString, ErrorGqlStatusObject gqlCause, Throwable cause) {
-        var errorGqlStatusObjectBuilder = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_50N11)
+            Throwable cause,
+            String causeString,
+            ErrorGqlStatusObject gqlStatusCause) {
+        String constraintString = constraint.userDescription(tokenNameLookup);
+        ErrorGqlStatusObjectImplementation.Builder gqlStatusBuilder = ErrorGqlStatusObjectImplementation.from(
+                        GqlStatusInfoCodes.STATUS_50N11)
                 .withParam(
                         GqlParams.StringParam.constrDescrOrName,
                         constraint.getName() != null ? constraint.getName() : constraintString);
-        if (gqlCause != null) {
-            errorGqlStatusObjectBuilder.withCause(gqlCause);
+        if (gqlStatusCause != null) {
+            gqlStatusBuilder.withCause(gqlStatusCause);
         }
-        return new CreateConstraintFailureException(errorGqlStatusObjectBuilder.build(), constraint, cause);
-    }
-
-    public CreateConstraintFailureException(ConstraintDescriptor constraint, String cause) {
-        super(Status.Schema.ConstraintCreationFailed, null, "Unable to create constraint %s: %s", constraint, cause);
-        this.constraint = constraint;
-        this.cause = cause;
-    }
-
-    public CreateConstraintFailureException(
-            ErrorGqlStatusObject gqlStatusObject, ConstraintDescriptor constraint, String cause) {
-        super(
-                gqlStatusObject,
-                Status.Schema.ConstraintCreationFailed,
-                null,
-                "Unable to create constraint %s: %s",
-                constraint,
-                cause);
-
-        this.constraint = constraint;
-        this.cause = cause;
+        return new CreateConstraintFailureException(gqlStatusBuilder.build(), constraint, cause, causeString);
     }
 
     public ConstraintDescriptor constraint() {
@@ -111,7 +148,7 @@ public class CreateConstraintFailureException extends SchemaKernelException {
 
     @Override
     public String getUserMessage(TokenNameLookup tokenNameLookup) {
-        final var sb = new StringBuilder("Unable to create ").append(constraint.userDescription(tokenNameLookup));
+        StringBuilder sb = new StringBuilder("Unable to create ").append(constraint.userDescription(tokenNameLookup));
         if (getCause() instanceof KernelException kernelCause) {
             sb.append(':').append(System.lineSeparator()).append(kernelCause.getUserMessage(tokenNameLookup));
         } else if (cause != null) {

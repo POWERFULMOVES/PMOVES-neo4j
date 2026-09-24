@@ -105,12 +105,14 @@ public class MapCachingDatabaseReferenceRepositoryTest {
             var ref = delegate.getByAlias(new NormalizedDatabaseName(name));
             databaseRefRepo.getByUuid(ref.get().id());
         });
-        ExecutorService executor = Executors.newFixedThreadPool(3);
-        executor.execute(worker1);
-        executor.execute(worker2);
-        executor.execute(worker3);
-        executor.shutdown();
-        assertThat(executor.awaitTermination(60, TimeUnit.SECONDS)).isTrue();
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(3)) {
+            executor.execute(worker1);
+            executor.execute(worker2);
+            executor.execute(worker3);
+            executor.shutdown();
+            assertThat(executor.awaitTermination(60, TimeUnit.SECONDS)).isTrue();
+        }
     }
 
     private Runnable runnable(Consumer<String> consumer) {
@@ -152,17 +154,11 @@ public class MapCachingDatabaseReferenceRepositoryTest {
     @Test
     void shouldNotCacheGetAllLookups() {
         databaseRefRepo.getAllDatabaseReferences();
-        databaseRefRepo.getInternalDatabaseReferences();
-        databaseRefRepo.getExternalDatabaseReferences();
         databaseRefRepo.getCompositeDatabaseReferences();
         databaseRefRepo.getAllDatabaseReferences();
-        databaseRefRepo.getInternalDatabaseReferences();
-        databaseRefRepo.getExternalDatabaseReferences();
         databaseRefRepo.getCompositeDatabaseReferences();
 
         verify(delegate, atLeast(2)).getAllDatabaseReferences();
-        verify(delegate, atLeast(2)).getInternalDatabaseReferences();
-        verify(delegate, atLeast(2)).getExternalDatabaseReferences();
         verify(delegate, atLeast(2)).getCompositeDatabaseReferences();
     }
 

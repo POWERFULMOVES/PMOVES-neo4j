@@ -30,6 +30,8 @@ import org.neo4j.values.ElementIdDecoder
 import org.neo4j.values.storable.TextValue
 import org.neo4j.values.virtual.GraphReferenceValue
 
+import scala.jdk.CollectionConverters._
+
 abstract class GraphReference extends Expression {
   def rewrite(f: Expression => Expression): Expression = f(this)
 
@@ -55,20 +57,30 @@ case class ConstantGraphReference(name: CatalogName) extends NameGraphReference 
   protected def name(row: ReadableRow, state: QueryState): String = name.qualifiedNameString
 }
 
-case class NameExpressionGraphReference(name: Expression) extends NameGraphReference {
-  override def rewrite(f: Expression => Expression): Expression = f(NameExpressionGraphReference(f(name)))
+case class NameExpressionGraphReference(name: Expression, parseStringGraphReferences: Boolean)
+    extends NameGraphReference {
+
+  override def rewrite(f: Expression => Expression): Expression =
+    f(NameExpressionGraphReference(f(name), parseStringGraphReferences))
 
   override def children: collection.Seq[AstNode[_]] = Seq(name)
 
   protected def name(row: ReadableRow, state: QueryState): String =
     name.apply(row, state) match {
       case x: TextValue => x.stringValue()
-      case x            => throw new CypherTypeException(s"graph.byName requires text value; found '$x''")
+      case x => throw CypherTypeException.invalidType(
+          x.prettyPrint(),
+          List("String", "Char").asJava,
+          x.getTypeName,
+          List("String", "Char").mkString(",")
+        )
     }
 }
 
 case class IdExpressionGraphReference(id: Expression) extends GraphReference {
-  override def rewrite(f: Expression => Expression): Expression = f(NameExpressionGraphReference(f(id)))
+
+  override def rewrite(f: Expression => Expression): Expression =
+    f(NameExpressionGraphReference(f(id), parseStringGraphReferences = false))
 
   override def children: collection.Seq[AstNode[_]] = Seq(id)
 

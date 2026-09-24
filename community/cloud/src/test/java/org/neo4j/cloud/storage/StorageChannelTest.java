@@ -32,15 +32,14 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
 
 @TestDirectoryExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class StorageChannelTest {
 
     @Inject
@@ -183,6 +182,25 @@ class StorageChannelTest {
     }
 
     @Test
+    void readAllFromPosition() throws IOException {
+        final var bytes = rnd.nextBytes(new byte[rnd.nextInt(123, 666)]);
+        Files.write(output, bytes, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
+
+        try (var channel = readChannel()) {
+            assertThat(channel.size()).isEqualTo(bytes.length);
+
+            final var startOffset = rnd.nextInt(10, 69);
+            channel.position(startOffset);
+            assertThat(channel.position()).isEqualTo(startOffset);
+
+            assertThatThrownBy(() -> channel.readAll(ByteBuffer.wrap(new byte[13]), startOffset * 2L))
+                    .isInstanceOf(UnsupportedOperationException.class);
+
+            assertThat(channel.position()).as("should not update the position").isEqualTo(startOffset);
+        }
+    }
+
+    @Test
     void write() throws IOException {
         final var bytes = rnd.nextBytes(new byte[rnd.nextInt(1, 666)]);
 
@@ -235,6 +253,14 @@ class StorageChannelTest {
         assertThat(copyOfRange(content, bufferSize, bufferSize * 2)).isEqualTo(buffer2.array());
         assertThat(copyOfRange(content, bufferSize * 2, bufferSize * 3)).isEqualTo(buffer3.array());
         assertThat(copyOfRange(content, bufferSize * 3, bufferSize * 4)).isEqualTo(buffer1.array());
+    }
+
+    @Test
+    void writeAllWithPosition() throws IOException {
+        try (var channel = writeChannel()) {
+            assertThatThrownBy(() -> channel.writeAll(ByteBuffer.wrap(rnd.nextBytes(new byte[13])), 13))
+                    .isInstanceOf(UnsupportedOperationException.class);
+        }
     }
 
     @Test

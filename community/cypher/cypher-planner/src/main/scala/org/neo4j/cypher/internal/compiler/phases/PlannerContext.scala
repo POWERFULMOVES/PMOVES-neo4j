@@ -19,160 +19,162 @@
  */
 package org.neo4j.cypher.internal.compiler.phases
 
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.semantics.SemanticErrorDef
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
 import org.neo4j.cypher.internal.compiler.CypherPlannerConfiguration
 import org.neo4j.cypher.internal.compiler.ExecutionModel
-import org.neo4j.cypher.internal.compiler.SyntaxExceptionCreator
 import org.neo4j.cypher.internal.compiler.UpdateStrategy
+import org.neo4j.cypher.internal.compiler.planner.GraphTargetVerifier
+import org.neo4j.cypher.internal.compiler.planner.Optimisation
 import org.neo4j.cypher.internal.compiler.planner.logical.ExpressionEvaluator
 import org.neo4j.cypher.internal.compiler.planner.logical.Metrics
 import org.neo4j.cypher.internal.compiler.planner.logical.MetricsFactory
 import org.neo4j.cypher.internal.compiler.planner.logical.QueryGraphSolver
 import org.neo4j.cypher.internal.compiler.planner.logical.cardinality.assumeIndependence.LabelInferenceStrategy
+import org.neo4j.cypher.internal.frontend.helpers.SyntaxExceptionCreator
+import org.neo4j.cypher.internal.frontend.notification.InternalNotificationStats
 import org.neo4j.cypher.internal.frontend.phases.BaseContext
 import org.neo4j.cypher.internal.frontend.phases.CompilationPhaseTracer
-import org.neo4j.cypher.internal.frontend.phases.InternalSyntaxUsageStats
+import org.neo4j.cypher.internal.frontend.phases.InternalUsageStats
 import org.neo4j.cypher.internal.frontend.phases.Monitors
+import org.neo4j.cypher.internal.notification.InternalNotificationLogger
 import org.neo4j.cypher.internal.options.CypherDebugOptions
-import org.neo4j.cypher.internal.options.CypherEagerAnalyzerOption
 import org.neo4j.cypher.internal.options.CypherInferSchemaPartsOption
+import org.neo4j.cypher.internal.options.CypherParallelRepeatHeuristicOption
 import org.neo4j.cypher.internal.options.CypherPlanVarExpandInto
 import org.neo4j.cypher.internal.options.CypherStatefulShortestPlanningModeOption
+import org.neo4j.cypher.internal.options.CypherTransactionBatchStrategyOption
 import org.neo4j.cypher.internal.planner.spi.PlanContext
 import org.neo4j.cypher.internal.util.CancellationChecker
 import org.neo4j.cypher.internal.util.CypherExceptionFactory
 import org.neo4j.cypher.internal.util.ErrorMessageProvider
 import org.neo4j.cypher.internal.util.InputPosition
-import org.neo4j.cypher.internal.util.InternalNotificationLogger
-import org.neo4j.cypher.internal.util.InternalNotificationStats
 import org.neo4j.cypher.internal.util.Neo4jCypherExceptionFactory
 import org.neo4j.cypher.internal.util.attribution.IdGen
 import org.neo4j.cypher.messages.MessageUtilProvider
+import org.neo4j.internal.kernel.api.security.AbstractSecurityLog
 import org.neo4j.kernel.database.DatabaseReference
-import org.neo4j.kernel.database.DatabaseReferenceRepository
 import org.neo4j.kernel.database.NamedDatabaseId
 import org.neo4j.logging.Log
 import org.neo4j.values.virtual.MapValue
 
 import java.time.Clock
 
-class BaseContextImpl(
+trait PlannerContext extends BaseContext {
+  def planContext: PlanContext
+  def metrics: Metrics
+  def config: CypherPlannerConfiguration
+  def queryGraphSolver: QueryGraphSolver
+  def updateStrategy: UpdateStrategy
+  def debugOptions: CypherDebugOptions
+  def clock: Clock
+  def logicalPlanIdGen: IdGen
+  def params: MapValue
+  def executionModel: ExecutionModel
+  def materializedEntitiesMode: Boolean
+  def statefulShortestPlanningMode: CypherStatefulShortestPlanningModeOption
+  def planVarExpandInto: CypherPlanVarExpandInto
+  def optimisations: Set[Optimisation]
+  def parallelRepeatHeuristic: CypherParallelRepeatHeuristicOption
+  def databaseId: NamedDatabaseId
+  def log: Log
+  def securityLog: AbstractSecurityLog
+  def internalNotificationStats: InternalNotificationStats
+  def labelInferenceStrategy: LabelInferenceStrategy
+  def expressionEvaluator: ExpressionEvaluator
+  def graphTargetVerifier: GraphTargetVerifier
+
+  /** Resolved batch strategy for `CALL ... IN CONCURRENT TRANSACTIONS` (setting + preparser-option override). */
+  def transactionBatchStrategy: CypherTransactionBatchStrategyOption
+  def withNotificationLogger(notificationLogger: InternalNotificationLogger): PlannerContext
+}
+
+final class PlannerContextImpl(
+  override val cypherVersion: CypherVersion,
   override val cypherExceptionFactory: CypherExceptionFactory,
   override val tracer: CompilationPhaseTracer,
   override val notificationLogger: InternalNotificationLogger,
+  override val planContext: PlanContext,
   override val monitors: Monitors,
+  override val metrics: Metrics,
+  override val config: CypherPlannerConfiguration,
+  override val queryGraphSolver: QueryGraphSolver,
+  override val updateStrategy: UpdateStrategy,
+  override val debugOptions: CypherDebugOptions,
+  override val clock: Clock,
+  override val logicalPlanIdGen: IdGen,
+  override val params: MapValue,
+  override val executionModel: ExecutionModel,
   override val cancellationChecker: CancellationChecker,
-  override val internalSyntaxUsageStats: InternalSyntaxUsageStats,
-  val sessionDatabase: DatabaseReference
-) extends BaseContext {
+  override val materializedEntitiesMode: Boolean,
+  override val statefulShortestPlanningMode: CypherStatefulShortestPlanningModeOption,
+  override val planVarExpandInto: CypherPlanVarExpandInto,
+  override val optimisations: Set[Optimisation],
+  override val parallelRepeatHeuristic: CypherParallelRepeatHeuristicOption,
+  override val databaseId: NamedDatabaseId,
+  override val log: Log,
+  override val securityLog: AbstractSecurityLog,
+  override val internalNotificationStats: InternalNotificationStats,
+  override val internalUsageStats: InternalUsageStats,
+  override val labelInferenceStrategy: LabelInferenceStrategy,
+  override val sessionDatabase: DatabaseReference,
+  override val semanticFeatures: Seq[SemanticFeature],
+  override val shadowedFunctions: Set[String],
+  override val transactionBatchStrategy: CypherTransactionBatchStrategyOption,
+  override val expressionEvaluator: ExpressionEvaluator,
+  override val graphTargetVerifier: GraphTargetVerifier
+) extends PlannerContext {
 
   override val errorHandler: Seq[SemanticErrorDef] => Unit =
     SyntaxExceptionCreator.throwOnError(cypherExceptionFactory)
 
-  override val errorMessageProvider: ErrorMessageProvider = MessageUtilProvider
-}
+  override def errorMessageProvider: ErrorMessageProvider = MessageUtilProvider
 
-object BaseContextImpl {
+  def withNotificationLogger(notificationLogger: InternalNotificationLogger): PlannerContext = new PlannerContextImpl(
+    cypherVersion = cypherVersion,
+    cypherExceptionFactory = cypherExceptionFactory,
+    tracer = tracer,
+    notificationLogger = notificationLogger,
+    planContext = planContext.withNotificationLogger(notificationLogger),
+    monitors = monitors,
+    metrics = metrics,
+    config = config,
+    queryGraphSolver = queryGraphSolver,
+    updateStrategy = updateStrategy,
+    debugOptions = debugOptions,
+    clock = clock,
+    logicalPlanIdGen = logicalPlanIdGen,
+    params = params,
+    executionModel = executionModel,
+    cancellationChecker = cancellationChecker,
+    materializedEntitiesMode = materializedEntitiesMode,
+    statefulShortestPlanningMode = statefulShortestPlanningMode,
+    planVarExpandInto = planVarExpandInto,
+    optimisations = optimisations,
+    parallelRepeatHeuristic = parallelRepeatHeuristic,
+    databaseId = databaseId,
+    log = log,
+    securityLog = securityLog,
+    internalNotificationStats = internalNotificationStats,
+    internalUsageStats = internalUsageStats,
+    labelInferenceStrategy = labelInferenceStrategy,
+    sessionDatabase = sessionDatabase,
+    semanticFeatures = semanticFeatures,
+    shadowedFunctions = shadowedFunctions,
+    transactionBatchStrategy = transactionBatchStrategy,
+    expressionEvaluator = expressionEvaluator,
+    graphTargetVerifier = graphTargetVerifier
+  )
 
-  def apply(
-    tracer: CompilationPhaseTracer,
-    notificationLogger: InternalNotificationLogger,
-    queryText: String,
-    offset: Option[InputPosition],
-    monitors: Monitors,
-    cancellationChecker: CancellationChecker,
-    internalSyntaxUsageStats: InternalSyntaxUsageStats,
-    sessionDatabase: DatabaseReference
-  ): BaseContextImpl = {
-    val exceptionFactory = Neo4jCypherExceptionFactory(queryText, offset)
-    new BaseContextImpl(
-      exceptionFactory,
-      tracer,
-      notificationLogger,
-      monitors,
-      cancellationChecker,
-      internalSyntaxUsageStats,
-      sessionDatabase
-    )
-  }
-}
-
-class PlannerContext(
-  cypherExceptionFactory: CypherExceptionFactory,
-  tracer: CompilationPhaseTracer,
-  notificationLogger: InternalNotificationLogger,
-  val planContext: PlanContext,
-  monitors: Monitors,
-  val metrics: Metrics,
-  val config: CypherPlannerConfiguration,
-  val queryGraphSolver: QueryGraphSolver,
-  val updateStrategy: UpdateStrategy,
-  val debugOptions: CypherDebugOptions,
-  val clock: Clock,
-  val logicalPlanIdGen: IdGen,
-  val params: MapValue,
-  val executionModel: ExecutionModel,
-  cancellationChecker: CancellationChecker,
-  val materializedEntitiesMode: Boolean,
-  val eagerAnalyzer: CypherEagerAnalyzerOption,
-  val statefulShortestPlanningMode: CypherStatefulShortestPlanningModeOption,
-  val planVarExpandInto: CypherPlanVarExpandInto,
-  val databaseReferenceRepository: DatabaseReferenceRepository,
-  val databaseId: NamedDatabaseId,
-  val log: Log,
-  val internalNotificationStats: InternalNotificationStats,
-  internalSyntaxUsageStats: InternalSyntaxUsageStats,
-  val labelInferenceStrategy: LabelInferenceStrategy,
-  override val sessionDatabase: DatabaseReference
-) extends BaseContextImpl(
-      cypherExceptionFactory,
-      tracer,
-      notificationLogger,
-      monitors,
-      cancellationChecker,
-      internalSyntaxUsageStats,
-      sessionDatabase
-    ) {
-
-  /**
-   * Return a copy with the given notificationLogger
-   */
-  def withNotificationLogger(notificationLogger: InternalNotificationLogger): PlannerContext = {
-    val newPlanContext = planContext.withNotificationLogger(notificationLogger)
-    new PlannerContext(
-      cypherExceptionFactory,
-      tracer,
-      notificationLogger,
-      newPlanContext,
-      monitors,
-      metrics,
-      config,
-      queryGraphSolver,
-      updateStrategy,
-      debugOptions,
-      clock,
-      logicalPlanIdGen,
-      params,
-      executionModel,
-      cancellationChecker,
-      materializedEntitiesMode,
-      eagerAnalyzer,
-      statefulShortestPlanningMode,
-      planVarExpandInto,
-      databaseReferenceRepository,
-      databaseId,
-      log,
-      internalNotificationStats,
-      internalSyntaxUsageStats,
-      labelInferenceStrategy,
-      sessionDatabase
-    )
-  }
+  override def isScopeQuery: Boolean = false
+  override def isDebugSession: Boolean = false
 }
 
 object PlannerContext {
 
   def apply(
+    cypherVersion: CypherVersion,
     tracer: CompilationPhaseTracer,
     notificationLogger: InternalNotificationLogger,
     planContext: PlanContext,
@@ -191,20 +193,24 @@ object PlannerContext {
     params: MapValue,
     cancellationChecker: CancellationChecker,
     materializedEntitiesMode: Boolean,
-    eagerAnalyzer: CypherEagerAnalyzerOption,
     labelInference: CypherInferSchemaPartsOption,
     statefulShortestPlanningMode: CypherStatefulShortestPlanningModeOption,
     planVarExpandInto: CypherPlanVarExpandInto,
-    databaseReferenceRepository: DatabaseReferenceRepository,
+    optimisations: Set[Optimisation],
+    parallelRepeatHeuristic: CypherParallelRepeatHeuristicOption,
     databaseId: NamedDatabaseId,
     log: Log,
+    securityLog: AbstractSecurityLog,
     internalNotificationStats: InternalNotificationStats,
-    internalSyntaxUsageStats: InternalSyntaxUsageStats,
-    sessionDatabase: DatabaseReference
-  ): PlannerContext = {
+    internalUsageStats: InternalUsageStats,
+    sessionDatabase: DatabaseReference,
+    semanticFeatures: Seq[SemanticFeature],
+    shadowedFunctions: Set[String],
+    transactionBatchStrategy: CypherTransactionBatchStrategyOption,
+    graphTargetVerifier: GraphTargetVerifier
+  ): PlannerContextImpl = {
     val exceptionFactory = Neo4jCypherExceptionFactory(queryText, offset)
-
-    val labelInferenceStrategy = LabelInferenceStrategy.fromConfig(planContext, labelInference)
+    val labelInferenceStrategy = LabelInferenceStrategy.fromConfig(planContext, labelInference, optimisations)
 
     val metrics = metricsFactory.newMetrics(
       planContext,
@@ -214,7 +220,8 @@ object PlannerContext {
       labelInferenceStrategy
     )
 
-    new PlannerContext(
+    new PlannerContextImpl(
+      cypherVersion,
       exceptionFactory,
       tracer,
       notificationLogger,
@@ -231,16 +238,22 @@ object PlannerContext {
       executionModel,
       cancellationChecker,
       materializedEntitiesMode,
-      eagerAnalyzer,
       statefulShortestPlanningMode,
       planVarExpandInto,
-      databaseReferenceRepository,
+      optimisations,
+      parallelRepeatHeuristic,
       databaseId,
       log,
+      securityLog,
       internalNotificationStats,
-      internalSyntaxUsageStats,
+      internalUsageStats,
       labelInferenceStrategy,
-      sessionDatabase
+      sessionDatabase,
+      semanticFeatures = semanticFeatures,
+      shadowedFunctions = shadowedFunctions,
+      transactionBatchStrategy = transactionBatchStrategy,
+      expressionEvaluator = evaluator,
+      graphTargetVerifier = graphTargetVerifier
     )
   }
 }

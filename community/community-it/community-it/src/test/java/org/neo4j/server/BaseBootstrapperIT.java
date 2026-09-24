@@ -317,8 +317,7 @@ public abstract class BaseBootstrapperIT extends ExclusiveWebContainerTestBase {
 
     @Test
     void debugLogToSystemOutInConsoleMode() throws IOException {
-        String log4jConfig =
-                """
+        String log4jConfig = """
                 <Configuration status="ERROR">
                     <Appenders>
                         <Console name="ConsoleAppender" target="SYSTEM_OUT">

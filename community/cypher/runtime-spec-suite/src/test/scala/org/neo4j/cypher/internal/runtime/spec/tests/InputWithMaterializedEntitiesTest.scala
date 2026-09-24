@@ -20,17 +20,20 @@
 package org.neo4j.cypher.internal.runtime.spec.tests
 
 import org.neo4j.cypher.internal.CypherRuntime
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.MasterCompiler
 import org.neo4j.cypher.internal.RuntimeContext
+import org.neo4j.cypher.internal.compiler.ExecutionModel
 import org.neo4j.cypher.internal.options.CypherDebugOptions
 import org.neo4j.cypher.internal.options.CypherInterpretedPipesFallbackOption
 import org.neo4j.cypher.internal.options.CypherOperatorEngineOption
-import org.neo4j.cypher.internal.options.CypherVersion
+import org.neo4j.cypher.internal.planner.spi.NoPreferenceIndexComparatorFactory
 import org.neo4j.cypher.internal.runtime.QueryContext
 import org.neo4j.cypher.internal.runtime.spec.Edition
 import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSupport
+import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSupport.WorkloadMode
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.graphdb.GraphDatabaseService
 import org.neo4j.logging.InternalLogProvider
@@ -215,8 +218,8 @@ abstract class InputWithMaterializedEntitiesTest[CONTEXT <: RuntimeContext](
 
   test("relationship 'type' function") {
     val (startNode, endNode) = givenGraph {
-      val startNode = nodeValue(1, "1", Values.stringArray(), MapValue.EMPTY)
-      val endNode = nodeValue(2, "2", Values.stringArray(), MapValue.EMPTY)
+      val startNode = nodeValue(1, "1", Values.EMPTY_TEXT_ARRAY, MapValue.EMPTY)
+      val endNode = nodeValue(2, "2", Values.EMPTY_TEXT_ARRAY, MapValue.EMPTY)
       (startNode, endNode)
     }
 
@@ -239,17 +242,19 @@ abstract class InputWithMaterializedEntitiesTest[CONTEXT <: RuntimeContext](
     graphDb: GraphDatabaseService,
     edition: Edition[CONTEXT],
     runtime: CypherRuntime[CONTEXT],
-    workloadMode: Boolean,
+    workloadMode: WorkloadMode,
     logProvider: InternalLogProvider
   ): RuntimeTestSupport[CONTEXT] = {
     new RuntimeTestSupport[CONTEXT](graphDb, edition, runtime, workloadMode, logProvider) {
 
-      override protected def newRuntimeContext(queryContext: QueryContext): CONTEXT = {
+      override protected def newRuntimeContext(
+        queryContext: QueryContext,
+        dbDefaultLanguage: CypherVersion
+      ): CONTEXT = {
         runtimeContextManager.create(
-          CypherVersion.default.actualVersion,
+          dbDefaultLanguage,
           queryContext,
-          queryContext.transactionalContext.schemaRead,
-          queryContext.transactionalContext.procedures,
+          _txContext,
           MasterCompiler.CLOCK,
           CypherDebugOptions.default,
           compileExpressions = false,
@@ -257,7 +262,8 @@ abstract class InputWithMaterializedEntitiesTest[CONTEXT <: RuntimeContext](
           operatorEngine = CypherOperatorEngineOption.default,
           interpretedPipesFallback = CypherInterpretedPipesFallbackOption.default,
           anonymousVariableNameGenerator = new AnonymousVariableNameGenerator(),
-          () => {}
+          ExecutionModel.default,
+          indexComparatorFactory = NoPreferenceIndexComparatorFactory
         )
       }
     }
@@ -266,7 +272,7 @@ abstract class InputWithMaterializedEntitiesTest[CONTEXT <: RuntimeContext](
   private def createNode(id: Long, label: String, properties: Map[String, Any]): NodeValue = {
     val labelValue =
       if (label == null) {
-        Values.stringArray()
+        Values.EMPTY_TEXT_ARRAY
       } else {
         Values.stringArray(label)
       }

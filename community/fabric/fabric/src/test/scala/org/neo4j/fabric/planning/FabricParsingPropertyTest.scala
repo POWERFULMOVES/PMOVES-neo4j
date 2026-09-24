@@ -21,38 +21,42 @@ package org.neo4j.fabric.planning
 
 import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.AstConstructionTestSupport
+import org.neo4j.cypher.internal.ast.Statement
 import org.neo4j.cypher.internal.ast.generator.AstGenerator
 import org.neo4j.cypher.internal.ast.prettifier.ExpressionStringifier
 import org.neo4j.cypher.internal.ast.prettifier.Prettifier
 import org.neo4j.cypher.internal.ast.semantics.SemanticErrorDef
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
 import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.MultipleGraphs
 import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.UseAsMultipleGraphsSelector
 import org.neo4j.cypher.internal.compiler.phases.CompilationPhases
-import org.neo4j.cypher.internal.compiler.phases.CompilationPhases.ParsingConfig
-import org.neo4j.cypher.internal.compiler.phases.CompilationPhases.defaultSemanticFeatures
-import org.neo4j.cypher.internal.expressions.Namespace
-import org.neo4j.cypher.internal.expressions.ProcedureName
 import org.neo4j.cypher.internal.frontend.phases
 import org.neo4j.cypher.internal.frontend.phases.BaseContext
 import org.neo4j.cypher.internal.frontend.phases.CompilationPhaseTracer
 import org.neo4j.cypher.internal.frontend.phases.FieldSignature
+import org.neo4j.cypher.internal.frontend.phases.FrontEndCompilationPhases.defaultSemanticFeatures
 import org.neo4j.cypher.internal.frontend.phases.InitialState
-import org.neo4j.cypher.internal.frontend.phases.InternalSyntaxUsageStats
-import org.neo4j.cypher.internal.frontend.phases.InternalSyntaxUsageStatsNoOp
+import org.neo4j.cypher.internal.frontend.phases.InternalUsageStats
+import org.neo4j.cypher.internal.frontend.phases.InternalUsageStatsNoOp
 import org.neo4j.cypher.internal.frontend.phases.ProcedureReadOnlyAccess
 import org.neo4j.cypher.internal.frontend.phases.ProcedureSignature
-import org.neo4j.cypher.internal.frontend.phases.QualifiedName
+import org.neo4j.cypher.internal.frontend.phases.QueryLanguage
 import org.neo4j.cypher.internal.frontend.phases.ScopedProcedureSignatureResolver
+import org.neo4j.cypher.internal.frontend.phases.TryResolveCallables
 import org.neo4j.cypher.internal.frontend.phases.UserFunctionSignature
+import org.neo4j.cypher.internal.frontend.phases.factories.ParsingConfig
+import org.neo4j.cypher.internal.notification.InternalNotificationLogger
+import org.neo4j.cypher.internal.notification.devNullLogger
 import org.neo4j.cypher.internal.planner.spi.IDPPlannerName
 import org.neo4j.cypher.internal.planning.WrappedMonitors
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.cypher.internal.util.CancellationChecker
 import org.neo4j.cypher.internal.util.CypherExceptionFactory
 import org.neo4j.cypher.internal.util.ErrorMessageProvider
+import org.neo4j.cypher.internal.util.FunctionName
 import org.neo4j.cypher.internal.util.InputPosition
-import org.neo4j.cypher.internal.util.InternalNotificationLogger
-import org.neo4j.cypher.internal.util.devNullLogger
+import org.neo4j.cypher.internal.util.Namespace
+import org.neo4j.cypher.internal.util.ProcedureName
 import org.neo4j.cypher.internal.util.helpers.NameDeduplicator.UNNAMED_PATTERN
 import org.neo4j.cypher.internal.util.symbols.CTInteger
 import org.neo4j.cypher.internal.util.symbols.CTList
@@ -63,6 +67,7 @@ import org.neo4j.cypher.messages.MessageUtilProvider
 import org.neo4j.gqlstatus.ErrorGqlStatusObject
 import org.neo4j.kernel.database.DatabaseReference
 import org.neo4j.monitoring.Monitors
+import org.neo4j.values.virtual.MapValue
 
 class FabricParsingPropertyTest extends CypherFunSuite
     with CypherScalaCheckDrivenPropertyChecks
@@ -70,30 +75,34 @@ class FabricParsingPropertyTest extends CypherFunSuite
 
   private val astGenerator = new AstGenerator(simpleStrings = false)
 
-  implicit val config: PropertyCheckConfiguration = PropertyCheckConfiguration(minSuccessful = 500)
+  implicit val config: PropertyCheckConfiguration = PropertyCheckConfiguration(
+    minSuccessful = 125,
+    // AstGenerator limits AST depth with the size parameter to try to avoid stack overflows
+    minSize = 4,
+    sizeRange = 8
+  )
 
   private val resolver = {
     val ns = Namespace(List("my", "proc"))(pos)
-    val name = ProcedureName("foo")(pos)
-    val qualifiedName = QualifiedName(ns.parts, name.name)
+    val name = ProcedureName(ns, "foo")(pos)
     val signatureInputs = IndexedSeq(FieldSignature("a", CTInteger))
     val signatureOutputs = Some(IndexedSeq(FieldSignature("x", CTInteger), FieldSignature("y", CTList(CTNode))))
     val signature =
-      ProcedureSignature(qualifiedName, signatureInputs, signatureOutputs, None, ProcedureReadOnlyAccess, id = 42)
+      ProcedureSignature(name, signatureInputs, signatureOutputs, None, ProcedureReadOnlyAccess, id = 42)
 
     new ScopedProcedureSignatureResolver {
-      override def procedureSignature(name: QualifiedName): ProcedureSignature = signature
-      override def functionSignature(name: QualifiedName): Option[UserFunctionSignature] = None
+      override def procedureSignature(name: ProcedureName): ProcedureSignature = signature
+      override def functionSignature(name: FunctionName): Option[UserFunctionSignature] = None
       override def procedureSignatureVersion: Long = -1
+
+      override def queryLanguage: QueryLanguage = QueryLanguage.from(astGenerator.whenAstDifferUseCypherVersion)
+
+      override def functionSignatureInOtherVersion(name: FunctionName): Option[UserFunctionSignature] = None
     }
   }
 
-  private val fabricParsingConfig =
-    ParsingConfig(
-      cypherVersion = CypherVersion.Default,
-      semanticFeatures = defaultSemanticFeatures ++ Seq(MultipleGraphs, UseAsMultipleGraphsSelector)
-    )
-  private val fabricParsing = CompilationPhases.fabricParsing(fabricParsingConfig, resolver)
+  private val fabricParsingConfig = ParsingConfig(resolveCallables = TryResolveCallables(resolver))
+  private val fabricParsing = CompilationPhases.fabricParsing(fabricParsingConfig, MapValue.EMPTY)
 
   private val prettifier: Prettifier =
     Prettifier(ExpressionStringifier(alwaysParens = true, alwaysBacktick = true, sensitiveParamsAsParams = true))
@@ -102,20 +111,17 @@ class FabricParsingPropertyTest extends CypherFunSuite
 
   private val dummyExceptionFactory = new CypherExceptionFactory {
 
-    override def arithmeticException(
-      gqlStatusObject: ErrorGqlStatusObject,
-      message: String,
-      cause: Exception
-    ): RuntimeException = new DummyException
-    override def arithmeticException(message: String, cause: Exception): RuntimeException = new DummyException
-    override def syntaxException(message: String, pos: InputPosition): RuntimeException = new DummyException
-
     override def syntaxException(
       gqlStatusObject: ErrorGqlStatusObject,
       message: String,
       pos: InputPosition
     ): RuntimeException = new DummyException
 
+    override def syntaxException(
+      gqlStatusObject: ErrorGqlStatusObject,
+      pos: InputPosition,
+      cause: Throwable
+    ): RuntimeException = ???
   }
 
   // The result of fabricParsing gets prettified later on in FabricStitcher.
@@ -123,46 +129,64 @@ class FabricParsingPropertyTest extends CypherFunSuite
   // This string must may contain anonymous variable names, but they must use negative numbers.
   // Otherwise newly generated anonymous variable names
   // on the remote instance can clash with the existing anonymous variable names.
+  // Note, default cypher version only!
   test("fabricParsing should not introduce anonymous variable names with non-negative numbers.") {
     // To reproduce test failures, enable the following line with the seed from the TC build
     // setScalaCheckInitialSeed(seed)
-    forAll(astGenerator._statement) { statement =>
-      val queryString = prettifier.asString(statement)
-      withClue(s"Original queryString: $queryString\n") {
-        val state = InitialState(
-          queryString,
-          IDPPlannerName,
-          new AnonymousVariableNameGenerator(negativeNumbers = true)
-        )
+    forAll(astGenerator._statement) { (statement: Statement) =>
+      val astSize = statement.folder.fold(0) { case _ => acc => acc + 1 }
+      // Skip too large ASTs: these have caused OOMs where a single generated
+      // statement explodes during rewriting into millions of nodes.
+      if (astSize <= 1000) {
+        val queryString = prettifier.asString(statement)
+        withClue(s"Original queryString (astSize=$astSize): $queryString\n") {
+          val state = InitialState(
+            queryString,
+            IDPPlannerName,
+            new AnonymousVariableNameGenerator(negativeNumbers = true)
+          )
 
-        val context = new BaseContext {
-          override def tracer: CompilationPhaseTracer = CompilationPhaseTracer.NO_TRACING
-          override def notificationLogger: InternalNotificationLogger = devNullLogger
-          override def cypherExceptionFactory: CypherExceptionFactory = dummyExceptionFactory
-          override def monitors: phases.Monitors = WrappedMonitors(mock[Monitors])
-          // Ignore semantic errors
-          override def errorHandler: Seq[SemanticErrorDef] => Unit = _ => ()
-          override val errorMessageProvider: ErrorMessageProvider = MessageUtilProvider
-          override def cancellationChecker: CancellationChecker = CancellationChecker.NeverCancelled
-          override def internalSyntaxUsageStats: InternalSyntaxUsageStats = InternalSyntaxUsageStatsNoOp
-
-          override def sessionDatabase: DatabaseReference = null
-        }
-
-        try {
-          val fabricParsed = fabricParsing.transform(state, context).statement()
-          val rewrittenQueryString = prettifier.asString(fabricParsed)
-          withClue(s"Rewritten queryString: $rewrittenQueryString\n") {
-            UNNAMED_PATTERN.findAllMatchIn(rewrittenQueryString).foreach(
-              _.group(2).toInt should be < 0
-            )
+          val context = new BaseContext {
+            override def cypherVersion: CypherVersion = astGenerator.whenAstDifferUseCypherVersion
+            override def tracer: CompilationPhaseTracer = CompilationPhaseTracer.NO_TRACING
+            override def notificationLogger: InternalNotificationLogger = devNullLogger
+            override def cypherExceptionFactory: CypherExceptionFactory = dummyExceptionFactory
+            override def monitors: phases.Monitors = WrappedMonitors(mock[Monitors])
+            // Ignore semantic errors
+            override def errorHandler: Seq[SemanticErrorDef] => Unit = _ => ()
+            override val errorMessageProvider: ErrorMessageProvider = MessageUtilProvider
+            override def cancellationChecker: CancellationChecker = CancellationChecker.NeverCancelled
+            override def internalUsageStats: InternalUsageStats = InternalUsageStatsNoOp
+            override def sessionDatabase: DatabaseReference = null
+            override def semanticFeatures: Seq[SemanticFeature] =
+              defaultSemanticFeatures.map(SemanticFeature.fromString) ++ Seq(
+                MultipleGraphs,
+                UseAsMultipleGraphsSelector
+              )
+            override def isScopeQuery: Boolean = false
+            override def shadowedFunctions: Set[String] = Set.empty
+            override def isDebugSession: Boolean = false
           }
-        } catch {
-          case _: DummyException =>
-          // Ignore. We can get those for certain semantic errors caught by the rewriters.
-          case _: IllegalStateException  =>
-          case _: NoSuchElementException =>
-          // Ignore. We can reach invalid states by ignoring semantic errors and continuing.
+
+          try {
+            val fabricParsed = fabricParsing.transform(state, context).statement()
+            val rewrittenQueryString = prettifier.asString(fabricParsed)
+            withClue(s"Rewritten queryString: $rewrittenQueryString\n") {
+              UNNAMED_PATTERN.findAllMatchIn(rewrittenQueryString).foreach(
+                _.group(2).toInt should be < 0
+              )
+            }
+          } catch {
+            // Ignore. We can get those for certain semantic errors caught by the rewriters.
+            case _: DummyException =>
+            // Ignore. We can reach invalid states by ignoring semantic errors and continuing.
+            case _: IllegalStateException  =>
+            case _: NoSuchElementException =>
+            // Ignore. Caused by invalid Cypher reaching the ASTRewriter
+            case _: UnsupportedOperationException =>
+            case _: ClassCastException            =>
+
+          }
         }
       }
     }

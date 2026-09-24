@@ -23,6 +23,7 @@ import static java.util.concurrent.TimeUnit.MINUTES;
 
 import java.io.PrintStream;
 import java.util.Optional;
+import java.util.OptionalLong;
 import org.neo4j.cli.CommandFailedException;
 import org.neo4j.io.IOUtils;
 
@@ -76,7 +77,26 @@ abstract class AbstractUnixBootloaderOs extends BootloaderOsAbstraction {
 
     @Override
     void stop(long pid) throws CommandFailedException {
-        getProcessIfAlive(pid).ifPresent(ProcessHandle::destroy);
+        getProcessIfAlive(pid).ifPresent(this::destroyOrFail);
+    }
+
+    private void destroyOrFail(ProcessHandle process) throws CommandFailedException {
+        var couldIssueDestroy = process.destroy();
+        if (!couldIssueDestroy) {
+            final var stopInvokingUser = System.getProperty("user.name");
+            process.info()
+                    .user()
+                    .ifPresentOrElse(
+                            otherProcessUser -> {
+                                final var msg = String.format(
+                                        "Failed to stop process. User of the process to stop '%s' and user running this process '%s' differs, which means this could be a permission problem.",
+                                        otherProcessUser, stopInvokingUser);
+                                throw new CommandFailedException(msg);
+                            },
+                            () -> {
+                                throw new CommandFailedException("Failed to stop process.");
+                            });
+        }
     }
 
     @Override
@@ -117,8 +137,9 @@ abstract class AbstractUnixBootloaderOs extends BootloaderOsAbstraction {
     }
 
     @Override
-    Optional<Long> getPidIfRunning() {
-        return getProcessIfAlive(bootloader.processManager().getPidFromFile()).map(ProcessHandle::pid);
+    OptionalLong getPidIfRunning() {
+        var process = getProcessIfAlive(bootloader.processManager().getPidFromFile());
+        return process.isPresent() ? OptionalLong.of(process.get().pid()) : OptionalLong.empty();
     }
 
     @Override

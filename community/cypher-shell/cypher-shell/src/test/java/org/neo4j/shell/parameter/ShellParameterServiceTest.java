@@ -20,7 +20,7 @@
 package org.neo4j.shell.parameter;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -80,7 +80,7 @@ class ShellParameterServiceTest {
         when(mockRecord.get("result")).thenReturn(result);
         var mockBoltResult = mock(BoltResult.class);
         when(mockBoltResult.iterate()).thenReturn(List.of(mockRecord).iterator());
-        when(transactionHandler.runCypher(eq("RETURN {hello:1 + 2 + 3} AS `result`"), any(), eq(USER_TRANSPILED)))
+        when(transactionHandler.runCypher5(eq("RETURN {hello:1 + 2 + 3} AS `result`"), any(), eq(USER_TRANSPILED)))
                 .thenReturn(Optional.of(mockBoltResult));
 
         assertEvaluate("1 + 2 + 3", new IntegerValue(6L));
@@ -88,10 +88,9 @@ class ShellParameterServiceTest {
 
     @Test
     void failToEvaluate() {
-        var exception = assertThrows(
-                ParameterService.ParameterEvaluationException.class,
-                () -> parameters.evaluate(new RawParameters("INVALID")));
-        assertThat(exception).hasMessageContaining("Failed to evaluate expression INVALID");
+        assertThatThrownBy(() -> parameters.evaluate(new RawParameters("INVALID")))
+                .isInstanceOf(ParameterService.ParameterEvaluationException.class)
+                .hasMessageContaining("Failed to evaluate expression INVALID");
     }
 
     @Test

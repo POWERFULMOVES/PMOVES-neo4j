@@ -29,64 +29,36 @@ import java.util.stream.Collectors;
 import org.neo4j.common.TokenNameLookup;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
+import org.neo4j.gqlstatus.GqlParams;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.internal.schema.SchemaDescriptor;
-import org.neo4j.internal.schema.SchemaUserDescription;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.util.VisibleForTesting;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.ValueTuple;
 
 public class IndexEntryConflictException extends KernelException {
-    private final SchemaDescriptor schemaDescriptor;
-    private final ValueTuple propertyValues;
-    private final long addedEntityId;
-    private final long existingEntityId;
+    protected final SchemaDescriptor schemaDescriptor;
+    protected final ValueTuple propertyValues;
+    protected final long addedEntityId;
+    protected final long existingEntityId;
 
-    public IndexEntryConflictException(
-            SchemaDescriptor schemaDescriptor, long existingEntityId, long addedEntityId, Value... propertyValue) {
-        this(schemaDescriptor, existingEntityId, addedEntityId, ValueTuple.of(propertyValue));
-    }
+    public static final String VALUE_GROUP = "values";
+    public static final String ADDED_ID = "addedId";
+    public static final String EXISTING_ID = "existingId";
+    public static final String INDEX_CONFLICT_REGEX =
+            "(?s)propertyValues=(?<%s>.*), addedEntityId=(?<%s>-?\\d+), existingEntityId=(?<%s>-?\\d+)"
+                    .formatted(VALUE_GROUP, ADDED_ID, EXISTING_ID);
 
-    public IndexEntryConflictException(
+    protected IndexEntryConflictException(
             ErrorGqlStatusObject gqlStatusObject,
             SchemaDescriptor schemaDescriptor,
             long existingEntityId,
             long addedEntityId,
-            Value... propertyValue) {
-        this(gqlStatusObject, schemaDescriptor, existingEntityId, addedEntityId, ValueTuple.of(propertyValue));
-    }
-
-    public IndexEntryConflictException(
-            SchemaDescriptor schemaDescriptor, long existingEntityId, long addedEntityId, ValueTuple propertyValues) {
-        super(
-                Status.Schema.ConstraintViolation,
-                buildErrorMessage(
-                        SchemaUserDescription.TOKEN_ID_NAME_LOOKUP,
-                        schemaDescriptor,
-                        propertyValues,
-                        addedEntityId,
-                        existingEntityId));
-        this.schemaDescriptor = schemaDescriptor;
-        this.existingEntityId = existingEntityId;
-        this.addedEntityId = addedEntityId;
-        this.propertyValues = propertyValues;
-    }
-
-    public IndexEntryConflictException(
-            ErrorGqlStatusObject gqlStatusObject,
-            SchemaDescriptor schemaDescriptor,
-            long existingEntityId,
-            long addedEntityId,
-            ValueTuple propertyValues) {
-        super(
-                gqlStatusObject,
-                Status.Schema.ConstraintViolation,
-                buildErrorMessage(
-                        SchemaUserDescription.TOKEN_ID_NAME_LOOKUP,
-                        schemaDescriptor,
-                        propertyValues,
-                        addedEntityId,
-                        existingEntityId));
+            ValueTuple propertyValues,
+            String legacyMessage) {
+        super(gqlStatusObject, Status.Schema.ConstraintViolation, legacyMessage);
 
         this.schemaDescriptor = schemaDescriptor;
         this.existingEntityId = existingEntityId;
@@ -152,6 +124,32 @@ public class IndexEntryConflictException extends KernelException {
                     tokenName,
                     propertyString(tokenNameLookup, schemaDescriptor.getPropertyIds(), propertyValues));
         }
+    }
+
+    public static IndexEntryConflictException indexEntryConflict(
+            SchemaDescriptor schemaDescriptor,
+            long existingEntityId,
+            long addedEntityId,
+            TokenNameLookup tokenNameLookup,
+            Value... propertyValue) {
+        return indexEntryConflict(
+                schemaDescriptor, existingEntityId, addedEntityId, tokenNameLookup, ValueTuple.of(propertyValue));
+    }
+
+    public static IndexEntryConflictException indexEntryConflict(
+            SchemaDescriptor schemaDescriptor,
+            long existingEntityId,
+            long addedEntityId,
+            TokenNameLookup tokenNameLookup,
+            ValueTuple propertyValues) {
+        String message =
+                buildErrorMessage(tokenNameLookup, schemaDescriptor, propertyValues, addedEntityId, existingEntityId);
+
+        ErrorGqlStatusObject gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N80)
+                .withParam(GqlParams.StringParam.value, message)
+                .build();
+        return new IndexEntryConflictException(
+                gql, schemaDescriptor, existingEntityId, addedEntityId, propertyValues, message);
     }
 
     @VisibleForTesting

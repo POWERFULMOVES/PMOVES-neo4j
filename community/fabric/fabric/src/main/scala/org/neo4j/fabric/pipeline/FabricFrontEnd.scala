@@ -19,10 +19,8 @@
  */
 package org.neo4j.fabric.pipeline
 
-import org.neo4j.configuration.GraphDatabaseInternalSettings
 import org.neo4j.cypher.internal.CachingPreParser
-import org.neo4j.cypher.internal.PreParsedQuery
-import org.neo4j.cypher.internal.QueryOptions
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.Statement
 import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
 import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.MultipleGraphs
@@ -31,29 +29,36 @@ import org.neo4j.cypher.internal.cache.CacheSize
 import org.neo4j.cypher.internal.cache.CacheTracer
 import org.neo4j.cypher.internal.cache.CaffeineCacheFactory
 import org.neo4j.cypher.internal.cache.CypherQueryCaches
+import org.neo4j.cypher.internal.cache.CypherQueryCaches.CacheStrategy
 import org.neo4j.cypher.internal.cache.CypherQueryCaches.PreParserCache
 import org.neo4j.cypher.internal.compiler.helpers.ParameterValueTypeHelper
-import org.neo4j.cypher.internal.compiler.phases.BaseContextImpl
 import org.neo4j.cypher.internal.compiler.phases.CompilationPhases
 import org.neo4j.cypher.internal.config.CypherConfiguration
 import org.neo4j.cypher.internal.frontend.phases.BaseContext
+import org.neo4j.cypher.internal.frontend.phases.BaseContextImpl
 import org.neo4j.cypher.internal.frontend.phases.BaseState
 import org.neo4j.cypher.internal.frontend.phases.CompilationPhaseTracer
+import org.neo4j.cypher.internal.frontend.phases.FrontEndCompilationPhases.defaultSemanticFeatures
+import org.neo4j.cypher.internal.frontend.phases.FrontEndCompilationPhases.settingToFeatureMapping
 import org.neo4j.cypher.internal.frontend.phases.InitialState
-import org.neo4j.cypher.internal.frontend.phases.InternalSyntaxUsageStats
+import org.neo4j.cypher.internal.frontend.phases.InternalUsageStats
 import org.neo4j.cypher.internal.frontend.phases.ScopedProcedureSignatureResolver
+import org.neo4j.cypher.internal.frontend.phases.TryResolveCallables
+import org.neo4j.cypher.internal.frontend.phases.factories.ParsingConfig
+import org.neo4j.cypher.internal.notification.InternalNotification
+import org.neo4j.cypher.internal.notification.InternalNotificationLogger
 import org.neo4j.cypher.internal.options.CypherExecutionMode
 import org.neo4j.cypher.internal.planner.spi.PlannerNameFor
 import org.neo4j.cypher.internal.planning.WrappedMonitors
+import org.neo4j.cypher.internal.preparser.PreParsedQuery
+import org.neo4j.cypher.internal.preparser.QueryOptions
 import org.neo4j.cypher.internal.tracing.CompilationTracer
 import org.neo4j.cypher.internal.tracing.TimingCompilationTracer
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.cypher.internal.util.CancellationChecker
-import org.neo4j.cypher.internal.util.InternalNotification
-import org.neo4j.cypher.internal.util.InternalNotificationLogger
 import org.neo4j.cypher.rendering.QueryRenderer
+import org.neo4j.exceptions.InvalidSemanticsException
 import org.neo4j.fabric.planning.FabricPlan
-import org.neo4j.fabric.util.Errors
 import org.neo4j.kernel.database.DatabaseReference
 import org.neo4j.monitoring
 import org.neo4j.values.virtual.MapValue
@@ -85,12 +90,17 @@ case class FabricFrontEnd(
         case CypherExecutionMode.default => FabricPlan.Execute
         case CypherExecutionMode.explain => FabricPlan.Explain
         case CypherExecutionMode.profile if inCompositeContext && !compositeProfilingEnabled.apply() =>
-          Errors.semantic("'PROFILE' is not supported on composite databases.")
+          throw InvalidSemanticsException.profileNotSupportedOnComposite()
         case CypherExecutionMode.profile => FabricPlan.PROFILE
       }
 
-    def preParse(queryString: String, notificationLogger: InternalNotificationLogger): PreParsedQuery = {
-      preParser.preParseQuery(queryString, notificationLogger)
+    def preParse(
+      queryString: String,
+      notificationLogger: InternalNotificationLogger,
+      defaultLanguage: CypherVersion,
+      cacheStrategy: CacheStrategy
+    ): PreParsedQuery = {
+      preParser.preParseQuery(queryString, notificationLogger, defaultLanguage, cacheStrategy = cacheStrategy)
     }
 
   }
@@ -101,14 +111,30 @@ case class FabricFrontEnd(
     params: MapValue,
     cancellationChecker: CancellationChecker,
     notificationLogger: InternalNotificationLogger,
-    internalSyntaxUsageStats: InternalSyntaxUsageStats,
-    sessionDatabase: DatabaseReference
+    internalSyntaxUsageStats: InternalUsageStats,
+    sessionDatabase: DatabaseReference,
+    shadowedFunctions: Set[String]
   ) {
 
     def traceStart(): CompilationTracer.QueryCompilationEvent =
       compilationTracer.compileQuery(query.description)
 
+    val semanticFeatures: Seq[SemanticFeature] = CompilationPhases.enabledSemanticFeatures(
+      cypherConfig.enableExtraSemanticFeatures ++
+        cypherConfig.toggledFeatures(defaultSemanticFeatures, settingToFeatureMapping: _*)
+    ) ++ Seq(MultipleGraphs, UseAsMultipleGraphsSelector)
+
+    private val parsingConfig = ParsingConfig(
+      resolveCallables = TryResolveCallables(signatures),
+      extractLiterals = cypherConfig.extractLiterals,
+      parameterTypeMapping = ParameterValueTypeHelper.asCypherTypeMap(params, cypherConfig.useParameterSizeHint),
+      resolveSimpleDynamicExpressions = cypherConfig.resolveSimpleDynamicExpressions,
+      enabledVirtualGraph = cypherConfig.useVirtualGraph,
+      isFabricPipeline = true
+    )
+
     private val context: BaseContext = BaseContextImpl(
+      query.resolvedLanguage,
       CompilationPhaseTracer.NO_TRACING,
       notificationLogger,
       query.rawStatement,
@@ -116,28 +142,11 @@ case class FabricFrontEnd(
       WrappedMonitors(kernelMonitors),
       cancellationChecker,
       internalSyntaxUsageStats,
-      sessionDatabase
-    )
-
-    private val semanticFeatures = Seq(
-      MultipleGraphs,
-      UseAsMultipleGraphsSelector
-    )
-
-    private val parsingConfig = CompilationPhases.ParsingConfig(
-      cypherVersion = query.options.queryOptions.cypherVersion.actualVersion,
-      extractLiterals = cypherConfig.extractLiterals,
-      parameterTypeMapping = ParameterValueTypeHelper.asCypherTypeMap(params, cypherConfig.useParameterSizeHint),
-      semanticFeatures =
-        CompilationPhases.enabledSemanticFeatures(
-          cypherConfig.enableExtraSemanticFeatures ++ cypherConfig.toggledFeatures(Map(
-            GraphDatabaseInternalSettings.show_setting -> SemanticFeature.ShowSetting.productPrefix,
-            GraphDatabaseInternalSettings.composable_commands -> SemanticFeature.ComposableCommands.productPrefix,
-            GraphDatabaseInternalSettings.graph_type_enabled -> SemanticFeature.GraphTypes.productPrefix
-          ))
-        ) ++ semanticFeatures,
-      obfuscateLiterals = cypherConfig.obfuscateLiterals,
-      antlrParserEnabled = cypherConfig.cypherParserAntlrEnabled
+      sessionDatabase,
+      semanticFeatures,
+      query.options.queryOptions.planMode.isScope,
+      shadowedFunctions = shadowedFunctions,
+      isDebugSession = false
     )
 
     object parseAndPrepare {
@@ -150,7 +159,7 @@ case class FabricFrontEnd(
 
       private val transformer =
         CompilationPhases
-          .fabricParsing(parsingConfig, signatures)
+          .fabricParsing(parsingConfig, params)
 
       def process(): BaseState =
         transformer.transform(
@@ -164,7 +173,7 @@ case class FabricFrontEnd(
       private val anonymousVariableNameGenerator = new AnonymousVariableNameGenerator(negativeNumbers = false)
 
       private val transformer =
-        CompilationPhases.fabricFinalize(parsingConfig)
+        CompilationPhases.fabricFinalize(parsingConfig, signatures)
 
       def process(statement: Statement, useFullQueryText: Boolean): BaseState = {
         val localQueryString =

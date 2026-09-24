@@ -20,7 +20,6 @@
 package org.neo4j.internal.kernel.api.security;
 
 import java.util.Locale;
-import java.util.Objects;
 
 public enum PrivilegeAction {
     // Database actions
@@ -73,21 +72,36 @@ public enum PrivilegeAction {
     CREATE_DATABASE,
     DROP_DATABASE,
     SET_DATABASE_ACCESS,
+    // would preferably be SET_DATABASE_DEFAULT_LANGUAGE,
+    // but since the enum is directly stored in system db for the privileges and
+    // those got released before the wanted renaming, we're leaving this as is
+    SET_DEFAULT_LANGUAGE,
+    ALTER_DATABASE_OPTIONS,
+    ALTER_DATABASE_TOPOLOGY,
     CREATE_COMPOSITE_DATABASE,
     DROP_COMPOSITE_DATABASE,
+    ALTER_COMPOSITE_DATABASE,
 
     CREATE_ALIAS,
     DROP_ALIAS,
     ALTER_ALIAS,
     SHOW_ALIAS,
 
+    READ_SECRETS,
+    WRITE_SECRETS,
+    SHOW_SECRETS,
+
     SHOW_USER,
+    SHOW_USER_CREDENTIALS,
     CREATE_USER,
     RENAME_USER,
     SET_USER_STATUS,
     SET_PASSWORDS,
     SET_USER_HOME_DATABASE,
     DROP_USER,
+
+    SHOW_USER_METADATA,
+    SET_USER_METADATA,
 
     IMPERSONATE,
 
@@ -98,12 +112,15 @@ public enum PrivilegeAction {
     ASSIGN_ROLE,
     REMOVE_ROLE,
 
+    SHOW_AUTH_RULE,
+    CREATE_AUTH_RULE,
+    RENAME_AUTH_RULE,
+    ALTER_AUTH_RULE,
+    DROP_AUTH_RULE,
+
     SHOW_PRIVILEGE,
     ASSIGN_PRIVILEGE,
     REMOVE_PRIVILEGE,
-
-    ASSIGN_IMMUTABLE_PRIVILEGE,
-    REMOVE_IMMUTABLE_PRIVILEGE,
 
     /**
      * Execute procedure or user defined function
@@ -175,7 +192,7 @@ public enum PrivilegeAction {
         @Override
         public boolean satisfies(PrivilegeAction action) {
             return switch (action) {
-                case CREATE_COMPOSITE_DATABASE, DROP_COMPOSITE_DATABASE -> true;
+                case CREATE_COMPOSITE_DATABASE, DROP_COMPOSITE_DATABASE, ALTER_COMPOSITE_DATABASE -> true;
                 default -> this == action;
             };
         }
@@ -186,9 +203,10 @@ public enum PrivilegeAction {
         public boolean satisfies(PrivilegeAction action) {
             return switch (action) {
                 case CREATE_DATABASE, DROP_DATABASE -> true;
-                default -> ALTER_DATABASE.satisfies(action)
-                        || COMPOSITE_DATABASE_MANAGEMENT.satisfies(action)
-                        || this == action;
+                default ->
+                    ALTER_DATABASE.satisfies(action)
+                            || COMPOSITE_DATABASE_MANAGEMENT.satisfies(action)
+                            || this == action;
             };
         }
     },
@@ -196,10 +214,10 @@ public enum PrivilegeAction {
     ALTER_DATABASE {
         @Override
         public boolean satisfies(PrivilegeAction action) {
-            if (Objects.requireNonNull(action) == PrivilegeAction.SET_DATABASE_ACCESS) {
-                return true;
-            }
-            return this == action;
+            return switch (action) {
+                case SET_DATABASE_ACCESS, SET_DEFAULT_LANGUAGE, ALTER_DATABASE_OPTIONS, ALTER_DATABASE_TOPOLOGY -> true;
+                default -> this == action;
+            };
         }
     },
 
@@ -223,11 +241,21 @@ public enum PrivilegeAction {
         }
     },
 
+    SECRETS_MANAGEMENT {
+        @Override
+        public boolean satisfies(PrivilegeAction action) {
+            return switch (action) {
+                case READ_SECRETS, WRITE_SECRETS, SHOW_SECRETS -> true;
+                default -> this == action;
+            };
+        }
+    },
+
     USER_MANAGEMENT {
         @Override
         public boolean satisfies(PrivilegeAction action) {
             return switch (action) {
-                case SHOW_USER, CREATE_USER, RENAME_USER, DROP_USER -> true;
+                case CREATE_USER, RENAME_USER, DROP_USER, SHOW_USER, SHOW_USER_CREDENTIALS -> true;
                 default -> ALTER_USER.satisfies(action) || this == action;
             };
         }
@@ -253,11 +281,31 @@ public enum PrivilegeAction {
         }
     },
 
+    USER_METADATA_MANAGEMENT {
+        @Override
+        public boolean satisfies(PrivilegeAction action) {
+            return switch (action) {
+                case SHOW_USER_METADATA, SET_USER_METADATA -> true;
+                default -> this == action;
+            };
+        }
+    },
+
     ROLE_MANAGEMENT {
         @Override
         public boolean satisfies(PrivilegeAction action) {
             return switch (action) {
                 case SHOW_ROLE, CREATE_ROLE, RENAME_ROLE, DROP_ROLE, ASSIGN_ROLE, REMOVE_ROLE -> true;
+                default -> this == action;
+            };
+        }
+    },
+
+    AUTH_RULE_MANAGEMENT {
+        @Override
+        public boolean satisfies(PrivilegeAction action) {
+            return switch (action) {
+                case SHOW_AUTH_RULE, CREATE_AUTH_RULE, ALTER_AUTH_RULE, RENAME_AUTH_RULE, DROP_AUTH_RULE -> true;
                 default -> this == action;
             };
         }
@@ -335,6 +383,9 @@ public enum PrivilegeAction {
         public boolean satisfies(PrivilegeAction action) {
             return ROLE_MANAGEMENT.satisfies(action)
                     || USER_MANAGEMENT.satisfies(action)
+                    || USER_METADATA_MANAGEMENT.satisfies(action)
+                    || SECRETS_MANAGEMENT.satisfies(action)
+                    || AUTH_RULE_MANAGEMENT.satisfies(action)
                     || DATABASE_MANAGEMENT.satisfies(action)
                     || ALIAS_MANAGEMENT.satisfies(action)
                     || PRIVILEGE_MANAGEMENT.satisfies(action)

@@ -34,11 +34,13 @@ import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.kernel.api.KernelTransaction
 import org.scalatest.funsuite.AnyFunSuiteLike
 
+object ProfilePageCacheStatsTestBase
+
 abstract class ProfilePageCacheStatsTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT]
 ) extends RuntimeTestSuite[CONTEXT](
-      edition.copyWith(GraphDatabaseSettings.pagecache_memory -> Long.box(164480)), // 20 pages
+      edition.copyWith(GraphDatabaseSettings.pagecache_memory -> Long.box( /*page size*/ 8224 * 30)),
       runtime
     ) {
 

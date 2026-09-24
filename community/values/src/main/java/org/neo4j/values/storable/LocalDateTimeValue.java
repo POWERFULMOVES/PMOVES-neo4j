@@ -28,7 +28,6 @@ import static org.neo4j.memory.HeapEstimator.shallowSizeOfInstance;
 import static org.neo4j.values.storable.DateTimeValue.parseZoneName;
 import static org.neo4j.values.storable.DateValue.DATE_PATTERN;
 import static org.neo4j.values.storable.DateValue.parseDate;
-import static org.neo4j.values.storable.IntegralValue.safeCastIntegral;
 import static org.neo4j.values.storable.LocalTimeValue.TIME_PATTERN;
 import static org.neo4j.values.storable.LocalTimeValue.parseTime;
 
@@ -42,13 +41,16 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoField;
 import java.time.temporal.IsoFields;
+import java.time.temporal.TemporalAccessor;
 import java.time.temporal.TemporalUnit;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.neo4j.exceptions.InvalidArgumentException;
+import org.neo4j.exceptions.TemporalParseException;
 import org.neo4j.exceptions.UnsupportedTemporalUnitException;
 import org.neo4j.internal.helpers.collection.Pair;
 import org.neo4j.values.AnyValue;
@@ -61,6 +63,7 @@ public final class LocalDateTimeValue extends TemporalValue<LocalDateTime, Local
 
     public static final LocalDateTimeValue MIN_VALUE = new LocalDateTimeValue(LocalDateTime.MIN);
     public static final LocalDateTimeValue MAX_VALUE = new LocalDateTimeValue(LocalDateTime.MAX);
+    public static final String CYPHER_TYPE_NAME = "LOCAL DATETIME";
 
     private final LocalDateTime value;
     private final long epochSecondsInUTC;
@@ -70,14 +73,15 @@ public final class LocalDateTimeValue extends TemporalValue<LocalDateTime, Local
         this.epochSecondsInUTC = this.value.toEpochSecond(UTC);
     }
 
+    // Only used in tests
     public static LocalDateTimeValue localDateTime(DateValue date, LocalTimeValue time) {
         return new LocalDateTimeValue(LocalDateTime.of(date.temporal(), time.temporal()));
     }
 
+    // Only used in tests
     public static LocalDateTimeValue localDateTime(
             int year, int month, int day, int hour, int minute, int second, int nanoOfSecond) {
-        return new LocalDateTimeValue(
-                assertValidArgument(() -> LocalDateTime.of(year, month, day, hour, minute, second, nanoOfSecond)));
+        return new LocalDateTimeValue(LocalDateTime.of(year, month, day, hour, minute, second, nanoOfSecond));
     }
 
     public static LocalDateTimeValue localDateTime(LocalDateTime value) {
@@ -89,7 +93,7 @@ public final class LocalDateTimeValue extends TemporalValue<LocalDateTime, Local
     }
 
     public static LocalDateTime localDateTimeRaw(long epochSecond, long nano) {
-        return assertValidArgument(() -> ofInstant(ofEpochSecond(epochSecond, nano), UTC));
+        return assertValidArgument("epochSecond", () -> ofInstant(ofEpochSecond(epochSecond, nano), UTC));
     }
 
     public static LocalDateTimeValue parse(CharSequence text) {
@@ -98,6 +102,24 @@ public final class LocalDateTimeValue extends TemporalValue<LocalDateTime, Local
 
     public static LocalDateTimeValue parse(TextValue text) {
         return parse(LocalDateTimeValue.class, PATTERN, LocalDateTimeValue::parse, text);
+    }
+
+    public static LocalDateTimeValue parsePattern(TextValue text, TextValue pattern) {
+        try {
+            DateTimeFormatter dtf = DateTimeFormatter.ofPattern(pattern.stringValue());
+            TemporalAccessor parsed = dtf.parseBest(text.stringValue(), LocalDateTime::from, LocalDate::from);
+            switch (parsed) {
+                case LocalDateTime ldt -> {
+                    return new LocalDateTimeValue(ldt);
+                }
+                case LocalDate ld -> {
+                    return new LocalDateTimeValue(ld.atStartOfDay());
+                }
+                default -> throw new IllegalStateException("Unexpected value: " + parsed);
+            }
+        } catch (IllegalArgumentException | DateTimeParseException e) {
+            throw TemporalParseException.mismatchedPattern(pattern.stringValue(), text.stringValue(), CYPHER_TYPE_NAME);
+        }
     }
 
     public static LocalDateTimeValue now(Clock clock) {
@@ -122,18 +144,18 @@ public final class LocalDateTimeValue extends TemporalValue<LocalDateTime, Local
 
     public static LocalDateTimeValue truncate(
             TemporalUnit unit, TemporalValue input, MapValue fields, Supplier<ZoneId> defaultZone) {
-        Pair<LocalDate, LocalTime> pair = getTruncatedDateAndTime(unit, input, "local date time");
+        Pair<LocalDate, LocalTime> pair = getTruncatedDateAndTime(unit, input, "local date time", "LOCAL DATETIME");
 
         LocalDate truncatedDate = pair.first();
         LocalTime truncatedTime = pair.other();
 
         LocalDateTime truncatedLDT = LocalDateTime.of(truncatedDate, truncatedTime);
 
-        if (fields.size() == 0) {
+        if (fields.isEmpty()) {
             return localDateTime(truncatedLDT);
         } else {
             return updateFieldMapWithConflictingSubseconds(fields, unit, truncatedLDT, (mapValue, localDateTime) -> {
-                if (mapValue.size() == 0) {
+                if (mapValue.isEmpty()) {
                     return localDateTime(localDateTime);
                 } else {
                     return build(mapValue.updatedWith("datetime", localDateTime(localDateTime)), defaultZone);
@@ -150,7 +172,7 @@ public final class LocalDateTimeValue extends TemporalValue<LocalDateTime, Local
             TemporalFields.minute.defaultValue);
 
     private static DateTimeValue.DateTimeBuilder<LocalDateTimeValue> builder(Supplier<ZoneId> defaultZone) {
-        return new DateTimeValue.DateTimeBuilder<>(defaultZone) {
+        return new DateTimeValue.DateTimeBuilder<>(defaultZone, "LOCAL DATETIME") {
             @Override
             protected boolean supportsTimeZone() {
                 return false;
@@ -210,14 +232,18 @@ public final class LocalDateTimeValue extends TemporalValue<LocalDateTime, Local
 
                 if (fields.containsKey(TemporalFields.week) && !selectingDate && !selectingDateTime) {
                     // Be sure to be in the start of the week based year (which can be later than 1st Jan)
-                    result = result.with(
-                                    IsoFields.WEEK_BASED_YEAR,
-                                    safeCastIntegral(
-                                            TemporalFields.year.name(),
-                                            fields.get(TemporalFields.year),
-                                            TemporalFields.year.defaultValue))
-                            .with(IsoFields.WEEK_OF_WEEK_BASED_YEAR, 1)
-                            .with(ChronoField.DAY_OF_WEEK, 1);
+                    var tempResult = result;
+                    result = assertValidArgument(
+                            "year",
+                            () -> tempResult
+                                    .with(
+                                            IsoFields.WEEK_BASED_YEAR,
+                                            safeCastAssignableIntegral(
+                                                    TemporalFields.year.name(),
+                                                    fields.get(TemporalFields.year),
+                                                    TemporalFields.year.defaultValue))
+                                    .with(IsoFields.WEEK_OF_WEEK_BASED_YEAR, 1)
+                                    .with(ChronoField.DAY_OF_WEEK, 1));
                 }
 
                 result = assignAllFields(result);
@@ -260,6 +286,11 @@ public final class LocalDateTimeValue extends TemporalValue<LocalDateTime, Local
     }
 
     @Override
+    public String getTemporalCypherTypeName() {
+        return CYPHER_TYPE_NAME;
+    }
+
+    @Override
     LocalDateTime temporal() {
         return value;
     }
@@ -276,7 +307,8 @@ public final class LocalDateTimeValue extends TemporalValue<LocalDateTime, Local
 
     @Override
     OffsetTime getTimePart(Supplier<ZoneId> defaultZone) {
-        ZoneOffset currentOffset = assertValidArgument(() -> ZonedDateTime.ofInstant(Instant.now(), defaultZone.get()))
+        ZoneOffset currentOffset = assertValidArgument(
+                        "time", () -> ZonedDateTime.ofInstant(Instant.now(), defaultZone.get()))
                 .getOffset();
         return OffsetTime.of(value.toLocalTime(), currentOffset);
     }
@@ -288,7 +320,7 @@ public final class LocalDateTimeValue extends TemporalValue<LocalDateTime, Local
 
     @Override
     ZoneOffset getZoneOffset() {
-        throw new UnsupportedTemporalUnitException(String.format("Cannot get the offset of: %s", this));
+        throw UnsupportedTemporalUnitException.cannotGetZoneOffset(String.valueOf(this));
     }
 
     @Override
@@ -333,12 +365,12 @@ public final class LocalDateTimeValue extends TemporalValue<LocalDateTime, Local
 
     @Override
     public LocalDateTimeValue add(DurationValue duration) {
-        return replacement(assertValidArithmetic(() -> value.plus(duration)));
+        return replacement(assertValidArithmetic(() -> value.plus(duration), value + " + " + duration, "+"));
     }
 
     @Override
     public LocalDateTimeValue sub(DurationValue duration) {
-        return replacement(assertValidArithmetic(() -> value.minus(duration)));
+        return replacement(assertValidArithmetic(() -> value.minus(duration), value + " - " + duration, "-"));
     }
 
     @Override

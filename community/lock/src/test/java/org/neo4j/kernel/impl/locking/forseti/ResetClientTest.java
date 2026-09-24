@@ -19,7 +19,8 @@
  */
 package org.neo4j.kernel.impl.locking.forseti;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.neo4j.kernel.impl.locking.LockMonitor.EMPTY_LOCK_MONITOR;
 
 import org.junit.jupiter.api.Test;
 import org.neo4j.configuration.Config;
@@ -30,23 +31,25 @@ import org.neo4j.lock.ResourceType;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.time.Clocks;
 
-public class ResetClientTest {
+class ResetClientTest {
     @Test
     void resetLockClientTest() {
         Config config = Config.defaults();
-        ForsetiLockManager lockManager = new ForsetiLockManager(config, Clocks.nanoClock(), ResourceType.values());
-        LockManager.Client client = lockManager.newClient();
-        client.initialize(LeaseService.NoLeaseClient.INSTANCE, 1, EmptyMemoryTracker.INSTANCE, config);
+        ForsetiLockManager lockManager =
+                new ForsetiLockManager(config, Clocks.nanoClock(), EMPTY_LOCK_MONITOR, ResourceType.values());
+        try (LockManager.Client client = lockManager.newClient()) {
+            client.initialize(LeaseService.NoLeaseClient.INSTANCE, 1, EmptyMemoryTracker.INSTANCE, config);
 
-        client.acquireExclusive(LockTracer.NONE, ResourceType.NODE, 1);
-        assertEquals(1, client.activeLockCount());
+            client.acquireExclusive(LockTracer.NONE, ResourceType.NODE, 1);
+            assertThat(client.activeLockCount()).isEqualTo(1);
 
-        client.reset();
-        assertEquals(0, client.activeLockCount());
+            client.reset();
+            assertThat(client.activeLockCount()).isEqualTo(0);
 
-        client.acquireExclusive(LockTracer.NONE, ResourceType.NODE, 1);
-        client.acquireExclusive(LockTracer.NONE, ResourceType.NODE, 2);
-        client.acquireExclusive(LockTracer.NONE, ResourceType.NODE, 3);
-        assertEquals(3, client.activeLockCount());
+            client.acquireExclusive(LockTracer.NONE, ResourceType.NODE, 1);
+            client.acquireExclusive(LockTracer.NONE, ResourceType.NODE, 2);
+            client.acquireExclusive(LockTracer.NONE, ResourceType.NODE, 3);
+            assertThat(client.activeLockCount()).isEqualTo(3);
+        }
     }
 }

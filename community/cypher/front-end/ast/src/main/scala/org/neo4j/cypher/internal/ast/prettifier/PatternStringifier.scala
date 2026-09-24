@@ -29,8 +29,8 @@ import org.neo4j.cypher.internal.expressions.Pattern
 import org.neo4j.cypher.internal.expressions.PatternElement
 import org.neo4j.cypher.internal.expressions.PatternPart
 import org.neo4j.cypher.internal.expressions.PatternPart.AllPaths
-import org.neo4j.cypher.internal.expressions.PatternPartWithSelector
 import org.neo4j.cypher.internal.expressions.PlusQuantifier
+import org.neo4j.cypher.internal.expressions.PrefixedPatternPart
 import org.neo4j.cypher.internal.expressions.QuantifiedPath
 import org.neo4j.cypher.internal.expressions.Range
 import org.neo4j.cypher.internal.expressions.RelationshipChain
@@ -49,6 +49,7 @@ trait PatternStringifier {
   def apply(concatenation: PathConcatenation): String
   def apply(quantified: QuantifiedPath): String
   def apply(path: ParenthesizedPath): String
+  // TODO: pass in shouldBacktickEmpty
 }
 
 object PatternStringifier {
@@ -63,19 +64,38 @@ private class DefaultPatternStringifier(expr: ExpressionStringifier) extends Pat
   override def apply(p: PatternPart): String = p match {
     case allPaths: PathPatternPart => apply(allPaths.element)
 
-    case withSelector: PatternPartWithSelector => withSelector.selector match {
-        case AllPaths() => apply(withSelector.part)
-        case selector =>
-          withSelector.part match {
-            case NamedPatternPart(variable, patternPart) =>
-              s"${expr(variable)} = ${selector.prettified} ${apply(patternPart)}"
-            case part: AnonymousPatternPart => s"${selector.prettified} ${apply(part)}"
-          }
-      }
+    case withSelector: PrefixedPatternPart =>
+      // canonical order is:
+      // p = SHORTEST ACYCLIC PATH GROUPS (a)--(b)
+      val (pathVariable, patternPart) =
+        withSelector.part match {
+          case NamedPatternPart(variable, patternPart) =>
+            (Some(expr(variable, shouldBacktickEmpty = true)), patternPart)
+          case part: AnonymousPatternPart => (None, part)
+        }
+
+      val pathModePrettified =
+        Option.when(!withSelector.pathMode.implicitlyCreated) {
+          withSelector.pathMode.prettified
+        }
+      val (selectorPrefix, selectorSuffix) =
+        withSelector.selector match {
+          case AllPaths() => (None, None)
+          case selector   => (Some(selector.prettifiedPrefix), Some(selector.prettifiedSuffix))
+        }
+
+      Seq(
+        pathVariable.map(path => s"$path ="),
+        selectorPrefix,
+        pathModePrettified,
+        selectorSuffix,
+        Some(apply(patternPart))
+      ).flatten.mkString(" ")
 
     case shortestPaths: ShortestPathsPatternPart => s"${shortestPaths.name}(${apply(shortestPaths.element)})"
 
-    case namedPattern: NamedPatternPart => s"${expr(namedPattern.variable)} = ${apply(namedPattern.patternPart)}"
+    case namedPattern: NamedPatternPart =>
+      s"${expr(namedPattern.variable, shouldBacktickEmpty = true)} = ${apply(namedPattern.patternPart)}"
   }
 
   override def apply(element: PatternElement): String = element match {
@@ -87,7 +107,7 @@ private class DefaultPatternStringifier(expr: ExpressionStringifier) extends Pat
   }
 
   override def apply(nodePattern: NodePattern): String = {
-    val variable = nodePattern.variable.map(expr(_))
+    val variable = nodePattern.variable.map(expr.apply(_, shouldBacktickEmpty = true))
 
     val labelExpression =
       nodePattern.labelExpression
@@ -101,7 +121,7 @@ private class DefaultPatternStringifier(expr: ExpressionStringifier) extends Pat
         " ",
         Seq(
           concatenate("", Seq(variable, labelExpression)),
-          nodePattern.properties.map(expr(_)),
+          nodePattern.properties.map(expr.apply),
           nodePattern.predicate.map(stringifyPredicate)
         )
       ).getOrElse("")
@@ -118,7 +138,7 @@ private class DefaultPatternStringifier(expr: ExpressionStringifier) extends Pat
   }
 
   override def apply(relationship: RelationshipPattern): String = {
-    val variable = relationship.variable.map(expr(_))
+    val variable = relationship.variable.map(expr.apply(_, shouldBacktickEmpty = true))
 
     val labelExpression =
       relationship.labelExpression
@@ -137,7 +157,7 @@ private class DefaultPatternStringifier(expr: ExpressionStringifier) extends Pat
       " ",
       Seq(
         concatenate("", Seq(variable, labelExpression, length)),
-        relationship.properties.map(expr(_)),
+        relationship.properties.map(expr.apply),
         relationship.predicate.map(stringifyPredicate)
       )
     ).fold("")(inner => s"[$inner]")

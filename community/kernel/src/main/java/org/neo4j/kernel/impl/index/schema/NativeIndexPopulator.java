@@ -20,6 +20,7 @@
 package org.neo4j.kernel.impl.index.schema;
 
 import static org.neo4j.index.internal.gbptree.DataTree.W_BATCHED_SINGLE_THREADED;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -28,10 +29,12 @@ import java.nio.file.OpenOption;
 import java.util.Collection;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.eclipse.collections.api.set.ImmutableSet;
+import org.neo4j.common.TokenNameLookup;
 import org.neo4j.index.internal.gbptree.GBPTree;
 import org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector;
 import org.neo4j.index.internal.gbptree.Writer;
 import org.neo4j.internal.schema.IndexDescriptor;
+import org.neo4j.io.async.AsyncBlockAccessor;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.kernel.api.exceptions.index.IndexEntryConflictException;
@@ -39,6 +42,7 @@ import org.neo4j.kernel.api.index.IndexPopulator;
 import org.neo4j.kernel.api.index.IndexSample;
 import org.neo4j.kernel.api.index.IndexUpdater;
 import org.neo4j.kernel.api.index.UniqueIndexSampler;
+import org.neo4j.kernel.impl.index.schema.CollectingIndexUpdater.VersionedUpdate;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
 import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
 import org.neo4j.util.Preconditions;
@@ -54,10 +58,12 @@ public abstract class NativeIndexPopulator<KEY extends NativeIndexKey<KEY>> exte
     public static final byte BYTE_FAILED = 0;
     static final byte BYTE_ONLINE = 1;
     static final byte BYTE_POPULATING = 2;
-    protected final IndexUpdateIgnoreStrategy ignoreStrategy;
+    private static final String NATIVE_POPULATOR_UPDATES = "NATIVE_POPULATOR_UPDATES";
 
+    protected final IndexUpdateIgnoreStrategy ignoreStrategy;
     private final KEY treeKey;
     private final UniqueIndexSampler uniqueSampler;
+    protected final TokenNameLookup tokenNameLookup;
 
     private ConflictDetectingValueMerger<KEY, Value[]> mainConflictDetector;
     private ConflictDetectingValueMerger<KEY, Value[]> updatesConflictDetector;
@@ -71,10 +77,12 @@ public abstract class NativeIndexPopulator<KEY extends NativeIndexKey<KEY>> exte
             IndexFiles indexFiles,
             IndexLayout<KEY> layout,
             IndexDescriptor descriptor,
-            ImmutableSet<OpenOption> openOptions) {
+            ImmutableSet<OpenOption> openOptions,
+            TokenNameLookup tokenNameLookup) {
         super(databaseIndexContext, layout, indexFiles, descriptor, openOptions, false);
         this.treeKey = layout.newKey();
         this.uniqueSampler = descriptor.isUnique() ? new UniqueIndexSampler() : null;
+        this.tokenNameLookup = tokenNameLookup;
         this.ignoreStrategy = indexUpdateIgnoreStrategy();
     }
 
@@ -101,10 +109,11 @@ public abstract class NativeIndexPopulator<KEY extends NativeIndexKey<KEY>> exte
 
         // true:  tree uniqueness is (value,entityId)
         // false: tree uniqueness is (value) <-- i.e. more strict
-        mainConflictDetector = new ThrowingConflictDetector<>(!descriptor.isUnique(), descriptor.schema());
+        mainConflictDetector =
+                new ThrowingConflictDetector<>(!descriptor.isUnique(), descriptor.schema(), tokenNameLookup);
         // for updates we have to have uniqueness on (value,entityId) to allow for intermediary violating updates.
         // there are added conflict checks after updates have been applied.
-        updatesConflictDetector = new ThrowingConflictDetector<>(true, descriptor.schema());
+        updatesConflictDetector = new ThrowingConflictDetector<>(true, descriptor.schema(), tokenNameLookup);
     }
 
     @Override
@@ -122,21 +131,32 @@ public abstract class NativeIndexPopulator<KEY extends NativeIndexKey<KEY>> exte
     }
 
     @Override
-    public void add(Collection<? extends IndexEntryUpdate<?>> updates, CursorContext cursorContext)
+    public void add(Collection<? extends IndexEntryUpdate> updates, CursorContext cursorContext)
             throws IndexEntryConflictException {
-        processUpdates(updates, mainConflictDetector, cursorContext);
+        try (Writer<KEY, NullValue> writer = tree.writer(W_BATCHED_SINGLE_THREADED, cursorContext)) {
+            for (IndexEntryUpdate indexEntryUpdate : updates) {
+                NativeIndexUpdater.processUpdate(
+                        treeKey,
+                        (ValueIndexEntryUpdate) indexEntryUpdate,
+                        writer,
+                        mainConflictDetector,
+                        ignoreStrategy);
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
     }
 
     @Override
     public IndexUpdater newPopulatingUpdater(CursorContext cursorContext) {
-        IndexUpdater updater =
-                new CollectingIndexUpdater(updates -> processUpdates(updates, updatesConflictDetector, cursorContext));
-        if (descriptor.isUnique()) {
-            // The index population detects conflicts on the fly, however for updates coming in we're in a position
-            // where we cannot detect conflicts while applying, but instead afterwards.
-            updater = new DeferredConflictCheckingIndexUpdater(updater, this::newReader, descriptor, cursorContext);
+        CollectingIndexUpdater updater = new CollectingIndexUpdater(
+                cursorContext, updates -> processVersionedUpdates(updates, updatesConflictDetector, cursorContext));
+        if (!descriptor.isUnique()) {
+            return updater;
         }
-        return updater;
+        // The index population detects conflicts on the fly, however for updates coming in we're in a position
+        // where we cannot detect conflicts while applying, but instead afterwards.
+        return new DeferredConflictCheckingIndexUpdater(updater, this::newReader, descriptor, tokenNameLookup);
     }
 
     @Override
@@ -151,13 +171,13 @@ public abstract class NativeIndexPopulator<KEY extends NativeIndexKey<KEY>> exte
                 // Successful and completed population
                 assertPopulatorOpen();
                 try (FileFlushEvent flushEvent = pageCacheTracer.beginFileFlush()) {
-                    flushTreeAndMarkAs(BYTE_ONLINE, flushEvent, cursorContext);
+                    flushTreeAndMarkAs(BYTE_ONLINE, flushEvent, EMPTY_ASYNC_BLOCK_ACCESSOR, cursorContext);
                 }
             } else if (failureBytes != null) {
                 // Failed population
                 ensureTreeInstantiated();
                 try (FileFlushEvent flushEvent = pageCacheTracer.beginFileFlush()) {
-                    markTreeAsFailed(flushEvent, cursorContext);
+                    markTreeAsFailed(flushEvent, EMPTY_ASYNC_BLOCK_ACCESSOR, cursorContext);
                 }
             }
             // else cancelled population. Here we simply close the tree w/o checkpointing it and it will look like
@@ -174,7 +194,7 @@ public abstract class NativeIndexPopulator<KEY extends NativeIndexKey<KEY>> exte
     }
 
     @Override
-    public void includeSample(IndexEntryUpdate<?> update) {
+    public void includeSample(IndexEntryUpdate update) {
         if (descriptor.isUnique()) {
             updateUniqueSample(update);
         }
@@ -189,36 +209,44 @@ public abstract class NativeIndexPopulator<KEY extends NativeIndexKey<KEY>> exte
         return buildNonUniqueIndexSample(cursorContext);
     }
 
-    void flushTreeAndMarkAs(byte state, FileFlushEvent flushEvent, CursorContext cursorContext) {
-        tree.checkpoint(new NativeIndexHeaderWriter(state), flushEvent, cursorContext);
+    void flushTreeAndMarkAs(
+            byte state, FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext) {
+        tree.checkpoint(new NativeIndexHeaderWriter(state), flushEvent, asyncBlockAccessor, cursorContext);
     }
 
     IndexSample buildNonUniqueIndexSample(CursorContext cursorContext) {
         return new FullScanNonUniqueIndexSampler<>(tree, layout).sample(cursorContext, new AtomicBoolean());
     }
 
-    private void markTreeAsFailed(FileFlushEvent flushEvent, CursorContext cursorContext) {
+    private void markTreeAsFailed(
+            FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext) {
         Preconditions.checkState(
                 failureBytes != null, "markAsFailed hasn't been called, populator not actually failed?");
-        tree.checkpoint(new FailureHeaderWriter(failureBytes), flushEvent, cursorContext);
+        tree.checkpoint(new FailureHeaderWriter(failureBytes), flushEvent, asyncBlockAccessor, cursorContext);
     }
 
-    private void processUpdates(
-            Iterable<? extends IndexEntryUpdate<?>> indexEntryUpdates,
+    private void processVersionedUpdates(
+            Iterable<CollectingIndexUpdater.VersionedUpdate> indexEntryUpdates,
             ConflictDetectingValueMerger<KEY, Value[]> conflictDetector,
             CursorContext cursorContext)
             throws IndexEntryConflictException {
-        try (Writer<KEY, NullValue> writer = tree.writer(W_BATCHED_SINGLE_THREADED, cursorContext)) {
-            for (IndexEntryUpdate<?> indexEntryUpdate : indexEntryUpdates) {
+        try (CursorContext localContext = cursorContext.createRelatedContext(NATIVE_POPULATOR_UPDATES);
+                Writer<KEY, NullValue> writer = tree.writer(W_BATCHED_SINGLE_THREADED, localContext)) {
+            for (VersionedUpdate indexEntryUpdate : indexEntryUpdates) {
+                localContext.getVersionContext().initWrite(indexEntryUpdate.version());
                 NativeIndexUpdater.processUpdate(
-                        treeKey, (ValueIndexEntryUpdate<?>) indexEntryUpdate, writer, conflictDetector, ignoreStrategy);
+                        treeKey,
+                        (ValueIndexEntryUpdate) indexEntryUpdate.update(),
+                        writer,
+                        conflictDetector,
+                        ignoreStrategy);
             }
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
     }
 
-    private void updateUniqueSample(IndexEntryUpdate<?> update) {
+    private void updateUniqueSample(IndexEntryUpdate update) {
         switch (update.updateMode()) {
             case ADDED:
                 uniqueSampler.increment(1);

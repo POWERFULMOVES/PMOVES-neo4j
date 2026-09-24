@@ -22,10 +22,13 @@ package org.neo4j.kernel.impl.index.schema;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Arrays.asList;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.params.provider.EnumSource.Mode.EXCLUDE;
 import static org.neo4j.kernel.impl.index.schema.NativeIndexKey.Inclusion.NEUTRAL;
 import static org.neo4j.kernel.impl.index.schema.NativeIndexKey.NO_ENTITY_ID;
 import static org.neo4j.values.storable.ValueGroup.GEOMETRY;
@@ -52,7 +55,10 @@ import static org.neo4j.values.storable.Values.of;
 import static org.neo4j.values.storable.Values.pointArray;
 import static org.neo4j.values.storable.Values.shortArray;
 import static org.neo4j.values.storable.Values.timeArray;
+import static org.neo4j.values.storable.VectorValue.MAX_VECTOR_DIMENSIONS;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -63,23 +69,31 @@ import java.time.ZonedDateTime;
 import java.time.temporal.TemporalAmount;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 import org.apache.commons.lang3.ArrayUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.neo4j.graphdb.Vector;
+import org.neo4j.internal.helpers.ArrayUtil;
 import org.neo4j.io.pagecache.ByteArrayPageCursor;
+import org.neo4j.io.pagecache.CursorException;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.PageCursor;
+import org.neo4j.io.pagecache.PageCursorUtil;
+import org.neo4j.io.pagecache.StubPageCursor;
 import org.neo4j.string.UTF8;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.values.storable.AbstractFloat16Vector;
 import org.neo4j.values.storable.ArrayValue;
 import org.neo4j.values.storable.ByteArray;
 import org.neo4j.values.storable.ByteValue;
@@ -88,8 +102,14 @@ import org.neo4j.values.storable.DateValue;
 import org.neo4j.values.storable.DoubleArray;
 import org.neo4j.values.storable.DoubleValue;
 import org.neo4j.values.storable.DurationValue;
+import org.neo4j.values.storable.Float32Vector;
+import org.neo4j.values.storable.Float64Vector;
 import org.neo4j.values.storable.FloatArray;
 import org.neo4j.values.storable.FloatValue;
+import org.neo4j.values.storable.Int16Vector;
+import org.neo4j.values.storable.Int32Vector;
+import org.neo4j.values.storable.Int64Vector;
+import org.neo4j.values.storable.Int8Vector;
 import org.neo4j.values.storable.IntArray;
 import org.neo4j.values.storable.IntValue;
 import org.neo4j.values.storable.LocalDateTimeValue;
@@ -106,48 +126,29 @@ import org.neo4j.values.storable.TextValue;
 import org.neo4j.values.storable.TimeValue;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.ValueGroup;
+import org.neo4j.values.storable.ValueWriter;
 import org.neo4j.values.storable.Values;
+import org.neo4j.values.storable.VectorValue;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 @TestInstance(PER_CLASS)
 abstract class IndexKeyStateTest<KEY extends GenericKey<KEY>> {
     @Inject
     RandomSupport random;
 
+    static final int MIN_NUM_SLOTS = 2;
+    static final int MAX_NUM_SLOTS = 5;
+    private static final int INVALID_COORDINATE_TYPE = 0x95;
+
     @BeforeEach
     void setupRandomConfig() {
-        random = random.withConfiguration(new RandomValues.Configuration() {
-            @Override
-            public int stringMinLength() {
-                return 0;
-            }
-
-            @Override
-            public int stringMaxLength() {
-                return 50;
-            }
-
-            @Override
-            public int arrayMinLength() {
-                return 0;
-            }
-
-            @Override
-            public int arrayMaxLength() {
-                return 10;
-            }
-
-            @Override
-            public int maxCodePoint() {
-                return RandomValues.MAX_BMP_CODE_POINT;
-            }
-
-            @Override
-            public int minCodePoint() {
-                return Character.MIN_CODE_POINT;
-            }
-        });
-        random.reset();
+        random.withConfiguration(RandomValues.newConfigurationBuilder()
+                        .stringLength(0, 50)
+                        .arrayMinLength(0)
+                        .maxCodePoint(RandomValues.MAX_BMP_CODE_POINT)
+                        .maxVectorNumBytes(RandomValues.MAX_NUM_BYTES_IN_INDEX_KEY / MAX_NUM_SLOTS)
+                        .build())
+                .reset();
     }
 
     @ParameterizedTest
@@ -177,7 +178,7 @@ abstract class IndexKeyStateTest<KEY extends GenericKey<KEY>> {
     @MethodSource("validValueGenerators")
     void readWhatIsWrittenCompositeKey(ValueGenerator valueGenerator) {
         // Given
-        int nbrOfSlots = random.nextInt(2, 5);
+        int nbrOfSlots = random.nextInt(MIN_NUM_SLOTS, MAX_NUM_SLOTS);
         PageCursor cursor = newPageCursor();
         Layout<KEY> layout = newLayout(nbrOfSlots);
         KEY writeState = layout.newKey();
@@ -202,6 +203,92 @@ abstract class IndexKeyStateTest<KEY extends GenericKey<KEY>> {
         assertThat(readValues).isEqualTo(writtenValues);
     }
 
+    /**
+     * A read of inconsistent data must be reported through {@link PageCursor#setCursorException(String)} so that the
+     * surrounding {@link PageCursor#shouldRetry()} loop can heal it, see {@link Type#readValue}.
+     */
+    @Test
+    void readMustNotThrowForArbitraryBytes() {
+        KEY into = newKeyState();
+        byte[] bytes = new byte[PageCache.PAGE_SIZE];
+        for (Type type : into.getTypesById()) {
+            for (int attempt = 0; attempt < 100; attempt++) {
+                PageCursor cursor = arbitraryKeyBytes(bytes, type.typeId);
+                assertThatCode(() -> into.get(cursor, bytes.length))
+                        .as("typeId=%d", type.typeId)
+                        .doesNotThrowAnyException();
+            }
+        }
+    }
+
+    /**
+     * Keys are compared inside a {@link PageCursor#shouldRetry()} loop, on state that may stem from an inconsistent
+     * read, so comparing must not throw either.
+     */
+    @Test
+    void compareMustNotThrowAfterReadingArbitraryBytes() {
+        KEY left = newKeyState();
+        KEY right = newKeyState();
+        byte[] bytes = new byte[PageCache.PAGE_SIZE];
+        for (Type type : left.getTypesById()) {
+            for (int attempt = 0; attempt < 100; attempt++) {
+                left.get(arbitraryKeyBytes(bytes, type.typeId), bytes.length);
+                right.get(arbitraryKeyBytes(bytes, type.typeId), bytes.length);
+                assertThatCode(() -> assertSymmetricComparison(left, right))
+                        .as("typeId=%d", type.typeId)
+                        .doesNotThrowAnyException();
+            }
+        }
+    }
+
+    @Test
+    void readVectorArrayWithInvalidCoordinateTypeMustBeReportedAsCursorException() {
+        StubPageCursor cursor = arbitraryKeyBytes(new byte[PageCache.PAGE_SIZE], Types.VECTOR_ARRAY.typeId);
+        cursor.setOffset(NativeIndexKey.ENTITY_ID_SIZE + GenericKey.TYPE_ID_SIZE);
+        cursor.putShort((short) 1); // array length
+        PageCursorUtil.put3BInt(cursor, (INVALID_COORDINATE_TYPE << Short.SIZE) | 3); // coordinate type + dimensions
+        cursor.putBytes(new byte[3]);
+        int size = cursor.getOffset();
+        cursor.setOffset(0);
+
+        RangeKey key = new RangeKey();
+        assertThat(key.get(cursor, size)).isFalse();
+        assertThatThrownBy(cursor::checkAndClearCursorException).isInstanceOf(CursorException.class);
+    }
+
+    @Test
+    void vectorArrayCompareMustNotThrowForInvalidCoordinateType() {
+        for (int dimensions = 1; dimensions <= 4; dimensions++) {
+            int header = (INVALID_COORDINATE_TYPE << Short.SIZE) | dimensions;
+            RangeKey left = vectorArrayKeyWithRawHeader(header, new byte[] {1, 2, 3, 4});
+            RangeKey right = vectorArrayKeyWithRawHeader(header, new byte[] {4, 3, 2, 1});
+
+            assertThatCode(() -> assertSymmetricComparison(left, right))
+                    .as("dimensions=%d", dimensions)
+                    .doesNotThrowAnyException();
+        }
+    }
+
+    private static RangeKey vectorArrayKeyWithRawHeader(int header, byte[] data) {
+        RangeKey key = new RangeKey();
+        key.initialize(1);
+        key.beginArray(1, ValueWriter.ArrayType.VECTOR);
+        VectorArrayType.write(key, 0, Vector.CoordinateType.INTEGER8, data.length, data);
+        key.endArray();
+        key.long0Array[0] = header;
+        return key;
+    }
+
+    private static <K extends GenericKey<K>> void assertSymmetricComparison(K left, K right) {
+        assertThat(Integer.signum(left.compareValueTo(right))).isEqualTo(-Integer.signum(right.compareValueTo(left)));
+    }
+
+    private StubPageCursor arbitraryKeyBytes(byte[] bytes, byte typeId) {
+        random.random().nextBytes(bytes);
+        bytes[NativeIndexKey.ENTITY_ID_SIZE] = typeId;
+        return new StubPageCursor(0, ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN));
+    }
+
     @ParameterizedTest
     @MethodSource("validValueGenerators")
     void copyShouldCopy(ValueGenerator valueGenerator) {
@@ -222,7 +309,7 @@ abstract class IndexKeyStateTest<KEY extends GenericKey<KEY>> {
     @MethodSource("validValueGenerators")
     void copyShouldCopyCompositeKey(ValueGenerator valueGenerator) {
         // Given
-        int nbrOfSlots = random.nextInt(2, 5);
+        int nbrOfSlots = random.nextInt(MIN_NUM_SLOTS, MAX_NUM_SLOTS);
         Layout<KEY> layout = newLayout(nbrOfSlots);
         KEY from = layout.newKey();
         Value[] values = generateValuesForCompositeKey(nbrOfSlots, valueGenerator);
@@ -239,22 +326,21 @@ abstract class IndexKeyStateTest<KEY extends GenericKey<KEY>> {
         assertEquals(0, from.compareValueTo(to), "states not equals after copy");
     }
 
-    @Test
-    void copyShouldCopyExtremeValues() {
+    @ParameterizedTest
+    @EnumSource(
+            mode = EXCLUDE,
+            names = {"NO_VALUE", "VECTOR_ARRAY"}) // todo: remove when vector array is storable, IND-468
+    void copyShouldCopyExtremeValues(ValueGroup valueGroup) {
         // Given
         KEY extreme = newKeyState();
         KEY copy = newKeyState();
 
-        for (ValueGroup valueGroup : ValueGroup.values()) {
-            if (valueGroup != ValueGroup.NO_VALUE) {
-                extreme.initValueAsLowest(valueGroup);
-                copy.copyFrom(extreme);
-                assertEquals(0, extreme.compareValueTo(copy), "states not equals after copy, valueGroup=" + valueGroup);
-                extreme.initValueAsHighest(valueGroup);
-                copy.copyFrom(extreme);
-                assertEquals(0, extreme.compareValueTo(copy), "states not equals after copy, valueGroup=" + valueGroup);
-            }
-        }
+        extreme.initValueAsLowest(valueGroup);
+        copy.copyFrom(extreme);
+        assertEquals(0, extreme.compareValueTo(copy), "states not equals after copy, valueGroup=" + valueGroup);
+        extreme.initValueAsHighest(valueGroup);
+        copy.copyFrom(extreme);
+        assertEquals(0, extreme.compareValueTo(copy), "states not equals after copy, valueGroup=" + valueGroup);
     }
 
     @ParameterizedTest
@@ -284,7 +370,7 @@ abstract class IndexKeyStateTest<KEY extends GenericKey<KEY>> {
     @ParameterizedTest
     @MethodSource("validComparableValueGenerators")
     void compositeKeyCompareToMustAlignWithValuesCompareTo(ValueGenerator valueGenerator) {
-        int nbrOfSlots = random.nextInt(2, 5);
+        int nbrOfSlots = random.nextInt(MIN_NUM_SLOTS, MAX_NUM_SLOTS);
         List<KEY> states = new ArrayList<>();
         Layout<KEY> layout = newLayout(nbrOfSlots);
         for (int i = 0; i < 10; i++) {
@@ -301,7 +387,7 @@ abstract class IndexKeyStateTest<KEY extends GenericKey<KEY>> {
             KEY key2 = states.get(i + 1);
 
             for (int slot = 0; slot < nbrOfSlots; slot++) {
-                var result = COMPARATOR.compare(key1.asValues()[slot], key2.asValues()[slot]);
+                int result = COMPARATOR.compare(key1.asValues()[slot], key2.asValues()[slot]);
                 if (result < 0) {
                     break;
                 }
@@ -311,6 +397,71 @@ abstract class IndexKeyStateTest<KEY extends GenericKey<KEY>> {
                 }
             }
         }
+    }
+
+    @Test
+    void vectorKeysMustBeOrderedAfterCoordinateAndDimensionAndLexicographicOrder() {
+        List<VectorValue> expectedOrder = List.of(
+                Values.int8Vector(new byte[] {1, 2, 3}),
+                Values.int8Vector(new byte[] {3, 2, 1}),
+                Values.int16Vector(new short[] {1, 2, 3}),
+                Values.int16Vector(new short[] {3, 2, 1}),
+                Values.int32Vector(1, 2, 3),
+                Values.int32Vector(3, 2, 1),
+                Values.int64Vector(1L, 2L, 3L),
+                Values.int64Vector(3L, 2L, 1L),
+                Values.float32Vector(1.0f, 2.0f, 3.0f),
+                Values.float32Vector(3.0f, 2.0f, 1.0f),
+                Values.float64Vector(1.0, 2.0, 3.0),
+                Values.float64Vector(3.0, 2.0, 1.0));
+
+        Function<VectorValue, RangeKey> makeKey = (v) -> {
+            RangeKey k = new RangeKey();
+            v.writeTo(k);
+            return k;
+        };
+
+        List<VectorValue> shuffled = new ArrayList<>(expectedOrder);
+        Collections.shuffle(shuffled, random.random());
+        List<Value> actualOrder = shuffled.stream()
+                .map(makeKey)
+                .sorted(RangeKey::compareValueTo)
+                .map(RangeKey::asValue)
+                .toList();
+        assertThat(actualOrder).isEqualTo(expectedOrder);
+    }
+
+    @ParameterizedTest
+    @MethodSource
+    void vectorKeysAreNotConfusedAboutEndianness(ByteOrder order) {
+        byte[] storage = new byte[PageCache.PAGE_SIZE];
+        Int32Vector value = Values.int32Vector(0xde7ec7ed);
+        RangeKey serializeKey = new RangeKey();
+        RangeKey deserializeKey = new RangeKey();
+
+        // Make sure that the keys are properly initialized
+        serializeKey.clear();
+        deserializeKey.clear();
+
+        // when
+        value.writeTo(serializeKey);
+        try (ByteArrayPageCursor cursor = new ByteArrayPageCursor(
+                0, ByteBuffer.wrap(storage, 0, storage.length).order(order))) {
+            serializeKey.put(cursor);
+        }
+
+        try (ByteArrayPageCursor cursor = new ByteArrayPageCursor(
+                0, ByteBuffer.wrap(storage, 0, storage.length).order(order))) {
+            deserializeKey.get(cursor, serializeKey.size());
+        }
+
+        // then
+        assertThat(value).isEqualTo(deserializeKey.asValue());
+        assertThat(serializeKey.compareValueTo(deserializeKey)).isZero();
+    }
+
+    public Stream<ByteOrder> vectorKeysAreNotConfusedAboutEndianness() {
+        return Stream.of(ByteOrder.BIG_ENDIAN, ByteOrder.LITTLE_ENDIAN);
     }
 
     // The reason this test doesn't test incomparable values is that it relies on ordering being same as that of the
@@ -341,7 +492,7 @@ abstract class IndexKeyStateTest<KEY extends GenericKey<KEY>> {
     @ParameterizedTest
     @MethodSource("validComparableValueGenerators")
     void mustProduceValidMinimalSplittersCompositeKey(ValueGenerator valueGenerator) {
-        int nbrOfSlots = random.nextInt(2, 5);
+        int nbrOfSlots = random.nextInt(MIN_NUM_SLOTS, MAX_NUM_SLOTS);
         Layout<KEY> layout = newLayout(nbrOfSlots);
         KEY key1 = layout.newKey();
         Value[] values1 = generateValuesForCompositeKey(nbrOfSlots, valueGenerator);
@@ -376,7 +527,7 @@ abstract class IndexKeyStateTest<KEY extends GenericKey<KEY>> {
     @ParameterizedTest
     @MethodSource("validValueGenerators")
     void mustProduceValidMinimalSplittersWhenValuesAreEqualCompositeKey(ValueGenerator valueGenerator) {
-        int nbrOfSlots = random.nextInt(2, 5);
+        int nbrOfSlots = random.nextInt(MIN_NUM_SLOTS, MAX_NUM_SLOTS);
         Layout<KEY> layout = newLayout(nbrOfSlots);
         KEY leftState = layout.newKey();
         KEY rightState = layout.newKey();
@@ -419,7 +570,7 @@ abstract class IndexKeyStateTest<KEY extends GenericKey<KEY>> {
     @MethodSource("validValueGenerators")
     void mustReportCorrectSizeCompositeKey(ValueGenerator valueGenerator) {
         // Given
-        int nbrOfSlots = random.nextInt(2, 5);
+        int nbrOfSlots = random.nextInt(MIN_NUM_SLOTS, MAX_NUM_SLOTS);
         PageCursor cursor = newPageCursor();
         Layout<KEY> layout = newLayout(nbrOfSlots);
         KEY state = layout.newKey();
@@ -501,6 +652,13 @@ abstract class IndexKeyStateTest<KEY extends GenericKey<KEY>> {
         assertLowest(of(ArrayUtils.EMPTY_LONG_ARRAY));
         assertLowest(of(ArrayUtils.EMPTY_FLOAT_ARRAY));
         assertLowest(of(ArrayUtils.EMPTY_DOUBLE_ARRAY));
+        // VECTORS (ordered lexicographically)
+        assertLowest(Values.int8Vector((byte) 0));
+        assertLowest(Values.int16Vector((short) 0));
+        assertLowest(Values.int32Vector(0));
+        assertLowest(Values.int64Vector(0));
+        assertLowest(Values.float32Vector(0));
+        assertLowest(Values.float64Vector(0));
     }
 
     @Test
@@ -563,6 +721,13 @@ abstract class IndexKeyStateTest<KEY extends GenericKey<KEY>> {
         assertHighest(longArray(new long[] {Long.MAX_VALUE}));
         assertHighest(floatArray(new float[] {Float.POSITIVE_INFINITY}));
         assertHighest(doubleArray(new double[] {Double.POSITIVE_INFINITY}));
+        // VECTORS
+        assertHighest(Values.int8Vector(ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, Byte.MAX_VALUE)));
+        assertHighest(Values.int16Vector(ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, Short.MAX_VALUE)));
+        assertHighest(Values.int32Vector(ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, Integer.MAX_VALUE)));
+        assertHighest(Values.int64Vector(ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, Long.MAX_VALUE)));
+        assertHighest(Values.float32Vector(ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, Float.MAX_VALUE)));
+        assertHighest(Values.float64Vector(ArrayUtil.filled(MAX_VECTOR_DIMENSIONS, Double.MAX_VALUE)));
     }
 
     @Test
@@ -673,7 +838,7 @@ abstract class IndexKeyStateTest<KEY extends GenericKey<KEY>> {
     @MethodSource("validValueGenerators")
     void minimalSplitterForSameValueShouldDivideLeftAndRightCompositeKey(ValueGenerator valueGenerator) {
         // Given composite keys with same set of values
-        int nbrOfSlots = random.nextInt(2, 5);
+        int nbrOfSlots = random.nextInt(MIN_NUM_SLOTS, MAX_NUM_SLOTS);
         Layout<KEY> layout = newLayout(nbrOfSlots);
         KEY left = layout.newKey();
         KEY right = layout.newKey();
@@ -706,7 +871,7 @@ abstract class IndexKeyStateTest<KEY extends GenericKey<KEY>> {
     @MethodSource("validValueGenerators")
     void minimalSplitterShouldRemoveEntityIdIfPossibleCompositeKey(ValueGenerator valueGenerator) {
         // Given
-        int nbrOfSlots = random.nextInt(2, 5);
+        int nbrOfSlots = random.nextInt(MIN_NUM_SLOTS, MAX_NUM_SLOTS);
         int differingSlot = random.nextInt(nbrOfSlots);
         Layout<KEY> layout = newLayout(nbrOfSlots);
         KEY left = layout.newKey();
@@ -760,27 +925,37 @@ abstract class IndexKeyStateTest<KEY extends GenericKey<KEY>> {
             case NUMBER -> getNumberSize(value);
             case BOOLEAN -> 2;
             case DATE ->
-            // typeName: Date
-            9;
+                // typeName: Date
+                9;
             case ZONED_TIME ->
-            // typeName: Time
-            13;
+                // typeName: Time
+                13;
             case LOCAL_TIME ->
-            // typeName: LocalTime
-            9;
+                // typeName: LocalTime
+                9;
             case ZONED_DATE_TIME ->
-            // typeName: DateTime
-            17;
+                // typeName: DateTime
+                17;
             case LOCAL_DATE_TIME ->
-            // typeName: LocalDateTime
-            13;
+                // typeName: LocalDateTime
+                13;
             case DURATION ->
-            // typeName: Duration or Period
-            29;
+                // typeName: Duration or Period
+                29;
             case GEOMETRY -> getGeometrySize(value);
             case TEXT -> getStringSize(value);
-            default -> throw new RuntimeException(
-                    "Did not expect this type to be tested in this test. Value was " + value);
+            case INT8_VECTOR,
+                    INT16_VECTOR,
+                    INT32_VECTOR,
+                    INT64_VECTOR,
+                    FLOAT16_VECTOR,
+                    BFLOAT16_VECTOR,
+                    FLOAT32_VECTOR,
+                    FLOAT64_VECTOR ->
+                // typeName: VectorKeyType
+                getVectorSize(value);
+            default ->
+                throw new RuntimeException("Did not expect this type to be tested in this test. Value was " + value);
         };
         assertKeySize(expectedSizeOfData, actualSizeOfData, typeName);
     }
@@ -858,8 +1033,9 @@ abstract class IndexKeyStateTest<KEY extends GenericKey<KEY>> {
                 assertTextArraySize(value, actualSizeOfData, normalArrayOverhead, typeName);
                 return;
             }
-            default -> throw new RuntimeException("Did not expect this type to be tested in this test. Value was "
-                    + value + " is value group " + value.valueGroup());
+            default ->
+                throw new RuntimeException("Did not expect this type to be tested in this test. Value was " + value
+                        + " is value group " + value.valueGroup());
         }
         int expectedSizeOfData = arrayOverhead + arrayLength * arrayElementSize;
         assertKeySize(expectedSizeOfData, actualSizeOfData, typeName);
@@ -1006,7 +1182,8 @@ abstract class IndexKeyStateTest<KEY extends GenericKey<KEY>> {
                 () -> random.randomValues().nextTextValue(),
                 () -> random.randomValues().nextAlphaNumericTextValue(),
                 () -> random.randomValues().nextBooleanValue(),
-                () -> random.randomValues().nextNumberValue()));
+                () -> random.randomValues().nextNumberValue(),
+                () -> random.randomValues().nextVectorValue()));
 
         if (includeIncomparable) {
             generators.addAll(asList(
@@ -1113,46 +1290,47 @@ abstract class IndexKeyStateTest<KEY extends GenericKey<KEY>> {
         return getPointSerialisedSize(dimensions);
     }
 
+    private int getVectorSize(Value value) {
+        return Byte.BYTES /* typeId */
+                + Integer.BYTES /* dimension header */
+                + switch (value) {
+                    case Int8Vector i8v -> Types.VECTOR_INT8.elementSize * i8v.dimensions();
+                    case Int16Vector i16v -> Types.VECTOR_INT16.elementSize * i16v.dimensions();
+                    case Int32Vector i32v -> Types.VECTOR_INT32.elementSize * i32v.dimensions();
+                    case Int64Vector i64v -> Types.VECTOR_INT64.elementSize * i64v.dimensions();
+                    case AbstractFloat16Vector f16v -> Types.VECTOR_FLOAT16.elementSize * f16v.dimensions();
+                    case Float32Vector f32v -> Types.VECTOR_FLOAT32.elementSize * f32v.dimensions();
+                    case Float64Vector f64v -> Types.VECTOR_FLOAT64.elementSize * f64v.dimensions();
+                    default -> throw new IllegalArgumentException(value.toString());
+                };
+    }
+
     private static int getNumberSize(Value value) {
-        int expectedSizeOfData;
-        if (value instanceof ByteValue) {
-            expectedSizeOfData = 3;
-        } else if (value instanceof ShortValue) {
-            expectedSizeOfData = 4;
-        } else if (value instanceof IntValue) {
-            expectedSizeOfData = 6;
-        } else if (value instanceof LongValue) {
-            expectedSizeOfData = 10;
-        } else if (value instanceof FloatValue) {
-            expectedSizeOfData = 6;
-        } else if (value instanceof DoubleValue) {
-            expectedSizeOfData = 10;
-        } else {
-            throw new RuntimeException(
-                    "Unexpected class for value in value group " + NUMBER + ", was " + value.getClass());
-        }
-        return expectedSizeOfData;
+        return switch (value) {
+            case ByteValue ignored -> 3;
+            case ShortValue ignored -> 4;
+            case IntValue ignored -> 6;
+            case LongValue ignored -> 10;
+            case FloatValue ignored -> 6;
+            case DoubleValue ignored -> 10;
+            default ->
+                throw new RuntimeException(
+                        "Unexpected class for value in value group " + NUMBER + ", was " + value.getClass());
+        };
     }
 
     private static int getNumberArrayElementSize(Value value) {
-        int arrayElementSize;
-        if (value instanceof ByteArray) {
-            arrayElementSize = 1;
-        } else if (value instanceof ShortArray) {
-            arrayElementSize = 2;
-        } else if (value instanceof IntArray) {
-            arrayElementSize = 4;
-        } else if (value instanceof LongArray) {
-            arrayElementSize = 8;
-        } else if (value instanceof FloatArray) {
-            arrayElementSize = 4;
-        } else if (value instanceof DoubleArray) {
-            arrayElementSize = 8;
-        } else {
-            throw new RuntimeException(
-                    "Unexpected class for value in value group " + NUMBER_ARRAY + ", was " + value.getClass());
-        }
-        return arrayElementSize;
+        return switch (value) {
+            case ByteArray ignored -> 1;
+            case ShortArray ignored -> 2;
+            case IntArray ignored -> 4;
+            case LongArray ignored -> 8;
+            case FloatArray ignored -> 4;
+            case DoubleArray ignored -> 8;
+            default ->
+                throw new RuntimeException(
+                        "Unexpected class for value in value group " + NUMBER_ARRAY + ", was " + value.getClass());
+        };
     }
 
     private static void assertTextArraySize(
@@ -1160,7 +1338,7 @@ abstract class IndexKeyStateTest<KEY extends GenericKey<KEY>> {
         if (value instanceof TextArray stringArray) {
             int sumOfStrings = 0;
             for (int i = 0; i < stringArray.intSize(); i++) {
-                String string = stringArray.stringValue(i);
+                String string = stringArray.stringValue(i).stringValue();
                 sumOfStrings += 2 + string.getBytes(UTF_8).length;
             }
             int totalTextArraySize = normalArrayOverhead + sumOfStrings;

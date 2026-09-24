@@ -21,25 +21,33 @@ package org.neo4j.cypher.internal
 
 import org.neo4j.cypher.internal.QueryCache.CacheKey
 import org.neo4j.cypher.internal.cache.CypherQueryCaches
+import org.neo4j.cypher.internal.cache.CypherQueryCaches.CacheStrategy
 import org.neo4j.cypher.internal.config.CypherConfiguration
 import org.neo4j.cypher.internal.expressions.FunctionTypeSignature
 import org.neo4j.cypher.internal.frontend.phases.BaseState
+import org.neo4j.cypher.internal.notification.InternalNotification
+import org.neo4j.cypher.internal.notification.InternalNotificationLogger
+import org.neo4j.cypher.internal.notification.RecordingNotificationLogger
 import org.neo4j.cypher.internal.options.CypherReplanOption
+import org.neo4j.cypher.internal.planning.CompilationException
+import org.neo4j.cypher.internal.preparser.FullyParsedQuery
+import org.neo4j.cypher.internal.preparser.InputQuery
+import org.neo4j.cypher.internal.preparser.PreParsedQuery
 import org.neo4j.cypher.internal.runtime.InputDataStream
 import org.neo4j.cypher.internal.runtime.NoInput
 import org.neo4j.cypher.internal.runtime.QueryRuntimeConfig
 import org.neo4j.cypher.internal.tracing.CompilationTracer
 import org.neo4j.cypher.internal.tracing.CompilationTracer.QueryCompilationEvent
-import org.neo4j.cypher.internal.util.InternalNotification
-import org.neo4j.cypher.internal.util.InternalNotificationLogger
-import org.neo4j.cypher.internal.util.RecordingNotificationLogger
+import org.neo4j.dbms.systemgraph.DefaultQueryLanguageLookup
 import org.neo4j.exceptions.ParameterNotFoundException
 import org.neo4j.gqlstatus.ErrorGqlStatusObject
-import org.neo4j.internal.kernel.api.security.AccessMode
+import org.neo4j.internal.kernel.api.security.StaticAccessMode
 import org.neo4j.kernel.GraphDatabaseQueryService
+import org.neo4j.kernel.api.QueryLanguage
 import org.neo4j.kernel.api.exceptions.Status
 import org.neo4j.kernel.api.exceptions.Status.HasStatus
 import org.neo4j.kernel.database.DatabaseReference
+import org.neo4j.kernel.database.NamedDatabaseId
 import org.neo4j.kernel.database.NormalizedCatalogEntry
 import org.neo4j.kernel.database.NormalizedDatabaseName
 import org.neo4j.kernel.impl.query.FunctionInformation
@@ -60,6 +68,7 @@ import java.util.Optional
 import java.util.UUID
 
 import scala.jdk.CollectionConverters.SeqHasAsJava
+import scala.jdk.CollectionConverters.SetHasAsJava
 
 /**
  * This class constructs and initializes both the cypher compilers and runtimes, which are very expensive
@@ -77,9 +86,12 @@ abstract class ExecutionEngine(
 ) extends Closeable {
 
   // HELPER OBJECTS
-  protected val defaultQueryExecutionMonitor = kernelMonitors.newMonitor(classOf[QueryExecutionMonitor])
+  val defaultQueryExecutionMonitor: QueryExecutionMonitor = kernelMonitors.newMonitor(classOf[QueryExecutionMonitor])
 
   private val preParser = new CachingPreParser(config, queryCaches.preParserCache)
+
+  private val defaultLanguageLookup =
+    queryService.getDependencyResolver.resolveDependency(classOf[DefaultQueryLanguageLookup])
 
   private val queryCache: QueryCache[CacheKey[InputQuery.CacheKey], ExecutableQuery] = queryCaches.executableQueryCache
 
@@ -136,6 +148,9 @@ abstract class ExecutionEngine(
     queryMonitor.startProcessing(context.executingQuery())
     val queryTracer = tracer.compileQuery(query.description)
     val notificationLogger = new RecordingNotificationLogger()
+    val cacheStrategy = CacheStrategy.default.withConfig(config)
+      .updateFromQueryOptions(query.options.queryOptions)
+      .updateFromAst(query.state.statement())
     closing(context, queryTracer) {
       doExecute(
         query,
@@ -147,7 +162,8 @@ abstract class ExecutionEngine(
         queryMonitor,
         queryTracer,
         subscriber,
-        notificationLogger
+        notificationLogger,
+        cacheStrategy
       )
     }
   }
@@ -180,13 +196,23 @@ abstract class ExecutionEngine(
     closing(context, queryTracer) {
       val couldContainSensitiveFields = isOutermostQuery && masterCompiler.supportsAdministrativeCommands()
       val notificationLogger = new RecordingNotificationLogger()
+      val queryLangScope = context.kernelTransaction().defaultQueryLanguageScope()
+
+      // We have not parsed query options yet, so we start with the default strategy.
+      val initialCacheStrategy = CacheStrategy.default.withConfig(config).updateFromQueryText(query)
+
+      val defaultLanguage =
+        defaultLanguageLookup.dbDefaultQueryLanguage(queryLangScope, context.databaseId(), config.systemDefaultLanguage)
       val preParsedQuery = preParser.preParseQuery(
-        query,
-        notificationLogger,
-        profile,
-        couldContainSensitiveFields,
-        DatabaseMode.COMPOSITE.equals(context.databaseMode())
+        queryText = query,
+        notificationLogger = notificationLogger,
+        defaultLanguage = defaultLanguage,
+        profile = profile,
+        couldContainSensitiveFields = couldContainSensitiveFields,
+        targetsComposite = DatabaseMode.COMPOSITE.equals(context.databaseMode()),
+        initialCacheStrategy
       )
+      val cacheStrategy = initialCacheStrategy.updateFromQueryOptions(preParsedQuery.options.queryOptions)
       doExecute(
         preParsedQuery,
         params,
@@ -197,7 +223,8 @@ abstract class ExecutionEngine(
         monitor,
         queryTracer,
         subscriber,
-        notificationLogger
+        notificationLogger,
+        cacheStrategy
       )
     }
   }
@@ -227,12 +254,13 @@ abstract class ExecutionEngine(
     queryMonitor: QueryExecutionMonitor,
     tracer: QueryCompilationEvent,
     subscriber: QuerySubscriber,
-    notificationLogger: InternalNotificationLogger
+    notificationLogger: InternalNotificationLogger,
+    cacheStrategy: CacheStrategy
   ): QueryExecution = {
-
+    context.executingQuery().onPreparseReady(query.resolvedLanguage)
     val executableQuery =
       try {
-        getOrCompile(context, query, tracer, params, notificationLogger)
+        getOrCompile(context, query, tracer, params, notificationLogger, cacheStrategy, isOutermostQuery)
       } catch {
         case gqlException: ErrorGqlStatusObject =>
           if (isOutermostQuery) {
@@ -240,12 +268,7 @@ abstract class ExecutionEngine(
               case withStatus: HasStatus => withStatus.status()
               case _                     => null
             }
-            queryMonitor.endFailure(
-              context.executingQuery(),
-              gqlException.getMessage,
-              status,
-              gqlException
-            )
+            queryMonitor.endFailure(context.executingQuery(), gqlException.getMessage, status, gqlException)
           }
           throw gqlException
         case up: Throwable =>
@@ -273,7 +296,7 @@ abstract class ExecutionEngine(
       )
     }
 
-    val queryConfig = QueryRuntimeConfig.createFrom(query.options.queryOptions, config)
+    val queryConfig = QueryRuntimeConfig.createFrom(query.options.queryOptions, query.options.derivedOptions, config)
     executableQuery.execute(
       context,
       isOutermostQuery,
@@ -296,7 +319,9 @@ abstract class ExecutionEngine(
     transactionalContext: TransactionalContext,
     params: MapValue,
     notificationLogger: InternalNotificationLogger,
-    sessionDatabase: DatabaseReference
+    sessionDatabase: DatabaseReference,
+    cacheStrategy: CacheStrategy,
+    isOutermostQuery: Boolean
   ): CompilerWithExpressionCodeGenOption[ExecutableQuery] = {
     val compiledExpressionCompiler =
       () =>
@@ -306,7 +331,9 @@ abstract class ExecutionEngine(
           transactionalContext,
           params,
           notificationLogger,
-          sessionDatabase
+          sessionDatabase,
+          cacheStrategy,
+          isOutermostQuery
         )
     val interpretedExpressionCompiler =
       () =>
@@ -316,7 +343,9 @@ abstract class ExecutionEngine(
           transactionalContext,
           params,
           notificationLogger,
-          sessionDatabase
+          sessionDatabase,
+          cacheStrategy,
+          isOutermostQuery
         )
 
     new CompilerWithExpressionCodeGenOption[ExecutableQuery] {
@@ -353,24 +382,28 @@ abstract class ExecutionEngine(
     initialInputQuery: InputQuery,
     tracer: QueryCompilationEvent,
     params: MapValue,
-    notificationLogger: InternalNotificationLogger
+    notificationLogger: InternalNotificationLogger,
+    cacheStrategy: CacheStrategy,
+    isOutermostQuery: Boolean
   ): ExecutableQuery = {
 
     // create transaction and query context
     val tc = context.getOrBeginNewIfClosed()
-    val compilerAuthorization = tc.restrictCurrentTransaction(tc.securityContext.withMode(AccessMode.Static.READ))
+    val compilerAuthorization = tc.restrictCurrentTransaction(tc.securityContext.withMode(StaticAccessMode.READ))
     var forceReplan = false
     var inputQuery = initialInputQuery
 
-    val cacheKey = CacheKey(
-      initialInputQuery.cacheKey,
+    val cacheKey = if (cacheStrategy.executableQueryShouldBeCached) CacheKey(
+      inputQuery.cacheKey,
       QueryCache.extractParameterTypeMap(params, config.useParameterSizeHint),
-      tc.kernelTransaction().dataRead().transactionStateHasChanges()
+      tc.kernelTransaction().dataRead().transactionStateHasChanges(),
+      inputQuery.resolvedLanguage
     )
+    else null
 
     try {
       var n = 0
-      while (n < ExecutionEngine.PLAN_BUILDING_TRIES) {
+      while (n < ExecutionEngineConst.PLAN_BUILDING_TRIES) {
 
         val schemaToken = schemaHelper.readSchemaToken(tc)
         if (forceReplan) {
@@ -401,6 +434,8 @@ abstract class ExecutionEngine(
            */
             override def id(): UUID = throw new NotImplementedError()
 
+            override def namedDatabaseId(): NamedDatabaseId = throw new NotImplementedError()
+
             /**
            * @return Prettified String representaion
            */
@@ -409,7 +444,7 @@ abstract class ExecutionEngine(
             /**
            * @return the full normalized name of the dataspace, including the namespace.
            */
-            override def fullName(): NormalizedDatabaseName = new NormalizedDatabaseName(context.databaseId().name())
+            override def fullName(): NormalizedDatabaseName = context.databaseId().normalizedName()
 
             /**
            * @return true if this reference points to a Composite database, otherwise false
@@ -422,19 +457,25 @@ abstract class ExecutionEngine(
              * @return the owning database of this reference. This is used for authorization on property shards which inherit
              *         their permissions from the "owning" graph shard.
              */
-            override def owningDatabaseName: String = fullName().name();
+            override def owningDatabaseName: String = fullName().name()
 
             override def catalogEntry(): NormalizedCatalogEntry = throw new NotImplementedError()
-          }
+
+            override def isShard: Boolean = false
+          },
+          cacheStrategy,
+          isOutermostQuery
         )
 
-        val executableQuery = queryCache.computeIfAbsentOrStale(
+        val queryCacheResult = queryCache.computeIfAbsentOrStale(
           cacheKey,
           tc,
           compiler,
           inputQuery.options.queryOptions.replan,
-          context.executingQuery().id()
+          context.executingQuery().id(),
+          cacheStrategy
         )
+        val executableQuery = queryCacheResult.executableQuery
 
         val lockedEntities = schemaHelper.lockEntities(schemaToken, executableQuery, tc)
 
@@ -443,14 +484,14 @@ abstract class ExecutionEngine(
         }
         forceReplan = lockedEntities.needsReplan
 
-        // if the schema has changed while taking all locks we need to try again.
+        // if the schema has changed while taking all locks, we need to try again.
         n += 1
       }
     } finally {
       compilerAuthorization.close()
     }
 
-    throw new IllegalStateException("Could not compile query due to insanely frequent schema changes")
+    throw CompilationException.tooFrequentSchemaChanges()
   }
 
   def clearQueryCaches(): Long =
@@ -466,22 +507,33 @@ abstract class ExecutionEngine(
     masterCompiler.clearCaches()
 
   def insertIntoCache(
-    queryText: String,
     preParsedQuery: PreParsedQuery,
     params: MapValue,
     parsedQuery: BaseState,
     parsingNotifications: Set[InternalNotification]
   ): Unit = {
-    preParser.insertIntoCache(queryText, preParsedQuery)
+    preParser.insertIntoCache(preParsedQuery)
     masterCompiler.insertIntoCache(preParsedQuery, params, parsedQuery, parsingNotifications)
   }
 
   def getCypherFunctions: java.util.List[FunctionInformation] = {
-    val informations: Seq[FunctionInformation] =
-      org.neo4j.cypher.internal.expressions.functions.Function.functionInfo.map(FunctionWithInformation)
+    val informations: Seq[FunctionInformation] = {
+      org.neo4j.cypher.internal.expressions.functions.Function.functionInfo.map(FunctionWithInformation.apply)
+    }
+
     val predicateInformations: Seq[FunctionInformation] =
-      org.neo4j.cypher.internal.expressions.IterablePredicateExpression.functionInfo.map(FunctionWithInformation)
-    (informations ++ predicateInformations).asJava
+      org.neo4j.cypher.internal.expressions.IterablePredicateExpression.functionInfo.map(FunctionWithInformation.apply)
+
+    val propertyExistsInformations: Seq[FunctionInformation] =
+      org.neo4j.cypher.internal.expressions.PropertyExistsShowInfo
+        .functionInfoForShow.map(FunctionWithInformation.apply)
+
+    val shortestPathInformations: Seq[FunctionInformation] =
+      (org.neo4j.cypher.internal.expressions.ShortestPathShowInfo.functionInfoForShow ++
+        org.neo4j.cypher.internal.expressions.AllShortestPathsShowInfo.functionInfoForShow)
+        .map(FunctionWithInformation.apply)
+
+    (informations ++ predicateInformations ++ propertyExistsInformations ++ shortestPathInformations).asJava
   }
 
   override def close(): Unit =
@@ -497,7 +549,11 @@ abstract class ExecutionEngine(
       if (!(givenParams.containsKey(key) || extractedParams.containsKey(key))) {
         val missingKeys =
           queryParams.filter(key => !(givenParams.containsKey(key) || extractedParams.containsKey(key))).distinct
-        throw new ParameterNotFoundException("Expected parameter(s): " + missingKeys.mkString(", "))
+        throw ParameterNotFoundException.expectedParamList(
+          missingKeys.mkString(", "),
+          missingKeys.toList.asJava,
+          givenParams.keySet()
+        )
       }
       i += 1
     }
@@ -538,8 +594,12 @@ case class FunctionWithInformation(f: FunctionTypeSignature) extends FunctionInf
       )
     }.asJava
   }
+
+  override def scopes(): java.util.Set[QueryLanguage] = {
+    f.scopes.map(org.neo4j.cypher.internal.frontend.phases.QueryLanguage.toKernelScope).asJava
+  }
 }
 
-object ExecutionEngine {
+object ExecutionEngineConst {
   val PLAN_BUILDING_TRIES: Int = 20
 }

@@ -24,6 +24,7 @@ import static org.neo4j.internal.kernel.api.IndexQueryConstraints.unconstrained;
 import static org.neo4j.internal.kernel.api.PropertyIndexQuery.exact;
 import static org.neo4j.internal.kernel.api.QueryContext.NULL_CONTEXT;
 import static org.neo4j.io.IOUtils.closeAllUnchecked;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -31,11 +32,15 @@ import java.io.UncheckedIOException;
 import java.nio.file.OpenOption;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
+import java.util.function.LongPredicate;
 import org.eclipse.collections.api.iterator.LongIterator;
 import org.eclipse.collections.api.set.ImmutableSet;
 import org.eclipse.collections.api.set.primitive.LongSet;
@@ -48,6 +53,7 @@ import org.neo4j.batchimport.api.input.Group;
 import org.neo4j.batchimport.api.input.ReadableGroups;
 import org.neo4j.common.TokenNameLookup;
 import org.neo4j.configuration.Config;
+import org.neo4j.internal.batchimport.BuildCompletionScheduler;
 import org.neo4j.internal.batchimport.PopulationWorkJobScheduler;
 import org.neo4j.internal.batchimport.cache.MemoryStatsVisitor;
 import org.neo4j.internal.helpers.progress.ProgressMonitorFactory;
@@ -67,12 +73,13 @@ import org.neo4j.kernel.api.index.IndexPopulator;
 import org.neo4j.kernel.api.index.ValueIndexReader;
 import org.neo4j.kernel.impl.api.index.IndexProviderMap;
 import org.neo4j.kernel.impl.api.index.IndexSamplingConfig;
+import org.neo4j.kernel.impl.api.index.IndexUpdateMode;
 import org.neo4j.kernel.impl.api.index.PhaseTracker;
 import org.neo4j.kernel.impl.api.index.stats.IndexStatisticsStore;
 import org.neo4j.kernel.impl.index.schema.IndexUsageTracking;
 import org.neo4j.kernel.impl.index.schema.NodeValueIterator;
 import org.neo4j.memory.EmptyMemoryTracker;
-import org.neo4j.storageengine.api.IndexEntryUpdate;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.values.ElementIdMapper;
 import org.neo4j.values.storable.Values;
 
@@ -96,7 +103,6 @@ public class IndexIdMapper implements IdMapper {
     private final ByteBufferFactory bufferFactory;
     private final StorageEngineIndexingBehaviour indexingBehaviour;
     private final MutableLongSet duplicateNodeIds = LongSets.mutable.empty();
-    private final LongAdder numAdded = new LongAdder();
 
     // key is groupName, and for some reason accessors doesn't expose which descriptor they're for, so pass that in too
     public IndexIdMapper(
@@ -140,18 +146,31 @@ public class IndexIdMapper implements IdMapper {
                     openOptions,
                     indexingBehaviour);
             populator.create();
-            populators.put(entry.getKey(), new Populator(populator, descriptor));
+            populators.put(entry.getKey(), new Populator(populator, descriptor, new LongAdder()));
         }
     }
 
     @Override
-    public void put(Object inputId, long actualId, Group group) {
-        var populator = populators.get(group.name());
-        var update = IndexEntryUpdate.add(actualId, populator.descriptor, Values.of(inputId));
-        try {
-            populator.populator.add(Collections.singleton(update), CursorContext.NULL_CONTEXT);
-            populator.populator.includeSample(update);
-            numAdded.increment();
+    public Setter newSetter(int workerId) {
+        return (inputId, actualId, group) -> {
+            var populator = populators.get(group.name());
+            var update = EagerValueIndexEntryUpdate.add(actualId, populator.descriptor, Values.of(inputId));
+            try {
+                populator.populator.add(Collections.singleton(update), CursorContext.NULL_CONTEXT);
+                populator.populator.includeSample(update);
+                populator.numAdded.increment();
+            } catch (IndexEntryConflictException e) {
+                throw new RuntimeException(e);
+            }
+        };
+    }
+
+    @Override
+    public void remove(Object inputId, long actualId, Group group) {
+        var accessor = accessors.get(group.name());
+        try (var updater = accessor.newUpdater(IndexUpdateMode.ONLINE, CursorContext.NULL_CONTEXT, true)) {
+            updater.process(EagerValueIndexEntryUpdate.remove(
+                    actualId, populators.get(group.name()).descriptor, Values.of(inputId)));
         } catch (IndexEntryConflictException e) {
             throw new RuntimeException(e);
         }
@@ -177,7 +196,7 @@ public class IndexIdMapper implements IdMapper {
      * Schedules "scanCompleted" calls to any index populations that are part of this ID mapper,
      * such that they can be scheduled with "scanCompleted" calls to other index populations.
      */
-    public void completeBuild(Collector collector, Consumer<Runnable> scheduler) {
+    private void completeBuild(Collector collector, Consumer<Runnable> scheduler) {
         for (var entry : populators.entrySet()) {
             scheduler.accept(() -> {
                 var conflictHandler = conflictHandler(collector, entry);
@@ -201,20 +220,21 @@ public class IndexIdMapper implements IdMapper {
             synchronized (duplicateNodeIds) {
                 duplicateNodeIds.add(otherEntityId);
             }
-            collector.collectDuplicateNode(values[0].asObjectCopy(), otherEntityId, groups.get(entry.getKey()));
+            collector.collectDuplicateNode(
+                    values[0].asObjectCopy(), otherEntityId, groups.get(entry.getKey()), null, 0L);
             return IndexEntryConflictHandler.IndexEntryConflictAction.DELETE;
         };
     }
 
     /**
-     * Validates all added entries from {@link #put(Object, long, Group)} and collects duplicates into
+     * Validates all added entries from {@link Setter#put(Object, long, Group)} and collects duplicates into
      * the {@code collector}, also returning the IDs of violating nodes.
-     * Must be run before {@link IdMapper#prepare(PropertyValueLookup, Collector, ProgressMonitorFactory)}.
+     * Must be run before {@link IdMapper#prepare(PropertyValueLookup, Collector, ProgressMonitorFactory, LongSet)}.
      *
      * @param collector {@link Collector} to report violations into.
      * @return the IDs of the violating nodes.
      */
-    public LongSet validate(Collector collector) {
+    private LongSet validate(Collector collector) {
         for (var entry : populators.entrySet()) {
             var conflictHandler = conflictHandler(collector, entry);
 
@@ -233,7 +253,6 @@ public class IndexIdMapper implements IdMapper {
                             newNodesIndex,
                             true,
                             conflictHandler,
-                            null,
                             configuration.maxNumberOfWorkerThreads(),
                             workScheduler.jobScheduler());
                 }
@@ -246,7 +265,16 @@ public class IndexIdMapper implements IdMapper {
 
     @Override
     public void prepare(
-            PropertyValueLookup inputIdLookup, Collector collector, ProgressMonitorFactory progressMonitorFactory) {
+            PropertyValueLookup propertyValueLookup,
+            Collector collector,
+            ProgressMonitorFactory progressMonitorFactory,
+            LongSet otherViolatingNodes) {
+        try (var scheduler = new BuildCompletionScheduler(workScheduler.jobScheduler())) {
+            completeBuild(collector, scheduler);
+        }
+        validate(collector);
+        long totalAdded =
+                populators.values().stream().mapToLong(p -> p.numAdded().sum()).sum();
         for (var entry : populators.entrySet()) {
             try {
                 var descriptor = entry.getValue().descriptor;
@@ -258,14 +286,14 @@ public class IndexIdMapper implements IdMapper {
                                 ElementIdMapper.PLACEHOLDER,
                                 openOptions,
                                 indexingBehaviour);
-                        var progress = progressMonitorFactory.singlePart("Prepare ID mapper", numAdded.sum())) {
+                        var progress = progressMonitorFactory.singlePart("Prepare ID mapper", totalAdded)) {
                     var accessor = accessors.get(entry.getKey());
                     accessor.insertFrom(
                             newNodesIndex,
                             null,
                             true,
                             IndexEntryConflictHandler.THROW,
-                            id -> !duplicateNodeIds.contains(id),
+                            id -> (!duplicateNodeIds.contains(id) && !otherViolatingNodes.contains(id)),
                             configuration.maxNumberOfWorkerThreads(),
                             workScheduler.jobScheduler(),
                             progress);
@@ -279,10 +307,21 @@ public class IndexIdMapper implements IdMapper {
     }
 
     @Override
-    public Getter newGetter() {
+    public Getter newGetter(int workerId) {
         return new Getter() {
             @Override
             public long get(Object inputId, Group group) {
+                var nodeId = queryNodeId(group, inputId);
+                if (nodeId != ID_NOT_FOUND) {
+                    return nodeId;
+                }
+                if (inputId instanceof Number) {
+                    return queryNodeId(group, inputId.toString());
+                }
+                return ID_NOT_FOUND;
+            }
+
+            private long queryNodeId(Group group, Object id) {
                 // TODO somehow reuse client/progressor per thread?
                 try (var client = new NodeValueIterator()) {
                     // TODO do we need a proper QueryContext?
@@ -290,9 +329,10 @@ public class IndexIdMapper implements IdMapper {
                     index.reader.query(
                             client,
                             NULL_CONTEXT,
+                            CursorContext.NULL_CONTEXT,
                             unconstrained(),
-                            exact(index.schemaDescriptor.getPropertyId(), inputId));
-                    return client.hasNext() ? client.next() : -1;
+                            exact(index.schemaDescriptor.getPropertyId(), id));
+                    return client.hasNext() ? client.next() : ID_NOT_FOUND;
                 } catch (IndexNotApplicableKernelException e) {
                     throw new RuntimeException(e);
                 }
@@ -310,7 +350,7 @@ public class IndexIdMapper implements IdMapper {
                 () -> {
                     for (var accessor : accessors.values()) {
                         try (var flushEvent = pageCacheTracer.beginFileFlush()) {
-                            accessor.force(flushEvent, CursorContext.NULL_CONTEXT);
+                            accessor.force(flushEvent, EMPTY_ASYNC_BLOCK_ACCESSOR, CursorContext.NULL_CONTEXT);
                         }
                     }
                 },
@@ -318,16 +358,15 @@ public class IndexIdMapper implements IdMapper {
                 bufferFactory);
     }
 
-    public void additionalViolatingNodes(LongSet violatingNodes) {
-        synchronized (duplicateNodeIds) {
-            duplicateNodeIds.addAll(violatingNodes);
-        }
-    }
-
     @Override
     public LongIterator leftOverDuplicateNodesIds() {
         // TODO could be a memory overhead for large amounts of duplicates?
         return duplicateNodeIds.toSortedList().longIterator();
+    }
+
+    @Override
+    public LongPredicate leftOverDuplicateNodesIdsPredicate() {
+        return duplicateNodeIds.isEmpty() ? null : duplicateNodeIds::contains;
     }
 
     @Override
@@ -338,6 +377,57 @@ public class IndexIdMapper implements IdMapper {
     @Override
     public void acceptMemoryStatsVisitor(MemoryStatsVisitor visitor) {}
 
+    /**
+     * @param includeUnchanged if {@code false} excludes any index (managed by this IdMapper) that hasn't gotten
+     * any updates made to it.
+     * @return all indexes (their {@link IndexDescriptor} managed by this IdMapper.
+     */
+    public Set<IndexDescriptor> indexDescriptors(boolean includeUnchanged) {
+        Set<IndexDescriptor> descriptors = new HashSet<>();
+        populators.forEach((group, populator) -> {
+            if (includeUnchanged || populator.numAdded.sum() > 0) {
+                descriptors.add(populator.descriptor);
+            }
+        });
+        return descriptors;
+    }
+
+    /**
+     *
+     * @param indexId ID of the index to get the {@link IndexAccessor} for.
+     * @return the (already open) {@link IndexAccessor} for the index with the given id. This method
+     * should be called after {@link #prepare(PropertyValueLookup, Collector, ProgressMonitorFactory, LongSet)}.
+     */
+    public Optional<IndexAccessor> indexAccessor(long indexId) {
+        boolean found = false;
+        String foundGroup = null;
+        for (var group : indexDescriptors.keySet()) {
+            if (indexDescriptors.get(group).getId() == indexId) {
+                found = true;
+                foundGroup = group;
+                break;
+            }
+        }
+        if (!found) {
+            return Optional.empty();
+        }
+        return Optional.of(accessors.get(foundGroup));
+    }
+
+    /**
+     * @param indexId ID of the index to get the group name for.
+     * @return the name of the {@link Group} that the index for the given id is associated with in this IdMapper.
+     */
+    public String groupName(long indexId) {
+        for (var groupName : indexDescriptors.keySet()) {
+            var indexDescriptor = indexDescriptors.get(groupName);
+            if (indexDescriptor.getId() == indexId) {
+                return groupName;
+            }
+        }
+        throw new IllegalStateException("Group name not found for index id " + indexId);
+    }
+
     private record Index(ValueIndexReader reader, SchemaDescriptor schemaDescriptor) implements Closeable {
         @Override
         public void close() throws IOException {
@@ -345,5 +435,5 @@ public class IndexIdMapper implements IdMapper {
         }
     }
 
-    private record Populator(IndexPopulator populator, IndexDescriptor descriptor) {}
+    private record Populator(IndexPopulator populator, IndexDescriptor descriptor, LongAdder numAdded) {}
 }

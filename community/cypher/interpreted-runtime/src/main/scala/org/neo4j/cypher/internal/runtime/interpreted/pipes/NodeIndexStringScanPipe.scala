@@ -64,37 +64,52 @@ abstract class AbstractNodeIndexStringScanPipe(
 }
 
 case class NodeIndexContainsScanPipe(
-  ident: String,
+  node: String,
   label: LabelToken,
   property: IndexedProperty,
   queryIndexId: Int,
   valueExpr: Expression,
-  indexOrder: IndexOrder
+  indexOrder: IndexOrder,
+  includeChangesFromThisTransaction: Boolean
 )(val id: Id = Id.INVALID_ID)
-    extends AbstractNodeIndexStringScanPipe(ident, property, queryIndexId, valueExpr) {
+    extends AbstractNodeIndexStringScanPipe(
+      node,
+      property,
+      queryIndexId,
+      valueExpr
+    ) {
+
+  override val ident: Option[String] = Some(node)
 
   override protected def queryContextCall(
     state: QueryState,
     index: IndexReadSession,
     value: TextValue
   ): NodeValueIndexCursor =
-    state.query.nodeIndexSeekByContains(index, needsValues, indexOrder, value)
+    state.query.nodeIndexSeekByContains(index, needsValues, indexOrder, value, includeChangesFromThisTransaction)
 }
 
 case class NodeIndexEndsWithScanPipe(
-  ident: String,
+  node: String,
   label: LabelToken,
   property: IndexedProperty,
   queryIndexId: Int,
   valueExpr: Expression,
-  indexOrder: IndexOrder
+  indexOrder: IndexOrder,
+  includeChangesFromThisTransaction: Boolean
 )(val id: Id = Id.INVALID_ID)
-    extends AbstractNodeIndexStringScanPipe(ident, property, queryIndexId, valueExpr) {
+    extends AbstractNodeIndexStringScanPipe(
+      node,
+      property,
+      queryIndexId,
+      valueExpr
+    ) {
+  override val ident: Option[String] = Some(node)
 
   override protected def queryContextCall(
     state: QueryState,
     index: IndexReadSession,
     value: TextValue
   ): NodeValueIndexCursor =
-    state.query.nodeIndexSeekByEndsWith(index, needsValues, indexOrder, value)
+    state.query.nodeIndexSeekByEndsWith(index, needsValues, indexOrder, value, includeChangesFromThisTransaction)
 }

@@ -46,7 +46,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
-import org.eclipse.collections.api.factory.Sets;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -62,6 +61,7 @@ import org.neo4j.io.layout.recordstorage.RecordDatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.store.NeoStores;
 import org.neo4j.kernel.impl.store.RelationshipGroupStore;
 import org.neo4j.kernel.impl.store.RelationshipStore;
@@ -72,7 +72,6 @@ import org.neo4j.kernel.impl.store.record.Record;
 import org.neo4j.kernel.impl.store.record.RecordLoad;
 import org.neo4j.kernel.impl.store.record.RelationshipGroupRecord;
 import org.neo4j.kernel.impl.store.record.RelationshipRecord;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.LongReference;
@@ -137,8 +136,7 @@ public class RecordRelationshipTraversalCursorTest {
                 NullLogProvider.getInstance(),
                 new CursorContextFactory(pageCacheTracer, EMPTY_CONTEXT_SUPPLIER),
                 false,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
-                Sets.immutable.empty());
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
         neoStores = storeFactory.openAllNeoStores();
         storeCursors = new CachedStoreCursors(neoStores, NULL_CONTEXT);
     }
@@ -467,9 +465,10 @@ public class RecordRelationshipTraversalCursorTest {
             switch (direction) {
                 case OUTGOING -> assertThat(cursor.sourceNodeReference()).isEqualTo(FIRST_OWNING_NODE);
                 case INCOMING -> assertThat(cursor.targetNodeReference()).isEqualTo(FIRST_OWNING_NODE);
-                case BOTH -> assertThat(FIRST_OWNING_NODE == cursor.sourceNodeReference()
-                                || FIRST_OWNING_NODE == cursor.targetNodeReference())
-                        .isTrue();
+                case BOTH ->
+                    assertThat(FIRST_OWNING_NODE == cursor.sourceNodeReference()
+                                    || FIRST_OWNING_NODE == cursor.targetNodeReference())
+                            .isTrue();
             }
         }
         assertThat(found).isEqualTo(count);

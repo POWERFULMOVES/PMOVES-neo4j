@@ -21,7 +21,10 @@ import org.antlr.v4.runtime.ParserRuleContext
 import org.antlr.v4.runtime.TokenStream
 import org.antlr.v4.runtime.tree.ParseTreeListener
 import org.neo4j.cypher.internal.ast.Statements
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
 import org.neo4j.cypher.internal.expressions.Expression
+import org.neo4j.cypher.internal.expressions.NumberLiteral
+import org.neo4j.cypher.internal.notification.InternalNotificationLogger
 import org.neo4j.cypher.internal.parser.CypherErrorStrategy
 import org.neo4j.cypher.internal.parser.ast.AntlrAstParser
 import org.neo4j.cypher.internal.parser.ast.AstBuildingAntlrParser
@@ -29,23 +32,33 @@ import org.neo4j.cypher.internal.parser.ast.SyntaxChecker
 import org.neo4j.cypher.internal.parser.v5.Cypher5Parser
 import org.neo4j.cypher.internal.util.CypherExceptionFactory
 import org.neo4j.cypher.internal.util.InputPosition
-import org.neo4j.cypher.internal.util.InternalNotificationLogger
+import org.neo4j.gqlstatus.ErrorGqlStatusObject
+
+import scala.collection.immutable.ArraySeq
 
 final class Cypher5AstParser(
   query: String,
   override val exceptionFactory: CypherExceptionFactory,
-  notificationLogger: Option[InternalNotificationLogger]
+  notificationLogger: Option[InternalNotificationLogger],
+  semanticFeatures: Seq[SemanticFeature],
+  override val jsSemanticAnalysis: Boolean = false
 ) extends AntlrAstParser[CypherAstBuildingAntlrParser] {
 
   override def statements(): Statements = parse(_.statements())
   override def expression(): Expression = parse(_.expression())
+  override def numberLiteral(): NumberLiteral = parse(_.numberLiteral())
+  override def symbolicAliasName(): ArraySeq[String] = parse(_.symbolicAliasName())
 
-  override def syntaxException(message: String, position: InputPosition): RuntimeException = {
-    exceptionFactory.syntaxException(message, position)
+  override def syntaxException(
+    gqlStatusObject: ErrorGqlStatusObject,
+    message: String,
+    position: InputPosition
+  ): RuntimeException = {
+    exceptionFactory.syntaxException(gqlStatusObject, message, position)
   }
 
   override protected def newParser(tokens: TokenStream): CypherAstBuildingAntlrParser =
-    new CypherAstBuildingAntlrParser(tokens, exceptionFactory, notificationLogger)
+    new CypherAstBuildingAntlrParser(tokens, exceptionFactory, notificationLogger, semanticFeatures, jsSemanticAnalysis)
 
   override protected def newLexer(fullTokens: Boolean): Lexer = Cypher5AstLexer.fromString(query, fullTokens)
   override protected def errorStrategyConf: CypherErrorStrategy.Conf = new Cypher5ErrorStrategyConf
@@ -57,13 +70,17 @@ final class Cypher5AstParser(
 final protected class CypherAstBuildingAntlrParser(
   input: TokenStream,
   exceptionFactory: CypherExceptionFactory,
-  notificationLogger: Option[InternalNotificationLogger]
+  notificationLogger: Option[InternalNotificationLogger],
+  semanticFeatures: Seq[SemanticFeature],
+  override val jsSemanticAnalysis: Boolean = false
 ) extends Cypher5Parser(input) with AstBuildingAntlrParser {
 
   removeErrorListeners() // Avoid printing errors to stdout
 
-  override def createSyntaxChecker(): SyntaxChecker = new Cypher5SyntaxChecker(exceptionFactory)
-  override def createAstBuilder(): ParseTreeListener = new Cypher5AstBuilder(notificationLogger, exceptionFactory)
+  override def createSyntaxChecker(): SyntaxChecker = new Cypher5SyntaxChecker(exceptionFactory, semanticFeatures)
+
+  override def createAstBuilder(): ParseTreeListener =
+    new Cypher5AstBuilder(notificationLogger, exceptionFactory, jsSemanticAnalysis)
 
   override def isSafeToFreeChildren(ctx: ParserRuleContext): Boolean = ctx.getRuleIndex match {
     case Cypher5Parser.RULE_allPrivilegeTarget                => false
@@ -79,6 +96,7 @@ final protected class CypherAstBuildingAntlrParser(
     case Cypher5Parser.RULE_constraintType                    => false
     case Cypher5Parser.RULE_constraintExistType               => false
     case Cypher5Parser.RULE_createIndex                       => false
+    case Cypher5Parser.RULE_defaultLanguageSpecification      => false
     case Cypher5Parser.RULE_extendedCaseAlternative           => false
     case Cypher5Parser.RULE_extendedWhen                      => false
     case Cypher5Parser.RULE_functionName                      => false
@@ -101,6 +119,6 @@ final protected class CypherAstBuildingAntlrParser(
     case Cypher5Parser.RULE_unescapedLabelSymbolicNameString  => false
     case Cypher5Parser.RULE_unescapedLabelSymbolicNameString_ => false
     case Cypher5Parser.RULE_unescapedSymbolicNameString       => false
-    case _                                                    => true
+    case _                                                    => !jsSemanticAnalysis
   }
 }

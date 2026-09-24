@@ -22,10 +22,8 @@ package org.neo4j.shell.expect;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.regex.Pattern.compile;
 import static org.apache.commons.io.IOUtils.resourceToString;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.fail;
+import static org.assertj.core.api.Assertions.fail;
 import static org.neo4j.shell.expect.ExpectTestExtension.CYPHER_SHELL_PATH;
-import static org.neo4j.shell.expect.InteractionAssertion.assertEqualInteraction;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -39,11 +37,11 @@ import org.apache.commons.io.IOUtils;
 import org.junit.jupiter.api.extension.AfterAllCallback;
 import org.junit.jupiter.api.extension.BeforeAllCallback;
 import org.junit.jupiter.api.extension.ExtensionContext;
+import org.neo4j.util.VisibleForTesting;
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.Neo4jContainer;
-import org.testcontainers.containers.Neo4jLabsPlugin;
 import org.testcontainers.containers.Network;
 import org.testcontainers.images.builder.ImageFromDockerfile;
+import org.testcontainers.neo4j.Neo4jContainer;
 
 /**
  * Extension to run tests using expect. Will start docker containers with neo4j and expect. Use runTestCase to run expect scenarios.
@@ -52,7 +50,7 @@ public class ExpectTestExtension implements BeforeAllCallback, AfterAllCallback 
     private static final boolean DEBUG = false;
     static String CYPHER_SHELL_PATH = "/cypher-shell/bin/cypher-shell";
     private final String neo4jDockerTag;
-    private NeoContainer neo4jContainer;
+    private Neo4jContainer neo4jContainer;
     private GenericContainer<?> expectContainer;
 
     public ExpectTestExtension(String neo4jDockerTag) {
@@ -66,8 +64,8 @@ public class ExpectTestExtension implements BeforeAllCallback, AfterAllCallback 
 
     @Override
     public void afterAll(ExtensionContext context) {
-        this.neo4jContainer.close();
-        this.expectContainer.close();
+        if (this.neo4jContainer != null) this.neo4jContainer.close();
+        if (this.expectContainer != null) this.expectContainer.close();
     }
 
     public void runTestCase(Path expectResourcePath) throws IOException, InterruptedException {
@@ -91,18 +89,21 @@ public class ExpectTestExtension implements BeforeAllCallback, AfterAllCallback 
                 : new String[] {"expect", expectScriptFilename};
         final var execution = expectContainer.execInContainer(args);
         if (execution.getExitCode() != 0 || !execution.getStderr().isEmpty()) {
-            final var message =
-                    """
+            final var message = """
                     Exit Code: %d
                     ==================================== stderr ====================================
                     %s
                     ==================================== stdout ====================================
                     %s
-                    """
-                            .formatted(execution.getExitCode(), execution.getStderr(), execution.getStdout());
+                    """.formatted(execution.getExitCode(), execution.getStderr(), execution.getStdout());
             fail(message);
         }
         assertEqualInteraction(execution.getStdout(), expected);
+    }
+
+    @VisibleForTesting
+    public static void assertEqualInteraction(String actual, String expected) {
+        InteractionAssertion.assertEqualInteraction(actual, expected);
     }
 
     public static Stream<Path> findAllExpectResources() throws IOException {
@@ -128,12 +129,20 @@ public class ExpectTestExtension implements BeforeAllCallback, AfterAllCallback 
         final var neo4jAddress = "neo4j";
 
         final var network = Network.newNetwork();
+        final var cypherShellZipProp = "org.neo4j.cypher.shell.zip";
+        final var cypherShellZipPath = Path.of(System.getProperty(cypherShellZipProp));
+
+        if (!Files.exists(cypherShellZipPath)) {
+            throw new FileNotFoundException(
+                    "Neo4j cypher shell zip file not found, it needs to be set to property '%s': %s"
+                            .formatted(cypherShellZipProp, cypherShellZipPath));
+        }
 
         // Create a docker container that will be used to run Cypher Shell with expect
         final var expectImage = new ImageFromDockerfile()
                 .withFileFromClasspath("Dockerfile", "/expect/docker/Dockerfile")
                 .withFileFromClasspath("expect", "/expect/tests")
-                .withFileFromPath("cypher-shell.zip", cypherShellZip());
+                .withFileFromPath("cypher-shell.zip", cypherShellZipPath);
         final var expectContainer = new GenericContainer(expectImage)
                 .withNetwork(network)
                 .withEnv("NEO4J_USER", neo4jUser)
@@ -142,38 +151,18 @@ public class ExpectTestExtension implements BeforeAllCallback, AfterAllCallback 
                 .withEnv("CYPHER_SHELL_PATH", CYPHER_SHELL_PATH);
 
         // Create container that runs neo4j
-        final var neo4jContainer = new NeoContainer("neo4j:" + neo4jDockerTag)
+        final var neo4jContainer = new Neo4jContainer("neo4j:" + neo4jDockerTag)
                 .withAdminPassword(neo4jPassword)
                 .withEnv("NEO4J_ACCEPT_LICENSE_AGREEMENT", "yes")
                 .withNetwork(network)
                 .withNetworkAliases(neo4jAddress)
-                .withLabsPlugins(Neo4jLabsPlugin.APOC);
+                .withPlugins("apoc");
 
         neo4jContainer.start();
         expectContainer.start();
 
         this.neo4jContainer = neo4jContainer;
         this.expectContainer = expectContainer;
-    }
-
-    private static Path cypherShellZip() throws IOException {
-        final var target = Path.of("../cypher-shell/target");
-        try (Stream<Path> pathStream = Files.list(target)) {
-            var zipFiles = pathStream
-                    .filter(f -> f.getFileName().toString().endsWith(".zip"))
-                    .toList();
-            if (zipFiles.size() == 1) {
-                return zipFiles.get(0);
-            } else {
-                throw new RuntimeException("Did not find cypher shell zip distribution in " + target);
-            }
-        }
-    }
-
-    private static class NeoContainer extends Neo4jContainer<NeoContainer> {
-        NeoContainer(String name) {
-            super(name);
-        }
     }
 }
 
@@ -184,19 +173,24 @@ class InteractionAssertion {
             compile("^Connected to Neo4j using Bolt protocol version ([0-9.]+) at"),
             compile("^ready to start consuming query after ([0-9]+) ms, results consumed after another ([0-9]+) ms"));
     private static final Pattern ANSI_CODE_PATTERN = Pattern.compile("\u001B\\[[?]?[;\\d]*[mhlCDA]");
+    private static final Pattern REGEX_PATTERN = Pattern.compile("\\$\\{regex:(?<exp>.*?)\\}");
 
     static void assertEqualInteraction(String actual, String expected) {
         final var cleanedActual = cleanActual(actual).collect(Collectors.joining(System.lineSeparator()));
         final var cleanedExpected = cleanExpected(expected).collect(Collectors.joining(System.lineSeparator()));
-        if (!cleanedExpected.equals(cleanedActual)) {
-            String message =
-                    "Actual interaction was not equal to expected. Hint: expect has debug options you might want to consider"
-                            + System.lineSeparator()
-                            + debugString(cleanedActual, "Actual Interaction Cleaned")
-                            + debugString(cleanedExpected, "Expected Interaction Cleaned")
-                            + debugString(actual, "Actual Interaction")
-                            + debugString(expected, "Expected Interaction");
-            assertEquals(message, cleanedExpected, cleanedActual);
+        final var mismatchLine = mismatchLine(cleanedActual, cleanedExpected);
+        if (mismatchLine >= 0) {
+            String message = "Actual interaction was not equal to expected."
+                    + System.lineSeparator()
+                    + "Mismatch at line: " + mismatchLine
+                    + System.lineSeparator()
+                    + "Hint: expect has debug options you might want to consider"
+                    + System.lineSeparator()
+                    + debugString(cleanedActual, "Actual Interaction Cleaned")
+                    + debugString(cleanedExpected, "Expected Interaction Cleaned")
+                    + debugString(actual, "Actual Interaction")
+                    + debugString(expected, "Expected Interaction");
+            fail(message);
         }
     }
 
@@ -263,5 +257,42 @@ class InteractionAssertion {
                 .append(" ")
                 .append("=".repeat(size - 2))
                 .append(nl);
+    }
+
+    // Compares strings with regex placeholders, e.g., ${regex:\d+}.
+    @VisibleForTesting
+    public static int mismatchLine(String actual, String expected) {
+        if (actual.equals(expected)) return -1;
+
+        final var actualLines = actual.lines().toList();
+        final var expectedLines = expected.lines().toList();
+
+        for (int i = 0; i < actualLines.size(); ++i) {
+            if (i >= expectedLines.size()) return i;
+            if (!compareSingleLine(actualLines.get(i), expectedLines.get(i))) return i;
+        }
+        if (expectedLines.size() != actualLines.size()) return actualLines.size();
+        return -1;
+    }
+
+    // Compares single lines with regex placeholders, e.g., ${regex:\d+}.
+    private static boolean compareSingleLine(String actualLine, String expectedLine) {
+        if (actualLine.equals(expectedLine)) return true;
+
+        final var placeholderMatcher = REGEX_PATTERN.matcher(expectedLine);
+
+        StringBuilder finalRegex = new StringBuilder();
+        int lastIndex = 0;
+
+        while (placeholderMatcher.find()) {
+            if (placeholderMatcher.start() != lastIndex) {
+                finalRegex.append(Pattern.quote(expectedLine.substring(lastIndex, placeholderMatcher.start())));
+            }
+            finalRegex.append(placeholderMatcher.group("exp"));
+            lastIndex = placeholderMatcher.end();
+        }
+        finalRegex.append(Pattern.quote(expectedLine.substring(lastIndex)));
+
+        return actualLine.matches(finalRegex.toString());
     }
 }

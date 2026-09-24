@@ -22,22 +22,22 @@ package org.neo4j.internal.recordstorage;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
-import static org.neo4j.internal.recordstorage.LogCommandSerializationV5_8Test.securityContext;
 
 import java.io.IOException;
 import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.internal.recordstorage.Command.RecordEnrichmentCommand;
-import org.neo4j.kernel.impl.transaction.log.InMemoryClosableChannel;
+import org.neo4j.io.fs.ReadPastEndException;
+import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.CommandReader;
 import org.neo4j.storageengine.api.enrichment.CaptureMode;
 import org.neo4j.storageengine.api.enrichment.Enrichment;
 import org.neo4j.storageengine.api.enrichment.EnrichmentCommand;
 import org.neo4j.storageengine.api.enrichment.TxMetadata;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.wal.InMemoryClosableChannel;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 public class LogCommandSerializationV5_0Test extends LogCommandSerializationV5Base {
 
     @RepeatedTest(10)
@@ -85,7 +85,7 @@ public class LogCommandSerializationV5_0Test extends LogCommandSerializationV5Ba
             writer.putLong(13L);
             writer.putChecksum();
 
-            assertThatThrownBy(() -> createReader().read(channel.reader()))
+            assertThatThrownBy(() -> createReader().read(channel.reader(), EmptyMemoryTracker.INSTANCE))
                     .isInstanceOf(IOException.class)
                     .hasMessageContaining("Unsupported in this version");
         }
@@ -107,10 +107,25 @@ public class LogCommandSerializationV5_0Test extends LogCommandSerializationV5Ba
         }
     }
 
+    @Test
+    void shouldHandleReadingAnIncorrectNumberOfRecords() {
+        try (var channel = new InMemoryClosableChannel()) {
+            // given a wrong large number of records
+            channel.put((byte) 0); // flags
+            channel.putInt(Integer.MAX_VALUE); // numberOfRecords
+
+            // when/then throw ReadPastEndException and don't OOM
+            assertThatThrownBy(() -> LogCommandSerializationV5_0.readNodeRecord(1, channel))
+                    .isInstanceOf(ReadPastEndException.class);
+        }
+    }
+
+    @Override
     CommandReader createReader() {
         return LogCommandSerializationV5_0.INSTANCE;
     }
 
+    @Override
     LogCommandSerialization writer() {
         return LogCommandSerializationV5_0.INSTANCE;
     }

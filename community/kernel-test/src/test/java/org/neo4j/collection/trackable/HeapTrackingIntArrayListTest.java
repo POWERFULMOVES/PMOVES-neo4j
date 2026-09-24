@@ -25,17 +25,17 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import org.eclipse.collections.api.iterator.IntIterator;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.memory.LocalMemoryTracker;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class HeapTrackingIntArrayListTest {
     private final MemoryTracker memoryTracker = new LocalMemoryTracker();
     private HeapTrackingIntArrayList aList;
@@ -213,5 +213,35 @@ class HeapTrackingIntArrayListTest {
         }
 
         bList.close();
+    }
+
+    @Test
+    void equalsAndHashCode() {
+        try (var a = HeapTrackingIntArrayList.newIntArrayList(memoryTracker);
+                var b = HeapTrackingIntArrayList.newIntArrayList(memoryTracker)) {
+            // Empty lists are equal
+            assertEquals(a, b);
+            assertEquals(a.hashCode(), b.hashCode());
+
+            a.addAll(1, 2, 3);
+            b.addAll(1, 2, 3);
+            // Same elements, potentially different backing-array capacities
+            assertEquals(a, b);
+            assertEquals(a.hashCode(), b.hashCode());
+
+            b.add(4);
+            assertFalse(a.equals(b));
+        }
+    }
+
+    @Test
+    void iterator() {
+        IntIterator iterator = aList.iterator();
+        int i = 0;
+        while (iterator.hasNext()) {
+            assertTrue(i < intArray.length);
+            assertEquals(intArray[i++], iterator.next());
+        }
+        assertEquals(i, intArray.length);
     }
 }

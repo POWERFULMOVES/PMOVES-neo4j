@@ -41,6 +41,7 @@ import org.neo4j.internal.kernel.api.Read;
 import org.neo4j.internal.kernel.api.RelationshipScanCursor;
 import org.neo4j.internal.kernel.api.TokenRead;
 import org.neo4j.io.pagecache.context.CursorContext;
+import org.neo4j.kernel.api.AssertOpen;
 import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.token.api.NamedToken;
@@ -56,7 +57,8 @@ public class SchemaCalculator {
     private final CursorFactory cursors;
     private final CursorContext cursorContext;
     private final MemoryTracker memoryTracker;
-    private boolean useCypherTypes;
+    private final boolean useCypherTypes;
+    private final AssertOpen assertOpen;
 
     SchemaCalculator(KernelTransaction ktx, boolean useCypherTypes) {
         this.dataRead = ktx.dataRead();
@@ -65,9 +67,10 @@ public class SchemaCalculator {
         this.cursorContext = ktx.cursorContext();
         this.memoryTracker = ktx.memoryTracker();
         this.useCypherTypes = useCypherTypes;
+        this.assertOpen = ktx;
 
         // the only one that is common for both nodes and rels so thats why we can do it here
-        propertyIdToPropertyNameMapping = new HashMap<>(tokenRead.propertyKeyCount());
+        propertyIdToPropertyNameMapping = HashMap.newHashMap(tokenRead.propertyKeyCount());
         addNamesToCollection(tokenRead.propertyKeyGetAllTokens(), propertyIdToPropertyNameMapping);
     }
 
@@ -113,7 +116,7 @@ public class SchemaCalculator {
 
             // lookup property value types
             MutableIntSet propertyIds = relMappings.relationshipTypeIdToPropertyKeys.get(typeId);
-            if (propertyIds.size() == 0) {
+            if (propertyIds.isEmpty()) {
                 results.add(new RelationshipPropertySchemaInfoResult(name, null, null, false));
             } else {
                 String finalName = name;
@@ -157,7 +160,7 @@ public class SchemaCalculator {
 
             // lookup property value types
             MutableIntSet propertyIds = nodeMappings.labelSetToPropertyKeys.get(labelSet);
-            if (propertyIds.size() == 0) {
+            if (propertyIds.isEmpty()) {
                 results.add(new NodePropertySchemaInfoResult(labels, labelNames, null, null, false));
             } else {
                 propertyIds.forEach(propId -> {
@@ -189,6 +192,7 @@ public class SchemaCalculator {
                 PropertyCursor propertyCursor = cursors.allocatePropertyCursor(cursorContext, memoryTracker)) {
             dataRead.allRelationshipsScan(relationshipScanCursor);
             while (relationshipScanCursor.next()) {
+                assertOpen.assertOpen();
                 int typeId = relationshipScanCursor.type();
                 relationshipScanCursor.properties(propertyCursor);
                 MutableIntSet propertyIds = IntSets.mutable.empty();
@@ -197,7 +201,7 @@ public class SchemaCalculator {
                     int propertyKey = propertyCursor.propertyKey();
 
                     Value currentValue = propertyCursor.propertyValue();
-                    var key = new RelationshipTypePropertyKey(typeId, propertyKey);
+                    RelationshipTypePropertyKey key = new RelationshipTypePropertyKey(typeId, propertyKey);
                     updateValueTypeInMapping(
                             currentValue,
                             key,
@@ -213,7 +217,7 @@ public class SchemaCalculator {
 
                 // find out which old properties we did not visited and mark them as nullable
                 if (oldPropertyKeySet == emptyPropertyIdSet) {
-                    if (propertyIds.size() == 0) {
+                    if (propertyIds.isEmpty()) {
                         // Even if we find property key on other rels with this type, set all of them nullable
                         relMappings.nullableRelationshipTypes.add(typeId);
                     }
@@ -228,7 +232,7 @@ public class SchemaCalculator {
 
                     propertyIds.addAll(oldPropertyKeySet);
                     propertyIds.forEach(id -> {
-                        var key = new RelationshipTypePropertyKey(typeId, id);
+                        RelationshipTypePropertyKey key = new RelationshipTypePropertyKey(typeId, id);
                         relMappings
                                 .relationshipTypeIdANDPropertyTypeIdToValueType
                                 .get(key)
@@ -249,6 +253,7 @@ public class SchemaCalculator {
                 PropertyCursor propertyCursor = cursors.allocatePropertyCursor(cursorContext, memoryTracker)) {
             dataRead.allNodesScan(nodeCursor);
             while (nodeCursor.next()) {
+                assertOpen.assertOpen();
                 // each node
                 SortedLabels labels = SortedLabels.from(nodeCursor.labels());
                 nodeCursor.properties(propertyCursor);
@@ -257,7 +262,7 @@ public class SchemaCalculator {
                 while (propertyCursor.next()) {
                     Value currentValue = propertyCursor.propertyValue();
                     int propertyKeyId = propertyCursor.propertyKey();
-                    var key = new LabelSetPropertyKey(labels, propertyKeyId);
+                    LabelSetPropertyKey key = new LabelSetPropertyKey(labels, propertyKeyId);
                     updateValueTypeInMapping(
                             currentValue,
                             key,
@@ -273,7 +278,7 @@ public class SchemaCalculator {
 
                 // find out which old properties we did not visited and mark them as nullable
                 if (oldPropertyKeySet == emptyPropertyIdSet) {
-                    if (propertyIds.size() == 0) {
+                    if (propertyIds.isEmpty()) {
                         // Even if we find property key on other nodes with those labels, set all of them nullable
                         nodeMappings.nullableLabelSets.add(labels);
                     }
@@ -288,7 +293,7 @@ public class SchemaCalculator {
 
                     propertyIds.addAll(oldPropertyKeySet);
                     propertyIds.forEach(id -> {
-                        var key = new LabelSetPropertyKey(labels, id);
+                        LabelSetPropertyKey key = new LabelSetPropertyKey(labels, id);
                         nodeMappings
                                 .labelSetANDNodePropertyKeyIdToValueType
                                 .get(key)
@@ -324,7 +329,7 @@ public class SchemaCalculator {
     private static class ValueTypeListHelper {
         private final Set<String> seenValueTypes;
         private boolean isMandatory = true;
-        private boolean useCypherTypes;
+        private final boolean useCypherTypes;
 
         ValueTypeListHelper(Value v, boolean useCypherTypes) {
             seenValueTypes = new HashSet<>();
@@ -369,8 +374,8 @@ public class SchemaCalculator {
         final Map<Integer, String> labelIdToLabelName;
 
         NodeMappings(int labelCount) {
-            labelSetToPropertyKeys = new HashMap<>(labelCount);
-            labelIdToLabelName = new HashMap<>(labelCount);
+            labelSetToPropertyKeys = HashMap.newHashMap(labelCount);
+            labelIdToLabelName = HashMap.newHashMap(labelCount);
             labelSetANDNodePropertyKeyIdToValueType = new HashMap<>();
             nullableLabelSets = new HashSet<>();
         }
@@ -389,8 +394,8 @@ public class SchemaCalculator {
                 nullableRelationshipTypes; // used for types without properties -> all properties are viewed as nullable
 
         RelationshipMappings(int relationshipTypeCount) {
-            relationshipTypIdToRelationshipName = new HashMap<>(relationshipTypeCount);
-            relationshipTypeIdToPropertyKeys = new HashMap<>(relationshipTypeCount);
+            relationshipTypIdToRelationshipName = HashMap.newHashMap(relationshipTypeCount);
+            relationshipTypeIdToPropertyKeys = HashMap.newHashMap(relationshipTypeCount);
             relationshipTypeIdANDPropertyTypeIdToValueType = new HashMap<>();
             nullableRelationshipTypes = new HashSet<>();
         }

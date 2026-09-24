@@ -78,7 +78,7 @@ public class Neo4jBrowserModule implements ServerModule {
                         .sorted()
                         .toList();
 
-                var browserFile = (BrowserVersion) sortedList.get(sortedList.size() - 1);
+                var browserFile = (BrowserVersion) sortedList.getLast();
 
                 if (matchingFiles.size() > 1) {
                     log.warn("Multiple matching browser files found. Loading " + browserFile);

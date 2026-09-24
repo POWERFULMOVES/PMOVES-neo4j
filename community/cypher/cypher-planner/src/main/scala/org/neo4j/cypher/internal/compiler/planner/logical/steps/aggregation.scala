@@ -22,6 +22,7 @@ package org.neo4j.cypher.internal.compiler.planner.logical.steps
 import org.neo4j.cypher.internal.compiler.helpers.AggregationHelper
 import org.neo4j.cypher.internal.compiler.planner.logical.LogicalPlanningContext
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.leverageOrder.OrderToLeverageWithAliases
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.projection.MaybeReportedProjections
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.ir.AggregatingQueryProjection
@@ -56,10 +57,12 @@ object aggregation {
     val aggregationsToReport = aggregation.aggregationExpressions
     val rewrittenGroupingExprs = toSolved(groupingExpressionsToReport)
     val rewrittenAggregationExprs = toSolved(aggregationsToReport)
+    val optionalPreprocessingToPlan =
+      aggregation.optionalPreprocessing.mapExpressions(rewrittenExpressions.rewrittenExpressionOrSelf)
 
     val projectionMapForLimit: Map[LogicalVariable, Expression] =
-      if (AggregationHelper.isOnlyMinOrMaxAggregation(rewrittenGroupingExprs, rewrittenAggregationExprs)) {
-        val (key, value) = rewrittenAggregationExprs.head // just checked that there is only one key
+      if (AggregationHelper.isOnlyMinOrMaxAggregation(groupingExpressionsToReport, aggregationsToReport)) {
+        val (key, value) = aggregationsToReport.head // just checked that there is only one key
         val providedOrder = context.staticComponents.planningAttributes.providedOrders.get(plan.id)
 
         def minFunc(expr: Expression) = {
@@ -78,7 +81,7 @@ object aggregation {
 
         if (shouldPlanLimit)
           // .head works since min and max always have only one argument
-          Map(key -> value.arguments.head)
+          Map(key -> rewrittenExpressions.rewrittenExpressionOrSelf(value).arguments.head)
         else
           Map.empty
       } else {
@@ -90,7 +93,7 @@ object aggregation {
       val projectedPlan = context.staticComponents.logicalPlanProducer.planRegularProjection(
         plan,
         projectionMapForLimit,
-        None,
+        MaybeReportedProjections.empty,
         context
       )
 
@@ -99,7 +102,8 @@ object aggregation {
         reportedGrouping = groupingExpressionsToReport,
         reportedAggregation = aggregationsToReport,
         interestingOrder = interestingOrderToReportForLimit,
-        context = context
+        context = context,
+        optionalPreprocessing = aggregation.optionalPreprocessing
       )
     } else {
       val inputProvidedOrder =
@@ -117,7 +121,7 @@ object aggregation {
           plan.availableSymbols
         )
 
-      // Parallel runtime does currently not support OrderedAggregation
+      // OrderedAggregation requires runtime to be order preserving
       if (orderToLeverageForGrouping.isEmpty || !context.settings.executionModel.providedOrderPreserving) {
         context.staticComponents.logicalPlanProducer.planAggregation(
           plan,
@@ -126,6 +130,8 @@ object aggregation {
           groupingExpressionsToReport,
           aggregationsToReport,
           previousInterestingOrder,
+          optionalPreprocessingToPlan,
+          aggregation.optionalPreprocessing,
           context
         )
       } else {
@@ -136,6 +142,7 @@ object aggregation {
           orderToLeverageForGrouping,
           groupingExpressionsToReport,
           aggregationsToReport,
+          aggregation.optionalPreprocessing,
           context
         )
       }

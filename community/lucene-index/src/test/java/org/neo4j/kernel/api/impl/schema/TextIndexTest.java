@@ -25,11 +25,9 @@ import static org.neo4j.internal.schema.SchemaDescriptors.forLabel;
 
 import java.io.IOException;
 import java.util.UUID;
-import org.apache.lucene.document.Document;
-import org.apache.lucene.document.Field;
-import org.apache.lucene.document.StringField;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.neo4j.configuration.Config;
 import org.neo4j.internal.schema.AllIndexProviderDescriptors;
 import org.neo4j.internal.schema.IndexDescriptor;
@@ -38,8 +36,12 @@ import org.neo4j.internal.schema.IndexType;
 import org.neo4j.io.IOUtils;
 import org.neo4j.io.fs.DefaultFileSystemAbstraction;
 import org.neo4j.kernel.api.impl.index.DatabaseIndex;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneContext;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDocument;
 import org.neo4j.kernel.api.impl.index.storage.DirectoryFactory;
+import org.neo4j.kernel.api.impl.schema.text.TextIndexBuilder;
 import org.neo4j.kernel.api.index.ValueIndexReader;
+import org.neo4j.logging.NullLogProvider;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
@@ -52,7 +54,7 @@ class TextIndexTest {
     @Inject
     private TestDirectory testDir;
 
-    private final DirectoryFactory dirFactory = new DirectoryFactory.InMemoryDirectoryFactory();
+    private DirectoryFactory dirFactory;
     private DatabaseIndex<ValueIndexReader> index;
     private final IndexDescriptor descriptor = IndexPrototype.forSchema(forLabel(3, 5))
             .withName("a")
@@ -65,89 +67,97 @@ class TextIndexTest {
         IOUtils.closeAll(index, dirFactory);
     }
 
-    @Test
-    void markAsOnline() throws IOException {
-        index = createIndex();
-        index.getIndexWriter().addDocument(newDocument());
+    @ParameterizedTest
+    @EnumSource
+    void markAsOnline(LuceneContext luceneContext) throws IOException {
+        index = createIndex(luceneContext);
+        index.getIndexWriter().addDocument(newDocument(luceneContext));
         index.markAsOnline();
 
         assertTrue(index.isOnline(), "Should have had online status set");
     }
 
-    @Test
-    void markAsOnlineAndClose() throws IOException {
-        index = createIndex();
-        index.getIndexWriter().addDocument(newDocument());
+    @ParameterizedTest
+    @EnumSource
+    void markAsOnlineAndClose(LuceneContext luceneContext) throws IOException {
+        index = createIndex(luceneContext);
+        index.getIndexWriter().addDocument(newDocument(luceneContext));
         index.markAsOnline();
 
         index.close();
 
-        index = openIndex();
+        index = openIndex(luceneContext);
         assertTrue(index.isOnline(), "Should have had online status set");
     }
 
-    @Test
-    void markAsOnlineTwice() throws IOException {
-        index = createIndex();
+    @ParameterizedTest
+    @EnumSource
+    void markAsOnlineTwice(LuceneContext luceneContext) throws IOException {
+        index = createIndex(luceneContext);
         index.markAsOnline();
 
-        index.getIndexWriter().addDocument(newDocument());
+        index.getIndexWriter().addDocument(newDocument(luceneContext));
         index.markAsOnline();
 
         assertTrue(index.isOnline(), "Should have had online status set");
     }
 
-    @Test
-    void markAsOnlineTwiceAndClose() throws IOException {
-        index = createIndex();
+    @ParameterizedTest
+    @EnumSource
+    void markAsOnlineTwiceAndClose(LuceneContext luceneContext) throws IOException {
+        index = createIndex(luceneContext);
         index.markAsOnline();
 
-        index.getIndexWriter().addDocument(newDocument());
+        index.getIndexWriter().addDocument(newDocument(luceneContext));
         index.markAsOnline();
         index.close();
 
-        index = openIndex();
+        index = openIndex(luceneContext);
         assertTrue(index.isOnline(), "Should have had online status set");
     }
 
-    @Test
-    void markAsOnlineIsRespectedByOtherWriter() throws IOException {
-        index = createIndex();
+    @ParameterizedTest
+    @EnumSource
+    void markAsOnlineIsRespectedByOtherWriter(LuceneContext luceneContext) throws IOException {
+        index = createIndex(luceneContext);
         index.markAsOnline();
         index.close();
 
-        index = openIndex();
-        index.getIndexWriter().addDocument(newDocument());
+        index = openIndex(luceneContext);
+        index.getIndexWriter().addDocument(newDocument(luceneContext));
         index.close();
 
-        index = openIndex();
+        index = openIndex(luceneContext);
         assertTrue(index.isOnline(), "Should have had online status set");
     }
 
-    private DatabaseIndex<ValueIndexReader> createIndex() throws IOException {
-        var schemaIndex = newSchemaIndex();
+    private DatabaseIndex<ValueIndexReader> createIndex(LuceneContext luceneContext) throws IOException {
+        dirFactory = DirectoryFactory.inMemory(luceneContext);
+        DatabaseIndex<ValueIndexReader> schemaIndex = newSchemaIndex(luceneContext);
         schemaIndex.create();
         schemaIndex.open();
         return schemaIndex;
     }
 
-    private DatabaseIndex<ValueIndexReader> openIndex() throws IOException {
-        var schemaIndex = newSchemaIndex();
+    private DatabaseIndex<ValueIndexReader> openIndex(LuceneContext luceneContext) throws IOException {
+        DatabaseIndex<ValueIndexReader> schemaIndex = newSchemaIndex(luceneContext);
         schemaIndex.open();
         return schemaIndex;
     }
 
-    private DatabaseIndex<ValueIndexReader> newSchemaIndex() {
-        TextIndexBuilder builder = TextIndexBuilder.create(descriptor, writable(), Config.defaults());
+    private DatabaseIndex<ValueIndexReader> newSchemaIndex(LuceneContext luceneContext) {
+        TextIndexBuilder builder =
+                TextIndexBuilder.create(descriptor, writable(), Config.defaults(), NullLogProvider.getInstance());
         return builder.withIndexRootFolder(testDir.directory("index").resolve("testIndex"))
                 .withDirectoryFactory(dirFactory)
+                .withLuceneContext(luceneContext)
                 .withFileSystem(fs)
                 .build();
     }
 
-    private static Document newDocument() {
-        Document doc = new Document();
-        doc.add(new StringField("test", UUID.randomUUID().toString(), Field.Store.YES));
+    private static LuceneDocument newDocument(LuceneContext luceneContext) {
+        LuceneDocument doc = luceneContext.documentsFactory().newDocument();
+        doc.addStringField("test", UUID.randomUUID().toString(), true);
         return doc;
     }
 }

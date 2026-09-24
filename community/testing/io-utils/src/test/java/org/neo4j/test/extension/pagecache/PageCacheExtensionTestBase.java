@@ -20,8 +20,6 @@
 package org.neo4j.test.extension.pagecache;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.neo4j.io.pagecache.PagedFile.PF_SHARED_READ_LOCK;
 import static org.neo4j.io.pagecache.PagedFile.PF_SHARED_WRITE_LOCK;
 
@@ -34,6 +32,7 @@ import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.PageCursor;
 import org.neo4j.io.pagecache.PagedFile;
 import org.neo4j.io.pagecache.context.CursorContext;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.utils.TestDirectory;
@@ -50,20 +49,22 @@ abstract class PageCacheExtensionTestBase {
 
     @Test
     void pageCacheInjected() {
-        assertNotNull(pageCache);
+        assertThat(pageCache).isNotNull();
     }
 
     @Test
     void testDirectoryInjected() {
-        assertNotNull(testDirectory);
+        assertThat(testDirectory).isNotNull();
     }
 
     @Test
     void pageCacheCanFindFileCreatedByTestDirectory() throws IOException {
         Path testFile = testDirectory.createFile("testFile");
         try (PagedFile map = pageCache.map(
-                testFile, 4096, testDirectory.homePath().getFileName().toString())) {
-            assertNotNull(map);
+                new StoreFile(testFile),
+                4096,
+                testDirectory.homePath().getFileName().toString())) {
+            assertThat(map).isNotNull();
         }
     }
 
@@ -75,7 +76,7 @@ abstract class PageCacheExtensionTestBase {
 
         Path testFile = testDirectory.createFile("testFile");
         try (PagedFile map = pageCache.map(
-                testFile,
+                new StoreFile(testFile),
                 PageCache.PAGE_SIZE,
                 testDirectory.homePath().getFileName().toString())) {
             try (PageCursor cursor = map.io(0, PF_SHARED_WRITE_LOCK, CursorContext.NULL_CONTEXT)) {
@@ -113,12 +114,12 @@ abstract class PageCacheExtensionTestBase {
 
         @Test
         void nestedPageCacheInjection() {
-            assertNotNull(nestedPageCache);
+            assertThat(nestedPageCache).isNotNull();
         }
 
         @Test
         void nestedAndRootPageCacheAreTheSame() {
-            assertSame(pageCache, nestedPageCache);
+            assertThat(nestedPageCache).isSameAs(pageCache);
         }
     }
 }

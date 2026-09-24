@@ -102,6 +102,11 @@ public class ThreadPoolJobScheduler extends LifecycleAdapter implements JobSched
     }
 
     @Override
+    public int virtualThreadCount() {
+        return 0;
+    }
+
+    @Override
     public ThreadFactory threadFactory(Group group) {
         return threadFactory;
     }
@@ -256,6 +261,11 @@ public class ThreadPoolJobScheduler extends LifecycleAdapter implements JobSched
         @Override
         public V get() throws ExecutionException, InterruptedException {
             return future.get();
+        }
+
+        @Override
+        public boolean isDone() {
+            return future.isDone();
         }
     }
 }

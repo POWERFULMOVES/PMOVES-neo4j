@@ -23,6 +23,7 @@ import org.neo4j.cypher.internal.parser.CypherErrorStrategy.DatabaseNameRule
 import org.neo4j.cypher.internal.parser.CypherErrorStrategy.ExpressionRule
 import org.neo4j.cypher.internal.parser.CypherErrorStrategy.GraphPatternRule
 import org.neo4j.cypher.internal.parser.CypherErrorStrategy.IdentifierRule
+import org.neo4j.cypher.internal.parser.CypherErrorStrategy.InterpolatedStringLiteralRule
 import org.neo4j.cypher.internal.parser.CypherErrorStrategy.LabelExpression1Rule
 import org.neo4j.cypher.internal.parser.CypherErrorStrategy.LabelExpressionRule
 import org.neo4j.cypher.internal.parser.CypherErrorStrategy.NodePatternRule
@@ -41,10 +42,14 @@ class Cypher25ErrorStrategyConf extends CypherErrorStrategy.Conf {
 
   override def ignoredTokens: util.Set[Integer] = java.util.Set.of[java.lang.Integer](
     Token.EPSILON,
-    Cypher25Parser.SEMICOLON
+    Cypher25Parser.SEMICOLON,
+    // Feature flag based exclusions:
+    Cypher25Parser.DEFINE, // Feature flagged keyword, remove when DEFINE is released.
+    Cypher25Parser.OBFUSCATION
   )
 
   override def customTokenDisplayNames: Map[Int, String] = Map(
+    Cypher25Parser.DOT_METRIC -> "'DOT'",
     Cypher25Parser.SPACE -> "' '",
     Cypher25Parser.SINGLE_LINE_COMMENT -> "'//'",
     Cypher25Parser.DECIMAL_DOUBLE -> "a float value",
@@ -59,11 +64,23 @@ class Cypher25ErrorStrategyConf extends CypherErrorStrategy.Conf {
     Cypher25Parser.MULTI_LINE_COMMENT -> "'/*'",
     Cypher25Parser.STRING_LITERAL1 -> "a string value",
     Cypher25Parser.STRING_LITERAL2 -> "a string value",
+    Cypher25Parser.INTERPOLATED_START_SINGLE -> "an interpolated string value",
+    Cypher25Parser.INTERPOLATED_END_SINGLE -> "an interpolated string value",
+    Cypher25Parser.INTERPOLATED_EXPR_START_SINGLE -> "'{'",
+    Cypher25Parser.INTERPOLATED_TEXT_SINGLE -> "an interpolated string value",
+    Cypher25Parser.INTERPOLATED_START_DOUBLE -> "an interpolated string value",
+    Cypher25Parser.INTERPOLATED_END_DOUBLE -> "an interpolated string value",
+    Cypher25Parser.INTERPOLATED_EXPR_START_DOUBLE -> "'{'",
+    Cypher25Parser.INTERPOLATED_TEXT_DOUBLE -> "an interpolated string value",
+    Cypher25Parser.INTERPOLATED_UNEXPECTED_RCURLY_SINGLE -> "'}'",
+    Cypher25Parser.INTERPOLATED_UNEXPECTED_RCURLY_DOUBLE -> "'}'",
     Cypher25Parser.ESCAPED_SYMBOLIC_NAME -> "an identifier",
     Cypher25Parser.ALL_SHORTEST_PATHS -> "'allShortestPaths'",
     Cypher25Parser.SHORTEST_PATH -> "'shortestPath'",
     Cypher25Parser.LIMITROWS -> "'LIMIT'",
     Cypher25Parser.SKIPROWS -> "'SKIP'",
+    Cypher25Parser.ALLREDUCE -> "'allReduce'",
+    Cypher25Parser.LCURLY -> "'{'",
     Token.EOF -> "<EOF>"
   )
 
@@ -82,16 +99,20 @@ class Cypher25ErrorStrategyConf extends CypherErrorStrategy.Conf {
       Cypher25Parser.RULE_expression10 -> ExpressionRule,
       Cypher25Parser.RULE_expression11 -> ExpressionRule,
       Cypher25Parser.RULE_stringLiteral -> StringLiteralRule,
+      Cypher25Parser.RULE_interpolatedStringLiteral -> InterpolatedStringLiteralRule,
+      Cypher25Parser.RULE_interpolatedStringLiteralSingle -> InterpolatedStringLiteralRule,
+      Cypher25Parser.RULE_interpolatedStringLiteralDouble -> InterpolatedStringLiteralRule,
       Cypher25Parser.RULE_numberLiteral -> NumberLiteralRule,
       Cypher25Parser.RULE_parameter -> ParameterRule,
       Cypher25Parser.RULE_variable -> VariableRule,
+      Cypher25Parser.RULE_symbolicVariableNameString -> VariableRule,
+      Cypher25Parser.RULE_unescapedSymbolicVariableNameString -> VariableRule,
+      Cypher25Parser.RULE_escapedSymbolicNameString -> VariableRule,
       Cypher25Parser.RULE_symbolicAliasName -> DatabaseNameRule,
       Cypher25Parser.RULE_pattern -> GraphPatternRule,
       Cypher25Parser.RULE_symbolicNameString -> IdentifierRule,
       Cypher25Parser.RULE_escapedSymbolicNameString -> IdentifierRule,
       Cypher25Parser.RULE_unescapedSymbolicNameString -> IdentifierRule,
-      Cypher25Parser.RULE_symbolicLabelNameString -> IdentifierRule,
-      Cypher25Parser.RULE_unescapedLabelSymbolicNameString -> IdentifierRule,
       Cypher25Parser.RULE_labelExpression -> LabelExpressionRule,
       Cypher25Parser.RULE_relationshipPattern -> RelationshipPatternRule,
       Cypher25Parser.RULE_nodePattern -> NodePatternRule,

@@ -23,11 +23,10 @@ import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito
 import org.mockito.invocation.InvocationOnMock
 import org.neo4j.cypher.internal.expressions.SemanticDirection
-import org.neo4j.cypher.internal.logical.plans.TraversalMatchMode
+import org.neo4j.cypher.internal.logical.plans.TraversalPathMode
 import org.neo4j.cypher.internal.physicalplanning.SlotConfiguration
 import org.neo4j.cypher.internal.physicalplanning.SlotConfigurationBuilder
-import org.neo4j.cypher.internal.runtime.ClosingLongIterator
-import org.neo4j.cypher.internal.runtime.RelationshipIterator
+import org.neo4j.cypher.internal.runtime.ClosingRelationshipIterator
 import org.neo4j.cypher.internal.runtime.ResourceManager
 import org.neo4j.cypher.internal.runtime.interpreted.QueryStateHelper
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.EagerTypes
@@ -46,8 +45,8 @@ class VarLengthExpandSlottedPipeTest extends CypherFunSuite {
     def wasClosed: Boolean
   }
 
-  private def relationshipIterator: ClosingLongIterator with RelationshipIterator with WasClosed =
-    new ClosingLongIterator with RelationshipIterator with WasClosed {
+  private def relationshipIterator: ClosingRelationshipIterator with WasClosed =
+    new ClosingRelationshipIterator with WasClosed {
       private val inner = Iterator(1L, 2L, 3L)
       private var _wasClosed = false
 
@@ -106,8 +105,8 @@ class VarLengthExpandSlottedPipeTest extends CypherFunSuite {
     val pipe = VarLengthExpandSlottedPipe(
       input,
       slots("a").slot,
-      slots("r").offset,
-      slots("b").slot,
+      Some(slots("r").offset),
+      Some(slots("b").slot),
       SemanticDirection.OUTGOING,
       SemanticDirection.OUTGOING,
       new EagerTypes(Array(0)),
@@ -117,7 +116,7 @@ class VarLengthExpandSlottedPipeTest extends CypherFunSuite {
       slots,
       TraversalPredicates.NONE,
       SlotConfiguration.Size(0, 0),
-      TraversalMatchMode.Trail
+      TraversalPathMode.Trail
     )()
     // exhaust
     pipe.createResults(state).toList
@@ -151,8 +150,8 @@ class VarLengthExpandSlottedPipeTest extends CypherFunSuite {
     val pipe = VarLengthExpandSlottedPipe(
       input,
       slots("a").slot,
-      slots("r").offset,
-      slots("b").slot,
+      Some(slots("r").offset),
+      Some(slots("b").slot),
       SemanticDirection.OUTGOING,
       SemanticDirection.OUTGOING,
       new EagerTypes(Array(0)),
@@ -162,7 +161,7 @@ class VarLengthExpandSlottedPipeTest extends CypherFunSuite {
       slots,
       TraversalPredicates.NONE,
       SlotConfiguration.Size(0, 0),
-      TraversalMatchMode.Trail
+      TraversalPathMode.Trail
     )()
     val result = pipe.createResults(state)
     result.hasNext shouldBe true // Need to initialize to get cursor registered

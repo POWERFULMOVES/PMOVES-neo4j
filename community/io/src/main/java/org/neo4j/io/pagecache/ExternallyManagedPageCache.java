@@ -21,13 +21,14 @@ package org.neo4j.io.pagecache;
 
 import java.io.IOException;
 import java.nio.file.OpenOption;
-import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import org.eclipse.collections.api.set.ImmutableSet;
 import org.neo4j.io.pagecache.buffer.IOBufferFactory;
 import org.neo4j.io.pagecache.impl.muninn.EvictionBouncer;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.impl.muninn.VersionStorage;
+import org.neo4j.io.pagecache.segment.FileSegmentTracker;
 import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
 
 /**
@@ -50,20 +51,29 @@ public class ExternallyManagedPageCache implements PageCache {
 
     @Override
     public PagedFile map(
-            Path path,
+            StoreFile storeFile,
             int pageSize,
             String databaseName,
             ImmutableSet<OpenOption> openOptions,
             IOController ioController,
             EvictionBouncer evictionBouncer,
-            VersionStorage versionStorage)
+            VersionStorage versionStorage,
+            FileSegmentTracker segmentTracker)
             throws IOException {
-        return delegate.map(path, pageSize, databaseName, openOptions, ioController, evictionBouncer, versionStorage);
+        return delegate.map(
+                storeFile,
+                pageSize,
+                databaseName,
+                openOptions,
+                ioController,
+                evictionBouncer,
+                versionStorage,
+                segmentTracker);
     }
 
     @Override
-    public Optional<PagedFile> getExistingMapping(Path path) throws IOException {
-        return delegate.getExistingMapping(path);
+    public Optional<PagedFile> getExistingMapping(StoreFile storeFile) throws IOException {
+        return delegate.getExistingMapping(storeFile);
     }
 
     @Override
@@ -84,6 +94,11 @@ public class ExternallyManagedPageCache implements PageCache {
     @Override
     public int pageSize() {
         return delegate.pageSize();
+    }
+
+    @Override
+    public int pagePayloadSize(ImmutableSet<OpenOption> openOptions) {
+        return delegate.pagePayloadSize(openOptions);
     }
 
     @Override

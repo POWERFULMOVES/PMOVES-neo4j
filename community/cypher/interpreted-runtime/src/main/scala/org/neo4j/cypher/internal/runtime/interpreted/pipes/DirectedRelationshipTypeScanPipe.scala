@@ -24,14 +24,19 @@ import org.neo4j.cypher.internal.runtime.ClosingIterator
 import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.runtime.PrimitiveLongHelper
 import org.neo4j.cypher.internal.util.attribution.Id
+import org.neo4j.values.virtual.VirtualValues
 
 case class DirectedRelationshipTypeScanPipe(
-  ident: String,
-  fromNode: String,
+  ident: Option[String],
+  fromNode: Option[String],
   typ: LazyTypeStatic,
-  toNode: String,
-  indexOrder: IndexOrder
+  toNode: Option[String],
+  indexOrder: IndexOrder,
+  includeChangesFromThisTransaction: Boolean
 )(val id: Id = Id.INVALID_ID) extends Pipe {
+
+  private val relationshipWriter =
+    Relationships.compileRelationshipWriter(ident, fromNode, toNode)
 
   protected def internalCreateResults(state: QueryState): ClosingIterator[CypherRow] = {
     val ctx = state.newRowWithArgument(rowFactory)
@@ -39,14 +44,22 @@ case class DirectedRelationshipTypeScanPipe(
     val typeId = typ.getId(query)
     if (typeId == LazyType.UNKNOWN) ClosingIterator.empty
     else {
-      val relIterator = query.getRelationshipsByType(state.relTypeTokenReadSession.get, typeId, indexOrder)
+      val relIterator = query.getRelationshipsByType(
+        state.relTypeTokenReadSession.get,
+        typeId,
+        indexOrder,
+        includeChangesFromThisTransaction
+      )
       PrimitiveLongHelper.map(
         relIterator,
         relationshipId => {
-          val relationship = state.query.relationshipById(relationshipId)
-          val startNode = query.nodeById(relIterator.startNodeId())
-          val endNode = query.nodeById(relIterator.endNodeId())
-          rowFactory.copyWith(ctx, ident, relationship, fromNode, startNode, toNode, endNode)
+          relationshipWriter.writeRow(
+            rowFactory,
+            ctx,
+            VirtualValues.relationship(relationshipId),
+            VirtualValues.node(relIterator.startNodeId()),
+            VirtualValues.node(relIterator.endNodeId())
+          )
         }
       )
     }

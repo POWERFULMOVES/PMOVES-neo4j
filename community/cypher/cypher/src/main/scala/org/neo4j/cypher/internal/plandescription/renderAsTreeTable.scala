@@ -19,7 +19,7 @@
  */
 package org.neo4j.cypher.internal.plandescription
 
-import org.neo4j.cypher.internal.macros.AssertMacros.checkOnlyWhenAssertionsAreEnabled
+import org.neo4j.cypher.internal.macros.AssertMacros3.checkOnlyWhenAssertionsAreEnabled
 import org.neo4j.cypher.internal.plandescription.Arguments.DbHits
 import org.neo4j.cypher.internal.plandescription.Arguments.Details
 import org.neo4j.cypher.internal.plandescription.Arguments.Distinctness
@@ -31,8 +31,10 @@ import org.neo4j.cypher.internal.plandescription.Arguments.PageCacheMisses
 import org.neo4j.cypher.internal.plandescription.Arguments.PipelineInfo
 import org.neo4j.cypher.internal.plandescription.Arguments.Rows
 import org.neo4j.cypher.internal.plandescription.Arguments.Time
+import org.neo4j.cypher.internal.plandescription.Arguments.UsedIndexes
 import org.neo4j.cypher.internal.plandescription.PlanDescriptionArgumentSerializer.serialize
 import org.neo4j.cypher.internal.plandescription.renderAsTreeTable.splitDetails
+import org.neo4j.cypher.internal.util.attribution.Id
 
 import scala.annotation.tailrec
 import scala.collection.Map
@@ -207,9 +209,24 @@ private object Header {
   val ORDER = "Ordered by"
   val DISTINCTNESS = "Distinctness"
   val PIPELINE = "Pipeline"
+  val INDEXES_USED = "Indexes Used"
 
   val ALL: Seq[String] =
-    Seq(OPERATOR, ID, DETAILS, ESTIMATED_ROWS, ROWS, HITS, MEMORY, PAGE_CACHE, TIME, ORDER, DISTINCTNESS, PIPELINE)
+    Seq(
+      OPERATOR,
+      ID,
+      DETAILS,
+      ESTIMATED_ROWS,
+      ROWS,
+      HITS,
+      MEMORY,
+      PAGE_CACHE,
+      TIME,
+      ORDER,
+      DISTINCTNESS,
+      PIPELINE,
+      INDEXES_USED
+    )
 }
 
 /**
@@ -317,13 +334,13 @@ private object TreeTableBuilder {
 
       override def next(): LevelledPlan = {
         val levelledPlan = stack.pop()
-        levelledPlan.plan.children match {
-          case SingleChild(inner) =>
-            stack.push(LevelledPlan(compactPlan(inner), levelledPlan.level.child))
-          case TwoChildren(lhs, rhs) =>
-            stack.push(LevelledPlan(compactPlan(lhs), levelledPlan.level.child))
-            stack.push(LevelledPlan(compactPlan(rhs), levelledPlan.level.fork))
-          case NoChildren =>
+        val children = levelledPlan.plan.children
+        children.headOption.foreach { child =>
+          stack.push(LevelledPlan(compactPlan(child), levelledPlan.level.child))
+          // only call tail if head exists
+          children.tail.foreach { child =>
+            stack.push(LevelledPlan(compactPlan(child), levelledPlan.level.fork))
+          }
         }
         levelledPlan.copy(childLevel = stack.headOption.map(_.level))
       }
@@ -336,7 +353,7 @@ private object TreeTableBuilder {
       plan: InternalPlanDescription
     ): Seq[InternalPlanDescription] = {
       plan.children match {
-        case SingleChild(inner)
+        case Seq(inner)
           if !plan.arguments.exists(a => a.isInstanceOf[Details] || a.isInstanceOf[PipelineInfo]) &&
             !inner.arguments.exists(a => a.isInstanceOf[Details] || a.isInstanceOf[PipelineInfo]) &&
             inner.name == plan.name => compactPlanAcc(acc :+ plan, inner)
@@ -428,9 +445,16 @@ private class TreeTableBuilder private (
       case Details(detailsList) =>
         Header.DETAILS -> Cell.left(splitDetails(detailsList.map(_.prettifiedString).toList): _*)
       case pipeline: PipelineInfo => Header.PIPELINE -> Cell.left(serialize(pipeline).toString)
+      case indexes: UsedIndexes =>
+        Header.INDEXES_USED -> Cell.left(indexes.toSeqOfStrings: _*)
     }
 
-    val idColumn = Header.ID -> Cell.right(plan.id.x.toString)
+    val idString = Option(plan.id)
+      .filter(_ != Id.INVALID_ID)
+      .map(_.x.toString)
+      .getOrElse("")
+
+    val idColumn = Header.ID -> Cell.right(idString)
 
     val operatorColumn = Header.OPERATOR -> Cell.left(levelledPlan.level.line + "+" + levelledPlan.plan.name)
 

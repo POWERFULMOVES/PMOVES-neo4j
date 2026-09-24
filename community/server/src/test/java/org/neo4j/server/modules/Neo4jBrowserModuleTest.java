@@ -45,7 +45,7 @@ class Neo4jBrowserModuleTest {
         Files.writeString(browserZipPath, "irrelevant");
 
         var module = new Neo4jBrowserModule(
-                webServer, webDir, GlobbingPattern.create("neo4j-browser*.zip").get(0));
+                webServer, webDir, GlobbingPattern.create("neo4j-browser*.zip").getFirst());
 
         module.start();
 
@@ -61,7 +61,7 @@ class Neo4jBrowserModuleTest {
         Files.writeString(webDir.resolve("not-a-browser.zip"), "irrelevant");
 
         var module = new Neo4jBrowserModule(
-                webServer, webDir, GlobbingPattern.create("neo4j-browser*.zip").get(0));
+                webServer, webDir, GlobbingPattern.create("neo4j-browser*.zip").getFirst());
         module.start();
 
         verify(webServer).addStaticContent(eq(StaticContent.classpathStaticContent("browser")), eq("/browser"));
@@ -75,7 +75,7 @@ class Neo4jBrowserModuleTest {
         var module = new Neo4jBrowserModule(
                 webServer,
                 missingWebDir,
-                GlobbingPattern.create("neo4j-browser*.zip").get(0));
+                GlobbingPattern.create("neo4j-browser*.zip").getFirst());
         module.start();
 
         verify(webServer).addStaticContent(eq(StaticContent.classpathStaticContent("browser")), eq("/browser"));
@@ -85,7 +85,7 @@ class Neo4jBrowserModuleTest {
     void stopShouldRemoveBrowserMountPoint() {
         var webServer = mock(WebServer.class);
         var module = new Neo4jBrowserModule(
-                webServer, tempDir, GlobbingPattern.create("neo4j-browser*.zip").get(0));
+                webServer, tempDir, GlobbingPattern.create("neo4j-browser*.zip").getFirst());
 
         module.stop();
 

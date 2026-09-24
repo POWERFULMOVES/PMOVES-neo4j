@@ -19,13 +19,9 @@
  */
 package org.neo4j.kernel.database;
 
-import static java.util.concurrent.TimeUnit.MILLISECONDS;
-import static org.neo4j.configuration.GraphDatabaseInternalSettings.shutdown_terminated_transaction_wait_timeout;
-
 import java.io.IOException;
-import java.util.concurrent.TimeUnit;
+import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.locks.LockSupport;
 import java.util.function.LongFunction;
 import org.neo4j.collection.Dependencies;
 import org.neo4j.common.DependencyResolver;
@@ -41,10 +37,9 @@ import org.neo4j.io.pagecache.IOController;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.kernel.api.Kernel;
 import org.neo4j.kernel.availability.DatabaseAvailabilityGuard;
-import org.neo4j.kernel.impl.api.TransactionRegistry;
+import org.neo4j.kernel.impl.api.ChunkedTransactionTracker;
 import org.neo4j.kernel.impl.query.QueryExecutionEngine;
 import org.neo4j.kernel.impl.store.StoreFileListing;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.StoreCopyCheckPointMutex;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.kernel.lifecycle.LifeSupport;
 import org.neo4j.kernel.lifecycle.Lifecycle;
@@ -53,18 +48,19 @@ import org.neo4j.kernel.monitoring.DatabaseEventListeners;
 import org.neo4j.logging.InternalLog;
 import org.neo4j.logging.internal.DatabaseLogProvider;
 import org.neo4j.logging.internal.DatabaseLogService;
-import org.neo4j.memory.MemoryTracker;
 import org.neo4j.monitoring.DatabaseHealth;
+import org.neo4j.monitoring.ExceptionHandlerService;
 import org.neo4j.monitoring.Monitors;
 import org.neo4j.resources.CpuClock;
 import org.neo4j.scheduler.JobScheduler;
+import org.neo4j.storageengine.api.StorageEngine;
 import org.neo4j.storageengine.api.StorageEngineFactory;
-import org.neo4j.storageengine.api.StoreFileMetadata;
 import org.neo4j.storageengine.api.StoreId;
 import org.neo4j.time.SystemNanoClock;
 import org.neo4j.token.TokenHolders;
 import org.neo4j.util.VisibleForTesting;
 import org.neo4j.values.ElementIdMapper;
+import org.neo4j.wal.checkpoint.StoreCopyCheckPointMutex;
 
 public abstract class AbstractDatabase extends LifecycleAdapter implements Lifecycle {
 
@@ -76,10 +72,11 @@ public abstract class AbstractDatabase extends LifecycleAdapter implements Lifec
     protected final NamedDatabaseId namedDatabaseId;
     protected final DatabaseConfig databaseConfig;
     protected final DatabaseEventListeners eventListeners;
-    protected final Monitors parentMonitors;
+    protected final DatabaseMonitorsFactory monitorsFactory;
     protected final DatabaseLogService databaseLogService;
     protected final DatabaseLogProvider internalLogProvider;
     protected final SystemNanoClock clock;
+    protected final ExceptionHandlerService exceptionHandlerService;
     protected final DatabaseLogProvider userLogProvider;
     protected final InternalLog internalLog;
     protected final JobScheduler scheduler;
@@ -89,27 +86,29 @@ public abstract class AbstractDatabase extends LifecycleAdapter implements Lifec
     protected Dependencies databaseDependencies;
     protected LifeSupport life;
     protected SettingChangeListener<Boolean> cpuChangeListener;
-    protected Monitors databaseMonitors;
+    protected DatabaseMonitors databaseMonitors;
 
     protected AbstractDatabase(
             DependencyResolver globalDependencies,
             NamedDatabaseId namedDatabaseId,
             DatabaseConfig databaseConfig,
             DatabaseEventListeners eventListeners,
-            Monitors monitors,
+            DatabaseMonitorsFactory monitorsFactory,
             DatabaseLogService databaseLogService,
             JobScheduler scheduler,
             LongFunction<DatabaseAvailabilityGuard> databaseAvailabilityGuardFactory,
             Factory<DatabaseHealth> databaseHealthFactory,
-            SystemNanoClock clock) {
+            SystemNanoClock clock,
+            ExceptionHandlerService exceptionHandlerService) {
         this.globalDependencies = globalDependencies;
         this.namedDatabaseId = namedDatabaseId;
         this.databaseConfig = databaseConfig;
         this.eventListeners = eventListeners;
-        this.parentMonitors = monitors;
+        this.monitorsFactory = monitorsFactory;
         this.databaseLogService = databaseLogService;
         this.internalLogProvider = databaseLogService.getInternalLogProvider();
         this.clock = clock;
+        this.exceptionHandlerService = exceptionHandlerService;
         this.internalLog = internalLogProvider.getLog(getClass());
         this.userLogProvider = databaseLogService.getUserLogProvider();
         this.scheduler = scheduler;
@@ -133,13 +132,13 @@ public abstract class AbstractDatabase extends LifecycleAdapter implements Lifec
         try {
             databaseDependencies = new Dependencies(globalDependencies);
             life = new LifeSupport();
-            databaseMonitors = new Monitors(parentMonitors, internalLogProvider);
+            databaseMonitors = monitorsFactory.create(life);
             databaseHealth = databaseHealthFactory.newInstance();
 
             databaseDependencies.satisfyDependency(this);
-            databaseDependencies.satisfyDependency(databaseMonitors);
             databaseDependencies.satisfyDependency(databaseHealth);
-            databaseDependencies.satisfyDependency(namedDatabaseId);
+            databaseDependencies.satisfyDependencyIfAbsent(databaseMonitors);
+            databaseDependencies.satisfyDependencyIfAbsent(namedDatabaseId);
             databaseDependencies.satisfyDependency(databaseConfig);
             databaseDependencies.satisfyDependency(databaseLogService);
             databaseDependencies.satisfyDependency(databaseAvailabilityGuard);
@@ -185,7 +184,6 @@ public abstract class AbstractDatabase extends LifecycleAdapter implements Lifec
 
         eventListeners.databaseShutdown(namedDatabaseId);
         life.stop();
-        awaitAllClosingTransactions();
         life.shutdown();
         started = false;
         initialized = false;
@@ -220,26 +218,6 @@ public abstract class AbstractDatabase extends LifecycleAdapter implements Lifec
             internalLog.error("Couldn't close database after startup failure", closeException);
         }
         throw new RuntimeException(e);
-    }
-
-    protected void awaitAllClosingTransactions() {
-        internalLog.info("Waiting for closing transactions.");
-
-        var transactionRegistry = transactionRegistry();
-        transactionRegistry.terminateTransactions();
-
-        // Give transactions a short time to detect they are terminated
-        long waitTime =
-                databaseConfig.get(shutdown_terminated_transaction_wait_timeout).toMillis();
-        long deadline = clock.millis() + waitTime;
-        while (transactionRegistry.haveActiveTransaction() && clock.millis() < deadline) {
-            LockSupport.parkNanos(MILLISECONDS.toNanos(10));
-        }
-
-        while (transactionRegistry.haveClosingTransaction()) {
-            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
-        }
-        internalLog.info("All transactions are closed.");
     }
 
     protected AtomicReference<CpuClock> setupCpuClockAtomicReference() {
@@ -280,6 +258,14 @@ public abstract class AbstractDatabase extends LifecycleAdapter implements Lifec
         return namedDatabaseId;
     }
 
+    public SystemNanoClock getClock() {
+        return clock;
+    }
+
+    public ExceptionHandlerService getExceptionHandlerService() {
+        return exceptionHandlerService;
+    }
+
     @VisibleForTesting
     public LifeSupport getLife() {
         return life;
@@ -305,7 +291,7 @@ public abstract class AbstractDatabase extends LifecycleAdapter implements Lifec
 
     public abstract Kernel getKernel();
 
-    public abstract ResourceIterator<StoreFileMetadata> listStoreFiles(boolean includeLogs) throws IOException;
+    public abstract ResourceIterator<Path> listStoreFiles(boolean includeLogs) throws IOException;
 
     public abstract StoreFileListing getStoreFileListing();
 
@@ -319,13 +305,15 @@ public abstract class AbstractDatabase extends LifecycleAdapter implements Lifec
 
     public abstract DatabaseTracers getTracers();
 
-    public abstract MemoryTracker getOtherDatabaseMemoryTracker();
-
     public abstract StorageEngineFactory getStorageEngineFactory();
+
+    public abstract StorageEngine getStorageEngine();
 
     public abstract IOController getIoController();
 
     public abstract CursorContextFactory getCursorContextFactory();
+
+    public abstract ChunkedTransactionTracker getChunkedTransactionTracker();
 
     public abstract ElementIdMapper getElementIdMapper();
 
@@ -340,8 +328,6 @@ public abstract class AbstractDatabase extends LifecycleAdapter implements Lifec
     protected abstract void specificStop();
 
     protected abstract void specificShutdown() throws Exception;
-
-    protected abstract TransactionRegistry transactionRegistry();
 
     protected abstract void postStartupInit() throws Exception;
 

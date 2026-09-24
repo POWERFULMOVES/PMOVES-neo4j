@@ -105,16 +105,13 @@ import static org.neo4j.configuration.GraphDatabaseSettings.transaction_monitor_
 import static org.neo4j.configuration.GraphDatabaseSettings.transaction_sampling_percentage;
 import static org.neo4j.configuration.GraphDatabaseSettings.transaction_timeout;
 import static org.neo4j.configuration.GraphDatabaseSettings.transaction_tracing_level;
-import static org.neo4j.configuration.GraphDatabaseSettings.tx_state_max_off_heap_memory;
-import static org.neo4j.configuration.GraphDatabaseSettings.tx_state_memory_allocation;
-import static org.neo4j.configuration.GraphDatabaseSettings.tx_state_off_heap_block_cache_size;
-import static org.neo4j.configuration.GraphDatabaseSettings.tx_state_off_heap_max_cacheable_block_size;
 import static org.neo4j.configuration.GraphDatabaseSettings.writable_databases;
 import static org.neo4j.configuration.connectors.BoltConnectorInternalSettings.thread_pool_shutdown_wait_time;
 import static org.neo4j.configuration.connectors.BoltConnectorInternalSettings.unsupported_bolt_unauth_connection_max_inbound_bytes;
 import static org.neo4j.configuration.connectors.BoltConnectorInternalSettings.unsupported_bolt_unauth_connection_timeout;
 import static org.neo4j.configuration.connectors.BoltConnectorInternalSettings.unsupported_thread_pool_queue_size;
 
+import java.time.Duration;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -246,7 +243,33 @@ public final class SettingMigrators {
                 "internal.dbms.cluster.discovery.parallel_enabled",
                 "unsupported.dbms.kernel_id",
                 "internal.dbms.kernel_id",
-                "internal.dbms.linked_users");
+                "internal.dbms.linked_users",
+                "dbms.memory.off_heap.max_size",
+                "server.memory.off_heap.transaction_max_size",
+                "server.memory.off_heap.max_cacheable_block_size",
+                "dbms.memory.off_heap.max_cacheable_block_size",
+                "dbms.tx_state.off_heap.max_cacheable_block_size",
+                "server.memory.off_heap.block_cache_size",
+                "dbms.memory.off_heap.block_cache_size",
+                "dbms.tx_state.off_heap.block_cache_size",
+                "db.tx_state.memory_allocation",
+                "dbms.tx_state.memory_allocation",
+                "dbms.tx_state.max_off_heap_memory",
+                "unsupported.dbms.index.population_print_debug",
+                "internal.dbms.index.population_print_debug",
+                "internal.cypher.enable_vector_type",
+                "unsupported.dbms.index.skip_default_indexes_on_creation",
+                "internal.dbms.index.skip_default_indexes_on_creation",
+                "internal.cypher.vector_search_enabled",
+                "internal.dbms.vector_single_stage_filtering_enabled",
+                "internal.dbms.cypher_show_database_interpreted",
+                "internal.cypher.enable_variable_checker",
+                "internal.cypher.disable_reworked_rewriters",
+                "internal.cypher.enable_working_scope_namespacer",
+                "internal.dbms.graph_type",
+                "internal.dbms.dependent_constraints_enabled",
+                "internal.dbms.relationship_endpoint_label_and_node_label_existence_constraints",
+                "internal.dbms.composable_commands");
 
         private static final Collection<Mapping> LEGACY_UNSUPPORTED_SETTINGS_MAPPING = List.of(
                 new Mapping("dbms.capabilities.blocked", "internal.dbms.capabilities.blocked"),
@@ -375,11 +398,11 @@ public final class SettingMigrators {
                         "unsupported.dbms.bolt.inbound_message_throttle.low_watermark",
                         "internal.dbms.bolt.inbound_message_throttle.low_watermark"),
                 new Mapping(
+                        "internal.dbms.bolt.local_object_enabled",
+                        "dbms.bolt.local_connector.object_transport_enabled"),
+                new Mapping(
                         "unsupported.dbms.bolt.netty_message_merge_cumulator",
                         "internal.dbms.bolt.netty_message_merge_cumulator"),
-                new Mapping(
-                        "unsupported.dbms.bolt.netty_server_shutdown_quiet_period",
-                        "internal.dbms.bolt.netty_server_shutdown_quiet_period"),
                 new Mapping(
                         "unsupported.dbms.bolt.netty_server_shutdown_timeout",
                         "internal.dbms.bolt.netty_server_shutdown_timeout"),
@@ -478,8 +501,6 @@ public final class SettingMigrators {
                         "unsupported.dbms.index.population_batch_max_byte_size",
                         "internal.dbms.index.population_batch_max_byte_size"),
                 new Mapping(
-                        "unsupported.dbms.index.population_print_debug", "internal.dbms.index.population_print_debug"),
-                new Mapping(
                         "unsupported.dbms.index.population_queue_threshold",
                         "internal.dbms.index.population_queue_threshold"),
                 new Mapping("unsupported.dbms.index.populator_block_size", "internal.dbms.index.populator_block_size"),
@@ -494,9 +515,6 @@ public final class SettingMigrators {
                 new Mapping(
                         "unsupported.dbms.index.sampling.log_recovered_samples",
                         "internal.dbms.index.sampling.log_recovered_samples"),
-                new Mapping(
-                        "unsupported.dbms.index.skip_default_indexes_on_creation",
-                        "internal.dbms.index.skip_default_indexes_on_creation"),
                 new Mapping(
                         "unsupported.dbms.index.spatial.curve.bottom_threshold",
                         "internal.dbms.index.spatial.curve.bottom_threshold"),
@@ -521,9 +539,9 @@ public final class SettingMigrators {
                         "internal.dbms.lock_manager.verbose_deadlocks"),
                 new Mapping(
                         "unsupported.dbms.logs.query.heap_dump_enabled", "internal.dbms.logs.query.heap_dump_enabled"),
-                new Mapping("unsupported.dbms.loopback_delete", "internal.dbms.loopback_delete"),
-                new Mapping("unsupported.dbms.loopback_enabled", "internal.dbms.loopback_enabled"),
-                new Mapping("unsupported.dbms.loopback_file", "internal.dbms.loopback_file"),
+                new Mapping("unsupported.dbms.loopback_delete", "server.bolt.unix_socket_delete"),
+                new Mapping("unsupported.dbms.loopback_enabled", "internal.dbms.enable_aura_profile"),
+                new Mapping("unsupported.dbms.loopback_file", "server.bolt.unix_socket_path"),
                 new Mapping("unsupported.dbms.lucene.max_partition_size", "internal.dbms.lucene.max_partition_size"),
                 new Mapping(
                         "unsupported.dbms.max_http_request_header_size", "internal.dbms.max_http_request_header_size"),
@@ -588,7 +606,8 @@ public final class SettingMigrators {
                 new Mapping(
                         "unsupported.vm_pause_monitor.stall_alert_threshold",
                         "internal.vm_pause_monitor.stall_alert_threshold"),
-                new Mapping("dbms.config.strict_validation", GraphDatabaseSettings.strict_config_validation.name()));
+                new Mapping("dbms.config.strict_validation", GraphDatabaseSettings.strict_config_validation.name()),
+                new Mapping("internal.db.query.default_language", "db.query.default_language"));
 
         @Override
         public void migrate(Map<String, String> values, Map<String, String> defaultValues, InternalLog log) {
@@ -628,6 +647,45 @@ public final class SettingMigrators {
             migratePageCacheAndMemorySettings(values, defaultValues, log);
             migrateAutoUpgrade(values, defaultValues, log);
             migrateAnnotationDataAsJson(values, defaultValues, log);
+            migrateQuietPeriod(values, defaultValues, log);
+        }
+
+        private void migrateQuietPeriod(
+                Map<String, String> values, Map<String, String> defaultValues, InternalLog log) {
+            String unsupportedSetting = "unsupported.dbms.bolt.netty_server_shutdown_quiet_period";
+            String internalSetting = "internal.dbms.bolt.netty_server_shutdown_quiet_period";
+            String newSetting = "internal.dbms.bolt.netty_server_shutdown_quiet_period_duration";
+
+            if (values.containsKey(unsupportedSetting)) {
+                log.warn("Use of deprecated setting '%s'. It is replaced by '%s'.", unsupportedSetting, newSetting);
+                var seconds = values.get(unsupportedSetting);
+                if (isNotBlank(seconds)) {
+                    try {
+                        var timeParse = SettingValueParsers.INT.parse(seconds);
+                        var duration = Duration.ofSeconds(timeParse);
+                        values.remove(unsupportedSetting);
+                        values.computeIfAbsent(
+                                newSetting, (ignored) -> SettingValueParsers.DURATION.valueToString(duration));
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+                return;
+            }
+
+            if (values.containsKey(internalSetting)) {
+                log.warn("Use of deprecated setting '%s'. It is replaced by '%s'.", internalSetting, newSetting);
+                var seconds = values.get(internalSetting);
+                if (isNotBlank(seconds)) {
+                    try {
+                        var timeParse = SettingValueParsers.INT.parse(seconds);
+                        var duration = Duration.ofSeconds(timeParse);
+                        values.remove(internalSetting);
+                        values.computeIfAbsent(
+                                newSetting, (ignored) -> SettingValueParsers.DURATION.valueToString(duration));
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+            }
         }
 
         private void migratePageCacheAndMemorySettings(
@@ -642,17 +700,6 @@ public final class SettingMigrators {
             migrateSettingNameChange(
                     values, log, "dbms.memory.pagecache.flush.buffer.enabled", pagecache_buffered_flush_enabled);
             migrateSettingNameChange(values, log, "dbms.memory.pagecache.directio", pagecache_direct_io);
-
-            migrateSettingNameChange(values, log, "dbms.memory.off_heap.max_size", tx_state_max_off_heap_memory);
-            // renaming the previous 5.x setting
-            migrateSettingNameChange(values, log, "server.memory.off_heap.max_size", tx_state_max_off_heap_memory);
-            migrateSettingNameChange(
-                    values,
-                    log,
-                    "dbms.memory.off_heap.max_cacheable_block_size",
-                    tx_state_off_heap_max_cacheable_block_size);
-            migrateSettingNameChange(
-                    values, log, "dbms.memory.off_heap.block_cache_size", tx_state_off_heap_block_cache_size);
 
             migrateSettingNameChange(values, log, "dbms.memory.heap.max_size", max_heap_size);
             migrateSettingNameChange(values, log, "dbms.memory.heap.initial_size", initial_heap_size);
@@ -785,7 +832,6 @@ public final class SettingMigrators {
             migrateSettingNameChange(values, log, "dbms.tx_log.preallocate", preallocate_logical_logs);
             migrateSettingNameChange(values, log, "dbms.tx_log.rotation.retention_policy", keep_logical_logs);
             migrateSettingNameChange(values, log, "dbms.tx_log.rotation.size", logical_log_rotation_threshold);
-            migrateSettingNameChange(values, log, "dbms.tx_state.memory_allocation", tx_state_memory_allocation);
         }
 
         private void migrateTransactionAndTrackingSettings(
@@ -858,15 +904,6 @@ public final class SettingMigrators {
 
         private static void migrateDatabaseMemorySettings(
                 Map<String, String> values, Map<String, String> defaultValues, InternalLog log) {
-            migrateSettingNameChange(values, log, "dbms.tx_state.max_off_heap_memory", tx_state_max_off_heap_memory);
-            migrateSettingNameChange(
-                    values,
-                    log,
-                    "dbms.tx_state.off_heap.max_cacheable_block_size",
-                    tx_state_off_heap_max_cacheable_block_size);
-            migrateSettingNameChange(
-                    values, log, "dbms.tx_state.off_heap.block_cache_size", tx_state_off_heap_block_cache_size);
-
             // Migrate cypher.query_max_allocations to new setting, if new settings is not configured
             String maxAllocations = values.remove("cypher.query_max_allocations");
             if (isNotBlank(maxAllocations)) {

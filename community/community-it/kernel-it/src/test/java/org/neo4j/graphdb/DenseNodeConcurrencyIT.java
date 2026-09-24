@@ -65,7 +65,6 @@ import java.util.stream.Stream;
 import org.assertj.core.description.Description;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -84,7 +83,7 @@ import org.neo4j.io.fs.FileSystemUtils;
 import org.neo4j.io.fs.UncloseableDelegatingFileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.kernel.DeadlockDetectedException;
-import org.neo4j.kernel.api.KernelTransaction.KernelTransactionMonitor;
+import org.neo4j.kernel.api.KernelTransaction.Monitor;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.impl.api.KernelTransactionImplementation;
 import org.neo4j.kernel.impl.core.NodeEntity;
@@ -104,10 +103,11 @@ import org.neo4j.test.Tokens;
 import org.neo4j.test.extension.ExtensionCallback;
 import org.neo4j.test.extension.ImpermanentDbmsExtension;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.test.extension.SkipOnSpd;
 
 @ImpermanentDbmsExtension(configurationCallback = "configure")
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class DenseNodeConcurrencyIT {
     private static final int NUM_INITIAL_RELATIONSHIPS_PER_DENSE_NODE = 500;
     private static final int NUM_INITIAL_RELATIONSHIPS_PER_SPARSE_NODE = 10;
@@ -563,6 +563,7 @@ class DenseNodeConcurrencyIT {
     }
 
     @Test
+    @SkipOnSpd
     void shouldNotBlockOnCreateOnLongChain() throws ExecutionException, InterruptedException {
         // given
         Set<Relationship> relationships = newKeySet();
@@ -614,6 +615,7 @@ class DenseNodeConcurrencyIT {
     }
 
     @Test
+    @SkipOnSpd
     void shouldNotBlockOnDeleteOnSameLongChain() throws Throwable {
         // given
         Set<Relationship> relationships = new HashSet<>();
@@ -776,7 +778,7 @@ class DenseNodeConcurrencyIT {
                 t2Future = t2.executeDontWait(command(() -> {
                     try (Transaction tx = database.beginTx()) {
                         tx1.accept(tx);
-                        ((TransactionImpl) tx).commit(KernelTransactionMonitor.withBeforeApply(barrier::reached));
+                        ((TransactionImpl) tx).commit(Monitor.withBeforeApply(barrier::reached));
                     }
                 }));
                 barrier.await();
@@ -811,7 +813,7 @@ class DenseNodeConcurrencyIT {
                     try (Transaction tx = database.beginTx()) {
                         tx1.accept(tx);
                         tx.createNode(); // ensure we upgrade to a write transaction to reach the barrier
-                        ((TransactionImpl) tx).commit(KernelTransactionMonitor.withBeforeApply(barrier::reached));
+                        ((TransactionImpl) tx).commit(Monitor.withBeforeApply(barrier::reached));
                     }
                 }));
                 barrier.await();
@@ -1152,8 +1154,10 @@ class DenseNodeConcurrencyIT {
             } catch (NotFoundException e) {
                 // this is not yet fully understood, but is caught and rethrown as transient to cause retry of this
                 // transaction
-                throw new TransientTransactionFailureException(
-                        Status.Database.Unknown, "Relationship vanished in front of us, hmm");
+                throw TransientTransactionFailureException.internalError(
+                        DenseNodeConcurrencyIT.class.getSimpleName(),
+                        "Relationship vanished in front of us, hmm",
+                        Status.Database.Unknown);
             }
         }
 

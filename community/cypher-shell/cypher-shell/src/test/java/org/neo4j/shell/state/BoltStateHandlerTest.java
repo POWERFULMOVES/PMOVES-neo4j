@@ -21,9 +21,11 @@ package org.neo4j.shell.state;
 
 import static java.util.Collections.singletonList;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -42,11 +44,13 @@ import java.net.URI;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.neo4j.driver.AccessMode;
 import org.neo4j.driver.AuthToken;
-import org.neo4j.driver.Bookmark;
+import org.neo4j.driver.BookmarkManager;
 import org.neo4j.driver.Config;
 import org.neo4j.driver.Driver;
 import org.neo4j.driver.Query;
@@ -61,7 +65,6 @@ import org.neo4j.driver.Values;
 import org.neo4j.driver.exceptions.ClientException;
 import org.neo4j.driver.exceptions.ServiceUnavailableException;
 import org.neo4j.driver.exceptions.SessionExpiredException;
-import org.neo4j.driver.internal.InternalBookmark;
 import org.neo4j.driver.internal.value.IntegerValue;
 import org.neo4j.driver.internal.value.StringValue;
 import org.neo4j.driver.summary.DatabaseInfo;
@@ -426,6 +429,46 @@ class BoltStateHandlerTest {
     }
 
     @Test
+    void configuresConnectionTimeoutAndPoolSize() throws CommandException {
+        RecordingDriverProvider provider = new RecordingDriverProvider();
+        BoltStateHandler handler = new BoltStateHandler(provider, false);
+
+        handler.connect(config);
+
+        assertThat(provider.config.connectionTimeoutMillis()).isEqualTo((int) TimeUnit.SECONDS.toMillis(30));
+        assertThat(provider.config.maxConnectionPoolSize()).isEqualTo(32);
+    }
+
+    @Test
+    void silentDisconnectUsesCloseAsync() throws Exception {
+        Session sessionMock = mock(Session.class);
+        Result resultMock = mock(Result.class);
+        Driver driverMock = stubResultSummaryInAnOpenSession(resultMock, sessionMock, "neo4j-version");
+        when(driverMock.closeAsync()).thenReturn(CompletableFuture.completedFuture(null));
+        OfflineBoltStateHandler handler = new OfflineBoltStateHandler(driverMock);
+        handler.connect();
+
+        handler.silentDisconnect();
+
+        verify(driverMock).closeAsync();
+    }
+
+    @Test
+    void silentDisconnectIgnoresFailedCloseAsync() throws Exception {
+        Session sessionMock = mock(Session.class);
+        Result resultMock = mock(Result.class);
+        Driver driverMock = stubResultSummaryInAnOpenSession(resultMock, sessionMock, "neo4j-version");
+        CompletableFuture<Void> failedClose = new CompletableFuture<>();
+        failedClose.completeExceptionally(new RuntimeException("close failed"));
+        when(driverMock.closeAsync()).thenReturn(failedClose);
+        OfflineBoltStateHandler handler = new OfflineBoltStateHandler(driverMock);
+        handler.connect();
+
+        assertThatCode(handler::silentDisconnect).doesNotThrowAnyException();
+        verify(driverMock).closeAsync();
+    }
+
+    @Test
     void fallbackToBolt() throws CommandException {
         fallbackTest("neo4j", "bolt", () -> {
             throw new ServiceUnavailableException("Please fall back");
@@ -478,24 +521,24 @@ class BoltStateHandlerTest {
     }
 
     @Test
-    void shouldChangePasswordAndKeepSystemDbBookmark() throws CommandException {
+    void shouldChangePasswordAndUseBookmarkManager() throws CommandException {
         // Given
         ConnectionConfig config =
                 testConnectionConfig("bolt://localhost").withUsernameAndPasswordAndDatabase("", "", ABSENT_DB_NAME);
-        Bookmark bookmark = InternalBookmark.parse("myBookmark");
         var newPassword = "newPW";
 
         Session sessionMock = mock(Session.class);
         Result resultMock = mock(Result.class);
         Driver driverMock =
                 stubResultSummaryInAnOpenSession(resultMock, sessionMock, "Neo4j/9.4.1-ALPHA", "my_default_db");
+        var bookmarkManager = mock(BookmarkManager.class);
+        given(driverMock.executableQueryBookmarkManager()).willReturn(bookmarkManager);
         when(sessionMock.run(
                         eq(new Query(
                                 "ALTER CURRENT USER SET PASSWORD FROM $o TO $n",
                                 Values.parameters("o", config.password(), "n", newPassword))),
                         eq(userActionTxConf)))
                 .thenReturn(resultMock);
-        when(sessionMock.lastBookmark()).thenReturn(bookmark);
         BoltStateHandler handler = new OfflineBoltStateHandler(driverMock);
 
         // When
@@ -507,90 +550,12 @@ class BoltStateHandlerTest {
         // When connecting to system db again
         handler.connect(config.withUsernameAndPasswordAndDatabase("", "", SYSTEM_DB_NAME));
 
-        // Then use bookmark for system DB
-        verify(driverMock)
+        // Then use bookmarkManager
+        verify(driverMock, times(2))
                 .session(SessionConfig.builder()
                         .withDefaultAccessMode(AccessMode.WRITE)
                         .withDatabase(SYSTEM_DB_NAME)
-                        .withBookmarks(bookmark)
-                        .build());
-    }
-
-    @SuppressWarnings("OptionalGetWithoutIsPresent")
-    @Test
-    void shouldKeepOneBookmarkPerDatabase() throws CommandException {
-        ConnectionConfig config = testConnectionConfig("bolt://localhost")
-                .withUsernameAndPasswordAndDatabase("user", "pass", "database1");
-        Bookmark db1Bookmark = InternalBookmark.parse("db1");
-        Bookmark db2Bookmark = InternalBookmark.parse("db2");
-
-        // A couple of these mock calls are now redundant with what is called in stubResultSummaryInAnOpenSession
-        Result resultMock = mock(Result.class);
-        Session db1SessionMock = mock(Session.class);
-        when(db1SessionMock.isOpen()).thenReturn(true);
-        when(db1SessionMock.lastBookmark()).thenReturn(db1Bookmark);
-        when(db1SessionMock.run(eq("CALL db.ping()"), eq(systemTxConf))).thenReturn(resultMock);
-        Session db2SessionMock = mock(Session.class);
-        when(db2SessionMock.isOpen()).thenReturn(true);
-        when(db2SessionMock.lastBookmark()).thenReturn(db2Bookmark);
-        when(db2SessionMock.run(eq("CALL db.ping()"), eq(systemTxConf))).thenReturn(resultMock);
-
-        Driver driverMock =
-                stubResultSummaryInAnOpenSession(resultMock, db1SessionMock, "Neo4j/9.4.1-ALPHA", "database1");
-        when(driverMock.session(any(SessionConfig.class))).thenAnswer(arg -> {
-            SessionConfig sc = (SessionConfig) arg.getArguments()[0];
-            switch (sc.database().get()) {
-                case "database1":
-                    return db1SessionMock;
-                case "database2":
-                    return db2SessionMock;
-                default:
-                    return null;
-            }
-        });
-
-        BoltStateHandler handler = new OfflineBoltStateHandler(driverMock);
-
-        // When
-        handler.connect(config);
-
-        // Then no bookmark yet for db1
-        verify(driverMock)
-                .session(SessionConfig.builder()
-                        .withDefaultAccessMode(AccessMode.WRITE)
-                        .withDatabase("database1")
-                        .build());
-
-        // When
-        handler.setActiveDatabase("database2");
-
-        // Then no bookmark yet for db2
-        verify(driverMock)
-                .session(SessionConfig.builder()
-                        .withDefaultAccessMode(AccessMode.WRITE)
-                        .withDatabase("database2")
-                        .build());
-
-        // When
-        handler.setActiveDatabase("database1");
-
-        // Then use bookmark for db1
-        verify(driverMock)
-                .session(SessionConfig.builder()
-                        .withDefaultAccessMode(AccessMode.WRITE)
-                        .withDatabase("database1")
-                        .withBookmarks(db1Bookmark)
-                        .build());
-
-        // When
-        handler.setActiveDatabase("database2");
-
-        // Then use bookmark for db2
-        verify(driverMock)
-                .session(SessionConfig.builder()
-                        .withDefaultAccessMode(AccessMode.WRITE)
-                        .withDatabase("database2")
-                        .withBookmarks(db2Bookmark)
+                        .withBookmarkManager(bookmarkManager)
                         .build());
     }
 
@@ -675,7 +640,7 @@ class BoltStateHandlerTest {
         handler.connect(config);
 
         assertThat(handler.licenseDetails().status()).isEqualTo(LicenseDetails.Status.EXPIRED);
-        assertThat(handler.licenseDetails().daysLeft()).contains(0L);
+        assertThat(handler.licenseDetails().daysLeft()).hasValue(0L);
     }
 
     @Test
@@ -688,7 +653,7 @@ class BoltStateHandlerTest {
         handler.connect(config);
 
         assertThat(handler.licenseDetails().status()).isEqualTo(LicenseDetails.Status.EVAL);
-        assertThat(handler.licenseDetails().daysLeft()).contains(5L);
+        assertThat(handler.licenseDetails().daysLeft()).hasValue(5L);
     }
 
     @Test

@@ -27,17 +27,16 @@ import org.neo4j.cypher.internal.runtime.spec.Edition
 import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RandomValuesTestSupport
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
-import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSupport
 import org.neo4j.cypher.internal.runtime.spec.SideEffectingInputStream
-import org.neo4j.graphdb.GraphDatabaseService
 import org.neo4j.kernel.api.KernelTransaction.Type
-import org.neo4j.logging.InternalLogProvider
 import org.neo4j.logging.LogAssert
 import org.scalatest.LoneElement
 
 import java.time.Duration.ofSeconds
 
 import scala.util.Random
+
+object ErrorHandlingStressTestBase
 
 abstract class ErrorHandlingStressTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
@@ -50,26 +49,10 @@ abstract class ErrorHandlingStressTestBase[CONTEXT <: RuntimeContext](
       runtime
     )
     with SideEffectingInputStream[CONTEXT]
-    with RandomValuesTestSupport
+    with RandomValuesTestSupport[CONTEXT]
     with LoneElement {
 
-  override protected def createRuntimeTestSupport(
-    graphDb: GraphDatabaseService,
-    edition: Edition[CONTEXT],
-    runtime: CypherRuntime[CONTEXT],
-    workloadMode: Boolean,
-    logProvider: InternalLogProvider
-  ): RuntimeTestSupport[CONTEXT] = {
-    new RuntimeTestSupport[CONTEXT](
-      graphDb,
-      edition,
-      runtime,
-      workloadMode,
-      logProvider,
-      debugOptions,
-      defaultTransactionType = Type.IMPLICIT
-    )
-  }
+  override protected def defaultTransactionType: Type = Type.IMPLICIT
 
   class SuperFatalError(msg: String) extends VirtualMachineError(msg)
 
@@ -83,13 +66,13 @@ abstract class ErrorHandlingStressTestBase[CONTEXT <: RuntimeContext](
     val errorMessage = "Simulated fatal error of type "
     val nRandomMessages = 10
     val orderedMessages = (1 to nRandomMessages).map(errorMessage + _)
-    val errorMessages = Random.shuffle(orderedMessages)
+    val errors = Random.shuffle(orderedMessages).map(e => new SuperFatalError(e))
     var errorCount = 0
 
     val fatalProbe = new Probe {
       override def onRow(row: AnyRef, state: AnyRef): Unit = {
         errorCount = (errorCount + 1) % nRandomMessages
-        throw new SuperFatalError(errorMessages(errorCount))
+        throw errors(errorCount)
       }
     }
 

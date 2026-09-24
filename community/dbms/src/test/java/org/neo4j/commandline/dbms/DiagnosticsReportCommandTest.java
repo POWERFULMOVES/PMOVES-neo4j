@@ -22,11 +22,16 @@ package org.neo4j.commandline.dbms;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.PrintStream;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.neo4j.cli.ContextInjectingFactory;
 import org.neo4j.cli.ExecutionContext;
+import org.neo4j.configuration.Config;
+import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import picocli.CommandLine;
 
 class DiagnosticsReportCommandTest {
@@ -39,16 +44,15 @@ class DiagnosticsReportCommandTest {
             CommandLine commandLine = new CommandLine(command, new ContextInjectingFactory(ctx));
             commandLine.usage(new PrintStream(out), CommandLine.Help.Ansi.OFF);
         }
-        assertThat(baos.toString().trim())
-                .isEqualToIgnoringNewLines(
-                        """
+        assertThat(baos.toString().trim()).isEqualToIgnoringNewLines("""
                 Produces a zip/tar of the most common information needed for remote assessments.
 
                 USAGE
 
                 report [-h] [--expand-commands] [--list] [--verbose] [--ignore-disk-space-check
-                       [=true|false]] [--additional-config=<file>] [--database=<database>]
-                       [--to-path=<path>] [<classifier>...] [COMMAND]
+                       [=true|false]] [--obfuscate-query-log[=true|false]] [-a=<address>]
+                       [--additional-config=<file>] [--database=<database>] [-p=<password>]
+                       [--to-path=<path>] [-u=<username>] [<classifier>...] [COMMAND]
 
                 DESCRIPTION
 
@@ -63,6 +67,11 @@ class DiagnosticsReportCommandTest {
 
                 OPTIONS
 
+                  -a, --uri, --address=<address>
+                                          Address of the DBMS to connect to, including the
+                                            scheme (e.g. bolt://localhost:7687 or bolt+ssc:
+                                            //localhost:7687). Defaults to an address derived
+                                            from the Neo4j configuration.
                       --additional-config=<file>
                                           Configuration file with additional configuration.
                       --database=<database>
@@ -77,8 +86,66 @@ class DiagnosticsReportCommandTest {
                                           Ignore disk full warning.
                                             Default: false
                       --list              List all available classifiers.
+                      --obfuscate-query-log[=true|false]
+                                          Obfuscate the literals of queries in the collected
+                                            (JSON) query log.
+                                            Default: false
+                  -p, --password=<password>
+                                          Password for connecting to the running DBMS. Required
+                                            when a classifier that needs a connection to a live
+                                            database is selected. Can be specified as the
+                                            NEO4J_PASSWORD environment variable.
                       --to-path=<path>    Destination directory for reports. Defaults to a
                                             system tmp directory.
-                      --verbose           Enable verbose output.""");
+                  -u, --username=<username>
+                                          Username for connecting to the running DBMS. Required
+                                            when a classifier that needs a connection to a live
+                                            database is selected. Can be specified as the
+                                            NEO4J_USERNAME environment variable.
+                      --verbose           Enable verbose output.
+                """);
+    }
+
+    @Test
+    void obfuscateQueryLogDefaultsToFalse(@TempDir Path confDir) {
+        assertThat(obfuscateQueryLogIn(config(confDir))).isFalse();
+    }
+
+    @Test
+    void obfuscateQueryLogOptionEnablesObfuscation(@TempDir Path confDir) {
+        assertThat(obfuscateQueryLogIn(config(confDir, "--obfuscate-query-log")))
+                .isTrue();
+    }
+
+    @Test
+    void settingControlsObfuscationWhenTheOptionIsNotGiven(@TempDir Path confDir) throws IOException {
+        writeSetting(confDir, true);
+
+        assertThat(obfuscateQueryLogIn(config(confDir))).isTrue();
+    }
+
+    @Test
+    void optionOverridesTheSetting(@TempDir Path confDir) throws IOException {
+        writeSetting(confDir, true);
+
+        assertThat(obfuscateQueryLogIn(config(confDir, "--obfuscate-query-log=false")))
+                .isFalse();
+    }
+
+    private static void writeSetting(Path confDir, boolean value) throws IOException {
+        Files.writeString(
+                confDir.resolve(Config.DEFAULT_CONFIG_FILE_NAME),
+                GraphDatabaseInternalSettings.log_queries_obfuscation_in_report_enabled.name() + "=" + value);
+    }
+
+    private static Config config(Path confDir, String... args) {
+        ExecutionContext ctx = new ExecutionContext(confDir, confDir);
+        DiagnosticsReportCommand command = new DiagnosticsReportCommand(ctx);
+        new CommandLine(command, new ContextInjectingFactory(ctx)).parseArgs(args);
+        return command.getConfig();
+    }
+
+    private static boolean obfuscateQueryLogIn(Config config) {
+        return config.get(GraphDatabaseInternalSettings.log_queries_obfuscation_in_report_enabled);
     }
 }

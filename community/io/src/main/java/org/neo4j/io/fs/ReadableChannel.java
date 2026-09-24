@@ -28,6 +28,13 @@ import java.nio.channels.ReadableByteChannel;
  */
 public interface ReadableChannel extends ReadableByteChannel, ChecksumReader, SeekableChannel {
     /**
+     * Indicates unimplemented, or unset content type for current channel entry
+     */
+    byte UNSPECIFIED_CONTENT_TYPE = -1;
+
+    long BASE_TERM = 0L;
+
+    /**
      * @return the next {@code byte} in this channel.
      * @throws IOException I/O error from channel.
      * @throws ReadPastEndException if not enough data was available.
@@ -86,4 +93,27 @@ public interface ReadableChannel extends ReadableByteChannel, ChecksumReader, Se
      * @throws ReadPastEndException if not enough data was available.
      */
     byte getVersion() throws IOException;
+
+    /**
+     * @return the append index from this channel.
+     * @throws IOException I/O error from channel.
+     * @throws ReadPastEndException if not enough data was available.
+     */
+    long getAppendIndex() throws IOException;
+
+    /**
+     * @return the content type from this channel. Channels may not implement
+     * a mechanism for setting/getting this and return UNSPECIFIED_CONTENT_TYPE instead.
+     * @throws IOException I/O error from channel.
+     * @throws ReadPastEndException if not enough data was available.
+     */
+    byte getContentType() throws IOException;
+
+    /**
+     * @return the current term from this channel. Channels may not implement
+     * a mechanism for setting/getting this and return BASE_TERM instead.
+     * @throws IOException I/O error from channel.
+     * @throws ReadPastEndException if not enough data was available.
+     */
+    long getTerm() throws IOException;
 }

@@ -38,9 +38,9 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.api.parallel.Resources;
 import org.neo4j.bolt.protocol.common.connector.connection.Connection;
+import org.neo4j.bolt.protocol.common.connector.transport.NioConnectorTransport;
 import org.neo4j.bolt.testing.client.BoltTestConnection;
 import org.neo4j.bolt.testing.client.SocketConnection;
-import org.neo4j.bolt.testing.messages.BoltDefaultWire;
 import org.neo4j.bolt.testing.messages.BoltWire;
 import org.neo4j.bolt.testing.sequence.RequestSequenceCollection;
 import org.neo4j.bolt.transport.Neo4jWithSocket;
@@ -61,7 +61,7 @@ import org.neo4j.test.extension.testdirectory.EphemeralTestDirectoryExtension;
 @Neo4jWithSocketExtension
 @ExtendWith(SuppressOutputExtension.class)
 @ResourceLock(Resources.SYSTEM_OUT)
-public class ResetFuzzIT {
+class ResetFuzzIT {
     private static final int TEST_EXECUTION_TIME = 2000;
 
     private static final String SHORT_QUERY_1 = "CREATE (n:Node {name: 'foo', occupation: 'bar'})";
@@ -80,25 +80,25 @@ public class ResetFuzzIT {
 
     private InetSocketAddress address;
 
-    private final BoltWire wire = new BoltDefaultWire();
+    private final BoltWire wire = BoltWire.latest();
 
     @BeforeEach
-    public void setup(TestInfo testInfo) throws IOException {
+    void setup(TestInfo testInfo) throws IOException {
         server.setGraphDatabaseFactory(getTestGraphDatabaseFactory());
         server.setConfigure(getSettingsFunction());
         server.init(testInfo);
-        address = (InetSocketAddress) server.lookupDefaultConnector().toSocketAddress();
+        address = server.lookupDefaultConnector().toSocketAddress();
     }
 
     @AfterEach
-    public void tearDown() {
+    void tearDown() {
         userLogProvider.print(System.out);
         internalLogProvider.print(System.out);
     }
 
     @Test
     @Timeout(value = 1, unit = TimeUnit.MINUTES)
-    public void shouldTerminateAutoCommitQuery() throws Exception {
+    void shouldTerminateAutoCommitQuery() throws Exception {
         var sequences = new RequestSequenceCollection()
                 .with(wire.run(SHORT_QUERY_1), wire.pull())
                 .with(wire.run(SHORT_QUERY_2), wire.discard())
@@ -109,7 +109,7 @@ public class ResetFuzzIT {
 
     @Test
     @Timeout(value = 1, unit = TimeUnit.MINUTES)
-    public void shouldTerminateLongRunningAutoCommitQuery() throws Exception {
+    void shouldTerminateLongRunningAutoCommitQuery() throws Exception {
         // It takes a while for kernel to notice the tx get killed.
         var sequences = new RequestSequenceCollection().with(wire.run(LONG_QUERY), wire.discard());
 
@@ -118,7 +118,7 @@ public class ResetFuzzIT {
 
     @Test
     @Timeout(value = 1, unit = TimeUnit.MINUTES)
-    public void shouldTerminateQueryInExplicitTransaction() throws Exception {
+    void shouldTerminateQueryInExplicitTransaction() throws Exception {
         var sequences = new RequestSequenceCollection()
                 .with(wire.begin(), wire.run(SHORT_QUERY_1), wire.pull(), wire.rollback())
                 .with(wire.begin(), wire.run(SHORT_QUERY_2), wire.pull(), wire.commit())
@@ -131,7 +131,7 @@ public class ResetFuzzIT {
 
     @Test
     @Timeout(value = 1, unit = TimeUnit.MINUTES)
-    public void shouldTerminateLongRunningQueryInExplicitTransaction() throws Exception {
+    void shouldTerminateLongRunningQueryInExplicitTransaction() throws Exception {
         var sequences =
                 new RequestSequenceCollection().with(wire.begin(), wire.run(LONG_QUERY), wire.pull(), wire.rollback());
 
@@ -154,7 +154,7 @@ public class ResetFuzzIT {
     }
 
     private BoltTestConnection connectAndAuthenticate() throws Exception {
-        var connection = new SocketConnection(address)
+        var connection = new SocketConnection(new NioConnectorTransport(), BoltWire.latest(), address)
                 .connect()
                 .sendDefaultProtocolVersion()
                 .send(wire.hello());

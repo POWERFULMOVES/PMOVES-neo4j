@@ -30,7 +30,6 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.dbms.api.DatabaseManagementService;
 import org.neo4j.graphdb.GraphDatabaseService;
 import org.neo4j.graphdb.Label;
@@ -49,13 +48,18 @@ import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.logging.AssertableLogProvider;
 import org.neo4j.storageengine.api.StorageEngine;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
-import org.neo4j.test.extension.EphemeralFileSystemExtension;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
+import org.neo4j.test.extension.testdirectory.EphemeralTestDirectoryExtension;
+import org.neo4j.test.utils.TestDirectory;
 
-@ExtendWith(EphemeralFileSystemExtension.class)
+@EphemeralTestDirectoryExtension
 class IndexStatisticsIT {
     private static final Label ALIEN = label("Alien");
     private static final String SPECIMEN = "specimen";
+
+    @Inject
+    private TestDirectory directory;
 
     @Inject
     private EphemeralFileSystemAbstraction fs;
@@ -74,6 +78,7 @@ class IndexStatisticsIT {
         managementService.shutdown();
     }
 
+    @SkipOnSpd(reason = "Gets the IndexStatisticsStore for the graphDb and asserts on size will be wrong")
     @Test
     void shouldRecoverIndexCountsBySamplingThemOnStartup() {
         // given some aliens in a database
@@ -111,7 +116,7 @@ class IndexStatisticsIT {
         assertThat(logProvider)
                 .forClass(IndexSamplingController.class)
                 .forLevel(DEBUG)
-                .containsMessages("Recovering index sampling for index %s", labelAndProperty);
+                .containsMessages("Recovering index sampling for index %s".formatted(labelAndProperty));
     }
 
     private int labelId(Label alien) {
@@ -169,7 +174,7 @@ class IndexStatisticsIT {
     }
 
     private void startDb() {
-        managementService = new TestDatabaseManagementServiceBuilder()
+        managementService = new TestDatabaseManagementServiceBuilder(directory.homePath())
                 .setInternalLogProvider(logProvider)
                 .setFileSystem(new UncloseableDelegatingFileSystemAbstraction(fs))
                 .setConfig(index_background_sampling_enabled, false)

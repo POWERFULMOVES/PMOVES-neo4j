@@ -29,7 +29,15 @@ import static org.eclipse.collections.impl.factory.Sets.immutable;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
 import static org.neo4j.index.internal.gbptree.DataTree.W_BATCHED_SINGLE_THREADED;
 import static org.neo4j.index.internal.gbptree.GBPTree.NO_HEADER_READER;
@@ -37,6 +45,7 @@ import static org.neo4j.index.internal.gbptree.GBPTreeStructure.visitState;
 import static org.neo4j.index.internal.gbptree.GBPTreeTestUtil.consistencyCheck;
 import static org.neo4j.index.internal.gbptree.SimpleLongLayout.longLayout;
 import static org.neo4j.io.fs.FileUtils.blockSize;
+import static org.neo4j.io.pagecache.PagedFile.PF_SHARED_READ_LOCK;
 import static org.neo4j.io.pagecache.PagedFile.PF_SHARED_WRITE_LOCK;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
@@ -49,6 +58,7 @@ import java.io.UncheckedIOException;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedList;
@@ -64,13 +74,16 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import org.apache.commons.lang3.mutable.MutableBoolean;
 import org.apache.commons.lang3.mutable.MutableLong;
 import org.apache.commons.lang3.mutable.MutableObject;
 import org.apache.commons.lang3.tuple.Pair;
+import org.eclipse.collections.api.block.function.primitive.LongToLongFunction;
 import org.eclipse.collections.api.factory.Sets;
 import org.eclipse.collections.api.set.ImmutableSet;
 import org.junit.jupiter.api.AfterEach;
@@ -80,61 +93,74 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.neo4j.function.ThrowingConsumer;
 import org.neo4j.index.internal.gbptree.MultiRootGBPTree.Monitor;
 import org.neo4j.io.ByteUnit;
+import org.neo4j.io.async.AsyncBlockAccessor;
 import org.neo4j.io.fs.EphemeralFileSystemAbstraction;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.DelegatingPageCache;
+import org.neo4j.io.pagecache.DelegatingPageSwapper;
 import org.neo4j.io.pagecache.DelegatingPagedFile;
+import org.neo4j.io.pagecache.IOController;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.PageCursor;
-import org.neo4j.io.pagecache.PageSwapper;
+import org.neo4j.io.pagecache.PageEvictionCallback;
 import org.neo4j.io.pagecache.PagedFile;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.impl.FileIsNotMappedException;
+import org.neo4j.io.pagecache.impl.muninn.EvictionBouncer;
+import org.neo4j.io.pagecache.impl.muninn.MuninnPageCache;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
+import org.neo4j.io.pagecache.impl.muninn.swapper.PageSwapper;
+import org.neo4j.io.pagecache.impl.muninn.swapper.PageSwapperFactory;
+import org.neo4j.io.pagecache.impl.muninn.swapper.SingleFilePageSwapperFactory;
+import org.neo4j.io.pagecache.impl.muninn.swapper.SwapperIdProvider;
+import org.neo4j.io.pagecache.segment.FileSegmentTracker;
+import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
 import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.io.pagecache.tracing.FlushEvent;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.io.pagecache.tracing.PageReferenceTranslator;
 import org.neo4j.io.pagecache.tracing.PinEvent;
+import org.neo4j.io.pagecache.tracing.async.SubmitEvent;
 import org.neo4j.io.pagecache.tracing.cursor.DefaultPageCursorTracer;
-import org.neo4j.kernel.lifecycle.LifeSupport;
+import org.neo4j.memory.EmptyMemoryTracker;
+import org.neo4j.scheduler.JobScheduler;
 import org.neo4j.test.Barrier;
 import org.neo4j.test.OtherThreadExecutor;
 import org.neo4j.test.Race;
 import org.neo4j.test.Race.ThrowingRunnable;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.LifeExtension;
 import org.neo4j.test.extension.RandomExtension;
 import org.neo4j.test.extension.pagecache.PageCacheSupportExtension;
-import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
+import org.neo4j.test.extension.testdirectory.EphemeralTestDirectoryExtension;
+import org.neo4j.test.scheduler.ThreadPoolJobScheduler;
 import org.neo4j.test.utils.PageCacheConfig;
 import org.neo4j.test.utils.TestDirectory;
 
-@TestDirectoryExtension
-@ExtendWith({RandomExtension.class, LifeExtension.class})
+@EphemeralTestDirectoryExtension
+@ExtendWith(RandomExtension.class)
 class GBPTreeTest {
     private static final Layout<MutableLong, MutableLong> layout = longLayout().build();
+    private final AsyncBlockAccessor asyncBlockAccessor = AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 
     @RegisterExtension
     static PageCacheSupportExtension pageCacheExtension =
             new PageCacheSupportExtension(config().withAccessChecks(true));
 
     @Inject
-    private FileSystemAbstraction fileSystem;
+    private EphemeralFileSystemAbstraction fileSystem;
 
     @Inject
     private TestDirectory testDirectory;
 
     @Inject
     private RandomSupport random;
-
-    @Inject
-    private LifeSupport lifeSupport;
 
     protected Path indexFile;
     private ExecutorService executor;
@@ -191,6 +217,60 @@ class GBPTreeTest {
     }
 
     @Test
+    void shouldWriteBiggerValueToExistingKey() throws IOException {
+        var layout = new SimpleByteArrayLayout(true);
+        try (var pageCache = createPageCache(PageCache.PAGE_SIZE);
+                var tree = new GBPTreeBuilder<>(pageCache, fileSystem, indexFile, layout).build()) {
+
+            // given a key value pair
+            try (var writer = tree.writer(NULL_CONTEXT)) {
+                var value = new RawBytes(new byte[100]);
+                writer.put(layout.key(0), value);
+            }
+
+            // when writing a bigger value to the key
+            try (var writer = tree.writer(NULL_CONTEXT)) {
+                var value = new RawBytes(new byte[142]);
+                writer.merge(layout.key(0), value, ValueMergers.overwrite());
+            }
+
+            // then should have the bigger value
+            try (var seeker = tree.seek(layout.key(0), layout.key(0), NULL_CONTEXT)) {
+                assertThat(seeker.next()).isTrue();
+                RawBytes value = seeker.value();
+                assertThat(value.bytes).hasSize(142);
+            }
+        }
+    }
+
+    @Test
+    void shouldWriteSmallerValueToExistingKey() throws IOException {
+        var layout = new SimpleByteArrayLayout(true);
+        try (var pageCache = createPageCache(PageCache.PAGE_SIZE);
+                var tree = new GBPTreeBuilder<>(pageCache, fileSystem, indexFile, layout).build()) {
+
+            // given a key value pair
+            try (var writer = tree.writer(NULL_CONTEXT)) {
+                var value = new RawBytes(new byte[100]);
+                writer.put(layout.key(0), value);
+            }
+
+            // when writing a smaller value to the key
+            try (var writer = tree.writer(NULL_CONTEXT)) {
+                var value = new RawBytes(new byte[42]);
+                writer.merge(layout.key(0), value, ValueMergers.overwrite());
+            }
+
+            // then should have the smaller value
+            try (var seeker = tree.seek(layout.key(0), layout.key(0), NULL_CONTEXT)) {
+                assertThat(seeker.next()).isTrue();
+                RawBytes value = seeker.value();
+                assertThat(value.bytes).hasSize(42);
+            }
+        }
+    }
+
+    @Test
     void shouldNeedRecreationIfNoCheckpointBeforeClose() throws Exception {
         try (PageCache pageCache = createPageCache(defaultPageSize)) {
             index(pageCache).build().close();
@@ -208,7 +288,7 @@ class GBPTreeTest {
     void shouldNotNeedRecreationIfCheckpointBeforeClose() throws Exception {
         try (PageCache pageCache = createPageCache(defaultPageSize);
                 var index = index(pageCache).build()) {
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
         }
 
         var monitor = new RecreationMonitor();
@@ -222,7 +302,11 @@ class GBPTreeTest {
     @Test
     void shouldNotHaveStoreFileIfFailedDuringConstructor() throws Exception {
         try (PageCache pageCache = createPageCache(defaultPageSize)) {
-            index(pageCache).with(new FailInConstructorMonitor()).build().close();
+            index(pageCache)
+                    .with(new FailInConstructorMonitor())
+                    .with(StructureWriteLog.EMPTY)
+                    .build()
+                    .close();
         } catch (Exception e) {
             // Ignore
         }
@@ -276,7 +360,7 @@ class GBPTreeTest {
         // GIVEN
         try (PageCache pageCache = createPageCache(defaultPageSize);
                 var index = index(pageCache).build()) {
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
         }
 
         // WHEN
@@ -292,7 +376,7 @@ class GBPTreeTest {
         // GIVEN
         try (PageCache pageCache = createPageCache(defaultPageSize);
                 var index = index(pageCache).build()) {
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
         }
 
         // WHEN
@@ -308,7 +392,7 @@ class GBPTreeTest {
         // GIVEN
         try (PageCache pageCache = createPageCache(defaultPageSize);
                 var index = index(pageCache).build()) {
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
         }
 
         // WHEN
@@ -342,7 +426,7 @@ class GBPTreeTest {
         int pageSize = 2 * defaultPageSize;
         try (PageCache pageCache = createPageCache(pageSize);
                 var index = index(pageCache).build()) {
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
         }
 
         // WHEN
@@ -362,7 +446,8 @@ class GBPTreeTest {
             index(pageCache).build().close();
 
             int payloadSize;
-            try (PagedFile pagedFile = pageCache.map(indexFile, pageSize, DEFAULT_DATABASE_NAME, getOpenOptions());
+            try (PagedFile pagedFile =
+                            pageCache.map(new StoreFile(indexFile), pageSize, DEFAULT_DATABASE_NAME, getOpenOptions());
                     PageCursor cursor = pagedFile.io(IdSpace.META_PAGE_ID, PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
                 payloadSize = pagedFile.payloadSize();
                 assertTrue(cursor.next());
@@ -388,7 +473,7 @@ class GBPTreeTest {
         try (PageCache pageCache = createPageCache(defaultPageSize)) {
             var builder = index(pageCache);
             try (var index = builder.build()) {
-                index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+                index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
             }
 
             assertThatThrownBy(
@@ -532,7 +617,7 @@ class GBPTreeTest {
         try (var controlledPageCache = createPageCache(defaultPageSize);
                 var index = index(controlledPageCache).build()) {
             assertThat(index.sizeInBytes()).isEqualTo(defaultPageSize * 5L);
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
 
             // WHEN
             try (var writer = index.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT)) {
@@ -549,8 +634,8 @@ class GBPTreeTest {
     @Test
     void shouldPutHeaderDataInCheckPoint() throws Exception {
         BiConsumer<GBPTree<MutableLong, MutableLong>, byte[]> beforeClose = (index, expected) -> {
-            ThrowingRunnable throwingRunnable =
-                    () -> index.checkpoint(cursor -> cursor.putBytes(expected), FileFlushEvent.NULL, NULL_CONTEXT);
+            ThrowingRunnable throwingRunnable = () -> index.checkpoint(
+                    cursor -> cursor.putBytes(expected), FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
             throwing(throwingRunnable).run();
         };
         verifyHeaderDataAfterClose(beforeClose);
@@ -560,12 +645,13 @@ class GBPTreeTest {
     void shouldCarryOverHeaderDataInCheckPoint() throws Exception {
         BiConsumer<GBPTree<MutableLong, MutableLong>, byte[]> beforeClose = (index, expected) -> {
             ThrowingRunnable throwingRunnable = () -> {
-                index.checkpoint(cursor -> cursor.putBytes(expected), FileFlushEvent.NULL, NULL_CONTEXT);
+                index.checkpoint(
+                        cursor -> cursor.putBytes(expected), FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
                 insert(index, 0, 1);
 
                 // WHEN
                 // Should carry over header data
-                index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+                index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
             };
             throwing(throwingRunnable).run();
         };
@@ -576,7 +662,8 @@ class GBPTreeTest {
     void shouldCarryOverHeaderDataOnDirtyClose() throws Exception {
         BiConsumer<GBPTree<MutableLong, MutableLong>, byte[]> beforeClose = (index, expected) -> {
             ThrowingRunnable throwingRunnable = () -> {
-                index.checkpoint(cursor -> cursor.putBytes(expected), FileFlushEvent.NULL, NULL_CONTEXT);
+                index.checkpoint(
+                        cursor -> cursor.putBytes(expected), FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
                 insert(index, 0, 1);
 
                 // No checkpoint
@@ -590,9 +677,12 @@ class GBPTreeTest {
     void shouldReplaceHeaderDataInNextCheckPoint() throws Exception {
         BiConsumer<GBPTree<MutableLong, MutableLong>, byte[]> beforeClose = (index, expected) -> {
             ThrowingRunnable throwingRunnable = () -> {
-                index.checkpoint(cursor -> cursor.putBytes(expected), FileFlushEvent.NULL, NULL_CONTEXT);
+                index.checkpoint(
+                        cursor -> cursor.putBytes(expected), FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
                 random.nextBytes(expected);
-                index.checkpoint(cursor -> cursor.putBytes(expected), FileFlushEvent.NULL, NULL_CONTEXT);
+                index.writer(NULL_CONTEXT).close();
+                index.checkpoint(
+                        cursor -> cursor.putBytes(expected), FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
             };
             throwing(throwingRunnable).run();
         };
@@ -610,11 +700,106 @@ class GBPTreeTest {
         // WHEN
         try (PageCache pageCache = createPageCache(defaultPageSize)) {
             try (var index = index(pageCache).build()) {
-                index.checkpoint(headerWriter, FileFlushEvent.NULL, NULL_CONTEXT);
+                index.checkpoint(headerWriter, FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
             }
 
             // THEN
             verifyHeader(pageCache, headerBytes);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void shouldSkipActualCheckpointIfNoChangesSinceLastCheckpointAndNoHeaderChange(boolean explicitlyWriteSameHeader)
+            throws IOException {
+        // GIVEN
+        try (var pageCache = createPageCache(defaultPageSize);
+                var index = index(pageCache).build()) {
+            try (var writer = index.writer(NULL_CONTEXT)) {
+                writer.put(new MutableLong(0), new MutableLong(1));
+            }
+            var firstCheckpointEvent = mockedFileFlushEventForCheckpoint();
+            Consumer<PageCursor> additionalHeaderDataWriter = cursor -> cursor.putInt(5);
+            index.checkpoint(additionalHeaderDataWriter, firstCheckpointEvent, asyncBlockAccessor, NULL_CONTEXT);
+            var firstTreeStates = extractTreeStates(pageCache, indexFile);
+            verify(firstCheckpointEvent, atLeastOnce()).startFlush(any());
+
+            // WHEN
+            var secondCheckpointEvent = mock(FileFlushEvent.class);
+            if (explicitlyWriteSameHeader) {
+                index.checkpoint(additionalHeaderDataWriter, secondCheckpointEvent, asyncBlockAccessor, NULL_CONTEXT);
+            } else {
+                index.checkpoint(secondCheckpointEvent, asyncBlockAccessor, NULL_CONTEXT);
+            }
+            var secondTreeStates = extractTreeStates(pageCache, indexFile);
+
+            // THEN
+            verifyNoInteractions(secondCheckpointEvent);
+            assertThat(secondTreeStates).isEqualTo(firstTreeStates);
+        }
+    }
+
+    @Test
+    void shouldDoActualCheckpointIfNoChangesSinceLastCheckpointButHasHeaderChange() throws IOException {
+        // GIVEN
+        try (var pageCache = createPageCache(defaultPageSize);
+                var index = index(pageCache).build()) {
+            try (var writer = index.writer(NULL_CONTEXT)) {
+                writer.put(new MutableLong(0), new MutableLong(1));
+            }
+            var firstCheckpointEvent = mockedFileFlushEventForCheckpoint();
+            index.checkpoint(cursor -> cursor.putInt(5), firstCheckpointEvent, asyncBlockAccessor, NULL_CONTEXT);
+            var firstTreeStates = extractTreeStates(pageCache, indexFile);
+            verify(firstCheckpointEvent, atLeastOnce()).startFlush(any());
+
+            // WHEN
+            var secondCheckpointEvent = mockedFileFlushEventForCheckpoint();
+            index.checkpoint(cursor -> cursor.putInt(6), secondCheckpointEvent, asyncBlockAccessor, NULL_CONTEXT);
+            var secondTreeStates = extractTreeStates(pageCache, indexFile);
+
+            // THEN
+            verify(secondCheckpointEvent, atLeastOnce()).startFlush(any());
+            assertThat(secondTreeStates).isNotEqualTo(firstTreeStates);
+        }
+    }
+
+    @Test
+    void shouldSkipActualFirstCheckpointAfterCleanStartup() throws IOException {
+        // GUVEN
+        try (var pageCache = createPageCache(defaultPageSize)) {
+            try (var index = index(pageCache).build()) {
+                index.writer(NULL_CONTEXT).close();
+                index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
+            }
+
+            // WHEN
+            try (var index = index(pageCache).build()) {
+                var checkpointEvent = mock(FileFlushEvent.class);
+                index.checkpoint(checkpointEvent, asyncBlockAccessor, NULL_CONTEXT);
+
+                // THEN
+                verifyNoInteractions(checkpointEvent);
+            }
+        }
+    }
+
+    @Test
+    void shouldDoActualFirstCheckpointAfterDirtyStartup() throws IOException {
+        // GUVEN
+        try (var pageCache = createPageCache(defaultPageSize)) {
+            try (var index = index(pageCache).build()) {
+                index.writer(NULL_CONTEXT).close();
+                // no checkpoint
+            }
+
+            // WHEN
+            try (var index = index(pageCache).build()) {
+                var checkpointEvent = mockedFileFlushEventForCheckpoint();
+                index.checkpoint(checkpointEvent, asyncBlockAccessor, NULL_CONTEXT);
+
+                // THEN
+                verify(checkpointEvent, atLeastOnce()).startFlush(any());
+            }
         }
     }
 
@@ -626,7 +811,7 @@ class GBPTreeTest {
         Consumer<PageCursor> headerWriter = pc -> pc.putBytes(expectedBytes);
         try (PageCache pageCache = createPageCache(defaultPageSize)) {
             try (var index = index(pageCache).build()) {
-                index.checkpoint(headerWriter, FileFlushEvent.NULL, NULL_CONTEXT);
+                index.checkpoint(headerWriter, FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
             }
 
             // WHEN
@@ -636,7 +821,7 @@ class GBPTreeTest {
             } while (Arrays.equals(expectedBytes, fraudulentBytes));
 
             try (var index = index(pageCache).build()) {
-                index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+                index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
             }
 
             // THEN
@@ -651,7 +836,7 @@ class GBPTreeTest {
         Consumer<PageCursor> headerWriter = pc -> pc.putBytes(initialHeader);
         try (PageCache pageCache = createPageCache(defaultPageSize)) {
             try (var index = index(pageCache).build()) {
-                index.checkpoint(headerWriter, FileFlushEvent.NULL, NULL_CONTEXT);
+                index.checkpoint(headerWriter, FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
             }
             verifyHeader(pageCache, initialHeader);
 
@@ -661,7 +846,7 @@ class GBPTreeTest {
             random.nextBytes(newHeader);
             GBPTree.overwriteHeader(
                     pageCache,
-                    indexFile,
+                    new StoreFile(indexFile),
                     pc -> pc.putBytes(newHeader),
                     DEFAULT_DATABASE_NAME,
                     NULL_CONTEXT,
@@ -693,7 +878,7 @@ class GBPTreeTest {
             Consumer<PageCursor> headerWriter = pc -> pc.putBytes("failed".getBytes());
             try (GBPTree<MutableLong, MutableLong> index =
                     index(pageCache).with(RecoveryCleanupWorkCollector.ignore()).build()) {
-                index.checkpoint(headerWriter, FileFlushEvent.NULL, NULL_CONTEXT);
+                index.checkpoint(headerWriter, FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
             }
 
             verifyHeader(pageCache, "failed".getBytes());
@@ -719,7 +904,13 @@ class GBPTreeTest {
 
         // WHEN
         // Read separate
-        GBPTree.readHeader(pageCache, indexFile, headerReader, DEFAULT_DATABASE_NAME, NULL_CONTEXT, getOpenOptions());
+        GBPTree.readHeader(
+                pageCache,
+                new StoreFile(indexFile),
+                headerReader,
+                DEFAULT_DATABASE_NAME,
+                NULL_CONTEXT,
+                getOpenOptions());
 
         assertEquals(expectedHeader.length, length.get());
         assertArrayEquals(expectedHeader, readHeader);
@@ -732,7 +923,7 @@ class GBPTreeTest {
         try (PageCache pageCache = createPageCache(defaultPageSize)) {
             assertThatThrownBy(() -> GBPTree.readHeader(
                             pageCache,
-                            doesNotExist,
+                            new StoreFile(doesNotExist),
                             NO_HEADER_READER,
                             DEFAULT_DATABASE_NAME,
                             NULL_CONTEXT,
@@ -747,7 +938,7 @@ class GBPTreeTest {
         try (PageCache pageCache = createPageCache(defaultPageSize)) {
             pageCache
                     .map(
-                            indexFile,
+                            new StoreFile(indexFile),
                             pageCache.pageSize(),
                             DEFAULT_DATABASE_NAME,
                             getOpenOptions().newWith(CREATE))
@@ -755,7 +946,7 @@ class GBPTreeTest {
 
             assertThatThrownBy(() -> GBPTree.readHeader(
                             pageCache,
-                            indexFile,
+                            new StoreFile(indexFile),
                             NO_HEADER_READER,
                             DEFAULT_DATABASE_NAME,
                             NULL_CONTEXT,
@@ -774,7 +965,7 @@ class GBPTreeTest {
 
             assertThatThrownBy(() -> GBPTree.readHeader(
                             pageCache,
-                            indexFile,
+                            new StoreFile(indexFile),
                             NO_HEADER_READER,
                             DEFAULT_DATABASE_NAME,
                             NULL_CONTEXT,
@@ -798,7 +989,7 @@ class GBPTreeTest {
 
             assertThatThrownBy(() -> GBPTree.readHeader(
                             pageCache,
-                            indexFile,
+                            new StoreFile(indexFile),
                             NO_HEADER_READER,
                             DEFAULT_DATABASE_NAME,
                             NULL_CONTEXT,
@@ -816,7 +1007,7 @@ class GBPTreeTest {
         // WHEN
         try (PageCache pageCache = createPageCache(defaultPageSize);
                 GBPTree<MutableLong, MutableLong> index = index(pageCache).build()) {
-            index.checkpoint(headerWriter, FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(headerWriter, FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
             byte[] readHeader = new byte[headerBytes.length];
             AtomicInteger length = new AtomicInteger();
             Header.Reader headerReader = headerData -> {
@@ -824,7 +1015,12 @@ class GBPTreeTest {
                 headerData.get(readHeader);
             };
             GBPTree.readHeader(
-                    pageCache, indexFile, headerReader, DEFAULT_DATABASE_NAME, NULL_CONTEXT, getOpenOptions());
+                    pageCache,
+                    new StoreFile(indexFile),
+                    headerReader,
+                    DEFAULT_DATABASE_NAME,
+                    NULL_CONTEXT,
+                    getOpenOptions());
 
             // THEN
             assertEquals(headerBytes.length, length.get());
@@ -856,7 +1052,7 @@ class GBPTreeTest {
         try (var pageCache = createPageCache(256);
                 var index = index(pageCache).with(monitor).build();
                 var t2 = new OtherThreadExecutor("T2")) {
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
             var data = new MutableLong();
             try (var writer = index.writer(NULL_CONTEXT)) {
                 for (var i = 0; i < numInitialChanges; i++) {
@@ -869,7 +1065,7 @@ class GBPTreeTest {
             var checkpoint = t2.executeDontWait(() -> {
                 var pageCacheTracer = new DefaultPageCacheTracer(true);
                 var flushEvent = new CheckpointSpecificFileFlushEvent(pageCacheTracer);
-                index.checkpoint(flushEvent, NULL_CONTEXT);
+                index.checkpoint(flushEvent, asyncBlockAccessor, NULL_CONTEXT);
                 return flushEvent;
             });
             barrier.await();
@@ -883,7 +1079,7 @@ class GBPTreeTest {
 
             // then
             var flushEvent = checkpoint.get();
-            assertThat(flushEvent.flushEvents.size()).isEqualTo(3);
+            assertThat(flushEvent.flushEvents).hasSize(3);
             var firstFlush = flushEvent.flushEvents.get(0);
             var secondFlush = flushEvent.flushEvents.get(1);
             var thirdFlush = flushEvent.flushEvents.get(2);
@@ -908,7 +1104,8 @@ class GBPTreeTest {
 
             // WHEN
             monitor.enabled = true;
-            Future<?> checkpoint = executor.submit(throwing(() -> index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT)));
+            Future<?> checkpoint = executor.submit(
+                    throwing(() -> index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT)));
             monitor.barrier.awaitUninterruptibly();
             // now we're in the smack middle of a checkpoint
             Future<?> writerClose =
@@ -938,13 +1135,30 @@ class GBPTreeTest {
                 }
             }));
             barrier.awaitUninterruptibly();
-            Future<?> checkpoint = executor.submit(throwing(() -> index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT)));
+            Future<?> checkpoint = executor.submit(
+                    throwing(() -> index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT)));
             shouldWait(checkpoint);
 
             // THEN
             barrier.release();
             checkpoint.get();
             write.get();
+        }
+    }
+
+    @Test
+    void checkPointShouldForceChannelTwice() throws IOException {
+        // GIVEN
+        var forceCountingSwapper = new ForceCountingSwapperFactory();
+        try (JobScheduler jobScheduler = new ThreadPoolJobScheduler();
+                PageCache pageCache = new MuninnPageCache(
+                        fileSystem,
+                        jobScheduler,
+                        MuninnPageCache.forPages(1_000).swapperFactory(forceCountingSwapper));
+                GBPTree<MutableLong, MutableLong> index = index(pageCache).build()) {
+            forceCountingSwapper.reset();
+            index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
+            assertThat(forceCountingSwapper.count.get()).isEqualTo(2);
         }
     }
 
@@ -986,8 +1200,9 @@ class GBPTreeTest {
             // THEN
             write.get();
             close.get();
-            assertTrue(
-                    writerError.get() instanceof FileIsNotMappedException,
+            assertInstanceOf(
+                    FileIsNotMappedException.class,
+                    writerError.get(),
                     "Writer should not be able to acquired after close");
         }
     }
@@ -1032,7 +1247,8 @@ class GBPTreeTest {
 
             // WHEN
             monitor.enabled = true;
-            Future<?> checkpoint = executor.submit(throwing(() -> index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT)));
+            Future<?> checkpoint = executor.submit(
+                    throwing(() -> index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT)));
             monitor.barrier.awaitUninterruptibly();
             // now we're in the smack middle of a checkpoint
             Future<?> close = executor.submit(throwing(index::close));
@@ -1060,7 +1276,7 @@ class GBPTreeTest {
             try (Writer<MutableLong, MutableLong> writer = index.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT)) {
                 writer.put(new MutableLong(1L), new MutableLong(2L));
             }
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
         }
         assertCleanOnStartup(true);
     }
@@ -1096,7 +1312,8 @@ class GBPTreeTest {
             monitor.barrier.awaitUninterruptibly();
 
             // THEN
-            Future<?> checkpoint = executor.submit(throwing(() -> index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT)));
+            Future<?> checkpoint = executor.submit(
+                    throwing(() -> index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT)));
             shouldWait(checkpoint);
 
             monitor.barrier.release();
@@ -1120,7 +1337,8 @@ class GBPTreeTest {
             monitor.barrier.awaitUninterruptibly();
 
             // THEN
-            Future<?> checkpoint = executor.submit(throwing(() -> index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT)));
+            Future<?> checkpoint = executor.submit(
+                    throwing(() -> index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT)));
             shouldWait(checkpoint);
 
             monitor.barrier.release();
@@ -1308,7 +1526,7 @@ class GBPTreeTest {
 
     @Test
     void checkpointMustRecognizeFailedCleaning() throws Exception {
-        mustRecognizeFailedCleaning(index -> index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT));
+        mustRecognizeFailedCleaning(index -> index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT));
     }
 
     private void mustRecognizeFailedCleaning(ThrowingConsumer<GBPTree<MutableLong, MutableLong>, IOException> operation)
@@ -1366,7 +1584,7 @@ class GBPTreeTest {
             try (Writer<MutableLong, MutableLong> writer = index.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT)) {
                 writer.put(new MutableLong(0), new MutableLong(1));
             }
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
             assertEquals(1, checkpointCounter.count());
         }
 
@@ -1384,7 +1602,7 @@ class GBPTreeTest {
                 GBPTree<MutableLong, MutableLong> index =
                         index(pageCache).with(checkpointCounter).build()) {
             checkpointCounter.reset();
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
 
             // THEN
             assertEquals(1, checkpointCounter.count());
@@ -1423,7 +1641,7 @@ class GBPTreeTest {
             insert(index, key, value);
 
             // WHEN
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
         }
 
         // THEN
@@ -1444,7 +1662,7 @@ class GBPTreeTest {
         // GIVEN
         try (PageCache pageCache = createPageCache(defaultPageSize);
                 GBPTree<MutableLong, MutableLong> index = index(pageCache).build()) {
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
             insert(index, 0, 1);
 
             // no checkpoint
@@ -1510,7 +1728,7 @@ class GBPTreeTest {
                 GBPTree<MutableLong, MutableLong> index = index(pageCache).build()) {
             insert(index, 0, 1);
 
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
         }
 
         // WHEN
@@ -1528,7 +1746,7 @@ class GBPTreeTest {
         // GIVEN
         try (PageCache pageCache = createPageCache(defaultPageSize);
                 GBPTree<MutableLong, MutableLong> index = index(pageCache).build()) {
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
             insert(index, 0, 1);
 
             // no checkpoint
@@ -1553,7 +1771,7 @@ class GBPTreeTest {
             EphemeralFileSystemAbstraction snapshot;
             try (GBPTree<MutableLong, MutableLong> index =
                     index(pageCache).with(ephemeralFs).build()) {
-                index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+                index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
                 insert(index, 0, 1);
 
                 // WHEN
@@ -1576,7 +1794,7 @@ class GBPTreeTest {
         // GIVEN
         try (PageCache pageCache = createPageCache(defaultPageSize);
                 GBPTree<MutableLong, MutableLong> index = index(pageCache).build()) {
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
             insert(index, 0, 1);
 
             // No checkpoint
@@ -1599,7 +1817,7 @@ class GBPTreeTest {
                 GBPTree<MutableLong, MutableLong> index = index(pageCache).build()) {
             insert(index, 0, 1);
 
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
         }
 
         // WHEN
@@ -1619,12 +1837,15 @@ class GBPTreeTest {
         // GIVEN
         try (PageCache specificPageCache = createPageCache(defaultPageSize)) {
             try (var index = index(specificPageCache).build()) {
-                index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+                index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
             }
 
             // a tree state pointing to root with valid successor
             try (PagedFile pagedFile = specificPageCache.map(
-                            indexFile, specificPageCache.pageSize(), DEFAULT_DATABASE_NAME, getOpenOptions());
+                            new StoreFile(indexFile),
+                            specificPageCache.pageSize(),
+                            DEFAULT_DATABASE_NAME,
+                            getOpenOptions());
                     PageCursor cursor = pagedFile.io(0, PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
                 Pair<TreeState, TreeState> treeStates =
                         TreeStatePair.readStatePages(cursor, IdSpace.STATE_PAGE_A, IdSpace.STATE_PAGE_B);
@@ -1851,9 +2072,7 @@ class GBPTreeTest {
             // When seek end up in this corrupt child we should eventually fail with a tree inconsistency exception
             // even if we have multiple seeker that traverse different part of the tree and both get stuck in start from
             // root loop.
-            ExecutorService executor = null;
-            try {
-                executor = Executors.newFixedThreadPool(2);
+            try (var executor = Executors.newFixedThreadPool(2)) {
                 CountDownLatch go = new CountDownLatch(2);
                 Future<Object> execute1 = executor.submit(() -> {
                     go.countDown();
@@ -1877,10 +2096,6 @@ class GBPTreeTest {
 
                 assertFutureFailsWithTreeInconsistencyException(execute1);
                 assertFutureFailsWithTreeInconsistencyException(execute2);
-            } finally {
-                if (executor != null) {
-                    executor.shutdown();
-                }
             }
         }
     }
@@ -1889,7 +2104,10 @@ class GBPTreeTest {
     void mustFailGracefullyIfFileNotExistInReadOnlyMode() {
         // given
         try (PageCache pageCache = createPageCache(defaultPageSize)) {
-            assertThatThrownBy(() -> index(pageCache).readOnly().build())
+            assertThatThrownBy(() -> index(pageCache)
+                            .with(StructureWriteLog.EMPTY)
+                            .readOnly()
+                            .build())
                     .isInstanceOf(TreeFileNotFoundException.class)
                     .hasMessageContaining("Can not create new tree file")
                     .hasMessageContaining(indexFile.toAbsolutePath().toString());
@@ -2005,7 +2223,8 @@ class GBPTreeTest {
     }
 
     private void corruptTheChild(PageCache pageCache, long corruptChild) throws IOException {
-        try (PagedFile pagedFile = pageCache.map(indexFile, defaultPageSize, DEFAULT_DATABASE_NAME, getOpenOptions());
+        try (PagedFile pagedFile = pageCache.map(
+                        new StoreFile(indexFile), defaultPageSize, DEFAULT_DATABASE_NAME, getOpenOptions());
                 PageCursor cursor = pagedFile.io(0, PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
             assertTrue(cursor.next(corruptChild));
             assertTrue(TreeNodeUtil.isLeaf(cursor));
@@ -2113,7 +2332,7 @@ class GBPTreeTest {
                     }
                     assertFalse(seek.next());
                 }
-                index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+                index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
             }
         }
     }
@@ -2123,7 +2342,7 @@ class GBPTreeTest {
         // given
         try (var pageCache = createPageCache(defaultPageSize)) {
             try (var tree = index(pageCache).build()) {
-                tree.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+                tree.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
             }
 
             // when
@@ -2141,7 +2360,7 @@ class GBPTreeTest {
         // given
         try (var pageCache = createPageCache(defaultPageSize)) {
             try (var tree = index(pageCache).build()) {
-                tree.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+                tree.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
             }
 
             // when
@@ -2157,19 +2376,339 @@ class GBPTreeTest {
         // given
         try (var pageCache = createPageCache(defaultPageSize)) {
             try (var tree = index(pageCache).build()) {
-                tree.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+                tree.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
             }
 
             // when
             var stateBeforeOpenReadOnly = captureTreeState(pageCache);
             try (var tree = index(pageCache).readOnly().build()) {
-                tree.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+                tree.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
             }
 
             // then
             var stateAfterOpenReadOnly = captureTreeState(pageCache);
             assertThat(stateAfterOpenReadOnly).isEqualTo(stateBeforeOpenReadOnly);
         }
+    }
+
+    @Test
+    void shouldCloseResourcesEvenOnCloseFailure() throws IOException {
+        // given
+        var structureWriteLog = mock(StructureWriteLog.class);
+        try (var pageCache = createPageCache(defaultPageSize)) {
+            boolean errorClosingTree = false;
+            try (var tree = index(pageCache).with(structureWriteLog).build()) {
+                // when Intentional messing about by closing the page cache before closing the tree
+                var backingMappedFile =
+                        pageCache.map(new StoreFile(indexFile), pageCache.pageSize(), DEFAULT_DATABASE_NAME);
+                // a cheeky way of finding the mapped file backing this tree and closing it
+                // - once for the mapping we just did, and
+                // - once for the "actual" mapping that the tree did
+                backingMappedFile.close();
+                backingMappedFile.close();
+            } catch (IllegalStateException e) {
+                errorClosingTree = true;
+            }
+            assertThat(errorClosingTree).isTrue();
+        }
+
+        // then
+        verify(structureWriteLog).close();
+    }
+
+    @Test
+    void shouldBumpUnstableGenerationOnOpenInReadOnlyMode() throws Exception {
+        FileSystemAbstraction snapshot;
+        AtomicBoolean end = new AtomicBoolean();
+        AtomicBoolean checkpointed = new AtomicBoolean();
+        try (var pageCache = createPageCache(defaultPageSize);
+                var executor = Executors.newFixedThreadPool(2);
+                var tree = index(pageCache).build()) {
+            // given
+            // First Checkpoint to have a stable generation.
+            tree.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
+
+            // Thread that continuously writes to the tree, until stopped.
+            var writes = executor.submit(() -> {
+                while (!end.get()) {
+                    try (var writer = tree.writer(NULL_CONTEXT)) {
+                        var value = random.nextInt(100);
+                        if (checkpointed.get()) {
+                            // After the checkpoint we write other values, to assert that
+                            // no post-checkpoint values are observable.
+                            value += 100;
+                        }
+                        writer.put(new MutableLong(random.nextInt(100)), new MutableLong(value));
+                    }
+                }
+                return null;
+            });
+
+            // Let it run for a while
+            Thread.sleep(500);
+            // Second checkpoint
+            tree.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
+            checkpointed.set(true);
+
+            // Now to the problem that this test is here to assert we don't run into:
+            // The root tree node A got a successor B where A was put on the freelist.
+            // Then after the second checkpoint B wants to create a new successor and grabs A from the freelist
+            // When A is reused it's zapped (cleared w/ all-zeros). However, if we can make it so that
+            // B is flushed to disk, but not A - then when starting up we'd have A -> B -> A, creating
+            // a successor loop of sorts.
+            // And the final piece of the puzzle was that the unstable generation wasn't bumped when opening
+            // the tree in read-only mode so the Seeker couldn't recognize that it was reading a crash-generation
+            // and would therefor get stuck in the A -> B -> A successor loop.
+            //
+            // The "otherWrites" below will (quite deterministically) make it so that B gets evicted, but not A
+            var otherWrites = executor.submit(() -> {
+                try (var pagedFile = pageCache.map(
+                        new StoreFile(testDirectory.file("other")),
+                        defaultPageSize,
+                        "test",
+                        Sets.immutable.of(CREATE, StandardOpenOption.WRITE))) {
+                    try (var cursor = pagedFile.io(0, PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
+                        for (long i = 0; !end.get(); i++) {
+                            cursor.next(i % pageCache.maxCachedPages());
+                            cursor.putLong(0);
+                        }
+                    }
+                }
+                return null;
+            });
+            // Let both the `writes` and `otherStuff` run for a while.
+            // `writes` will keep writing to A, so it keeps being most-recently-used.
+            // `otherStuff` will write to many pages in the page cache and evict everything but A.
+            Thread.sleep(500);
+
+            // Simulate a crash
+            snapshot = fileSystem.snapshot();
+            end.set(true);
+            writes.get();
+            otherWrites.get();
+        }
+
+        // when open the crashed tree in read-only mode
+        try (var pageCache =
+                PageCacheSupportExtension.getPageCache(snapshot, config().withPageSize(defaultPageSize)); ) {
+            try (var tree = new GBPTreeBuilder<SingleRoot, MutableLong, MutableLong>(
+                            pageCache, snapshot, indexFile, layout)
+                    .with(getOpenOptions())
+                    .readOnly()
+                    .build()) {
+                try (var seek = tree.seek(new MutableLong(0), new MutableLong(Long.MAX_VALUE), NULL_CONTEXT)) {
+                    // then we should only see the values written pre-checkpoint.
+                    int counter = 0;
+                    while (seek.next()) {
+                        counter++;
+                        assertThat(seek.value().longValue()).isLessThan(100);
+                    }
+                    assertThat(counter).isGreaterThan(0);
+                }
+            }
+        }
+    }
+
+    @Test
+    void shouldShrinkFileSizeDuringCompactionAfterDeletingSomeData() throws IOException {
+        var reportSaysFileShrunk = new AtomicBoolean();
+        var monitor = new Monitor.Adaptor() {
+            @Override
+            public void checkpointCompleted(CompactionReport compactionReport) {
+                if (compactionReport.shrunkFile()) {
+                    reportSaysFileShrunk.set(true);
+                }
+            }
+        };
+        try (var pageCache = createPageCache(defaultPageSize);
+                var tree = index(pageCache).with(monitor).build()) {
+            // given
+            try (var writer = tree.writer(NULL_CONTEXT)) {
+                for (int i = 0; i < 200_000; i++) {
+                    writer.put(new MutableLong(i), new MutableLong(i));
+                }
+            }
+            try (var writer = tree.writer(NULL_CONTEXT)) {
+                for (int i = 0; i < 200_000; i++) {
+                    writer.remove(new MutableLong(i));
+                }
+            }
+
+            // when
+            long sizeBefore = tree.sizeInBytes();
+            for (int i = 0; i < 2; i++) {
+                tree.compact(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
+            }
+
+            // then
+            long sizeAfter = tree.sizeInBytes();
+            assertThat(sizeAfter).isLessThan(sizeBefore);
+            assertThat(reportSaysFileShrunk.get()).isTrue();
+        }
+    }
+
+    @Test
+    void shouldAvoidLotsOfEagerFlushingInternalNodesForWriteOperationsDuringCheckpoint() throws Exception {
+        // given
+        var barrier = new Barrier.Control();
+        var barrierEnabled = new AtomicBoolean(false);
+        var monitor = new Monitor.Adaptor() {
+            @Override
+            public void checkpointStarted() {
+                if (barrierEnabled.get()) {
+                    barrier.reached();
+                }
+            }
+        };
+        var tracer = new DefaultPageCacheTracer();
+        try (var pageCache =
+                        createPageCache(config().withPageSize(defaultPageSize).withTracer(tracer));
+                var index = index(pageCache).with(monitor).with(tracer).build()) {
+            // Produces a tree of depth:2
+            int numInitialKeys = 100_001;
+            for (int i = 0; i < numInitialKeys; i++) {
+                insert(index, i, i);
+            }
+            index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
+            // cheat a little and flush the "accidental" pages from creating a successor and updating the surroundings
+            long firstKey = 0;
+            long lastKey = numInitialKeys - 1;
+            insert(index, 0, 1);
+            insert(index, lastKey, lastKey + 1);
+            pageCache.flush(DatabaseFlushEvent.NULL);
+
+            long flushesBeforeBarrier = tracer.flushes();
+
+            // when letting another thread do a checkpoint of this tree, and make it take a long time
+            try (var t2 = new OtherThreadExecutor("slow checkpoint thread")) {
+                // a fake write just so that checkpoint won't be skipped
+                barrierEnabled.set(true);
+                var checkpointFuture = t2.executeDontWait(() -> {
+                    index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
+                    return null;
+                });
+
+                // now during the checkpoint, go and change lots of values
+                barrier.await();
+                int numAdditionalWrites = 100;
+                try (var writer = index.writer(NULL_CONTEXT)) {
+                    for (int i = 0; i < numAdditionalWrites; i++) {
+                        // alternate updating the first and the last key, to maximize internal cursor movement
+                        long key = i % 2 == 0 ? firstKey : lastKey;
+                        insert(writer, key, numInitialKeys + i);
+                    }
+                }
+                barrier.release();
+
+                // then
+                checkpointFuture.get();
+                long flushesAfterBarrier = tracer.flushes();
+                assertThat(flushesAfterBarrier - flushesBeforeBarrier).isEqualTo(numAdditionalWrites);
+            }
+        }
+    }
+
+    @Test
+    void shouldLetSeekCursorContinueReadingAfterOutOfBounds() throws Exception {
+        // given
+        try (var pageCache = createPageCache(config().withPageSize(defaultPageSize));
+                var index = index(pageCache).build()) {
+            // [xxxTTTTTTTTTTTTTTTTTT] or similar
+            int numInitialKeys = 200_000;
+            insertRange(index, 0, numInitialKeys, i -> i);
+            index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
+
+            // [xxx__________________TTTTTTTTTTTTTTTTTT] or similar
+            removeRange(index, 0, numInitialKeys);
+            insertRange(index, 0, numInitialKeys, i -> i);
+            index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
+            int numRemovedKeys = numInitialKeys / 3;
+            // [xxx________________________TTTTTTTTTTTT] or similar
+            removeRange(index, 0, numRemovedKeys);
+            index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
+
+            // when/then
+            AtomicBoolean compactionCompleted = new AtomicBoolean();
+            LongAdder numCompletedSeeks = new LongAdder();
+            int numSeekerThreads = 9;
+            Race race = new Race()
+                    .withEndCondition(() -> compactionCompleted.get() && numCompletedSeeks.sum() >= numSeekerThreads)
+                    .withRandomStartDelays();
+            race.addContestants(
+                    numSeekerThreads,
+                    c -> throwing(() -> {
+                        // Starting state of the Seeker
+                        // [xxx________________________TTTTTTTTTTTT] or similar
+                        //                               ^ Seeker is here somewhere
+                        // <Seeker sleeping a bit while potentially compaction runs>
+                        // [xxxTTTTTTTTTTTT] or similar
+                        //                                  ^ Seeker is still out here somewhere
+
+                        // We'd like to specifically tease out a few variants of this behavior primarily:
+                        // - traverseToTargetLevel: sleep in Monitor#internalNode()/leafNode()
+                        // - next (going to next sibling): sleep in Monitor#sibling()
+                        // - prepareToStartFromRoot (a bit meta, but still): sleep in Monitor#restartFromRoot()
+                        int variant = c % 3;
+                        var monitor = outOfBoundsTeasingMonitor(variant, compactionCompleted);
+                        try (var seeker = ((SeekCursor<MutableLong, MutableLong>) index.seek(
+                                        new MutableLong(numRemovedKeys), new MutableLong(numInitialKeys), NULL_CONTEXT))
+                                .withMonitor(monitor)) {
+                            int count = numInitialKeys - numRemovedKeys;
+                            for (int i = 0; i < count; i++) {
+                                assertThat(seeker.next()).isTrue();
+                                assertThat(seeker.key().longValue()).isEqualTo(numRemovedKeys + i);
+                                assertThat(seeker.value().longValue()).isEqualTo(numRemovedKeys + i);
+                            }
+                            assertThat(seeker.next()).isFalse();
+                            numCompletedSeeks.increment();
+                        }
+                    }));
+            race.addContestant(
+                    throwing(() -> {
+                        insertRange(index, numRemovedKeys, numInitialKeys, i -> i);
+                        index.compact(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
+                        compactionCompleted.set(true);
+                    }),
+                    1);
+            race.goUnchecked();
+        }
+    }
+
+    private static SeekCursor.Monitor outOfBoundsTeasingMonitor(int variant, AtomicBoolean compactionCompleted) {
+        return new SeekCursor.Monitor() {
+            @Override
+            public void internalNode(int depth, int keyCount) {
+                sleepIfVariant(0);
+            }
+
+            @Override
+            public void leafNode(int depth, int keyCount) {
+                sleepIfVariant(0);
+            }
+
+            @Override
+            public void sibling() {
+                sleepIfVariant(1);
+            }
+
+            @Override
+            public void restartFromRoot() {
+                sleepIfVariant(2);
+            }
+
+            private void sleepIfVariant(int triggerOnVariant) {
+                if (triggerOnVariant == variant && !compactionCompleted.get()) {
+                    try {
+                        // Large enough so that most of the seeker's time is spent here in this delay
+                        // right before the interesting "goTo" operation happens after it.
+                        Thread.sleep(500);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException(e);
+                    }
+                }
+            }
+        };
     }
 
     private Pair<TreeState, TreeState> captureTreeState(PageCache pageCache) throws IOException {
@@ -2227,9 +2766,9 @@ class GBPTreeTest {
     private PageCache pageCacheThatThrowExceptionWhenToldTo(final IOException e, final AtomicBoolean throwOnNextIO) {
         return new DelegatingPageCache(createPageCache(defaultPageSize)) {
             @Override
-            public PagedFile map(Path path, int pageSize, String databaseName, ImmutableSet<OpenOption> openOptions)
+            public PagedFile map(StoreFile storeFile, String databaseName, ImmutableSet<OpenOption> openOptions)
                     throws IOException {
-                return new DelegatingPagedFile(super.map(path, pageSize, databaseName, openOptions)) {
+                return new DelegatingPagedFile(super.map(storeFile, databaseName, openOptions)) {
                     @Override
                     public PageCursor io(long pageId, int pf_flags, CursorContext context) throws IOException {
                         maybeThrow();
@@ -2237,9 +2776,17 @@ class GBPTreeTest {
                     }
 
                     @Override
-                    public void flushAndForce(FileFlushEvent flushEvent) throws IOException {
+                    public void flush(FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor)
+                            throws IOException {
                         maybeThrow();
-                        super.flushAndForce(flushEvent);
+                        super.flush(flushEvent, asyncBlockAccessor);
+                    }
+
+                    @Override
+                    public void flushAndForce(FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor)
+                            throws IOException {
+                        maybeThrow();
+                        super.flushAndForce(flushEvent, asyncBlockAccessor);
                     }
 
                     private void maybeThrow() throws IOException {
@@ -2257,9 +2804,9 @@ class GBPTreeTest {
     private PageCache pageCacheThatBlockWhenToldTo(final Barrier barrier, final AtomicBoolean blockOnNextIO) {
         return new DelegatingPageCache(createPageCache(defaultPageSize)) {
             @Override
-            public PagedFile map(Path path, int pageSize, String databaseName, ImmutableSet<OpenOption> openOptions)
+            public PagedFile map(StoreFile storeFile, String databaseName, ImmutableSet<OpenOption> openOptions)
                     throws IOException {
-                return new DelegatingPagedFile(super.map(path, pageSize, databaseName, openOptions)) {
+                return new DelegatingPagedFile(super.map(storeFile, databaseName, openOptions)) {
                     @Override
                     public PageCursor io(long pageId, int pf_flags, CursorContext context) throws IOException {
                         maybeBlock();
@@ -2278,8 +2825,8 @@ class GBPTreeTest {
 
     private Pair<TreeState, TreeState> readTreeStates(PageCache pageCache) throws IOException {
         Pair<TreeState, TreeState> treeStatesBeforeOverwrite;
-        try (PagedFile pagedFile =
-                        pageCache.map(indexFile, pageCache.pageSize(), DEFAULT_DATABASE_NAME, getOpenOptions());
+        try (PagedFile pagedFile = pageCache.map(
+                        new StoreFile(indexFile), pageCache.pageSize(), DEFAULT_DATABASE_NAME, getOpenOptions());
                 PageCursor cursor = pagedFile.io(0, PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
             treeStatesBeforeOverwrite =
                     TreeStatePair.readStatePages(cursor, IdSpace.STATE_PAGE_A, IdSpace.STATE_PAGE_B);
@@ -2311,15 +2858,42 @@ class GBPTreeTest {
     private void makeDirty(PageCache pageCache) throws IOException {
         try (GBPTree<MutableLong, MutableLong> index = index(pageCache).build()) {
             // Need a first checkpoint to be considered initialized
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(FileFlushEvent.NULL, asyncBlockAccessor, NULL_CONTEXT);
             // Make dirty
             index.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT).close();
         }
     }
 
     private static void insert(GBPTree<MutableLong, MutableLong> index, long key, long value) throws IOException {
+        insertRange(index, key, 1, k -> value);
+    }
+
+    private static void insert(Writer<MutableLong, MutableLong> writer, long key, long value) {
+        writer.put(new MutableLong(key), new MutableLong(value));
+    }
+
+    private static void insertRange(
+            GBPTree<MutableLong, MutableLong> index, long startKey, int count, LongToLongFunction valueFunction)
+            throws IOException {
         try (Writer<MutableLong, MutableLong> writer = index.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT)) {
-            writer.put(new MutableLong(key), new MutableLong(value));
+            MutableLong key = new MutableLong();
+            MutableLong value = new MutableLong();
+            for (int i = 0; i < count; i++) {
+                key.setValue(startKey + i);
+                value.setValue(valueFunction.applyAsLong(key.longValue()));
+                writer.put(key, value);
+            }
+        }
+    }
+
+    private static void removeRange(GBPTree<MutableLong, MutableLong> index, long startKey, int count)
+            throws IOException {
+        try (Writer<MutableLong, MutableLong> writer = index.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT)) {
+            MutableLong key = new MutableLong();
+            for (int i = 0; i < count; i++) {
+                key.setValue(startKey + i);
+                writer.remove(key);
+            }
         }
     }
 
@@ -2329,7 +2903,11 @@ class GBPTreeTest {
     }
 
     protected PageCache createPageCache(int pageSize) {
-        return PageCacheSupportExtension.getPageCache(fileSystem, config().withPageSize(pageSize));
+        return createPageCache(config().withPageSize(pageSize));
+    }
+
+    protected PageCache createPageCache(PageCacheConfig config) {
+        return PageCacheSupportExtension.getPageCache(fileSystem, config);
     }
 
     private static class CleanJobControlledMonitor extends Monitor.Adaptor {
@@ -2353,9 +2931,9 @@ class GBPTreeTest {
     private PageCache pageCacheWithBarrierInClose(final AtomicBoolean enabled, final Barrier.Control barrier) {
         return new DelegatingPageCache(createPageCache(defaultPageSize * 4)) {
             @Override
-            public PagedFile map(Path path, int pageSize, String databaseName, ImmutableSet<OpenOption> openOptions)
+            public PagedFile map(StoreFile storeFile, String databaseName, ImmutableSet<OpenOption> openOptions)
                     throws IOException {
-                return new DelegatingPagedFile(super.map(path, pageSize, databaseName, openOptions)) {
+                return new DelegatingPagedFile(super.map(storeFile, databaseName, openOptions)) {
                     @Override
                     public void close() {
                         if (enabled.get()) {
@@ -2388,12 +2966,28 @@ class GBPTreeTest {
         }
     }
 
+    private Pair<TreeState, TreeState> extractTreeStates(PageCache pageCache, Path indexFile) throws IOException {
+        try (PagedFile pagedFile = pageCache.map(
+                        new StoreFile(indexFile), pageCache.pageSize(), DEFAULT_DATABASE_NAME, getOpenOptions());
+                PageCursor cursor = pagedFile.io(0, PF_SHARED_READ_LOCK, NULL_CONTEXT)) {
+            return TreeStatePair.readStatePages(cursor, IdSpace.STATE_PAGE_A, IdSpace.STATE_PAGE_B);
+        }
+    }
+
+    private static FileFlushEvent mockedFileFlushEventForCheckpoint() {
+        var firstCheckpointEvent = mock(FileFlushEvent.class);
+        when(firstCheckpointEvent.beginFlush(any(), any(), any(), anyInt(), anyInt()))
+                .thenReturn(FlushEvent.NULL);
+        when(firstCheckpointEvent.startChunk(any())).thenReturn(FileFlushEvent.ChunkEvent.NULL);
+        return firstCheckpointEvent;
+    }
+
     private static class CheckpointControlledMonitor extends Monitor.Adaptor {
         private final Barrier.Control barrier = new Barrier.Control();
         private volatile boolean enabled;
 
         @Override
-        public void checkpointCompleted() {
+        public void checkpointCompleted(CompactionReport compactionReport) {
             if (enabled) {
                 barrier.reached();
             }
@@ -2404,7 +2998,7 @@ class GBPTreeTest {
         private int count;
 
         @Override
-        public void checkpointCompleted() {
+        public void checkpointCompleted(CompactionReport compactionReport) {
             count++;
         }
 
@@ -2508,6 +3102,11 @@ class GBPTreeTest {
         }
 
         @Override
+        public SubmitEvent beginAsyncSubmit() {
+            return currentDelegate.beginAsyncSubmit();
+        }
+
+        @Override
         public FlushEvent beginFlush(
                 long pageRef, PageSwapper swapper, PageReferenceTranslator pageReferenceTranslator) {
             return currentDelegate.beginFlush(pageRef, swapper, pageReferenceTranslator);
@@ -2563,6 +3162,48 @@ class GBPTreeTest {
         @Override
         public long localBytesWritten() {
             return currentDelegate.localBytesWritten();
+        }
+    }
+
+    private class ForceCountingSwapperFactory implements PageSwapperFactory {
+        private final PageSwapperFactory delegate =
+                new SingleFilePageSwapperFactory(fileSystem, PageCacheTracer.NULL, EmptyMemoryTracker.INSTANCE);
+        private final AtomicLong count = new AtomicLong();
+
+        @Override
+        public PageSwapper createPageSwapper(
+                Path path,
+                int filePageSize,
+                PageEvictionCallback onEviction,
+                boolean createIfNotExist,
+                boolean useDirectIO,
+                long pagesPerSegment,
+                IOController ioController,
+                EvictionBouncer evictionBouncer,
+                SwapperIdProvider swapperIdProvider,
+                FileSegmentTracker segmentTracker)
+                throws IOException {
+            PageSwapper delegate = this.delegate.createPageSwapper(
+                    path,
+                    filePageSize,
+                    onEviction,
+                    createIfNotExist,
+                    useDirectIO,
+                    pagesPerSegment,
+                    ioController,
+                    evictionBouncer,
+                    swapperIdProvider,
+                    segmentTracker);
+            return new DelegatingPageSwapper(delegate) {
+                @Override
+                public void force() {
+                    count.incrementAndGet();
+                }
+            };
+        }
+
+        void reset() {
+            count.set(0);
         }
     }
 }

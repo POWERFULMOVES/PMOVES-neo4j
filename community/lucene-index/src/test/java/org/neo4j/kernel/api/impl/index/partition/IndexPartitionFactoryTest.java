@@ -24,16 +24,15 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.io.IOException;
 import java.nio.file.Path;
-import org.apache.lucene.document.Document;
-import org.apache.lucene.index.IndexWriter;
-import org.apache.lucene.store.Directory;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.neo4j.configuration.Config;
 import org.neo4j.kernel.api.impl.index.IndexWriterConfigBuilder;
+import org.neo4j.kernel.api.impl.index.IndexWriterConfigMode;
 import org.neo4j.kernel.api.impl.index.SearcherReference;
-import org.neo4j.kernel.api.impl.index.TestIndexWriterModes;
-import org.neo4j.kernel.api.impl.index.storage.DirectoryFactory;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneContext;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDirectory;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneIndexWriter;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
@@ -43,51 +42,47 @@ class IndexPartitionFactoryTest {
     @Inject
     private TestDirectory testDirectory;
 
-    private Directory directory;
-
-    @BeforeEach
-    void setUp() throws IOException {
-        directory = DirectoryFactory.PERSISTENT.open(testDirectory.homePath());
-    }
-
-    @Test
-    void createReadOnlyPartition() throws Exception {
-        prepareIndex();
-        try (AbstractIndexPartition indexPartition =
-                new ReadOnlyIndexPartitionFactory().createPartition(testDirectory.homePath(), directory)) {
-            assertThrows(UnsupportedOperationException.class, indexPartition::getIndexWriter);
+    @ParameterizedTest
+    @EnumSource
+    void createReadOnlyPartition(LuceneContext luceneContext) throws Exception {
+        try (LuceneDirectory directory = luceneContext.directoryFactory().openPersistent(testDirectory.homePath())) {
+            prepareIndex(luceneContext);
+            try (AbstractIndexPartition indexPartition =
+                    new ReadOnlyIndexPartitionFactory().createPartition(testDirectory.homePath(), directory)) {
+                assertThrows(UnsupportedOperationException.class, indexPartition::getIndexWriter);
+            }
         }
     }
 
-    @Test
-    void createWritablePartition() throws Exception {
-        try (AbstractIndexPartition indexPartition = new WritableIndexPartitionFactory(() -> {
-                    Config config = Config.defaults();
-                    return new IndexWriterConfigBuilder(TestIndexWriterModes.STANDARD, config).build();
-                })
-                .createPartition(testDirectory.homePath(), directory)) {
+    @ParameterizedTest
+    @EnumSource
+    void createWritablePartition(LuceneContext luceneContext) throws Exception {
+        try (LuceneDirectory directory = luceneContext.directoryFactory().openPersistent(testDirectory.homePath());
+                AbstractIndexPartition indexPartition = new WritableIndexPartitionFactory(() -> {
+                            Config config = Config.defaults();
+                            return new IndexWriterConfigBuilder(IndexWriterConfigMode.TEXT, config).build();
+                        })
+                        .createPartition(testDirectory.homePath(), directory)) {
 
-            try (IndexWriter indexWriter = indexPartition.getIndexWriter()) {
-                indexWriter.addDocument(new Document());
+            try (LuceneIndexWriter indexWriter = indexPartition.getIndexWriter()) {
+                indexWriter.addDocument(indexWriter.newDocument());
                 indexWriter.commit();
                 indexPartition.maybeRefreshBlocking();
                 try (SearcherReference searcher = indexPartition.acquireSearcher()) {
                     assertEquals(
-                            1,
-                            searcher.getIndexSearcher().getIndexReader().numDocs(),
-                            "We should be able to see newly added document ");
+                            1, searcher.getIndexSearcher().numDocs(), "We should be able to see newly added document ");
                 }
             }
         }
     }
 
-    private void prepareIndex() throws IOException {
+    private void prepareIndex(LuceneContext luceneContext) throws IOException {
         Path location = testDirectory.homePath();
         try (AbstractIndexPartition ignored = new WritableIndexPartitionFactory(() -> {
                     Config config = Config.defaults();
-                    return new IndexWriterConfigBuilder(TestIndexWriterModes.STANDARD, config).build();
+                    return new IndexWriterConfigBuilder(IndexWriterConfigMode.TEXT, config).build();
                 })
-                .createPartition(location, DirectoryFactory.PERSISTENT.open(location))) {
+                .createPartition(location, luceneContext.directoryFactory().openPersistent(location))) {
             // empty
         }
     }

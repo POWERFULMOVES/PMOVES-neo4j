@@ -20,56 +20,37 @@
 package org.neo4j.queryapi;
 
 import static java.util.List.of;
-import static org.neo4j.queryapi.QueryApiTestUtil.setupLogging;
 import static org.neo4j.queryapi.QueryResponseAssertions.assertThat;
-import static org.neo4j.queryapi.testclient.QueryRequest.returnOne;
+import static org.neo4j.queryapi.test.testclient.QueryRequest.returnOne;
 import static org.neo4j.server.queryapi.response.format.Fieldnames.VALUES_KEY;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.stream.Stream;
 import org.assertj.core.api.Assertions;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.neo4j.configuration.connectors.BoltConnector;
-import org.neo4j.configuration.connectors.BoltConnectorInternalSettings;
-import org.neo4j.configuration.connectors.ConnectorPortRegister;
-import org.neo4j.configuration.connectors.ConnectorType;
-import org.neo4j.configuration.connectors.HttpConnector;
-import org.neo4j.configuration.helpers.SocketAddress;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.neo4j.dbms.api.DatabaseManagementService;
 import org.neo4j.fabric.bolt.QueryRouterBookmark;
 import org.neo4j.fabric.bookmark.BookmarkFormat;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.database.Database;
-import org.neo4j.queryapi.testclient.QueryAPITestClient;
-import org.neo4j.queryapi.testclient.QueryRequest;
-import org.neo4j.test.TestDatabaseManagementServiceBuilder;
+import org.neo4j.queryapi.test.QueryApiTestUtil;
+import org.neo4j.queryapi.test.annotation.QueryAPITestExtension;
+import org.neo4j.queryapi.test.testclient.QueryAPITestClient;
+import org.neo4j.queryapi.test.testclient.QueryRequest;
 
+@QueryAPITestExtension(bookmarkReadyTimeoutInSeconds = 1)
 class QueryResourceIT {
 
-    private static DatabaseManagementService dbms;
-    private static QueryAPITestClient testClient;
+    private final DatabaseManagementService dbms;
+    private final QueryAPITestClient testClient;
 
-    @BeforeAll
-    static void beforeAll() {
-        setupLogging();
-        var builder = new TestDatabaseManagementServiceBuilder();
-        dbms = builder.setConfig(HttpConnector.enabled, true)
-                .setConfig(HttpConnector.listen_address, new SocketAddress("localhost", 0))
-                .setConfig(BoltConnectorInternalSettings.local_channel_address, QueryResourceIT.class.getSimpleName())
-                .setConfig(BoltConnector.enabled, true)
-                .impermanent()
-                .build();
-        var portRegister = QueryApiTestUtil.resolveDependency(dbms, ConnectorPortRegister.class);
-        var queryEndpoint =
-                "http://" + portRegister.getLocalAddress(ConnectorType.HTTP) + "/db/{databaseName}/query/v2";
-        testClient = new QueryAPITestClient(queryEndpoint);
-    }
-
-    @AfterAll
-    static void teardown() {
-        dbms.shutdown();
+    public QueryResourceIT(DatabaseManagementService dbms, QueryAPITestClient testClient) {
+        this.dbms = dbms;
+        this.testClient = testClient;
     }
 
     @Test
@@ -146,8 +127,8 @@ class QueryResourceIT {
         var responseB = testClient.autoCommit(
                 QueryRequest.newBuilder().statement("CREATE (n)").build());
 
-        var bmA = responseA.body().bookmarks().get(0);
-        var bmB = responseB.body().bookmarks().get(0);
+        var bmA = responseA.body().bookmarks().getFirst();
+        var bmB = responseB.body().bookmarks().getFirst();
 
         var combinedBmResponse = testClient.autoCommit(QueryRequest.newBuilder()
                 .statement("CREATE (n)")
@@ -156,7 +137,7 @@ class QueryResourceIT {
 
         assertThat(combinedBmResponse).wasSuccessful().hasBookmark();
 
-        var newBm = combinedBmResponse.body().bookmarks().get(0);
+        var newBm = combinedBmResponse.body().bookmarks().getFirst();
 
         Assertions.assertThat(newBm).isNotEqualTo(bmA);
         Assertions.assertThat(newBm).isNotEqualTo(bmB);
@@ -199,6 +180,7 @@ class QueryResourceIT {
                 .bookmarks(of(expectedBookmark))
                 .build());
 
+        var dbName = dbms.database("neo4j").databaseName();
         // initial request times out
         assertThat(responseA).hasErrorStatus(400, Status.Transaction.BookmarkTimeout);
 
@@ -238,5 +220,56 @@ class QueryResourceIT {
 
         // All valid values goes through
         Assertions.assertThat(parsedJson.get(VALUES_KEY).size()).isEqualTo(10000);
+    }
+
+    @ParameterizedTest
+    @MethodSource("queryTypes")
+    void shouldReturnQueryType(TransactionType transactionType, String statement, String expectedQueryType)
+            throws IOException, InterruptedException {
+        var response = testClient.executeQuery(
+                transactionType, QueryRequest.newBuilder().statement(statement).build());
+
+        QueryResponseAssertions.assertThat(response).wasSuccessful().hasQueryType(expectedQueryType);
+    }
+
+    @ParameterizedTest
+    @MethodSource("queryRequestElements")
+    void shouldHandleRequestFieldsInAnyOrder(List<String> elements) throws IOException, InterruptedException {
+        var response = testClient.sendRaw("{ %s }".formatted(String.join(",", elements)));
+
+        QueryResponseAssertions.assertThat(response).wasSuccessful();
+    }
+
+    static Stream<Arguments> queryTypes() {
+        return Stream.of(TransactionType.values())
+                .flatMap(type -> Stream.of(
+                        Arguments.of(type, "RETURN 1", "r"),
+                        Arguments.of(type, "CREATE ()", "w"),
+                        Arguments.of(type, "CREATE (p:Person{name: 'Vozinha'}) RETURN p", "rw"),
+                        Arguments.of(
+                                type,
+                                "CREATE CONSTRAINT constraint_name_%d FOR (n:Label) REQUIRE n.property_%d IS UNIQUE"
+                                        .formatted(type.ordinal(), type.ordinal()),
+                                "s")));
+    }
+
+    static Stream<Arguments> queryRequestElements() {
+        var includeCounters = """
+                "includeCounters": true""";
+        var parameters = """
+                    "parameters": {
+                      "value": 1
+                    }\
+                """;
+        var statement = """
+                "statement": "RETURN $value AS one\"""";
+        return Stream.of(
+                        List.of(includeCounters, parameters, statement),
+                        List.of(includeCounters, statement, parameters),
+                        List.of(statement, includeCounters, parameters),
+                        List.of(statement, parameters, includeCounters),
+                        List.of(parameters, statement, includeCounters),
+                        List.of(parameters, includeCounters, statement))
+                .map(Arguments::of);
     }
 }

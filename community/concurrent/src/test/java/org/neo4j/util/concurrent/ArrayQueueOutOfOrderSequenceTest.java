@@ -21,11 +21,9 @@ package org.neo4j.util.concurrent;
 
 import static java.lang.Integer.max;
 import static java.lang.Thread.sleep;
+import static org.apache.commons.lang3.ArrayUtils.EMPTY_LONG_ARRAY;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.neo4j.util.concurrent.OutOfOrderSequence.EMPTY_META;
 
 import java.util.concurrent.Callable;
@@ -96,24 +94,24 @@ class ArrayQueueOutOfOrderSequenceTest {
     void closingLastGapAfterArrayExtension() {
         // GIVEN
         OutOfOrderSequence sequence = new ArrayQueueOutOfOrderSequence(0, 5, EMPTY_META);
-        assertTrue(sequence.offer(1, EMPTY_META));
-        assertFalse(sequence.offer(3, EMPTY_META));
-        assertFalse(sequence.offer(4, EMPTY_META));
-        assertTrue(sequence.offer(2, EMPTY_META));
-        assertFalse(sequence.offer(6, EMPTY_META));
-        assertTrue(sequence.offer(5, EMPTY_META));
+        assertThat(sequence.offer(1, EMPTY_META)).isTrue();
+        assertThat(sequence.offer(3, EMPTY_META)).isFalse();
+        assertThat(sequence.offer(4, EMPTY_META)).isFalse();
+        assertThat(sequence.offer(2, EMPTY_META)).isTrue();
+        assertThat(sequence.offer(6, EMPTY_META)).isFalse();
+        assertThat(sequence.offer(5, EMPTY_META)).isTrue();
         // leave out 7
-        assertFalse(sequence.offer(8, EMPTY_META));
-        assertFalse(sequence.offer(9, EMPTY_META));
-        assertFalse(sequence.offer(10, EMPTY_META));
-        assertFalse(sequence.offer(11, EMPTY_META));
+        assertThat(sequence.offer(8, EMPTY_META)).isFalse();
+        assertThat(sequence.offer(9, EMPTY_META)).isFalse();
+        assertThat(sequence.offer(10, EMPTY_META)).isFalse();
+        assertThat(sequence.offer(11, EMPTY_META)).isFalse();
         // putting 12 should need extending the backing queue array
-        assertFalse(sequence.offer(12, EMPTY_META));
-        assertFalse(sequence.offer(13, EMPTY_META));
-        assertFalse(sequence.offer(14, EMPTY_META));
+        assertThat(sequence.offer(12, EMPTY_META)).isFalse();
+        assertThat(sequence.offer(13, EMPTY_META)).isFalse();
+        assertThat(sequence.offer(14, EMPTY_META)).isFalse();
 
         // WHEN finally offering nr 7
-        assertTrue(sequence.offer(7, EMPTY_META));
+        assertThat(sequence.offer(7, EMPTY_META)).isTrue();
 
         // THEN the number should jump to 14
         assertGet(sequence, 14, EMPTY_META);
@@ -130,42 +128,43 @@ class ArrayQueueOutOfOrderSequenceTest {
         final OutOfOrderSequence sequence =
                 new ArrayQueueOutOfOrderSequence(numberSource.get(), 5, metaFunction.apply(numberSource.get()));
         int offerThreads = max(2, Runtime.getRuntime().availableProcessors() - 1);
-        final ExecutorService race = Executors.newFixedThreadPool(offerThreads + 1);
-        for (int i = 0; i < offerThreads; i++) {
+        try (final ExecutorService race = Executors.newFixedThreadPool(offerThreads + 1)) {
+            for (int i = 0; i < offerThreads; i++) {
+                race.submit(() -> {
+                    long number;
+                    while ((number = numberSource.incrementAndGet()) < 10_000_000) {
+                        sequence.offer(number, metaFunction.apply(number));
+                    }
+                });
+            }
+            Runnable verifier = () -> {
+                var highest = sequence.get();
+                Meta expectedMeta = metaFunction.apply(highest.number());
+                assertThat(expectedMeta).isEqualTo(highest.meta());
+            };
             race.submit(() -> {
-                long number;
-                while ((number = numberSource.incrementAndGet()) < 10_000_000) {
-                    sequence.offer(number, metaFunction.apply(number));
+                while (numberSource.get() < 10_000_000) {
+                    verifier.run();
                 }
             });
-        }
-        Runnable verifier = () -> {
-            var highest = sequence.get();
-            Meta expectedMeta = metaFunction.apply(highest.number());
-            assertThat(expectedMeta).isEqualTo(highest.meta());
-        };
-        race.submit(() -> {
-            while (numberSource.get() < 10_000_000) {
-                verifier.run();
-            }
-        });
-        race.shutdown();
-        race.awaitTermination(1, TimeUnit.MINUTES);
+            race.shutdown();
+            race.awaitTermination(1, TimeUnit.MINUTES);
 
-        // THEN
-        verifier.run();
+            // THEN
+            verifier.run();
+        }
     }
 
     @Test
     void highestEverSeenTest() {
         final OutOfOrderSequence sequence = new ArrayQueueOutOfOrderSequence(0, 5, EMPTY_META);
-        assertEquals(0L, sequence.highestEverSeen());
+        assertThat(sequence.highestEverSeen()).isZero();
 
         sequence.offer(1L, EMPTY_META);
-        assertEquals(1L, sequence.highestEverSeen());
+        assertThat(sequence.highestEverSeen()).isOne();
 
         sequence.offer(42L, EMPTY_META);
-        assertEquals(42L, sequence.highestEverSeen());
+        assertThat(sequence.highestEverSeen()).isEqualTo(42L);
     }
 
     @Test
@@ -202,7 +201,7 @@ class ArrayQueueOutOfOrderSequenceTest {
         sequence.offer(6, EMPTY_META);
 
         var reverseSnapshot = sequence.reverseSnapshot();
-        assertEquals(3, reverseSnapshot.highestGapFree());
+        assertThat(reverseSnapshot.highestGapFree()).isEqualTo(3);
         assertThat(reverseSnapshot.missingIds()).hasSize(2).contains(4, 5);
     }
 
@@ -217,7 +216,7 @@ class ArrayQueueOutOfOrderSequenceTest {
         sequence.offer(11, EMPTY_META);
 
         var reverseSnapshot = sequence.reverseSnapshot();
-        assertEquals(3, reverseSnapshot.highestGapFree());
+        assertThat(reverseSnapshot.highestGapFree()).isEqualTo(3);
         assertThat(reverseSnapshot.missingIds()).hasSize(5).contains(4, 5, 7, 9, 10);
     }
 
@@ -229,7 +228,7 @@ class ArrayQueueOutOfOrderSequenceTest {
         sequence.offer(3, EMPTY_META);
 
         var reverseSnapshot = sequence.reverseSnapshot();
-        assertEquals(3, reverseSnapshot.highestGapFree());
+        assertThat(reverseSnapshot.highestGapFree()).isEqualTo(3);
         assertThat(reverseSnapshot.missingIds()).isEmpty();
     }
 
@@ -240,7 +239,7 @@ class ArrayQueueOutOfOrderSequenceTest {
         sequence.offer(21, EMPTY_META);
         sequence.offer(31, EMPTY_META);
         var reverseSnapshot = sequence.reverseSnapshot();
-        assertEquals(11, reverseSnapshot.highestGapFree());
+        assertThat(reverseSnapshot.highestGapFree()).isEqualTo(11);
         assertThat(reverseSnapshot.missingIds())
                 .hasSize(18)
                 .contains(12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30);
@@ -286,49 +285,132 @@ class ArrayQueueOutOfOrderSequenceTest {
     @Test
     void shouldSnapshotUnderStress() throws Throwable {
         // given
-        OutOfOrderSequence sequence = new ArrayQueueOutOfOrderSequence(0, 8, EMPTY_META);
+        OutOfOrderSequence sequence = new ArrayQueueOutOfOrderSequence(0, 8, simpleMeta(0));
         int threads = max(2, Runtime.getRuntime().availableProcessors() - 1);
-        ExecutorService executorService = Executors.newFixedThreadPool(threads + 1);
-        AtomicLong nextNumber = new AtomicLong(1);
-        AtomicInteger snapshots = new AtomicInteger(10);
-        for (int i = 0; i < threads; i++) {
-            executorService.submit(() -> {
-                while (snapshots.get() > 0) {
-                    long number = nextNumber.getAndIncrement();
-                    sequence.offer(number, simpleMeta(number * 2));
+        try (ExecutorService executorService = Executors.newFixedThreadPool(threads + 1)) {
+            AtomicLong nextNumber = new AtomicLong(1);
+            AtomicInteger snapshots = new AtomicInteger(10);
+            for (int i = 0; i < threads; i++) {
+                executorService.submit(() -> {
+                    while (snapshots.get() > 0) {
+                        long number = nextNumber.getAndIncrement();
+                        sequence.offer(number, simpleMeta(number * 2));
+                    }
+                });
+            }
+            AtomicReference<Throwable> thrown = new AtomicReference<>();
+            executorService.submit(new Callable<Void>() {
+                @Override
+                public Void call() {
+                    try {
+                        while (snapshots.get() > 0) {
+                            verifyInternallyConsistent(sequence.get());
+                            sleep(1);
+                            snapshots.decrementAndGet();
+                        }
+                    } catch (Throwable t) {
+                        thrown.set(t);
+                    } finally {
+                        snapshots.set(0);
+                    }
+                    return null;
+                }
+
+                private void verifyInternallyConsistent(NumberWithMeta data) {
+                    long number = data.number();
+                    assertThat(data.meta()).isEqualTo(simpleMeta(number * 2));
                 }
             });
-        }
-        AtomicReference<Throwable> throwed = new AtomicReference<>();
-        executorService.submit(new Callable<Void>() {
-            @Override
-            public Void call() throws InterruptedException {
-                try {
-                    while (snapshots.get() > 0) {
-                        verifyInternallyConsistent(sequence.get());
-                        sleep(1);
-                        snapshots.decrementAndGet();
-                    }
-                } catch (Throwable t) {
-                    throwed.set(t);
-                } finally {
-                    snapshots.set(0);
-                }
-                return null;
-            }
 
-            private void verifyInternallyConsistent(NumberWithMeta data) {
-                long number = data.number();
-                assertThat(data.meta()).isEqualTo(simpleMeta(number * 2));
+            // when/then verifications are made inside the race
+            executorService.shutdown();
+            executorService.awaitTermination(10, TimeUnit.MINUTES);
+            if (thrown.get() != null) {
+                throw thrown.get();
             }
-        });
-
-        // when/then verifications are made inside the race
-        executorService.shutdown();
-        executorService.awaitTermination(10, TimeUnit.MINUTES);
-        if (throwed.get() != null) {
-            throw throwed.get();
         }
+    }
+
+    @Test
+    void setWithMissingNumbersShouldRestoreState() {
+        var sequence = new ArrayQueueOutOfOrderSequence(0, 8, EMPTY_META);
+        sequence.offer(1, EMPTY_META);
+        sequence.offer(2, EMPTY_META);
+        sequence.offer(3, EMPTY_META);
+        sequence.offer(6, simpleMeta(6));
+        sequence.offer(8, simpleMeta(8));
+
+        var reverseSnapshot = sequence.reverseSnapshot();
+        assertThat(reverseSnapshot.highestGapFree()).isEqualTo(3);
+        assertThat(reverseSnapshot.highestEverSeen()).isEqualTo(8);
+        assertThat(reverseSnapshot.missingIds()).containsExactly(4, 5, 7);
+
+        var restored = new ArrayQueueOutOfOrderSequence(0, 8, EMPTY_META);
+        restored.set(reverseSnapshot.highestEverSeen(), EMPTY_META, reverseSnapshot.missingIds());
+
+        assertGet(restored, 3, EMPTY_META);
+        assertThat(restored.highestEverSeen()).isEqualTo(8);
+        var restoredReverse = restored.reverseSnapshot();
+        assertThat(restoredReverse.highestGapFree()).isEqualTo(3);
+        assertThat(restoredReverse.missingIds()).containsExactly(4, 5, 7);
+    }
+
+    @Test
+    void setWithMissingNumbersThenOfferMissing() {
+        var sequence = new ArrayQueueOutOfOrderSequence(0, 8, EMPTY_META);
+        Meta setMeta = simpleMeta(3);
+        sequence.set(8, setMeta, new long[] {4, 5, 7});
+
+        assertGet(sequence, 3, setMeta);
+
+        sequence.offer(4, simpleMeta(4));
+        sequence.offer(5, simpleMeta(5));
+        assertGet(sequence, 6, setMeta);
+
+        sequence.offer(7, simpleMeta(7));
+        assertGet(sequence, 8, setMeta);
+    }
+
+    @Test
+    void setWithMissingNumbersThenOfferNewNumbers() {
+        var sequence = new ArrayQueueOutOfOrderSequence(0, 8, EMPTY_META);
+        sequence.set(8, EMPTY_META, new long[] {7});
+
+        assertGet(sequence, 6, EMPTY_META);
+
+        sequence.offer(9, simpleMeta(9));
+        assertGet(sequence, 6, EMPTY_META); // still blocked by gap at 7
+
+        sequence.offer(7, simpleMeta(7));
+        assertGet(sequence, 9, simpleMeta(9));
+    }
+
+    @Test
+    void setWithEmptyMissingNumbers() {
+        var sequence = new ArrayQueueOutOfOrderSequence(0, 8, EMPTY_META);
+        sequence.set(5, simpleMeta(5), EMPTY_LONG_ARRAY);
+
+        assertGet(sequence, 5, simpleMeta(5));
+        assertThat(sequence.highestEverSeen()).isEqualTo(5);
+        assertThat(sequence.reverseSnapshot().missingIds()).isEmpty();
+
+        sequence.offer(6, simpleMeta(6));
+        assertGet(sequence, 6, simpleMeta(6));
+    }
+
+    @Test
+    void setWithMissingNumbersSnapshotConsistency() {
+        var sequence = new ArrayQueueOutOfOrderSequence(0, 8, EMPTY_META);
+        sequence.set(9, EMPTY_META, new long[] {4, 6});
+
+        var snapshot = sequence.snapshot();
+        assertThat(snapshot.highestGapFree()).isEqualTo(3);
+        assertThat(snapshot.idsOutOfOrder()).containsExactly(5, 7, 8, 9);
+
+        var reverseSnapshot = sequence.reverseSnapshot();
+        assertThat(reverseSnapshot.highestGapFree()).isEqualTo(3);
+        assertThat(reverseSnapshot.highestEverSeen()).isEqualTo(9);
+        assertThat(reverseSnapshot.missingIds()).containsExactly(4, 6);
     }
 
     @Test

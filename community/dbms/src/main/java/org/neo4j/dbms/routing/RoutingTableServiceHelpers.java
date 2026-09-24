@@ -19,23 +19,89 @@
  */
 package org.neo4j.dbms.routing;
 
-import static org.neo4j.kernel.api.exceptions.Status.Database.DatabaseNotFound;
-import static org.neo4j.kernel.api.exceptions.Status.General.DatabaseUnavailable;
 import static org.neo4j.values.storable.Values.NO_VALUE;
 
 import java.util.Optional;
+import org.neo4j.configuration.connectors.BoltConnector;
+import org.neo4j.configuration.connectors.ConnectorPortRegister;
+import org.neo4j.configuration.connectors.ConnectorType;
 import org.neo4j.configuration.helpers.SocketAddress;
 import org.neo4j.configuration.helpers.SocketAddressParser;
-import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
-import org.neo4j.gqlstatus.GqlStatusInfoCodes;
-import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.logging.InternalLog;
 import org.neo4j.values.storable.TextValue;
 import org.neo4j.values.virtual.MapValue;
 
 public class RoutingTableServiceHelpers {
-    public static final String ADDRESS_CONTEXT_KEY = "address";
     public static final String FROM_ALIAS_KEY = "alias";
+    public static final String ADDRESS_CONTEXT_KEY = "address";
+    public static final String POLICY_KEY = "policy";
+
+    public static SocketAddress findClientProvidedAddress(MapValue routingContext) throws RoutingException {
+        var value = Optional.ofNullable(routingContext.get(ADDRESS_CONTEXT_KEY)).filter(v -> v != NO_VALUE);
+        if (value.isEmpty()) {
+            return null;
+        }
+        if (value.get() instanceof TextValue textValue) {
+            try {
+                var address = textValue.stringValue();
+                if (address != null && !address.isEmpty() && !address.isBlank()) {
+                    return SocketAddressParser.socketAddress(address, BoltConnector.DEFAULT_PORT, SocketAddress::new);
+                }
+            } catch (Exception ignore) {
+            }
+        }
+        throw RoutingException.invalidAddressKey();
+    }
+
+    public static String findClientProvidedPolicy(MapValue routingContext) throws RoutingException {
+        var value = Optional.ofNullable(routingContext.get(POLICY_KEY)).filter(v -> v != NO_VALUE);
+        if (value.isEmpty()) {
+            return null;
+        }
+        if (value.get() instanceof TextValue textValue) {
+            return textValue.stringValue();
+        }
+        throw RoutingException.invalidRoutingRequest("policy key");
+    }
+
+    public static String findClientProvidedAliasChain(MapValue routingContext) throws RoutingException {
+        var value = Optional.ofNullable(routingContext.get(FROM_ALIAS_KEY)).filter(v -> v != NO_VALUE);
+        if (value.isEmpty()) {
+            return null;
+        }
+        if (value.get() instanceof TextValue textValue) {
+            return textValue.stringValue();
+        }
+        throw RoutingException.invalidRoutingRequest("'from alias'");
+    }
+
+    static SocketAddress ensureBoltAddressIsUsable(
+            MapValue routingContext, ConnectorPortRegister portRegister, SocketAddress localAdvertisedAddress)
+            throws RoutingException {
+        return ensureBoltAddressIsUsable(
+                findClientProvidedAddress(routingContext), portRegister, localAdvertisedAddress);
+    }
+
+    public static SocketAddress ensureBoltAddressIsUsable(
+            SocketAddress clientProvidedAddress,
+            ConnectorPortRegister portRegister,
+            SocketAddress localAdvertisedAddress) {
+        var addressToUse = clientProvidedAddress == null
+                ? localAdvertisedAddress
+                : clientProvidedAddress.getPort() == 0 ? localAdvertisedAddress : clientProvidedAddress;
+
+        if (addressToUse.getPort() <= 0) {
+            // advertised address with a negative or zero port is not useful for callers of the routing procedure
+            // attempt to resolve the actual port using the port register
+            var localAddress = portRegister.getLocalAddress(ConnectorType.BOLT);
+            if (localAddress != null) {
+                addressToUse = new SocketAddress(addressToUse.getHostname(), localAddress.getPort());
+            }
+        }
+        return addressToUse;
+    }
+
+    // ============================================
 
     public static Optional<SocketAddress> findClientProvidedAddress(
             MapValue routingContext, int defaultBoltPort, InternalLog log) throws RoutingException {
@@ -58,29 +124,14 @@ public class RoutingTableServiceHelpers {
                 log.warn("Exception attempting to determine address value from routing context", e);
             }
         }
-
-        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N16)
-                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N10)
-                        .build())
-                .build();
-        throw new RoutingException(
-                gql,
-                Status.Procedure.ProcedureCallFailed,
-                "An address key is included in the query string provided to the "
-                        + "GetRoutingTableProcedure, but its value could not be parsed.");
+        throw RoutingException.invalidAddressKey();
     }
 
     public static RoutingException databaseNotFoundException(String databaseName) {
-        return new RoutingException(
-                DatabaseNotFound,
-                "Unable to get a routing table for database '" + databaseName
-                        + "' because this database does not exist");
+        return RoutingException.routingTableForNonExistingDb(databaseName);
     }
 
     public static RoutingException databaseNotAvailableException(String databaseName) {
-        return new RoutingException(
-                DatabaseUnavailable,
-                "Unable to get a routing table for database '" + databaseName
-                        + "' because this database is unavailable");
+        return RoutingException.routingTableForUnavailableDb(databaseName);
     }
 }

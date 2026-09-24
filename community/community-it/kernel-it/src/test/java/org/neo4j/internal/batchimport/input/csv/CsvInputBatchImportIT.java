@@ -69,7 +69,6 @@ import java.util.function.Supplier;
 import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.batchimport.api.BatchImporter;
 import org.neo4j.batchimport.api.Monitor;
 import org.neo4j.batchimport.api.input.Collector;
@@ -96,34 +95,37 @@ import org.neo4j.internal.recordstorage.RecordStorageEngine;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.recordstorage.RecordDatabaseLayout;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.index.schema.IndexImporterFactoryImpl;
 import org.neo4j.kernel.impl.store.NeoStores;
 import org.neo4j.kernel.impl.store.TokenStore;
-import org.neo4j.kernel.impl.transaction.log.EmptyLogTailMetadata;
-import org.neo4j.kernel.impl.transaction.log.files.TransactionLogInitializer;
 import org.neo4j.kernel.impl.util.AutoCreatingHashMap;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.logging.LogTimeZone;
 import org.neo4j.logging.internal.NullLogService;
-import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.scheduler.JobScheduler;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.Neo4jLayoutExtension;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.scheduler.ThreadPoolJobScheduler;
 import org.neo4j.test.utils.TestDirectory;
 import org.neo4j.token.api.NamedToken;
 import org.neo4j.token.api.TokenConstants;
 import org.neo4j.values.storable.CoordinateReferenceSystem;
 import org.neo4j.values.storable.PointValue;
+import org.neo4j.wal.EmptyLogTailMetadata;
+import org.neo4j.wal.files.TransactionLogInitializer;
 
 @Neo4jLayoutExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class CsvInputBatchImportIT {
     /** Don't support these counts at the moment so don't compute them */
     private static final boolean COMPUTE_DOUBLE_SIDED_RELATIONSHIP_COUNTS = false;
+
+    private static final int GENERATED_NODE_COUNT = 4096;
+    private static final int GENERATED_RELATIONSHIP_COUNT = 4096 * 3;
 
     @Inject
     private TestDirectory testDirectory;
@@ -163,7 +165,8 @@ class CsvInputBatchImportIT {
                     TransactionLogInitializer.getLogFilesInitializer(),
                     new IndexImporterFactoryImpl(),
                     INSTANCE,
-                    NULL_CONTEXT_FACTORY);
+                    NULL_CONTEXT_FACTORY,
+                    DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
             Groups groups = new Groups();
             var group = groups.getOrCreate(null);
             List<InputEntity> nodeData = randomNodeData(group);
@@ -206,22 +209,23 @@ class CsvInputBatchImportIT {
 
     private List<InputEntity> randomNodeData(Group group) {
         List<InputEntity> nodes = new ArrayList<>();
-        for (int i = 0; i < 300; i++) {
+        for (int i = 0; i < GENERATED_NODE_COUNT; i++) {
             InputEntity node = new InputEntity();
             node.id(UUID.randomUUID().toString(), group);
-            node.property("name", "Node " + i);
-            node.property("pointA", "\"   { x : -4.2, y : " + i % 90 + ", crs: WGS-84 } \"");
-            node.property("pointB", "\" { x : -8, y : " + i + " } \"");
-            node.property("date", LocalDate.of(2018, i % 12 + 1, i % 28 + 1));
-            node.property("time", OffsetTime.of(1, i % 60, 0, 0, ZoneOffset.ofHours(9)));
-            node.property("dateTime", ZonedDateTime.of(2011, 9, 11, 8, i % 60, 0, 0, ZoneId.of("Europe/Stockholm")));
-            node.property("dateTime2", LocalDateTime.of(2011, 9, 11, 8, i % 60, 0, 0)); // No zone specified
-            node.property("localTime", LocalTime.of(1, i % 60, 0));
-            node.property("localDateTime", LocalDateTime.of(2011, 9, 11, 8, i % 60));
-            node.property("duration", Period.of(2, -3, i % 30));
-            node.property("floatArray", new float[] {1.0f, 2.0f, 3.0f});
-            node.property("dateArray", new LocalDate[] {LocalDate.of(2018, i % 12 + 1, i % 28 + 1)});
-            node.property("pointArray", "\" { x : -8, y : " + i + " } \"");
+            node.property("name", "Node " + i, false);
+            node.property("pointA", "\"   { x : -4.2, y : " + i % 90 + ", crs: WGS-84 } \"", false);
+            node.property("pointB", "\" { x : -8, y : " + i + " } \"", false);
+            node.property("date", LocalDate.of(2018, i % 12 + 1, i % 28 + 1), false);
+            node.property("time", OffsetTime.of(1, i % 60, 0, 0, ZoneOffset.ofHours(9)), false);
+            node.property(
+                    "dateTime", ZonedDateTime.of(2011, 9, 11, 8, i % 60, 0, 0, ZoneId.of("Europe/Stockholm")), false);
+            node.property("dateTime2", LocalDateTime.of(2011, 9, 11, 8, i % 60, 0, 0), false); // No zone specified
+            node.property("localTime", LocalTime.of(1, i % 60, 0), false);
+            node.property("localDateTime", LocalDateTime.of(2011, 9, 11, 8, i % 60), false);
+            node.property("duration", Period.of(2, -3, i % 30), false);
+            node.property("floatArray", new float[] {1.0f, 2.0f, 3.0f}, false);
+            node.property("dateArray", new LocalDate[] {LocalDate.of(2018, i % 12 + 1, i % 28 + 1)}, false);
+            node.property("pointArray", "\" { x : -8, y : " + i + " } \"", false);
             node.labels(randomLabels(random.random()));
             nodes.add(node);
         }
@@ -270,8 +274,8 @@ class CsvInputBatchImportIT {
             for (InputEntity node : nodeData) {
                 String csvLabels = csvLabels(node.labels());
                 StringBuilder sb = new StringBuilder().append(node.id()).append(',');
-                for (int i = 0; i < node.propertyCount(); i++) {
-                    sb.append(serializePropertyValue(node.propertyValue(i))).append(',');
+                for (var property : node.properties) {
+                    sb.append(serializePropertyValue(property.value())).append(',');
                 }
                 if (csvLabels != null && !csvLabels.isEmpty()) {
                     sb.append(csvLabels);
@@ -299,7 +303,7 @@ class CsvInputBatchImportIT {
         }
         StringBuilder builder = new StringBuilder();
         for (String label : labels) {
-            builder.append(builder.length() > 0 ? ";" : "").append(label);
+            builder.append(builder.isEmpty() ? "" : ";").append(label);
         }
         return builder.toString();
     }
@@ -310,7 +314,7 @@ class CsvInputBatchImportIT {
 
     private List<InputEntity> randomRelationshipData(List<InputEntity> nodeData, Group group) {
         List<InputEntity> relationships = new ArrayList<>();
-        for (int i = 0; i < 1000; i++) {
+        for (int i = 0; i < GENERATED_RELATIONSHIP_COUNT; i++) {
             InputEntity relationship = new InputEntity();
             relationship.startId(nodeData.get(random.nextInt(nodeData.size())).id(), group);
             relationship.endId(nodeData.get(random.nextInt(nodeData.size())).id(), group);
@@ -345,80 +349,81 @@ class CsvInputBatchImportIT {
                 expectedRelationshipCounts);
 
         // Do the verification
-        DatabaseManagementService managementService =
-                new TestDatabaseManagementServiceBuilder(testDirectory.homePath()).build();
-        GraphDatabaseService db = managementService.database(DEFAULT_DATABASE_NAME);
-        try (Transaction tx = db.beginTx();
-                ResourceIterable<Node> allNodes = tx.getAllNodes()) {
-            // Verify nodes
-            for (Node node : allNodes) {
-                String name = (String) node.getProperty("name");
-                String[] labels = expectedNodeNames.remove(name);
-                assertEquals(asSet(labels), names(node.getLabels()));
+        try (DatabaseManagementService managementService =
+                new TestDatabaseManagementServiceBuilder(testDirectory.homePath()).build()) {
+            GraphDatabaseService db = managementService.database(DEFAULT_DATABASE_NAME);
+            try (Transaction tx = db.beginTx();
+                    ResourceIterable<Node> allNodes = tx.getAllNodes()) {
+                // Verify nodes
+                for (Node node : allNodes) {
+                    String name = (String) node.getProperty("name");
+                    String[] labels = expectedNodeNames.remove(name);
+                    assertEquals(asSet(labels), names(node.getLabels()));
 
-                // Verify node properties
-                Map<String, Consumer<Object>> expectedPropertyVerifiers = expectedNodePropertyVerifiers.remove(name);
-                Map<String, Object> actualProperties = node.getAllProperties();
-                actualProperties.remove("id"); // The id does not exist in expected properties
-                for (Map.Entry actualProperty : actualProperties.entrySet()) {
-                    Consumer v = expectedPropertyVerifiers.get(actualProperty.getKey());
-                    if (v != null) {
-                        v.accept(actualProperty.getValue());
+                    // Verify node properties
+                    Map<String, Consumer<Object>> expectedPropertyVerifiers =
+                            expectedNodePropertyVerifiers.remove(name);
+                    Map<String, Object> actualProperties = node.getAllProperties();
+                    actualProperties.remove("id"); // The id does not exist in expected properties
+                    for (Map.Entry actualProperty : actualProperties.entrySet()) {
+                        Consumer v = expectedPropertyVerifiers.get(actualProperty.getKey());
+                        if (v != null) {
+                            v.accept(actualProperty.getValue());
+                        }
                     }
                 }
-            }
-            assertEquals(0, expectedNodeNames.size());
+                assertEquals(0, expectedNodeNames.size());
 
-            // Verify relationships
-            try (ResourceIterable<Relationship> allRelationships = tx.getAllRelationships()) {
-                for (Relationship relationship : allRelationships) {
-                    String startNodeName = (String) relationship.getStartNode().getProperty("name");
-                    Map<String, Map<String, AtomicInteger>> inner = expectedRelationships.get(startNodeName);
-                    String endNodeName = (String) relationship.getEndNode().getProperty("name");
-                    Map<String, AtomicInteger> innerInner = inner.get(endNodeName);
-                    String type = relationship.getType().name();
-                    int countAfterwards = innerInner.get(type).decrementAndGet();
-                    assertThat(countAfterwards).isGreaterThanOrEqualTo(0);
-                    if (countAfterwards == 0) {
-                        innerInner.remove(type);
-                        if (innerInner.isEmpty()) {
-                            inner.remove(endNodeName);
-                            if (inner.isEmpty()) {
-                                expectedRelationships.remove(startNodeName);
+                // Verify relationships
+                try (ResourceIterable<Relationship> allRelationships = tx.getAllRelationships()) {
+                    for (Relationship relationship : allRelationships) {
+                        String startNodeName =
+                                (String) relationship.getStartNode().getProperty("name");
+                        Map<String, Map<String, AtomicInteger>> inner = expectedRelationships.get(startNodeName);
+                        String endNodeName = (String) relationship.getEndNode().getProperty("name");
+                        Map<String, AtomicInteger> innerInner = inner.get(endNodeName);
+                        String type = relationship.getType().name();
+                        int countAfterwards = innerInner.get(type).decrementAndGet();
+                        assertThat(countAfterwards).isGreaterThanOrEqualTo(0);
+                        if (countAfterwards == 0) {
+                            innerInner.remove(type);
+                            if (innerInner.isEmpty()) {
+                                inner.remove(endNodeName);
+                                if (inner.isEmpty()) {
+                                    expectedRelationships.remove(startNodeName);
+                                }
                             }
                         }
                     }
                 }
-            }
-            assertEquals(0, expectedRelationships.size());
+                assertEquals(0, expectedRelationships.size());
 
-            RecordStorageEngine storageEngine =
-                    ((GraphDatabaseAPI) db).getDependencyResolver().resolveDependency(RecordStorageEngine.class);
-            NeoStores neoStores = storageEngine.testAccessNeoStores();
-            var counts = storageEngine.countsAccessor();
-            Function<String, Integer> labelTranslationTable =
-                    translationTable(neoStores.getLabelTokenStore(), TokenConstants.ANY_LABEL, storageEngine);
-            for (Pair<Integer, Long> count : allNodeCounts(labelTranslationTable, expectedNodeCounts)) {
-                assertEquals(
-                        count.other().longValue(),
-                        counts.nodeCount(count.first(), NULL_CONTEXT),
-                        "Label count mismatch for label " + count.first());
-            }
+                RecordStorageEngine storageEngine =
+                        ((GraphDatabaseAPI) db).getDependencyResolver().resolveDependency(RecordStorageEngine.class);
+                NeoStores neoStores = storageEngine.testAccessNeoStores();
+                var counts = storageEngine.countsAccessor();
+                Function<String, Integer> labelTranslationTable =
+                        translationTable(neoStores.getLabelTokenStore(), TokenConstants.ANY_LABEL, storageEngine);
+                for (Pair<Integer, Long> count : allNodeCounts(labelTranslationTable, expectedNodeCounts)) {
+                    assertEquals(
+                            count.other().longValue(),
+                            counts.nodeCount(count.first(), NULL_CONTEXT),
+                            "Label count mismatch for label " + count.first());
+                }
 
-            Function<String, Integer> relationshipTypeTranslationTable = translationTable(
-                    neoStores.getRelationshipTypeTokenStore(), TokenConstants.ANY_RELATIONSHIP_TYPE, storageEngine);
-            for (Pair<RelationshipCountKey, Long> count : allRelationshipCounts(
-                    labelTranslationTable, relationshipTypeTranslationTable, expectedRelationshipCounts)) {
-                RelationshipCountKey key = count.first();
-                assertEquals(
-                        count.other().longValue(),
-                        counts.relationshipCount(key.startLabel, key.type, key.endLabel, NULL_CONTEXT),
-                        "Label count mismatch for label " + key);
-            }
+                Function<String, Integer> relationshipTypeTranslationTable = translationTable(
+                        neoStores.getRelationshipTypeTokenStore(), TokenConstants.ANY_RELATIONSHIP_TYPE, storageEngine);
+                for (Pair<RelationshipCountKey, Long> count : allRelationshipCounts(
+                        labelTranslationTable, relationshipTypeTranslationTable, expectedRelationshipCounts)) {
+                    RelationshipCountKey key = count.first();
+                    assertEquals(
+                            count.other().longValue(),
+                            counts.relationshipCount(key.startLabel, key.type, key.endLabel, NULL_CONTEXT),
+                            "Label count mismatch for label " + key);
+                }
 
-            tx.commit();
-        } finally {
-            managementService.shutdown();
+                tx.commit();
+            }
         }
     }
 
@@ -475,7 +480,7 @@ class CsvInputBatchImportIT {
             TokenStore<?> tokenStore, final int anyValue, RecordStorageEngine storageEngine) {
         final Map<String, Integer> translationTable = new HashMap<>();
         try (var storeCursors = storageEngine.createStorageCursors(NULL_CONTEXT)) {
-            for (NamedToken token : tokenStore.getTokens(storeCursors, EmptyMemoryTracker.INSTANCE)) {
+            for (NamedToken token : tokenStore.getTokens(storeCursors, INSTANCE)) {
                 translationTable.put(token.name(), token.id());
             }
             return from -> from == null ? anyValue : translationTable.get(from);
@@ -506,8 +511,7 @@ class CsvInputBatchImportIT {
             // Build default verifiers for all the properties that compares the property value using equals
             Assertions.assertFalse(node.hasIntPropertyKeyIds);
             Map<String, Consumer<Object>> propertyVerifiers = new TreeMap<>();
-            for (int i = 0; i < node.propertyCount(); i++) {
-                final Object expectedValue = node.propertyValue(i);
+            node.propertiesAsMap().forEach((key, expectedValue) -> {
                 Consumer verify;
                 if (expectedValue instanceof TemporalAmount) {
                     // Since there is no straightforward comparison for TemporalAmount we add it to a reference
@@ -546,8 +550,8 @@ class CsvInputBatchImportIT {
                 } else {
                     verify = actualValue -> assertEquals(expectedValue, actualValue);
                 }
-                propertyVerifiers.put((String) node.propertyKey(i), verify);
-            }
+                propertyVerifiers.put(key, verify);
+            });
 
             // Special verifier for pointA property
             Consumer verifyPointA = actualValue -> {
@@ -638,10 +642,10 @@ class CsvInputBatchImportIT {
     }
 
     private static String nameOf(InputEntity node) {
-        return (String) node.properties()[1];
+        return (String) node.getProperty("name").value();
     }
 
     private static int indexOf(InputEntity node) {
-        return Integer.parseInt(((String) node.properties()[1]).split("\\s")[1]);
+        return Integer.parseInt(nameOf(node).split("\\s")[1]);
     }
 }

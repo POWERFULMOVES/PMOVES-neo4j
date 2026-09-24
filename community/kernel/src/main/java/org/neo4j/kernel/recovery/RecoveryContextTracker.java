@@ -19,21 +19,63 @@
  */
 package org.neo4j.kernel.recovery;
 
+import static org.neo4j.kernel.recovery.IncompleteTransactionAction.APPLY;
+import static org.neo4j.storageengine.AppendIndexProvider.UNKNOWN_APPEND_INDEX;
+import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_CONSENSUS_INDEX;
+import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_TX_ID;
+
+import org.eclipse.collections.api.map.primitive.MutableLongLongMap;
+import org.eclipse.collections.impl.factory.primitive.LongLongMaps;
 import org.neo4j.kernel.impl.transaction.CommittedCommandBatchRepresentation;
 import org.neo4j.kernel.impl.transaction.CommittedCommandBatchRepresentation.BatchInformation;
-import org.neo4j.kernel.impl.transaction.log.CheckpointInfo;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
+import org.neo4j.storageengine.api.OpenTransactionMetadata;
+import org.neo4j.storageengine.api.TransactionId;
+import org.neo4j.util.concurrent.ArrayQueueOutOfOrderSequence;
+import org.neo4j.util.concurrent.OutOfOrderSequence;
+import org.neo4j.wal.CheckpointInfo;
+import org.neo4j.wal.LogPosition;
 
 class RecoveryContextTracker {
+    private final IncompleteTransactionAction incompleteTransactionAction;
     private BatchInformation lastHighestTransactionBatchInfo = null;
     private BatchInformation lastBatchInfo = null;
     private LogPosition recoveryToPosition;
     private LogPosition lastTransactionPosition;
+    private OpenTransactionMetadata earliestOpenTransactionMetadata;
     private long recoveredBatches;
+    private ArrayQueueOutOfOrderSequence closedTxTracker;
+    private final MutableLongLongMap transactionIdFirstAppendIndexMap = LongLongMaps.mutable.empty();
+    private final long initialTransactionId;
 
-    RecoveryContextTracker(LogPosition recoveryStartPosition, CheckpointInfo checkpointInfo) {
+    RecoveryContextTracker(
+            LogPosition recoveryStartPosition,
+            CheckpointInfo checkpointInfo,
+            IncompleteTransactionAction incompleteTransactionAction) {
+        this.incompleteTransactionAction = incompleteTransactionAction;
         updatePositions(recoveryStartPosition);
         initInitialInfo(checkpointInfo);
+        closedTxTracker = initClosedTxTracker(checkpointInfo, incompleteTransactionAction);
+        initialTransactionId =
+                checkpointInfo != null ? checkpointInfo.transactionId().id() : UNKNOWN_TX_ID;
+    }
+
+    private ArrayQueueOutOfOrderSequence initClosedTxTracker(
+            CheckpointInfo checkpointInfo, IncompleteTransactionAction incompleteTransactionAction) {
+        if (APPLY != incompleteTransactionAction || checkpointInfo == null) {
+            return null;
+        }
+        TransactionId transactionId = checkpointInfo.transactionId();
+        return new ArrayQueueOutOfOrderSequence(
+                transactionId.id(),
+                128,
+                new OutOfOrderSequence.Meta(
+                        checkpointInfo.transactionLogPosition().getLogVersion(),
+                        checkpointInfo.transactionLogPosition().getByteOffset(),
+                        transactionId.kernelVersion().version(),
+                        transactionId.checksum(),
+                        transactionId.commitTimestamp(),
+                        transactionId.consensusIndex(),
+                        transactionId.appendIndex()));
     }
 
     private void initInitialInfo(CheckpointInfo checkpointInfo) {
@@ -42,32 +84,95 @@ class RecoveryContextTracker {
         }
         var checkpointTransactionId = checkpointInfo.transactionId();
         var checkpointBatchInfo = new BatchInformation(checkpointTransactionId, checkpointTransactionId.appendIndex());
-        var transactionId = checkpointInfo.transactionId();
 
-        lastBatchInfo = new BatchInformation(transactionId, checkpointInfo.appendIndex());
+        lastBatchInfo = new BatchInformation(
+                checkpointTransactionId.id(),
+                checkpointTransactionId.kernelVersion(),
+                checkpointTransactionId.checksum(),
+                checkpointTransactionId.commitTimestamp(),
+                lastClosedBatchConsensusIndex(checkpointInfo),
+                checkpointInfo.appendIndex());
         lastHighestTransactionBatchInfo = checkpointBatchInfo;
     }
 
+    /**
+     * Checkpoints written before {@link org.neo4j.kernel.KernelVersion#VERSION_CHECKPOINT_CONSENSUS_INDEX_INTRODUCED}
+     * only carry the last committed transaction's consensus index. Falling back to it can only underestimate the last
+     * closed batch, which is the safe direction.
+     */
+    private static long lastClosedBatchConsensusIndex(CheckpointInfo checkpointInfo) {
+        return checkpointInfo.consensusIndex() != UNKNOWN_CONSENSUS_INDEX
+                ? checkpointInfo.consensusIndex()
+                : checkpointInfo.transactionId().consensusIndex();
+    }
+
     void commitedBatch(CommittedCommandBatchRepresentation nextCommandBatch, LogPosition position) {
-        BatchInformation batchInfo = nextCommandBatch.batchInformation();
-        if (updateHighestBatchInfo(nextCommandBatch.txId())) {
-            lastHighestTransactionBatchInfo = batchInfo;
+        if (nextCommandBatch.commandBatch().isFirst()) {
+            transactionIdFirstAppendIndexMap.put(nextCommandBatch.txId(), nextCommandBatch.appendIndex());
         }
+        BatchInformation batchInfo = nextCommandBatch.batchInformation();
+        updateHighestBatchInfoIfNeeded(batchInfo);
         lastBatchInfo = batchInfo;
 
+        offerClosedTx(nextCommandBatch, position);
         updatePositions(position);
+
+        if (nextCommandBatch.commandBatch().isLast()) {
+            transactionIdFirstAppendIndexMap.remove(nextCommandBatch.txId());
+        }
+
         recoveredBatches++;
     }
 
-    void rollbackBatch(RollbackTransactionInfo rollbackTransactionInfo, LogPosition position) {
-        if (updateHighestBatchInfo(rollbackTransactionInfo.batchInfo().txId())) {
-            lastHighestTransactionBatchInfo = rollbackTransactionInfo.batchInfo();
+    private void offerClosedTx(CommittedCommandBatchRepresentation nextCommandBatch, LogPosition position) {
+        if (APPLY != incompleteTransactionAction) {
+            return;
         }
+        if (nextCommandBatch.txId() > initialTransactionId
+                && nextCommandBatch.commandBatch().isLast()) {
+            long firstAppendIndex = firstAppendIndex(nextCommandBatch.txId());
+            OutOfOrderSequence.Meta meta = new OutOfOrderSequence.Meta(
+                    position.getLogVersion(),
+                    position.getByteOffset(),
+                    nextCommandBatch.batchInformation().kernelVersion().version(),
+                    nextCommandBatch.batchInformation().checksum(),
+                    -1,
+                    nextCommandBatch.batchInformation().consensusIndex(),
+                    firstAppendIndex);
+            if (closedTxTracker != null) {
+                closedTxTracker.offer(nextCommandBatch.txId(), meta);
+                return;
+            }
+            closedTxTracker = new ArrayQueueOutOfOrderSequence(nextCommandBatch.txId(), 128, meta);
+        }
+    }
+
+    void rollbackBatch(RollbackTransactionInfo rollbackTransactionInfo, LogPosition position) {
+        updateHighestBatchInfoIfNeeded(rollbackTransactionInfo.batchInfo());
+        lastBatchInfo = rollbackTransactionInfo.batchInfo();
         updatePositions(position);
     }
 
-    private boolean updateHighestBatchInfo(long id) {
-        return lastHighestTransactionBatchInfo == null || lastHighestTransactionBatchInfo.txId() < id;
+    private void updateHighestBatchInfoIfNeeded(BatchInformation candidate) {
+        if (candidate.txId() <= initialTransactionId) {
+            return;
+        }
+
+        if (lastHighestTransactionBatchInfo == null || lastHighestTransactionBatchInfo.txId() < candidate.txId()) {
+            lastHighestTransactionBatchInfo = candidate;
+        } else if (lastHighestTransactionBatchInfo.txId() == candidate.txId()
+                && lastHighestTransactionBatchInfo.appendIndex() < candidate.appendIndex()) {
+            // Later chunk of the same transaction: keep the first chunk's append index, but advance the
+            // remaining metadata (checksum, ...) to the latest chunk.
+            long firstAppendIndex = firstAppendIndex(candidate.txId());
+            lastHighestTransactionBatchInfo = new BatchInformation(
+                    candidate.txId(),
+                    candidate.kernelVersion(),
+                    candidate.checksum(),
+                    candidate.timeWritten(),
+                    candidate.consensusIndex(),
+                    firstAppendIndex);
+        }
     }
 
     void completeRecovery(LogPosition logPosition) {
@@ -81,6 +186,10 @@ class RecoveryContextTracker {
 
     BatchInformation getLastHighestTransactionBatchInfo() {
         return lastHighestTransactionBatchInfo;
+    }
+
+    public OutOfOrderSequence.NumberWithMeta gapFreeClosedTransactionInfo() {
+        return closedTxTracker.get();
     }
 
     BatchInformation getLastBatchInfo() {
@@ -97,5 +206,24 @@ class RecoveryContextTracker {
 
     boolean hasRecoveredBatches() {
         return recoveredBatches > 0;
+    }
+
+    public void unrecoverableBatch(OpenTransactionMetadata openTransactionMetadata) {
+        if (earliestOpenTransactionMetadata != null) {
+            return;
+        }
+        this.earliestOpenTransactionMetadata = openTransactionMetadata;
+    }
+
+    public OpenTransactionMetadata getEarliestOpenTransactionMetadata() {
+        return earliestOpenTransactionMetadata;
+    }
+
+    private long firstAppendIndex(long transactionId) {
+        long firstAppendIndex = transactionIdFirstAppendIndexMap.getIfAbsent(transactionId, UNKNOWN_APPEND_INDEX);
+        if (firstAppendIndex == UNKNOWN_APPEND_INDEX) {
+            throw new IllegalStateException("Transaction " + transactionId + " first append index is missing.");
+        }
+        return firstAppendIndex;
     }
 }

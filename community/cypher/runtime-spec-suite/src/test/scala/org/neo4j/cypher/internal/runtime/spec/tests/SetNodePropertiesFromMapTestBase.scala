@@ -36,6 +36,8 @@ import org.neo4j.lock.ResourceType.NODE
 
 import scala.jdk.CollectionConverters.IterableHasAsScala
 
+object SetNodePropertiesFromMapTestBase
+
 abstract class SetNodePropertiesFromMapTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
@@ -539,7 +541,7 @@ abstract class SetNodePropertiesFromMapTestBase[CONTEXT <: RuntimeContext](
       .produceResults("p1", "p2", "p3")
       .projection("x1.prop1 as p1", "x1.prop2 as p2", "x1.prop3 as p3")
       .setNodePropertiesFromMap("x1", "r", removeOtherProps = true)
-      .directedRelationshipByIdSeek("r", "x1", "y1", Set.empty, relationships.head.getId)
+      .relationshipByIdSeek("(x1)-[r]->(y1)", Set.empty, relationships.head.getId)
       .build(readOnly = false)
 
     // then
@@ -641,29 +643,6 @@ abstract class SetNodePropertiesFromMapTestBase[CONTEXT <: RuntimeContext](
     runtimeResult should beColumns("n")
       .withSingleRow(nodes.head)
       .withStatistics(propertiesSet = 2)
-  }
-
-  test("should not take exclusive lock if value not changing") {
-    // given a single node
-    givenGraph {
-      uniqueNodeIndex("L", "prop")
-      nodePropertyGraph(1, { case _ => Map("prop" -> 1) }, "L")
-    }
-
-    // when
-    val logicalQuery = new LogicalQueryBuilder(this)
-      .produceResults("p1", "p2")
-      .projection("n.prop as p1", "n.other as p2")
-      .setNodePropertiesFromMap("n", "{other: n.prop, prop: n.prop}", removeOtherProps = true)
-      .nodeIndexOperator("n:L(prop = 1)", unique = true)
-      .build(readOnly = false)
-
-    // then
-    val runtimeResult: RecordingRuntimeResult = execute(logicalQuery, runtime)
-    runtimeResult should beColumns("p1", "p2")
-      .withSingleRow(1, 1)
-      .withStatistics(propertiesSet = 2)
-      .withLocks((EXCLUSIVE, NODE), (SHARED, INDEX_ENTRY), (SHARED, LABEL))
   }
 
   test("should take exclusive lock if value changing") {

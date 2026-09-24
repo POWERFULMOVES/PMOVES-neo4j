@@ -21,7 +21,7 @@ package org.neo4j.fabric.executor;
 
 import org.neo4j.graphdb.ExecutionPlanDescription;
 
-interface ProfilingContext extends AutoCloseable {
+public interface ProfilingContext extends AutoCloseable {
 
     QueryFragment fragmentStart(Location location, String query);
 

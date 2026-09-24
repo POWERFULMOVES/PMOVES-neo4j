@@ -69,7 +69,6 @@ import org.eclipse.collections.impl.factory.primitive.LongObjectMaps;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.configuration.Config;
 import org.neo4j.internal.counts.DegreeUpdater;
 import org.neo4j.internal.helpers.Exceptions;
@@ -87,6 +86,7 @@ import org.neo4j.lock.ResourceLocker;
 import org.neo4j.lock.ResourceType;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.EmptyMemoryTracker;
+import org.neo4j.memory.MemoryTracker;
 import org.neo4j.monitoring.Monitors;
 import org.neo4j.storageengine.api.RelationshipDirection;
 import org.neo4j.storageengine.api.StorageLocks;
@@ -95,9 +95,9 @@ import org.neo4j.storageengine.api.txstate.ReadableTransactionState;
 import org.neo4j.storageengine.api.txstate.RelationshipModifications;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class RelationshipModifierTest {
     private static final RelationshipDirection[] DIRECTIONS = {OUTGOING, INCOMING, LOOP};
     private static final Supplier<RelationshipDirection> OUT = () -> OUTGOING;
@@ -146,8 +146,7 @@ class RelationshipModifierTest {
                 relationshipModifierTestLocker,
                 NONE,
                 CursorContext.NULL_CONTEXT,
-                EmptyMemoryTracker.INSTANCE,
-                false);
+                EmptyMemoryTracker.INSTANCE);
         txState = mock(ReadableTransactionState.class);
         store = new MapRecordStore();
         monitors.addMonitorListener(new LockVerificationMonitor(lockTracking, txState, store));
@@ -460,11 +459,11 @@ class RelationshipModifierTest {
         this.lockTracking.preModify(true);
         modifications
                 .creations()
-                .forEach((id, type, start, end, addedProperties, changedProperties, removedProperties) ->
+                .forEach((id, type, start, end, addedProperties, removedProperties) ->
                         context.acquireRelationshipCreationLock(NONE, start, end, false, false));
         modifications
                 .deletions()
-                .forEach((id, type, start, end, noProperties, changedProperties, removedProperties) ->
+                .forEach((id, type, start, end, noProperties, removedProperties) ->
                         context.acquireRelationshipDeletionLock(NONE, start, end, id, false, false, false));
         this.lockTracking.preModify(false);
 
@@ -554,11 +553,11 @@ class RelationshipModifierTest {
             RelationshipModifications modifications, List<RelationshipData> expectedRelationships) {
         modifications
                 .creations()
-                .forEach((id, type, start, end, aP, cP, rP) ->
+                .forEach((id, type, start, end, aP, rP) ->
                         expectedRelationships.add(new RelationshipData(id, type, start, end)));
         modifications
                 .deletions()
-                .forEach((id, type, start, end, aP, cP, rP) ->
+                .forEach((id, type, start, end, aP, rP) ->
                         expectedRelationships.remove(new RelationshipData(id, type, start, end)));
     }
 
@@ -636,6 +635,14 @@ class RelationshipModifierTest {
         }
 
         @Override
+        public boolean trySharedLock(ResourceType resourceType, long resourceId) {
+            if (ignoreLocks) {
+                return false;
+            }
+            return locker.trySharedLock(resourceType, resourceId);
+        }
+
+        @Override
         public void acquireExclusive(LockTracer tracer, ResourceType resourceType, long... resourceIds) {
             if (ignoreLocks) {
                 return;
@@ -668,8 +675,8 @@ class RelationshipModifierTest {
         }
 
         @Override
-        public Collection<ActiveLock> activeLocks() {
-            return locker.activeLocks();
+        public Collection<ActiveLock> activeLocks(MemoryTracker memoryTracker) {
+            return locker.activeLocks(memoryTracker);
         }
 
         @Override

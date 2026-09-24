@@ -20,6 +20,7 @@
 package org.neo4j.kernel.impl.newapi;
 
 import static org.assertj.core.api.Assumptions.assumeThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.util.Collections;
 import java.util.HashMap;
@@ -58,16 +59,22 @@ import org.neo4j.kernel.impl.coreapi.schema.SchemaImpl;
 import org.neo4j.kernel.impl.newapi.PartitionedScanFactories.PartitionedScanFactory;
 import org.neo4j.kernel.impl.newapi.PartitionedScanTestSuite.Query;
 import org.neo4j.kernel.impl.newapi.TestUtils.PartitionedScanAPI;
+import org.neo4j.kernel.internal.GraphDatabaseAPI;
+import org.neo4j.logging.AssertableLogProvider;
+import org.neo4j.logging.LogAssert;
 import org.neo4j.storageengine.api.StorageEngine;
+import org.neo4j.storageengine.api.StorageEngineFactory;
 import org.neo4j.test.Race;
 import org.neo4j.test.RandomSupport;
+import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.Tokens;
+import org.neo4j.test.extension.ExtensionCallback;
 import org.neo4j.test.extension.ImpermanentDbmsExtension;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.RandomExtension;
 
 @ExtendWith({SoftAssertionsExtension.class, RandomExtension.class})
-@ImpermanentDbmsExtension
+@ImpermanentDbmsExtension(configurationCallback = "configure")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 abstract class PartitionedScanTestSuite<QUERY extends Query<?>, SESSION, CURSOR extends Cursor> {
     @Inject
@@ -91,6 +98,13 @@ abstract class PartitionedScanTestSuite<QUERY extends Query<?>, SESSION, CURSOR 
     protected int maxNumberOfPartitions;
     protected PartitionedScanFactory<QUERY, SESSION, CURSOR> factory;
 
+    protected AssertableLogProvider logProvider = new AssertableLogProvider();
+
+    @ExtensionCallback
+    protected void configure(TestDatabaseManagementServiceBuilder builder) {
+        builder.setInternalLogProvider(logProvider);
+    }
+
     PartitionedScanTestSuite(TestSuite<QUERY, SESSION, CURSOR> testSuite) {
         factory = testSuite.getFactory();
     }
@@ -112,6 +126,14 @@ abstract class PartitionedScanTestSuite<QUERY extends Query<?>, SESSION, CURSOR 
         return ((TransactionImpl) db.beginTx()).kernelTransaction();
     }
 
+    public final boolean isBlockFormat() {
+        return ((GraphDatabaseAPI) db)
+                .getDependencyResolver()
+                .resolveDependency(StorageEngineFactory.class)
+                .name()
+                .equals("block");
+    }
+
     @Test
     final void shouldThrowWithEntityTypeComplementSeekOrScan() throws KernelException {
         try (var tx = beginTx()) {
@@ -120,13 +142,20 @@ abstract class PartitionedScanTestSuite<QUERY extends Query<?>, SESSION, CURSOR 
             // given  a read session with a mismatched entity type to the seek/scan
             // when   partitioned scan constructed
             // then   IndexNotApplicableKernelException should be thrown
-            softly.assertThatThrownBy(
-                            () -> factory.getEntityTypeComplimentFactory()
-                                    .partitionedScan(
-                                            tx, factory.getSession(tx, query.indexName()), Integer.MAX_VALUE, query),
-                            "should throw with mismatched entity type seek/scan method, and given index session")
-                    .isInstanceOf(IndexNotApplicableKernelException.class)
-                    .hasMessageContaining("can not be performed on index");
+            var e = assertThrows(
+                    IndexNotApplicableKernelException.class,
+                    () -> factory.getEntityTypeComplimentFactory()
+                            .partitionedScan(tx, factory.getSession(tx, query.indexName()), Integer.MAX_VALUE, query),
+                    "should throw with mismatched entity type seek/scan method, and given index session");
+            softly.assertThat(e).hasMessageContaining("can not be performed on index");
+            softly.assertThat(e.gqlStatus()).isEqualTo("50N15");
+            softly.assertThat(e.statusDescription())
+                    .contains(
+                            "error: general processing exception - unsupported index operation. The system attempted to execute an unsupported operation on index",
+                            "See debug.log for more information.");
+            softly.proxy(LogAssert.class, AssertableLogProvider.class, logProvider)
+                    .containsMessageWithAll("can not be performed on index")
+                    .containsException(e);
         }
     }
 
@@ -175,11 +204,20 @@ abstract class PartitionedScanTestSuite<QUERY extends Query<?>, SESSION, CURSOR 
                 // given  an invalid query
                 // when   partitioned scan constructed
                 // then   IndexNotApplicableKernelException should be thrown
-                softly.assertThatThrownBy(
-                                () -> factory.partitionedScan(tx, Integer.MAX_VALUE, query),
-                                "should throw with an invalid query")
-                        .isInstanceOf(IndexNotApplicableKernelException.class)
+                var e = assertThrows(
+                        IndexNotApplicableKernelException.class,
+                        () -> factory.partitionedScan(tx, Integer.MAX_VALUE, query),
+                        "should throw with an invalid query");
+                softly.assertThat(e)
                         .hasMessageContaining("This index does not support partitioned scan for this query");
+                softly.assertThat(e.gqlStatus()).isEqualTo("50N15");
+                softly.assertThat(e.statusDescription())
+                        .contains(
+                                "error: general processing exception - unsupported index operation. The system attempted to execute an unsupported operation on index",
+                                "See debug.log for more information.");
+                softly.proxy(LogAssert.class, AssertableLogProvider.class, logProvider)
+                        .containsMessageWithAll("This index does not support partitioned scan for this query")
+                        .containsException(e);
             }
         }
     }

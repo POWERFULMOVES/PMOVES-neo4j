@@ -21,25 +21,28 @@ package org.neo4j.storageengine.api;
 
 import static java.util.Collections.emptyList;
 
-import java.nio.file.Path;
-import java.util.Collection;
+import java.util.List;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 
-/**
- * Holds information about storage files for a specific store. Either a store is doing well where e.g. {@link RecoveryState#RECOVERED}
- * or {@link RecoveryState#RECOVERABLE} is used, or some store files are missing or broken and {@link RecoveryState#UNRECOVERABLE} together
- * with a list of missing or broken files can be specified in {@link #unrecoverableState(Collection)}.
- */
-public record StorageFilesState(RecoveryState recoveryState, Collection<Path> missingFiles) {
-
-    public static StorageFilesState recoverableState() {
-        return new StorageFilesState(RecoveryState.RECOVERABLE, emptyList());
-    }
+/// Holds information about storage files for a specific store.
+///
+/// A store is either:
+/// * [RecoveryState#RECOVERED], and thus doing well
+/// * [RecoveryState#RECOVERABLE], also doing well, but requires recovery to fix a few things
+///   It may be possible to recover in some situations, such as the creation occurring since the last checkpoint.
+/// * [RecoveryState#UNRECOVERABLE], where some stores files are missing or broken, and should be specified in its
+///   [#unrecoverableState(java.util.List)] factory method.
+public record StorageFilesState(RecoveryState recoveryState, List<StoreFile> missingFiles) {
 
     public static StorageFilesState recoveredState() {
         return new StorageFilesState(RecoveryState.RECOVERED, emptyList());
     }
 
-    public static StorageFilesState unrecoverableState(Collection<Path> missingFiles) {
+    public static StorageFilesState recoverableState() {
+        return new StorageFilesState(RecoveryState.RECOVERABLE, emptyList());
+    }
+
+    public static StorageFilesState unrecoverableState(List<StoreFile> missingFiles) {
         return new StorageFilesState(RecoveryState.UNRECOVERABLE, missingFiles);
     }
 }

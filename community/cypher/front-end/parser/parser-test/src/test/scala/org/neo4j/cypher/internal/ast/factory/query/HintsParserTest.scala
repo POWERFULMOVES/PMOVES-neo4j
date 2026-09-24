@@ -16,7 +16,11 @@
  */
 package org.neo4j.cypher.internal.ast.factory.query
 
+import org.neo4j.cypher.internal.ast.ExpandHintAll
+import org.neo4j.cypher.internal.ast.ExpandHintInto
+import org.neo4j.cypher.internal.ast.ExpandStep
 import org.neo4j.cypher.internal.ast.Statements
+import org.neo4j.cypher.internal.ast.UsingExpandHint
 import org.neo4j.cypher.internal.ast.UsingIndexHint
 import org.neo4j.cypher.internal.ast.UsingIndexHint.SeekOnly
 import org.neo4j.cypher.internal.ast.UsingIndexHint.SeekOrScan
@@ -24,10 +28,9 @@ import org.neo4j.cypher.internal.ast.UsingIndexHint.UsingAnyIndexType
 import org.neo4j.cypher.internal.ast.UsingIndexHint.UsingPointIndexType
 import org.neo4j.cypher.internal.ast.UsingIndexHint.UsingRangeIndexType
 import org.neo4j.cypher.internal.ast.UsingIndexHint.UsingTextIndexType
-import org.neo4j.cypher.internal.ast.factory.neo4j.Neo4jASTConstructionException
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher25
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
+import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
 import org.neo4j.cypher.internal.ast.test.util.AstParsingTestBase
+import org.neo4j.cypher.internal.util.NonEmptyList
 import org.neo4j.exceptions.SyntaxException
 
 class HintsParserTest extends AstParsingTestBase {
@@ -45,29 +48,23 @@ class HintsParserTest extends AstParsingTestBase {
   }
 
   test("MATCH (n) USING BTREE INDEX n:N(p)") {
-    failsParsing[Statements]
-      .in {
-        case Cypher25 => _.throws[SyntaxException].withMessageStart("Invalid input 'BTREE'")
-        case _ =>
-          _.withMessageStart("Index type BTREE is no longer supported for USING index hint. Use TEXT, RANGE or POINT")
-            .in {
-              case Cypher5JavaCc => _.throws[Neo4jASTConstructionException]
-              case _             => _.throws[SyntaxException]
-            }
-      }
+    failsParsing[Statements].in {
+      case Cypher5 =>
+        _.withOldSyntax(
+          "Index type BTREE is no longer supported for USING index hint. Use TEXT, RANGE or POINT instead."
+        )
+      case _ => _.throws[SyntaxException].withMessageStart("Invalid input 'BTREE'")
+    }
   }
 
   test("MATCH (n) USING BTREE INDEX SEEK n:N(p)") {
-    failsParsing[Statements]
-      .in {
-        case Cypher25 => _.throws[SyntaxException].withMessageStart("Invalid input 'BTREE'")
-        case _ =>
-          _.withMessageStart("Index type BTREE is no longer supported for USING index hint. Use TEXT, RANGE or POINT")
-            .in {
-              case Cypher5JavaCc => _.throws[Neo4jASTConstructionException]
-              case _             => _.throws[SyntaxException]
-            }
-      }
+    failsParsing[Statements].in {
+      case Cypher5 =>
+        _.withOldSyntax(
+          "Index type BTREE is no longer supported for USING index hint. Use TEXT, RANGE or POINT instead."
+        )
+      case _ => _.throws[SyntaxException].withMessageStart("Invalid input 'BTREE'")
+    }
   }
 
   test("MATCH (n) USING RANGE INDEX n:N(p)") {
@@ -104,6 +101,98 @@ class HintsParserTest extends AstParsingTestBase {
     parses[Statements].containing[UsingIndexHint](
       UsingIndexHint(varFor("n"), labelOrRelTypeName("N"), Seq(propName("p")), SeekOnly, UsingTextIndexType)(pos)
     )
+  }
+
+  test("MATCH (a)-->(b) USING EXPAND FROM a TO b") {
+    parses[Statements].containing[UsingExpandHint](
+      UsingExpandHint(NonEmptyList(ExpandStep.byEndpoints(varFor("a"), varFor("b"), mode = None)(pos)))(pos)
+    )
+  }
+
+  test("MATCH (a)-->(b) USING EXPAND ALL FROM a TO b") {
+    parses[Statements].containing[UsingExpandHint](
+      UsingExpandHint(NonEmptyList(ExpandStep.byEndpoints(
+        varFor("a"),
+        varFor("b"),
+        mode = Some(ExpandHintAll)
+      )(pos)))(pos)
+    )
+  }
+
+  test("MATCH (a)-->(b) USING EXPAND INTO FROM a TO b") {
+    parses[Statements].containing[UsingExpandHint](
+      UsingExpandHint(NonEmptyList(ExpandStep.byEndpoints(
+        varFor("a"),
+        varFor("b"),
+        mode = Some(ExpandHintInto)
+      )(pos)))(pos)
+    )
+  }
+
+  test("MATCH (a)-->(b)-->(c) USING EXPAND FROM a TO b, FROM b TO c") {
+    parses[Statements].containing[UsingExpandHint](
+      UsingExpandHint(NonEmptyList(
+        ExpandStep.byEndpoints(varFor("a"), varFor("b"), mode = None)(pos),
+        ExpandStep.byEndpoints(varFor("b"), varFor("c"), mode = None)(pos)
+      ))(pos)
+    )
+  }
+
+  test("MATCH (expand)-->(into) RETURN expand, into") {
+    // accepts expand and into as identifiers
+    parses[Statements]
+  }
+
+  test("MATCH (a)-[r]->(b) USING EXPAND FROM a TO b VIA r") {
+    parses[Statements].containing[UsingExpandHint](
+      UsingExpandHint(NonEmptyList(
+        ExpandStep(Some(varFor("a")), Some(varFor("b")), Some(varFor("r")), None)(pos)
+      ))(pos)
+    )
+  }
+
+  test("MATCH (a)-[r]->(b) USING EXPAND VIA r") {
+    parses[Statements].containing[UsingExpandHint](
+      UsingExpandHint(NonEmptyList(
+        ExpandStep(None, None, Some(varFor("r")), None)(pos)
+      ))(pos)
+    )
+  }
+
+  test("MATCH (a)-[r]->(b) USING EXPAND INTO VIA r") {
+    parses[Statements].containing[UsingExpandHint](
+      UsingExpandHint(NonEmptyList(
+        ExpandStep(None, None, Some(varFor("r")), Some(ExpandHintInto))(pos)
+      ))(pos)
+    )
+  }
+
+  test("MATCH (a)-[r]->(b) USING EXPAND ALL VIA r") {
+    parses[Statements].containing[UsingExpandHint](
+      UsingExpandHint(NonEmptyList(
+        ExpandStep(None, None, Some(varFor("r")), Some(ExpandHintAll))(pos)
+      ))(pos)
+    )
+  }
+
+  test("MATCH (a)-[r]->(b)-[s]->(c) USING EXPAND FROM a TO b VIA r, VIA s") {
+    parses[Statements].containing[UsingExpandHint](
+      UsingExpandHint(NonEmptyList(
+        ExpandStep(Some(varFor("a")), Some(varFor("b")), Some(varFor("r")), None)(pos),
+        ExpandStep(None, None, Some(varFor("s")), None)(pos)
+      ))(pos)
+    )
+  }
+
+  test("MATCH (via)-->(a) RETURN via, a") {
+    // VIA is a non-reserved keyword in both Cypher 5 and Cypher 25
+    parses[Statements]
+  }
+
+  test("MATCH (a)-->(b) USING EXPAND ALL RETURN *") {
+    // Grammar requires at least one of FROM/TO or VIA per expandHintStep,
+    // so `USING EXPAND ALL` on its own is rejected at parse time.
+    failsParsing[Statements]
   }
 
   test("can parse multiple hints") {

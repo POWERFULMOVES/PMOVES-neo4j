@@ -22,10 +22,21 @@ package org.neo4j.cypher
 import org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME
 import org.neo4j.configuration.GraphDatabaseSettings.SYSTEM_DATABASE_NAME
 import org.neo4j.configuration.GraphDatabaseSettings.auth_enabled
+import org.neo4j.cypher.internal.util.test_helpers.GqlExceptionMatchers.gqlException
+import org.neo4j.cypher.internal.util.test_helpers.GqlExceptionMatchers.gqlStatus
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.AUTH_ID_PROPERTY
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.AUTH_PROVIDER_PROPERTY
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.HAS_AUTH_TYPE
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_CREDENTIALS_EXPIRED_PROPERTY
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_CREDENTIALS_PROPERTY
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_LABEL
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_NAME_PROPERTY
 import org.neo4j.exceptions.InvalidArgumentException
 import org.neo4j.exceptions.ParameterNotFoundException
 import org.neo4j.exceptions.ParameterWrongTypeException
+import org.neo4j.exceptions.SecurityAdministrationException
 import org.neo4j.exceptions.SyntaxException
+import org.neo4j.gqlstatus.GqlStatusInfoCodes
 import org.neo4j.graphdb.QueryExecutionException
 import org.neo4j.graphdb.Result
 import org.neo4j.graphdb.config.Setting
@@ -38,14 +49,6 @@ import org.neo4j.server.security.SecureHasher
 import org.neo4j.server.security.SystemGraphCredential
 import org.neo4j.server.security.auth.SecurityTestUtils
 import org.neo4j.server.security.systemgraph.SecurityGraphHelper.NATIVE_AUTH
-import org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.AUTH_ID
-import org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.AUTH_PROVIDER
-import org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.HAS_AUTH
-import org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.USER_CREDENTIALS
-import org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.USER_EXPIRED
-import org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.USER_LABEL
-import org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.USER_NAME
-import org.scalatest.enablers.Messaging.messagingNatureOfThrowable
 
 import java.util
 import java.util.Collections
@@ -67,8 +70,9 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
   private val newPassword = "newpassword"
   private val wrongPassword = "wrongpassword"
   private val alterDefaultUserQuery = s"ALTER USER $defaultUsername SET PASSWORD '$password' CHANGE NOT REQUIRED"
+  private val commandColumn: String = "command"
 
-  override def databaseConfig(): Map[Setting[_], Object] =
+  override def databaseConfig(): Map[Setting[?], Object] =
     super.databaseConfig() ++ Map(
       auth_enabled -> java.lang.Boolean.TRUE
     )
@@ -83,6 +87,14 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
 
     // THEN
     result.toList should be(List(defaultUser))
+  }
+
+  test("should show default user as command") {
+    // WHEN
+    val result = execute("CYPHER 25 SHOW USERS AS COMMANDS")
+
+    // THEN
+    result.toList should be(List(createUserCommand(defaultUsername, Seq(nativeAuth(defaultUsername, true)))))
   }
 
   test("should show all users") {
@@ -369,51 +381,6 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
     // but if for some reason there is external auth it might be nice to show regardless
     // and therefore test even if we have to fake the external auth parts
 
-    /** Takes in an existing user and adds external auths
-     *
-     * @param user username to add auths for
-     * @param externalAuths List of maps with provider and id for each wanted external auth: Map("provider" -> "x", "id" ->"y")
-     * @param keepNativeAuth if false, the native auth for the user is removed
-     */
-    def fakeExternalAuthForUser(
-      user: String,
-      externalAuths: List[Map[String, String]],
-      keepNativeAuth: Boolean = true
-    ): Unit = {
-      Using.resource(graphOps.beginTx()) { tx =>
-        val userNode = tx.findNode(USER_LABEL, USER_NAME, user)
-
-        if (!keepNativeAuth) {
-          // remove native auth
-          userNode.removeProperty(USER_CREDENTIALS)
-          userNode.removeProperty(USER_EXPIRED)
-
-          userNode.getRelationships(HAS_AUTH)
-            .stream()
-            .filter(rel => rel.getOtherNode(userNode).getProperty(AUTH_PROVIDER).equals(NATIVE_AUTH))
-            .forEach(rel => {
-              val node = rel.getOtherNode(userNode)
-              rel.delete()
-              node.delete()
-            })
-        }
-
-        externalAuths.foreach(auth => {
-          val authNode = tx.createNode()
-          authNode.setProperty(AUTH_PROVIDER, auth("provider"))
-          authNode.setProperty(AUTH_ID, auth("id"))
-          userNode.createRelationshipTo(authNode, HAS_AUTH)
-        })
-
-        tx.commit()
-      }
-    }
-
-    def addExternalAuthColumns(userMap: Map[String, Any], provider: String, id: String): Map[String, Any] = {
-      val authMap = if (id == null) null else Map("id" -> id)
-      userMap ++ Map("provider" -> provider, "auth" -> authMap)
-    }
-
     // GIVEN
     execute(s"CREATE USER $username SET PASSWORD '$password'")
     fakeExternalAuthForUser(
@@ -439,11 +406,11 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
     val user1Map = user(username) ++ Map("passwordChangeRequired" -> null)
     val user2Map = user(newUsername, passwordChangeRequired = false)
     resultWithAuth.toList should be(List(
-      addNativeAuthColumns(defaultUser, pwChangeRequired = true),
-      addExternalAuthColumns(user1Map, "Foo", s"$username.foo@example.com"),
-      addExternalAuthColumns(user1Map, "Bar", s"$username.bar@example.com"),
-      addNativeAuthColumns(user2Map, pwChangeRequired = false),
-      addExternalAuthColumns(user2Map, "Baz", s"$newUsername.baz@example.com")
+      withTags(addNativeAuthColumns(defaultUser, pwChangeRequired = true)),
+      withTags(addExternalAuthColumns(user1Map, "Foo", s"$username.foo@example.com")),
+      withTags(addExternalAuthColumns(user1Map, "Bar", s"$username.bar@example.com")),
+      withTags(addNativeAuthColumns(user2Map, pwChangeRequired = false)),
+      withTags(addExternalAuthColumns(user2Map, "Baz", s"$newUsername.baz@example.com"))
     ).sortBy(m => (m("user").asInstanceOf[String], m("provider").asInstanceOf[String])))
 
     // WHEN
@@ -451,9 +418,77 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
 
     // THEN
     resultWithoutAuth.toList should be(List(
-      defaultUser,
-      user(username) ++ Map("passwordChangeRequired" -> null),
-      user(newUsername, passwordChangeRequired = false)
+      withTags(defaultUser),
+      withTags(user(username) ++ Map("passwordChangeRequired" -> null)),
+      withTags(user(newUsername, passwordChangeRequired = false))
+    ).sortBy(m => m("user").asInstanceOf[String]))
+  }
+
+  test("should show users as commands with auth with multiple users with mixed auth info") {
+    // Community should only have native auth,
+    // but if for some reason there is external auth it might be nice to show regardless
+    // and therefore test even if we have to fake the external auth parts
+
+    // GIVEN
+    execute(s"CREATE USER $username SET PASSWORD '$password'")
+    fakeExternalAuthForUser(
+      username,
+      List(
+        Map("provider" -> "Foo", "id" -> s"$username.foo@example.com"),
+        Map("provider" -> "Bar", "id" -> s"$username.bar@example.com")
+      ),
+      keepNativeAuth = false
+    )
+    execute(s"CREATE USER $newUsername SET PASSWORD '$password' CHANGE NOT REQUIRED")
+    fakeExternalAuthForUser(
+      newUsername,
+      List(
+        Map("provider" -> "Baz", "id" -> s"$newUsername.baz@example.com")
+      )
+    )
+
+    // WHEN
+    val resultWithAuth = execute("CYPHER 25 SHOW USERS WITH AUTH AS COMMANDS YIELD * ORDER BY user, provider")
+
+    // THEN
+    val user1Command = createUserCommand(
+      username,
+      Seq(
+        externalAuth("Bar", s"$username.bar@example.com"),
+        externalAuth("Foo", s"$username.foo@example.com")
+      )
+    )
+    val user2Command = createUserCommand(
+      newUsername,
+      Seq(
+        externalAuth("Baz", s"$newUsername.baz@example.com"),
+        nativeAuth(newUsername, false)
+      )
+    )
+
+    val user1Map = user1Command ++ Map("user" -> username, "roles" -> null)
+    val user2Map = user2Command ++ Map("user" -> newUsername, "roles" -> null)
+    val defaultUserMap = createUserCommand(defaultUsername, Seq(nativeAuth(defaultUsername))) ++ Map(
+      "user" -> defaultUsername,
+      "roles" -> null
+    )
+
+    resultWithAuth.toList should be(List(
+      withTags(addExternalAuthColumns(user1Map, "Bar", s"$username.bar@example.com")),
+      withTags(addExternalAuthColumns(user1Map, "Foo", s"$username.foo@example.com")),
+      withTags(addNativeAuthColumns(defaultUserMap, pwChangeRequired = true)),
+      withTags(addExternalAuthColumns(user2Map, "Baz", s"$newUsername.baz@example.com")),
+      withTags(addNativeAuthColumns(user2Map, pwChangeRequired = false))
+    ).sortBy(m => (m("user").asInstanceOf[String], m("provider").asInstanceOf[String])))
+
+    // WHEN
+    val resultWithoutAuth = execute("CYPHER 25 SHOW USERS AS COMMANDS YIELD * ORDER BY user")
+
+    // THEN
+    resultWithoutAuth.toList should be(List(
+      withTags(defaultUserMap),
+      withTags(user1Map),
+      withTags(user2Map)
     ).sortBy(m => m("user").asInstanceOf[String]))
   }
 
@@ -470,10 +505,10 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
       "SHOW CURRENT USER",
       resultHandler = (row, _) => {
         // THEN
-        row.get("user") should be(username)
-        row.get("roles") should be(null)
-        row.get("passwordChangeRequired") shouldBe false
-        row.get("suspended") shouldBe null
+        row.get("user") shouldEqual username
+        row.get("roles") shouldEqual null
+        row.get("passwordChangeRequired") shouldEqual false
+        row.get("suspended") shouldEqual null
       }
     ) should be(1)
   }
@@ -491,7 +526,7 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
       resultHandler = (row, _) => {
         // THEN
         row.get("user") should be(username)
-        row.get("passwordChangeRequired") shouldBe false
+        row.get("passwordChangeRequired") shouldEqual false
       }
     ) should be(1)
   }
@@ -508,10 +543,10 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
       "SHOW CURRENT USER",
       resultHandler = (row, _) => {
         // THEN
-        row.get("user") should be(username)
-        row.get("roles") should be(null)
-        row.get("passwordChangeRequired") shouldBe false
-        row.get("suspended") shouldBe null
+        row.get("user") shouldEqual username
+        row.get("roles") shouldEqual null
+        row.get("passwordChangeRequired") shouldEqual false
+        row.get("suspended") shouldEqual null
       }
     ) should be(1)
   }
@@ -588,7 +623,13 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
       // WHEN
       execute("CREATE USER foo SET PASSWORD ''")
       // THEN
-    } should have message "A password cannot be empty."
+    } should (
+      have message "A password cannot be empty."
+        and be(gqlStatus(
+          GqlStatusInfoCodes.STATUS_22NB6,
+          "error: data exception - input empty. Invalid input. Password is not allowed to be an empty string."
+        ))
+    )
 
     execute("SHOW USERS").toSet shouldBe Set(defaultUser)
   }
@@ -690,9 +731,11 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
 
   test("should not be able to create user with explicit status active in community") {
     // WHEN
-    assertFailure(
+    assertFailureWithGQLStatus(
       "CREATE USER foo SET PASSWORD 'password' SET STATUS ACTIVE",
-      "Failed to create the specified user 'foo': 'SET STATUS' is not available in community edition."
+      "Failed to create the specified user 'foo': 'SET STATUS' is not available in community edition.",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. 'SET STATUS' is not supported in community edition."
     )
 
     // THEN
@@ -701,9 +744,11 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
 
   test("should not be able to create user with status suspended in community") {
     // WHEN
-    assertFailure(
+    assertFailureWithGQLStatus(
       "CREATE USER foo SET PASSWORD 'password' SET STATUS SUSPENDED",
-      "Failed to create the specified user 'foo': 'SET STATUS' is not available in community edition."
+      "Failed to create the specified user 'foo': 'SET STATUS' is not available in community edition.",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. 'SET STATUS' is not supported in community edition."
     )
 
     // THEN
@@ -712,9 +757,11 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
 
   test("should not be able to create user with a default database in community") {
     // WHEN
-    assertFailure(
+    assertFailureWithGQLStatus(
       "CREATE USER foo SET PASSWORD 'password' SET HOME DATABASE foo",
-      "Failed to create the specified user 'foo': 'HOME DATABASE' is not available in community edition."
+      "Failed to create the specified user 'foo': 'HOME DATABASE' is not available in community edition.",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. 'HOME DATABASE' is not supported in community edition."
     )
 
     // THEN
@@ -723,21 +770,27 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
 
   test("should not be able to create user with an external auth in community") {
     // WHEN
-    assertFailure(
+    assertFailureWithGQLStatus(
       "CREATE USER foo SET AUTH 'bar' { SET ID 'baz' }",
-      "Failed to create the specified user 'foo': `SET AUTH 'bar'` is not available in community edition."
+      "Failed to create the specified user 'foo': `SET AUTH 'bar'` is not available in community edition.",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. External auth provider is not supported in community edition."
     )
 
     // WHEN
-    assertFailure(
+    assertFailureWithGQLStatus(
       "CREATE USER foo SET AUTH 'bar' { SET ID 'baz' } SET AUTH 'baz' { SET ID 'qux' }",
-      "Failed to create the specified user 'foo': `SET AUTH 'bar'`, `SET AUTH 'baz'` are not available in community edition."
+      "Failed to create the specified user 'foo': `SET AUTH 'bar'`, `SET AUTH 'baz'` are not available in community edition.",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. External auth provider is not supported in community edition."
     )
 
     // WHEN
-    assertFailure(
+    assertFailureWithGQLStatus(
       "CREATE USER foo SET AUTH 'bar' { SET ID 'baz' } SET AUTH 'native' { SET PASSWORD 'password' }",
-      "Failed to create the specified user 'foo': `SET AUTH 'bar'` is not available in community edition."
+      "Failed to create the specified user 'foo': `SET AUTH 'bar'` is not available in community edition.",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. External auth provider is not supported in community edition."
     )
 
     // THEN
@@ -778,13 +831,25 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
       // WHEN
       execute("CREATE USER `` SET PASSWORD 'password' SET PASSWORD CHANGE REQUIRED")
       // THEN
-    } should have message "The provided username is empty."
+    } should (
+      have message "The provided username is empty."
+        and be(gqlStatus(
+          GqlStatusInfoCodes.STATUS_22NB6,
+          "error: data exception - input empty. Invalid input. Username is not allowed to be an empty string."
+        ))
+    )
 
     the[InvalidArgumentException] thrownBy {
       // WHEN
       execute("CREATE USER $user SET PASSWORD 'password' SET PASSWORD CHANGE REQUIRED", Map("user" -> ""))
       // THEN
-    } should have message "The provided username is empty."
+    } should (
+      have message "The provided username is empty."
+        and be(gqlStatus(
+          GqlStatusInfoCodes.STATUS_22NB6,
+          "error: data exception - input empty. Invalid input. Username is not allowed to be an empty string."
+        ))
+    )
 
     // THEN
     execute("SHOW USERS").toSet shouldBe Set(defaultUser)
@@ -1401,7 +1466,13 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
       // WHEN
       execute(s"ALTER USER $username SET PASSWORD '' CHANGE NOT REQUIRED")
       // THEN
-    } should have message "A password cannot be empty."
+    } should (
+      have message "A password cannot be empty."
+        and be(gqlStatus(
+          GqlStatusInfoCodes.STATUS_22NB6,
+          "error: data exception - input empty. Invalid input. Password is not allowed to be an empty string."
+        ))
+    )
 
     // THEN
     testUserLogin(username, password, AuthenticationResult.PASSWORD_CHANGE_REQUIRED)
@@ -1415,7 +1486,13 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
       // WHEN
       execute("ALTER USER $user SET PASSWORD $password", Map("user" -> username, "password" -> ""))
       // THEN
-    } should have message "A password cannot be empty."
+    } should (
+      have message "A password cannot be empty."
+        and be(gqlStatus(
+          GqlStatusInfoCodes.STATUS_22NB6,
+          "error: data exception - input empty. Invalid input. Password is not allowed to be an empty string."
+        ))
+    )
 
     // THEN
     testUserLogin(username, password, AuthenticationResult.PASSWORD_CHANGE_REQUIRED)
@@ -1671,27 +1748,35 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
   }
 
   test("should not be able to alter user status in community") {
-    assertFailure(
+    assertFailureWithGQLStatus(
       s"ALTER USER $defaultUsername SET STATUS ACTIVE",
-      s"Failed to alter the specified user '$defaultUsername': 'SET STATUS' is not available in community edition."
+      s"Failed to alter the specified user '$defaultUsername': 'SET STATUS' is not available in community edition.",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. 'SET STATUS' is not supported in community edition."
     )
-    assertFailure(
+    assertFailureWithGQLStatus(
       s"ALTER USER $defaultUsername SET PASSWORD 'xxx' SET STATUS SUSPENDED",
-      s"Failed to alter the specified user '$defaultUsername': 'SET STATUS' is not available in community edition."
+      s"Failed to alter the specified user '$defaultUsername': 'SET STATUS' is not available in community edition.",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. 'SET STATUS' is not supported in community edition."
     )
   }
 
   test("should not be able to alter a users home database in community") {
     // WHEN
-    assertFailure(
+    assertFailureWithGQLStatus(
       "ALTER USER foo SET HOME DATABASE foo",
-      "Failed to alter the specified user 'foo': 'HOME DATABASE' is not available in community edition."
+      "Failed to alter the specified user 'foo': 'HOME DATABASE' is not available in community edition.",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. 'HOME DATABASE' is not supported in community edition."
     )
 
     // WHEN
-    assertFailure(
+    assertFailureWithGQLStatus(
       "ALTER USER foo REMOVE HOME DATABASE",
-      "Failed to alter the specified user 'foo': 'HOME DATABASE' is not available in community edition."
+      "Failed to alter the specified user 'foo': 'HOME DATABASE' is not available in community edition.",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. 'HOME DATABASE' is not supported in community edition."
     )
 
     // THEN
@@ -1700,21 +1785,27 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
 
   test("should not be able to alter external auths in community") {
     // WHEN
-    assertFailure(
+    assertFailureWithGQLStatus(
       "ALTER USER foo SET AUTH 'bar' { SET ID 'baz' }",
-      "Failed to alter the specified user 'foo': `SET AUTH 'bar'` is not available in community edition."
+      "Failed to alter the specified user 'foo': `SET AUTH 'bar'` is not available in community edition.",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. External auth provider is not supported in community edition."
     )
 
     // WHEN
-    assertFailure(
+    assertFailureWithGQLStatus(
       "ALTER USER foo SET AUTH 'bar' { SET ID 'baz' } SET AUTH 'baz' { SET ID 'qux' }",
-      "Failed to alter the specified user 'foo': `SET AUTH 'bar'`, `SET AUTH 'baz'` are not available in community edition."
+      "Failed to alter the specified user 'foo': `SET AUTH 'bar'`, `SET AUTH 'baz'` are not available in community edition.",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. External auth provider is not supported in community edition."
     )
 
     // WHEN
-    assertFailure(
+    assertFailureWithGQLStatus(
       "ALTER USER foo SET AUTH 'bar' { SET ID 'baz' } SET AUTH 'native' { SET PASSWORD 'password' }",
-      "Failed to alter the specified user 'foo': `SET AUTH 'bar'` is not available in community edition."
+      "Failed to alter the specified user 'foo': `SET AUTH 'bar'` is not available in community edition.",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. External auth provider is not supported in community edition."
     )
 
     // THEN
@@ -1723,32 +1814,42 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
 
   test("should not be able to remove auths in community") {
     // WHEN
-    assertFailure(
+    assertFailureWithGQLStatus(
       "ALTER USER foo REMOVE AUTH 'bar'",
-      "Failed to alter the specified user 'foo': `REMOVE AUTH` is not available in community edition."
+      "Failed to alter the specified user 'foo': `REMOVE AUTH` is not available in community edition.",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. 'REMOVE AUTH' is not supported in community edition."
     )
     // WHEN
-    assertFailure(
+    assertFailureWithGQLStatus(
       "ALTER USER foo REMOVE AUTH 'native'",
-      "Failed to alter the specified user 'foo': `REMOVE AUTH` is not available in community edition."
+      "Failed to alter the specified user 'foo': `REMOVE AUTH` is not available in community edition.",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. 'REMOVE AUTH' is not supported in community edition."
     )
 
     // WHEN
-    assertFailure(
+    assertFailureWithGQLStatus(
       "ALTER USER foo REMOVE AUTH ['bar', 'baz']",
-      "Failed to alter the specified user 'foo': `REMOVE AUTH` is not available in community edition."
+      "Failed to alter the specified user 'foo': `REMOVE AUTH` is not available in community edition.",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. 'REMOVE AUTH' is not supported in community edition."
     )
 
     // WHEN
-    assertFailure(
+    assertFailureWithGQLStatus(
       "ALTER USER foo REMOVE AUTH ['bar', 'native']",
-      "Failed to alter the specified user 'foo': `REMOVE AUTH` is not available in community edition."
+      "Failed to alter the specified user 'foo': `REMOVE AUTH` is not available in community edition.",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. 'REMOVE AUTH' is not supported in community edition."
     )
 
     // WHEN
-    assertFailure(
+    assertFailureWithGQLStatus(
       "ALTER USER foo REMOVE ALL AUTH",
-      "Failed to alter the specified user 'foo': `REMOVE AUTH` is not available in community edition."
+      "Failed to alter the specified user 'foo': `REMOVE AUTH` is not available in community edition.",
+      GqlStatusInfoCodes.STATUS_51N27,
+      "error: system configuration or operation exception - not supported in this edition. 'REMOVE AUTH' is not supported in community edition."
     )
 
     // THEN
@@ -1786,11 +1887,20 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
     // GIVEN
     prepareUser(changeRequired = false)
 
-    the[QueryExecutionException] thrownBy {
+    val exception = the[QueryExecutionException] thrownBy {
       // WHEN
       executeOnSystem(username, password, s"ALTER CURRENT USER SET PASSWORD FROM '$wrongPassword' TO '$newPassword'")
       // THEN
-    } should have message s"User '$username' failed to alter their own password: Invalid principal or credentials."
+    }
+    exception should have message s"User '$username' failed to alter their own password: Invalid principal or credentials."
+    exception should be(gqlStatus(
+      GqlStatusInfoCodes.STATUS_42NFF,
+      "error: syntax error or access rule violation - permission/access denied. Access denied, see the security logs for details."
+    ))
+    assert42NFFLogWithMessage(
+      s"User '$username' failed to alter their own password: Invalid principal or credentials.",
+      community = true
+    )
 
     // THEN
     testUserLogin(username, password, AuthenticationResult.SUCCESS)
@@ -1805,17 +1915,32 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
       // WHEN
       executeOnSystem(username, password, s"ALTER CURRENT USER SET PASSWORD FROM '$password' TO ''")
       // THEN
-    } should have message "A password cannot be empty."
+    } should (
+      have message "A password cannot be empty."
+        and be(gqlStatus(
+          GqlStatusInfoCodes.STATUS_22NB6,
+          "error: data exception - input empty. Invalid input. Password is not allowed to be an empty string."
+        ))
+    )
 
     // THEN
     testUserLogin(username, password, AuthenticationResult.SUCCESS)
 
-    the[QueryExecutionException] thrownBy {
+    val exception = the[QueryExecutionException] thrownBy {
       // WHEN
       val parameter = Map[String, Object]("password" -> password).asJava
       executeOnSystem(username, password, s"ALTER CURRENT USER SET PASSWORD FROM '$password' TO $$password", parameter)
       // THEN
-    } should have message s"User '$username' failed to alter their own password: Old password and new password cannot be the same."
+    }
+    exception should have message s"User '$username' failed to alter their own password: Old password and new password cannot be the same."
+    exception should be(gqlStatus(
+      GqlStatusInfoCodes.STATUS_22N05,
+      "error: data exception - input failed validation. Invalid input '***' for alexandra password."
+    )
+      .withCause(
+        GqlStatusInfoCodes.STATUS_22N89,
+        "error: data exception - new password cannot be the same as the old password. Expected the new password to be different from the old password."
+      ))
 
     // THEN
     testUserLogin(username, password, AuthenticationResult.SUCCESS)
@@ -1825,12 +1950,20 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
     // GIVEN
     prepareUser(changeRequired = false)
 
-    the[QueryExecutionException] thrownBy {
+    val exception = the[QueryExecutionException] thrownBy {
       // WHEN
       val parameter = Map[String, Object]("password" -> password).asJava
       executeOnSystem(username, password, s"ALTER CURRENT USER SET PASSWORD FROM '$password' TO $$password", parameter)
       // THEN
-    } should have message s"User '$username' failed to alter their own password: Old password and new password cannot be the same."
+    }
+    exception should have message s"User '$username' failed to alter their own password: Old password and new password cannot be the same."
+    exception should be(gqlStatus(
+      GqlStatusInfoCodes.STATUS_22N05,
+      "error: data exception - input failed validation. Invalid input '***' for alexandra password."
+    ).withCause(
+      GqlStatusInfoCodes.STATUS_22N89,
+      "error: data exception - new password cannot be the same as the old password. Expected the new password to be different from the old password."
+    ))
 
     // THEN
     testUserLogin(username, password, AuthenticationResult.SUCCESS)
@@ -1978,11 +2111,18 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
   }
 
   test("should fail when changing own password when AUTH DISABLED") {
-    the[IllegalStateException] thrownBy {
+    val exception = the[SecurityAdministrationException] thrownBy {
       // WHEN
       execute(s"ALTER CURRENT USER SET PASSWORD FROM '$password' TO '$newPassword'")
       // THEN
-    } should have message "User failed to alter their own password: Command not available with auth disabled."
+    }
+    exception should be(gqlException(
+      "User failed to alter their own password: Command not available with auth disabled.",
+      gqlStatus(
+        GqlStatusInfoCodes.STATUS_51N2A,
+        "error: system configuration or operation exception - not supported with auth disabled. The command 'ALTER CURRENT USER SET PASSWORD' is not available with auth disabled."
+      )
+    ))
   }
 
   test("should fail when changing own password when not on system database") {
@@ -1999,8 +2139,13 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
         s"ALTER CURRENT USER SET PASSWORD FROM '$password' TO '$newPassword'"
       )
       // THEN
-    } should have message
+    } should (have message
       "This is an administration command and it should be executed against the system database: ALTER CURRENT USER SET PASSWORD"
+      and be(gqlStatus(
+        GqlStatusInfoCodes.STATUS_51N28,
+        "error: system configuration or operation exception - not supported by this database. This Cypher command must be executed against the database `system`."
+      )))
+
   }
 
   // Run commands
@@ -2046,6 +2191,76 @@ class CommunityUserAdministrationCommandAcceptanceTest extends CommunityAdminist
     val authMap = Map[String, Any]("password" -> "***", "changeRequired" -> pwChangeRequired)
     userMap ++ Map("provider" -> NATIVE_AUTH, "auth" -> authMap)
   }
+
+  private def addExternalAuthColumns(userMap: Map[String, Any], provider: String, id: String): Map[String, Any] = {
+    val authMap = if (id == null) null else Map("id" -> id)
+    userMap ++ Map("provider" -> provider, "auth" -> authMap)
+  }
+
+  private def withTags(userMap: Map[String, Any]): Map[String, Any] =
+    userMap + ("tags" -> List.empty[String])
+
+  /** Takes in an existing user and adds external auths
+   *
+   * @param user           username to add auths for
+   * @param externalAuths  List of maps with provider and id for each wanted external auth: Map("provider" -> "x", "id" ->"y")
+   * @param keepNativeAuth if false, the native auth for the user is removed
+   */
+  private def fakeExternalAuthForUser(
+    user: String,
+    externalAuths: List[Map[String, String]],
+    keepNativeAuth: Boolean = true
+  ): Unit = {
+    Using.resource(graphOps.beginTx()) { tx =>
+      val userNode = tx.findNode(USER_LABEL, USER_NAME_PROPERTY, user)
+
+      if (!keepNativeAuth) {
+        // remove native auth
+        userNode.removeProperty(USER_CREDENTIALS_PROPERTY)
+        userNode.removeProperty(USER_CREDENTIALS_EXPIRED_PROPERTY)
+
+        userNode.getRelationships(HAS_AUTH_TYPE)
+          .stream()
+          .filter(rel => rel.getOtherNode(userNode).getProperty(AUTH_PROVIDER_PROPERTY).equals(NATIVE_AUTH))
+          .forEach(rel => {
+            val node = rel.getOtherNode(userNode)
+            rel.delete()
+            node.delete()
+          })
+      }
+
+      externalAuths.foreach(auth => {
+        val authNode = tx.createNode()
+        authNode.setProperty(AUTH_PROVIDER_PROPERTY, auth("provider"))
+        authNode.setProperty(AUTH_ID_PROPERTY, auth("id"))
+        userNode.createRelationshipTo(authNode, HAS_AUTH_TYPE)
+      })
+
+      tx.commit()
+    }
+  }
+
+  private def createUserCommand(
+    username: String,
+    auths: Seq[String]
+  ): Map[String, Any] = {
+    Map(
+      commandColumn -> s"CREATE USER $username ${auths.mkString(" ")}"
+    )
+  }
+
+  private def nativeAuth(username: String, changeRequired: Boolean = true): String = {
+    val hashedCredentials = withTx { tx =>
+      val user = tx.findNode(USER_LABEL, USER_NAME_PROPERTY, username)
+      SystemGraphCredential.maskSerialized(user.getProperty(USER_CREDENTIALS_PROPERTY).asInstanceOf[String])
+    }
+    val changeReq = if (changeRequired) "" else "SET PASSWORD CHANGE NOT REQUIRED "
+
+    s"SET AUTH PROVIDER 'native' { SET ENCRYPTED PASSWORD '$hashedCredentials' $changeReq}"
+  }
+
+  private def externalAuth(provider: String, id: String): String =
+    s"SET AUTH PROVIDER '$provider' { SET ID '$id' }"
 
   private def testUserLogin(username: String, password: String, expected: AuthenticationResult): Unit = {
     val login = authManager.login(SecurityTestUtils.authToken(username, password), EMBEDDED_CONNECTION)

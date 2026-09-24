@@ -33,7 +33,7 @@ import java.util.Optional;
 import javax.servlet.http.HttpServletRequest;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
-import org.neo4j.bolt.protocol.common.message.AccessMode;
+import org.neo4j.boltmessages.AccessMode;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.logging.InternalLog;
 
@@ -110,7 +110,7 @@ public class HttpHeaderUtils {
     public static List<String> getBookmarks(HttpHeaders headers) {
         String headerValue = headers.getHeaderString(BOOKMARKS_HEADER);
 
-        if (headerValue == null || headerValue.length() == 0) {
+        if (headerValue == null || headerValue.isEmpty()) {
             return Collections.emptyList();
         }
 

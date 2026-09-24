@@ -209,7 +209,9 @@ object SizeEstimation {
           case _: Comment     => 0
           case _: PlaceHolder => 0
 
-          case unknown => throw new IllegalStateException(s"Don't know how many bytes $unknown will use")
+          case TableSwitch(_, ops, _) =>
+            26 /*constant part, includes throwing in default case and the the actual op*/ +
+              ops.size * 7 /*cost per label*/
         }
 
         if (visitChildren) acc => TraverseChildren(acc + bytesForInstruction)

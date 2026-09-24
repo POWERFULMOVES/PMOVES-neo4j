@@ -57,6 +57,20 @@ public interface MemoryTracker extends AutoCloseable, HeapMemoryTracker, HeapEst
     void allocateHeap(long bytes);
 
     /**
+     * Record an allocation of heap memory. This will not throw even if this request exceeds the limits.
+     *
+     * @param bytes the number of bytes about to be allocated.
+     */
+    default void allocateHeapNoThrow(long bytes) {}
+
+    /**
+     * Enable or disable tracking only mode of memory accounting. In tracking only mode we do memory tracking but no
+     * memory exceptions are thrown
+     * @param trackingOnly new desired state of tracking only mode
+     */
+    default void setTrackingOnly(boolean trackingOnly) {}
+
+    /**
      * Record the release of heap memory. This should be called when we forget about a reference and that particular object will be garbage collected.
      *
      * @param bytes number of released bytes
@@ -96,16 +110,18 @@ public interface MemoryTracker extends AutoCloseable, HeapMemoryTracker, HeapEst
         return getHeapEstimatorCache();
     }
 
-    // HeapEstimatorCache
-
+    @Override
     default long estimatedHeapUsage(Measurable measurable, long estimate) {
         return estimate;
     }
 
+    @Override
     default void fastReset() {}
 
+    @Override
     default void fullReset() {}
 
+    @Override
     default HeapEstimatorCache newWithSameSettings() {
         return this;
     }

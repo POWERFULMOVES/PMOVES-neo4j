@@ -19,10 +19,13 @@
  */
 package org.neo4j.cypher.internal
 
+import org.neo4j.cypher.internal.cache.CypherQueryCaches.CacheStrategy
 import org.neo4j.cypher.internal.frontend.phases.BaseState
 import org.neo4j.cypher.internal.frontend.phases.CompilationPhaseTracer
-import org.neo4j.cypher.internal.util.InternalNotification
-import org.neo4j.cypher.internal.util.InternalNotificationLogger
+import org.neo4j.cypher.internal.notification.InternalNotification
+import org.neo4j.cypher.internal.notification.InternalNotificationLogger
+import org.neo4j.cypher.internal.preparser.InputQuery
+import org.neo4j.cypher.internal.preparser.PreParsedQuery
 import org.neo4j.kernel.database.DatabaseReference
 import org.neo4j.kernel.impl.query.TransactionalContext
 import org.neo4j.values.virtual.MapValue
@@ -65,7 +68,9 @@ trait MasterCompiler {
     transactionalContext: TransactionalContext,
     params: MapValue,
     notificationLogger: InternalNotificationLogger,
-    sessionDatabase: DatabaseReference
+    sessionDatabase: DatabaseReference,
+    cacheStrategy: CacheStrategy,
+    isOutermostQuery: Boolean
   ): ExecutableQuery
 
   def supportsAdministrativeCommands(): Boolean
@@ -102,9 +107,20 @@ class SingleMasterCompiler(compiler: Compiler) extends MasterCompiler {
     transactionalContext: TransactionalContext,
     params: MapValue,
     notificationLogger: InternalNotificationLogger,
-    sessionDatabase: DatabaseReference
+    sessionDatabase: DatabaseReference,
+    cacheStrategy: CacheStrategy,
+    isOutermostQuery: Boolean
   ): ExecutableQuery =
-    compiler.compile(query, tracer, transactionalContext, params, notificationLogger, sessionDatabase)
+    compiler.compile(
+      query,
+      tracer,
+      transactionalContext,
+      params,
+      notificationLogger,
+      sessionDatabase,
+      cacheStrategy,
+      isOutermostQuery
+    )
 
   def supportsAdministrativeCommands(): Boolean = false
 }
@@ -137,7 +153,9 @@ class LibraryMasterCompiler(compilerLibrary: CompilerLibrary) extends MasterComp
     transactionalContext: TransactionalContext,
     params: MapValue,
     notificationLogger: InternalNotificationLogger,
-    sessionDatabase: DatabaseReference
+    sessionDatabase: DatabaseReference,
+    cacheStrategy: CacheStrategy,
+    isOutermostQuery: Boolean
   ): ExecutableQuery = {
 
     // Do the compilation
@@ -147,7 +165,16 @@ class LibraryMasterCompiler(compilerLibrary: CompilerLibrary) extends MasterComp
       query.options.materializedEntitiesMode
     )
 
-    compiler.compile(query, tracer, transactionalContext, params, notificationLogger, sessionDatabase)
+    compiler.compile(
+      query,
+      tracer,
+      transactionalContext,
+      params,
+      notificationLogger,
+      sessionDatabase,
+      cacheStrategy,
+      isOutermostQuery
+    )
   }
 
   def supportsAdministrativeCommands(): Boolean = compilerLibrary.supportsAdministrativeCommands()

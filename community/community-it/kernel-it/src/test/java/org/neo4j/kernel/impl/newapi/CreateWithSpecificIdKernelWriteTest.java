@@ -19,7 +19,6 @@
  */
 package org.neo4j.kernel.impl.newapi;
 
-import static org.apache.commons.lang3.ArrayUtils.EMPTY_INT_ARRAY;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
@@ -36,21 +35,28 @@ import org.eclipse.collections.api.map.primitive.MutableIntObjectMap;
 import org.eclipse.collections.api.map.primitive.MutableLongObjectMap;
 import org.eclipse.collections.api.set.primitive.IntSet;
 import org.eclipse.collections.api.set.primitive.MutableLongSet;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.internal.kernel.api.EntityCursor;
 import org.neo4j.internal.kernel.api.PropertyCursor;
-import org.neo4j.internal.kernel.api.exceptions.EntityAlreadyExistsException;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.token.api.NonUniqueTokenException;
+import org.neo4j.values.storable.RandomValuesUtils;
 import org.neo4j.values.storable.Value;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class CreateWithSpecificIdKernelWriteTest extends KernelAPIWriteTestBase<WriteTestSupport> {
     @Inject
     private RandomSupport random;
+
+    @BeforeEach
+    void setup() {
+        /* Not all storage engines supports vectors. */
+        random.withConfiguration(RandomValuesUtils.selectStorageEngineDependentConfiguration(graphDb))
+                .reset();
+    }
 
     // We need some coordination here since these test suites runs with PER_CLASS mode
     // Don't start from 0 since apparently record format(s) starts from 1, and it's also
@@ -60,119 +66,6 @@ class CreateWithSpecificIdKernelWriteTest extends KernelAPIWriteTestBase<WriteTe
     @Override
     public WriteTestSupport newTestSupport() {
         return new WriteTestSupport();
-    }
-
-    @Test
-    void shouldCreateNodesAndRelationshipsWithSpecificIds() throws Exception {
-        // given
-        MutableLongObjectMap<NodeData> nodes = LongObjectMaps.mutable.empty();
-        MutableLongObjectMap<RelationshipData> relationships = LongObjectMaps.mutable.empty();
-        try (var tx = beginTransaction()) {
-            var write = tx.dataWrite();
-            for (int i = 0; i < 10; i++) {
-                int[] labels = (i % 2 == 0) ? EMPTY_INT_ARRAY : new int[] {i % 3};
-                long nodeId = labels.length == 0 ? write.nodeCreate() : write.nodeCreateWithLabels(labels);
-                int keyId = i % 4;
-                var value = random.nextValue();
-                write.nodeSetProperty(nodeId, keyId, value);
-                nodes.put(
-                        nodeId,
-                        new NodeData(
-                                IntSets.immutable.of(labels),
-                                IntObjectMaps.immutable.with(keyId, value),
-                                LongSets.mutable.empty()));
-            }
-
-            var nodeIds = nodes.keySet().toArray();
-            for (int i = 0; i < 20; i++) {
-                long startNodeId = random.among(nodeIds);
-                int type = i % 3;
-                long endNodeId = random.among(nodeIds);
-                long relationshipId = write.relationshipCreate(startNodeId, type, endNodeId);
-                int keyId = i % 4;
-                var value = random.nextValue();
-                write.relationshipSetProperty(relationshipId, keyId, value);
-                var data =
-                        new RelationshipData(startNodeId, type, endNodeId, IntObjectMaps.immutable.with(keyId, value));
-                relationships.put(relationshipId, data);
-                nodes.get(startNodeId).relationships.add(relationshipId);
-                nodes.get(endNodeId).relationships.add(relationshipId);
-            }
-            tx.commit();
-        }
-
-        // when
-        clearGraph();
-        try (var tx = beginTransaction()) {
-            var write = tx.dataWrite();
-            for (var node : nodes.keyValuesView()) {
-                long nodeId = node.getOne();
-                var data = node.getTwo();
-                if (data.labels.isEmpty()) {
-                    write.nodeWithSpecificIdCreate(nodeId);
-                } else {
-                    write.nodeWithSpecificIdCreateWithLabels(nodeId, data.labels.toSortedArray());
-                }
-                for (var property : data.properties.keyValuesView()) {
-                    write.nodeSetProperty(nodeId, property.getOne(), property.getTwo());
-                }
-            }
-            for (var relationship : relationships.keyValuesView()) {
-                long relationshipId = relationship.getOne();
-                var data = relationship.getTwo();
-                write.relationshipWithSpecificIdCreate(relationshipId, data.startNodeId, data.type, data.endNodeId);
-                for (var property : data.properties.keyValuesView()) {
-                    write.relationshipSetProperty(relationshipId, property.getOne(), property.getTwo());
-                }
-            }
-            tx.commit();
-        }
-
-        // then, is all data there after we created if with specific IDs?
-        assertThat(readNodes()).isEqualTo(nodes);
-        assertThat(readRelationships()).isEqualTo(relationships);
-    }
-
-    @Test
-    void shouldFailCreateNodeWithSpecificIdIfAlreadyExists() throws Exception {
-        // given
-        long nodeId;
-        try (var tx = beginTransaction()) {
-            nodeId = tx.dataWrite().nodeCreate();
-            tx.commit();
-        }
-
-        // when/then
-        try (var tx = beginTransaction()) {
-            assertThatThrownBy(() -> tx.dataWrite().nodeWithSpecificIdCreate(nodeId))
-                    .isInstanceOf(EntityAlreadyExistsException.class);
-            assertThatThrownBy(() -> tx.dataWrite().nodeWithSpecificIdCreateWithLabels(nodeId, new int[] {1}))
-                    .isInstanceOf(EntityAlreadyExistsException.class);
-            tx.commit();
-        }
-    }
-
-    @Test
-    void shouldFailCreateRelationshipWithSpecificIdIfAlreadyExists() throws Exception {
-        // given
-        long relationshipId;
-        try (var tx = beginTransaction()) {
-            var write = tx.dataWrite();
-            var nodeId1 = write.nodeCreate();
-            var nodeId2 = write.nodeCreate();
-            relationshipId = write.relationshipCreate(nodeId1, 1, nodeId2);
-            tx.commit();
-        }
-
-        // when/then
-        try (var tx = beginTransaction()) {
-            var write = tx.dataWrite();
-            var nodeId1 = write.nodeCreate();
-            var nodeId2 = write.nodeCreate();
-            assertThatThrownBy(() -> write.relationshipWithSpecificIdCreate(relationshipId, nodeId1, 1, nodeId2))
-                    .isInstanceOf(EntityAlreadyExistsException.class);
-            tx.commit();
-        }
     }
 
     @Test

@@ -29,7 +29,6 @@ import org.neo4j.bolt.tx.TransactionManager;
 import org.neo4j.collection.Dependencies;
 import org.neo4j.common.DependencyResolver;
 import org.neo4j.configuration.Config;
-import org.neo4j.configuration.connectors.ConnectorPortRegister;
 import org.neo4j.configuration.database.readonly.ConfigBasedLookupFactory;
 import org.neo4j.configuration.database.readonly.ConfigReadOnlyDatabaseListener;
 import org.neo4j.dbms.DbmsRuntimeVersionProvider;
@@ -45,27 +44,28 @@ import org.neo4j.dbms.database.readonly.ReadOnlyChangeListener;
 import org.neo4j.dbms.database.readonly.ReadOnlyDatabases;
 import org.neo4j.dbms.database.readonly.SystemGraphReadOnlyDatabaseLookupFactory;
 import org.neo4j.dbms.routing.ClientRoutingDomainChecker;
-import org.neo4j.dbms.routing.RoutingOption;
 import org.neo4j.dbms.routing.RoutingService;
-import org.neo4j.dbms.routing.RoutingTableTTLProvider;
-import org.neo4j.dbms.routing.ServerSideRoutingTableProvider;
 import org.neo4j.dbms.routing.SimpleClientRoutingDomainChecker;
-import org.neo4j.dbms.routing.SingleAddressRoutingTableProvider;
 import org.neo4j.dbms.systemgraph.SystemDatabaseProvider;
 import org.neo4j.exceptions.KernelException;
+import org.neo4j.fleetmanagement.FleetManagementSettings;
+import org.neo4j.fleetmanagement.configuration.State;
+import org.neo4j.fleetmanagement.procedures.Configuration;
+import org.neo4j.fleetmanagement.procedures.DebugLogging;
+import org.neo4j.fleetmanagement.procedures.Documentation;
 import org.neo4j.graphdb.facade.DatabaseManagementServiceFactory;
 import org.neo4j.graphdb.factory.module.GlobalModule;
-import org.neo4j.graphdb.factory.module.id.IdContextFactory;
 import org.neo4j.graphdb.factory.module.id.IdContextFactoryProvider;
 import org.neo4j.internal.collector.DataCollectorProcedures;
+import org.neo4j.internal.kernel.api.exceptions.ProcedureException;
 import org.neo4j.kernel.api.net.DefaultNetworkConnectionTracker;
 import org.neo4j.kernel.api.net.NetworkConnectionTracker;
 import org.neo4j.kernel.api.procedure.GlobalProcedures;
 import org.neo4j.kernel.api.security.AuthManager;
 import org.neo4j.kernel.api.security.provider.SecurityProvider;
 import org.neo4j.kernel.database.DatabaseIdRepository;
-import org.neo4j.kernel.database.DatabaseReferenceRepository;
 import org.neo4j.kernel.database.DefaultDatabaseResolver;
+import org.neo4j.kernel.database.IdContextFactory;
 import org.neo4j.kernel.impl.factory.DbmsInfo;
 import org.neo4j.kernel.impl.index.DatabaseIndexStats;
 import org.neo4j.kernel.impl.transaction.stats.DatabaseTransactionStats;
@@ -74,13 +74,13 @@ import org.neo4j.logging.InternalLogProvider;
 import org.neo4j.procedure.builtin.BuiltInDbmsProcedures;
 import org.neo4j.procedure.builtin.BuiltInProcedures;
 import org.neo4j.procedure.builtin.FulltextProcedures;
+import org.neo4j.procedure.builtin.SpdBuiltInProcedures;
+import org.neo4j.procedure.builtin.SpecialBuiltInProcedures;
 import org.neo4j.procedure.builtin.TokenProcedures;
 import org.neo4j.procedure.builtin.VectorIndexProcedures;
-import org.neo4j.procedure.builtin.graphschema.Introspect;
 import org.neo4j.procedure.builtin.routing.RoutingProcedureInstaller;
 import org.neo4j.procedure.impl.ProcedureConfig;
 import org.neo4j.server.config.AuthConfigProvider;
-import org.neo4j.util.FeatureToggles;
 
 /**
  * Edition module for {@link DatabaseManagementServiceFactory}. Implementations of this class
@@ -99,18 +99,17 @@ public abstract class AbstractEditionModule {
             DatabaseContextProvider<?> databaseContextProvider,
             RoutingService routingService)
             throws KernelException {
+        SpecialBuiltInProcedures.get().install(globalProcedures);
+        registerEditionSpecificProcedures(globalProcedures, databaseContextProvider);
         globalProcedures.registerProcedure(BuiltInProcedures.class);
         globalProcedures.registerProcedure(TokenProcedures.class);
         globalProcedures.registerProcedure(BuiltInDbmsProcedures.class);
         globalProcedures.registerProcedure(FulltextProcedures.class);
         globalProcedures.registerProcedure(VectorIndexProcedures.class);
         globalProcedures.registerProcedure(DataCollectorProcedures.class);
-        if (FeatureToggles.flag(Introspect.class, "enabled", false)) {
-            globalProcedures.registerProcedure(Introspect.class);
-        }
         registerTemporalFunctions(globalProcedures, procedureConfig);
+        registerFleetManagementProcedures(globalProcedures, globalModule);
 
-        registerEditionSpecificProcedures(globalProcedures, databaseContextProvider);
         RoutingProcedureInstaller.install(
                 globalProcedures, routingService, globalModule.getLogService().getInternalLogProvider());
     }
@@ -125,7 +124,22 @@ public abstract class AbstractEditionModule {
 
     protected void registerEditionSpecificProcedures(
             GlobalProcedures globalProcedures, DatabaseContextProvider<?> databaseContextProvider)
-            throws KernelException {}
+            throws KernelException {
+        globalProcedures.registerComponent(
+                SpdBuiltInProcedures.class, context -> SpdBuiltInProcedures.COMMUNITY_EDITION_IMPL, false);
+    }
+
+    protected void registerFleetManagementProcedures(GlobalProcedures globalProcedures, GlobalModule globalModule)
+            throws ProcedureException {
+        if (globalModule.getGlobalConfig().get(FleetManagementSettings.fleet_manager_enabled)) {
+            var state = globalModule.getGlobalDependencies().resolveDependency(State.class);
+            globalProcedures.registerComponent(State.class, ctx -> state, true);
+
+            globalProcedures.registerProcedure(Configuration.class);
+            globalProcedures.registerProcedure(DebugLogging.class);
+            globalProcedures.registerProcedure(Documentation.class);
+        }
+    }
 
     protected abstract AuthConfigProvider createAuthConfigProvider(GlobalModule globalModule);
 
@@ -140,9 +154,7 @@ public abstract class AbstractEditionModule {
 
     public abstract SystemGraphComponents getSystemGraphComponents();
 
-    public abstract void createSecurityModule(GlobalModule globalModule);
-
-    public abstract DatabaseReferenceRepository getDatabaseReferenceRepo();
+    public abstract void createSecurityModule(GlobalModule globalModule, SystemDatabaseProvider systemDatabaseProvider);
 
     public abstract void createGlobalReadOnlyChecker(
             SystemDatabaseProvider systemDatabaseProvider,
@@ -152,14 +164,14 @@ public abstract class AbstractEditionModule {
     protected static ReadOnlyDatabases createGlobalReadOnlyChecker(
             Set<SystemGraphReadOnlyDatabaseLookupFactory.ReadonlyDatabasesProvider> readOnlyDatabaseProviders,
             SystemDatabaseProvider systemDatabaseProvider,
-            DatabaseIdRepository databaseIdRepository,
+            ConfigBasedLookupFactory.DatabaseIdResolver databaseIdResolver,
             ReadOnlyChangeListener listener,
             GlobalModule globalModule) {
         var globalConfig = globalModule.getGlobalConfig();
         var logProvider = globalModule.getLogService().getInternalLogProvider();
         var systemGraphReadOnlyLookup = new SystemGraphReadOnlyDatabaseLookupFactory(
                 systemDatabaseProvider, logProvider, readOnlyDatabaseProviders);
-        var configReadOnlyLookup = new ConfigBasedLookupFactory(globalConfig, databaseIdRepository);
+        var configReadOnlyLookup = new ConfigBasedLookupFactory(globalConfig, databaseIdResolver);
         var globalReadOnlyChecker =
                 new DefaultReadOnlyDatabases(listener, systemGraphReadOnlyLookup, configReadOnlyLookup);
         var configListener = new ConfigReadOnlyDatabaseListener(globalReadOnlyChecker, globalConfig);
@@ -209,8 +221,8 @@ public abstract class AbstractEditionModule {
         return securityProvider.inClusterAuthManager();
     }
 
-    public AuthManager getBoltLoopbackAuthManager() {
-        return securityProvider.loopbackAuthManager();
+    public AuthManager getBoltDomainSocketAuthManager() {
+        return securityProvider.domainSocketAuthManager();
     }
 
     public abstract Lifecycle createWebServer(
@@ -234,15 +246,6 @@ public abstract class AbstractEditionModule {
         return dbmsRuntimeRepository;
     }
 
-    protected ServerSideRoutingTableProvider serverSideRoutingTableProvider(GlobalModule globalModule) {
-        ConnectorPortRegister portRegister = globalModule.getConnectorPortRegister();
-        Config config = globalModule.getGlobalConfig();
-        InternalLogProvider logProvider = globalModule.getLogService().getInternalLogProvider();
-        RoutingTableTTLProvider ttlProvider = RoutingTableTTLProvider.ttlFromConfig(config);
-        return new SingleAddressRoutingTableProvider(
-                portRegister, RoutingOption.ROUTE_WRITE_AND_READ, config, logProvider, ttlProvider);
-    }
-
     public abstract TopologyInfoService createTopologyInfoService(DatabaseContextProvider<?> databaseContextProvider);
 
     public abstract RoutingService createRoutingService(
@@ -250,7 +253,7 @@ public abstract class AbstractEditionModule {
 
     public static <T> T tryResolveOrCreate(
             Class<T> clazz, DependencyResolver dependencies, Supplier<T> newInstanceMethod) {
-        return dependencies.containsDependency(clazz) ? dependencies.resolveDependency(clazz) : newInstanceMethod.get();
+        return dependencies.resolveOptionalDependency(clazz).orElseGet(newInstanceMethod);
     }
 
     public static IdContextFactory createIdContextFactory(GlobalModule globalModule) {

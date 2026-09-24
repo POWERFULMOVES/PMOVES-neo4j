@@ -30,9 +30,9 @@ import org.eclipse.collections.api.set.ImmutableSet;
 import org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.StorageEngineIndexingBehaviour;
+import org.neo4j.io.async.AsyncBlockAccessor;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
-import org.neo4j.kernel.api.exceptions.index.IndexEntryConflictException;
 import org.neo4j.kernel.api.index.IndexPopulator;
 import org.neo4j.kernel.api.index.IndexSample;
 import org.neo4j.kernel.api.index.IndexUpdater;
@@ -78,11 +78,10 @@ public class TokenIndexPopulator extends TokenIndex implements IndexPopulator {
     }
 
     @Override
-    public void add(Collection<? extends IndexEntryUpdate<?>> updates, CursorContext cursorContext)
-            throws IndexEntryConflictException {
-        try (TokenIndexUpdater updater =
-                singleUpdater.initialize(index.writer(W_BATCHED_SINGLE_THREADED, cursorContext), false)) {
-            for (IndexEntryUpdate<?> update : updates) {
+    public void add(Collection<? extends IndexEntryUpdate> updates, CursorContext cursorContext) {
+        try (TokenIndexUpdater updater = singleUpdater.initialize(
+                context -> index.writer(W_BATCHED_SINGLE_THREADED, context), false, cursorContext)) {
+            for (IndexEntryUpdate update : updates) {
                 updater.process(update);
             }
         } catch (IOException e) {
@@ -93,7 +92,8 @@ public class TokenIndexPopulator extends TokenIndex implements IndexPopulator {
     @Override
     public IndexUpdater newPopulatingUpdater(CursorContext cursorContext) {
         try {
-            return singleUpdater.initialize(index.writer(W_BATCHED_SINGLE_THREADED, cursorContext), false);
+            return singleUpdater.initialize(
+                    context -> index.writer(W_BATCHED_SINGLE_THREADED, context), false, cursorContext);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
@@ -107,17 +107,18 @@ public class TokenIndexPopulator extends TokenIndex implements IndexPopulator {
 
         try {
             assertNotDropped();
+            AsyncBlockAccessor asyncBlockAccessor = AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
             if (populationCompletedSuccessfully) {
                 // Successful and completed population
                 assertTreeOpen();
-                try (var flushEvent = pageCacheTracer.beginFileFlush()) {
-                    flushTreeAndMarkAs(ONLINE, flushEvent, cursorContext);
+                try (FileFlushEvent flushEvent = pageCacheTracer.beginFileFlush()) {
+                    flushTreeAndMarkAs(ONLINE, flushEvent, asyncBlockAccessor, cursorContext);
                 }
             } else if (failureBytes != null) {
                 // Failed population
                 ensureTreeInstantiated();
-                try (var flushEvent = pageCacheTracer.beginFileFlush()) {
-                    markTreeAsFailed(flushEvent, cursorContext);
+                try (FileFlushEvent flushEvent = pageCacheTracer.beginFileFlush()) {
+                    markTreeAsFailed(flushEvent, asyncBlockAccessor, cursorContext);
                 }
             }
             // else cancelled population. Here we simply close the tree w/o checkpointing it and it will look like
@@ -128,14 +129,16 @@ public class TokenIndexPopulator extends TokenIndex implements IndexPopulator {
         }
     }
 
-    private void flushTreeAndMarkAs(byte state, FileFlushEvent flushEvent, CursorContext cursorContext) {
-        index.checkpoint(pageCursor -> pageCursor.putByte(state), flushEvent, cursorContext);
+    private void flushTreeAndMarkAs(
+            byte state, FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext) {
+        index.checkpoint(pageCursor -> pageCursor.putByte(state), flushEvent, asyncBlockAccessor, cursorContext);
     }
 
-    private void markTreeAsFailed(FileFlushEvent flushEvent, CursorContext cursorContext) {
+    private void markTreeAsFailed(
+            FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext) {
         Preconditions.checkState(
                 failureBytes != null, "markAsFailed hasn't been called, populator not actually failed?");
-        index.checkpoint(new FailureHeaderWriter(failureBytes, FAILED), flushEvent, cursorContext);
+        index.checkpoint(new FailureHeaderWriter(failureBytes, FAILED), flushEvent, asyncBlockAccessor, cursorContext);
     }
 
     @Override
@@ -144,7 +147,7 @@ public class TokenIndexPopulator extends TokenIndex implements IndexPopulator {
     }
 
     @Override
-    public void includeSample(IndexEntryUpdate<?> update) {
+    public void includeSample(IndexEntryUpdate update) {
         // We don't do sampling for token indexes since that information is available in other ways.
     }
 

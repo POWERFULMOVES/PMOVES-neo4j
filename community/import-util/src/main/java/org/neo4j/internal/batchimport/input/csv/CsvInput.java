@@ -24,38 +24,53 @@ import static org.neo4j.batchimport.api.input.Collector.EMPTY;
 import static org.neo4j.csv.reader.CharSeekers.charSeeker;
 import static org.neo4j.internal.batchimport.input.InputEntityDecorators.NO_DECORATOR;
 import static org.neo4j.internal.batchimport.input.csv.CsvInputIterator.extractHeader;
+import static org.neo4j.internal.helpers.Exceptions.throwIfInstanceOfOrUnchecked;
 import static org.neo4j.io.ByteUnit.mebiBytes;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
-import static org.neo4j.util.Preconditions.checkState;
 
 import java.io.IOException;
 import java.io.PrintStream;
 import java.io.UncheckedIOException;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.ToIntFunction;
+import org.apache.commons.lang3.mutable.MutableBoolean;
 import org.apache.logging.log4j.util.TriConsumer;
 import org.neo4j.batchimport.api.InputIterable;
 import org.neo4j.batchimport.api.InputIterator;
 import org.neo4j.batchimport.api.input.Collector;
+import org.neo4j.batchimport.api.input.Group;
 import org.neo4j.batchimport.api.input.IdType;
 import org.neo4j.batchimport.api.input.Input;
 import org.neo4j.batchimport.api.input.PropertySizeCalculator;
 import org.neo4j.batchimport.api.input.ReadableGroups;
+import org.neo4j.collection.RawIterator;
+import org.neo4j.common.EntityType;
 import org.neo4j.csv.reader.CharReadable;
 import org.neo4j.csv.reader.CharSeeker;
 import org.neo4j.csv.reader.Configuration;
 import org.neo4j.csv.reader.Extractor;
 import org.neo4j.csv.reader.Extractors;
 import org.neo4j.csv.reader.MultiReadable;
+import org.neo4j.importer.SchemaCommandSource;
+import org.neo4j.importer.SchemaCommandSource.ResolvedSchemaCommands;
 import org.neo4j.internal.batchimport.input.Groups;
 import org.neo4j.internal.batchimport.input.InputEntity;
 import org.neo4j.internal.batchimport.input.Inputs;
-import org.neo4j.internal.schema.SchemaCommand;
+import org.neo4j.internal.helpers.collection.Iterators;
 import org.neo4j.internal.schema.SchemaDescriptor;
 import org.neo4j.internal.schema.SchemaDescriptors;
 import org.neo4j.io.ByteUnit;
@@ -63,6 +78,8 @@ import org.neo4j.memory.MemoryTracker;
 import org.neo4j.token.TokenHolders;
 import org.neo4j.token.api.TokenConstants;
 import org.neo4j.util.Preconditions;
+import org.neo4j.util.VisibleForTesting;
+import org.neo4j.util.concurrent.Futures;
 
 /**
  * Provides {@link Input} from data contained in tabular/csv form. Expects factories for instantiating
@@ -70,19 +87,27 @@ import org.neo4j.util.Preconditions;
  * extract meta data about the values.
  */
 public class CsvInput implements Input {
+    private static final String MIXED_COMPOSITE_ID_REFERRALS =
+            "How to refer to composite IDs (multiple :ID columns) from :START_ID/:END_ID must be consistent: "
+                    + "Either using a single :START_ID/:END_ID column, or a matching amount of :START_ID/:END_ID columns.";
     private static final long ESTIMATE_SAMPLE_SIZE = mebiBytes(1);
 
     private final Iterable<DataFactory> nodeDataFactory;
     private final Header.Factory nodeHeaderFactory;
     private final Iterable<DataFactory> relationshipDataFactory;
     private final Header.Factory relationshipHeaderFactory;
-    private final List<SchemaCommand> schemaCommands;
-    private final IdType idType;
+    private final SchemaCommandSource schemaCommandSource;
+    private final IdType defaultIdType;
     private final Configuration config;
     private final Monitor monitor;
     private final Groups groups;
+    private final Map<Path, Header> headersByPath = new HashMap<>();
     private final boolean autoSkipHeaders;
     private final MemoryTracker memoryTracker;
+    private List<Header> cachedNodeHeaders;
+    private boolean delimitIds;
+    private boolean hasBeenValidated;
+    private IdType idType;
 
     /**
      * @param nodeDataFactory multiple {@link DataFactory} instances providing data, each {@link DataFactory}
@@ -93,7 +118,7 @@ public class CsvInput implements Input {
      * specifies an input group with its own header, extracted by the {@code relationshipHeaderFactory}.
      * From the outside it looks like one stream of relationships.
      * @param relationshipHeaderFactory factory for reading relationship headers.
-     * @param idType {@link IdType} to expect in id fields of node and relationship input.
+     * @param defaultIdType {@link IdType} to expect in id fields of node and relationship input.
      * @param config CSV configuration.
      * @param autoSkipHeaders  flag to skip headers
      * @param monitor {@link Monitor} for internal events.
@@ -104,7 +129,7 @@ public class CsvInput implements Input {
             Header.Factory nodeHeaderFactory,
             Iterable<DataFactory> relationshipDataFactory,
             Header.Factory relationshipHeaderFactory,
-            IdType idType,
+            IdType defaultIdType,
             Configuration config,
             boolean autoSkipHeaders,
             Monitor monitor,
@@ -114,8 +139,8 @@ public class CsvInput implements Input {
                 nodeHeaderFactory,
                 relationshipDataFactory,
                 relationshipHeaderFactory,
-                List.of(),
-                idType,
+                ResolvedSchemaCommands.of(),
+                defaultIdType,
                 config,
                 autoSkipHeaders,
                 monitor,
@@ -132,7 +157,7 @@ public class CsvInput implements Input {
      * specifies an input group with its own header, extracted by the {@code relationshipHeaderFactory}.
      * From the outside it looks like one stream of relationships.
      * @param relationshipHeaderFactory factory for reading relationship headers.
-     * @param idType {@link IdType} to expect in id fields of node and relationship input.
+     * @param defaultIdType {@link IdType} to expect in id fields of node and relationship input.
      * @param config CSV configuration.
      * @param autoSkipHeaders  flag to skip headers
      * @param monitor {@link Monitor} for internal events.
@@ -144,7 +169,7 @@ public class CsvInput implements Input {
             Header.Factory nodeHeaderFactory,
             Iterable<DataFactory> relationshipDataFactory,
             Header.Factory relationshipHeaderFactory,
-            IdType idType,
+            IdType defaultIdType,
             Configuration config,
             boolean autoSkipHeaders,
             Monitor monitor,
@@ -155,8 +180,8 @@ public class CsvInput implements Input {
                 nodeHeaderFactory,
                 relationshipDataFactory,
                 relationshipHeaderFactory,
-                List.of(),
-                idType,
+                ResolvedSchemaCommands.of(),
+                defaultIdType,
                 config,
                 autoSkipHeaders,
                 monitor,
@@ -173,8 +198,8 @@ public class CsvInput implements Input {
      * specifies an input group with its own header, extracted by the {@code relationshipHeaderFactory}.
      * From the outside it looks like one stream of relationships.
      * @param relationshipHeaderFactory factory for reading relationship headers.
-     * @param schemaCommands the schema changes to apply to the database after the data is imported.
-     * @param idType {@link IdType} to expect in id fields of node and relationship input.
+     * @param schemaCommandSource the schema changes to apply to the database after the data is imported.
+     * @param defaultIdType {@link IdType} to expect in id fields of node and relationship input.
      * @param config CSV configuration.
      * @param autoSkipHeaders  flag to skip headers
      * @param monitor {@link Monitor} for internal events.
@@ -187,8 +212,8 @@ public class CsvInput implements Input {
             Header.Factory nodeHeaderFactory,
             Iterable<DataFactory> relationshipDataFactory,
             Header.Factory relationshipHeaderFactory,
-            List<SchemaCommand> schemaCommands,
-            IdType idType,
+            SchemaCommandSource schemaCommandSource,
+            IdType defaultIdType,
             Configuration config,
             boolean autoSkipHeaders,
             Monitor monitor,
@@ -202,8 +227,8 @@ public class CsvInput implements Input {
         this.nodeHeaderFactory = nodeHeaderFactory;
         this.relationshipDataFactory = relationshipDataFactory;
         this.relationshipHeaderFactory = relationshipHeaderFactory;
-        this.schemaCommands = schemaCommands;
-        this.idType = idType;
+        this.schemaCommandSource = schemaCommandSource;
+        this.defaultIdType = defaultIdType;
         this.config = config;
         this.monitor = monitor;
         this.groups = groups;
@@ -211,13 +236,24 @@ public class CsvInput implements Input {
 
     private static void assertSaneConfiguration(Configuration config) {
         Map<Character, String> delimiters = new HashMap<>();
-        delimiters.put(config.delimiter(), "delimiter");
-        checkUniqueCharacter(delimiters, config.arrayDelimiter(), "array delimiter");
-        checkUniqueCharacter(delimiters, config.quotationCharacter(), "quotation character");
+        delimiters.put(disallowNewline(config.delimiter(), "delimiter"), "delimiter");
+        checkUniqueCharacterAndNotNewline(delimiters, config.arrayDelimiter(), "array delimiter");
+        checkUniqueCharacterAndNotNewline(delimiters, config.quotationCharacter(), "quotation character");
+        // Vector delimiter may equal array delimiter, so drop array before checking vector.
+        delimiters.remove(config.arrayDelimiter());
+        checkUniqueCharacterAndNotNewline(delimiters, config.vectorDelimiter(), "vector delimiter");
     }
 
-    private static void checkUniqueCharacter(
+    private static char disallowNewline(char character, String characterDescription) {
+        if (character == '\n' || character == '\r') {
+            throw new IllegalArgumentException("A newline character must not be used as the " + characterDescription);
+        }
+        return character;
+    }
+
+    private static void checkUniqueCharacterAndNotNewline(
             Map<Character, String> characters, char character, String characterDescription) {
+        disallowNewline(character, characterDescription);
         String conflict = characters.put(character, characterDescription);
         if (conflict != null) {
             throw new IllegalArgumentException("Character '" + character + "' specified by " + characterDescription
@@ -226,27 +262,60 @@ public class CsvInput implements Input {
     }
 
     @Override
-    public List<SchemaCommand> schemaCommands() {
-        return schemaCommands;
+    public SchemaCommandSource schemaCommandSource() {
+        return schemaCommandSource;
+    }
+
+    @Override
+    public boolean containsVectorData() {
+        // CSV cannot prove to have vector data until `validateAndEstimate` has been called.
+        // But since that already samples data and throws, there is no point in even capturing if
+        // this contains vector data at this point.
+        return false;
     }
 
     @Override
     public InputIterable nodes(Collector badCollector) {
-        return () -> stream(nodeDataFactory, nodeHeaderFactory, badCollector);
+        Preconditions.checkState(hasBeenValidated, "must call validateAndEstimate before calling nodes");
+        return () -> stream(nodeDataFactory, nodeHeaderFactory, badCollector, EntityType.NODE);
     }
 
     @Override
     public InputIterable relationships(Collector badCollector) {
-        return () -> stream(relationshipDataFactory, relationshipHeaderFactory, badCollector);
+        Preconditions.checkState(hasBeenValidated, "must call validateAndEstimate before calling relationships");
+        return () -> stream(relationshipDataFactory, relationshipHeaderFactory, badCollector, EntityType.RELATIONSHIP);
     }
 
-    private InputIterator stream(Iterable<DataFactory> data, Header.Factory headerFactory, Collector badCollector) {
+    public Map<Path, Header> headersByPath() {
+        return Collections.unmodifiableMap(headersByPath);
+    }
+
+    public boolean delimitIds() {
+        return delimitIds;
+    }
+
+    public Configuration config() {
+        return config;
+    }
+
+    private InputIterator stream(
+            Iterable<DataFactory> data, Header.Factory headerFactory, Collector badCollector, EntityType entityType) {
         return new CsvGroupInputIterator(
-                data.iterator(), headerFactory, idType, config, badCollector, groups, autoSkipHeaders, NO_MONITOR);
+                data.iterator(),
+                headerFactory,
+                defaultIdType,
+                config,
+                badCollector,
+                groups,
+                autoSkipHeaders,
+                delimitIds,
+                NO_MONITOR,
+                entityType);
     }
 
     @Override
     public IdType idType() {
+        Preconditions.checkState(hasBeenValidated, "must call validateAndEstimate before calling idType");
         return idType;
     }
 
@@ -256,37 +325,65 @@ public class CsvInput implements Input {
     }
 
     @Override
-    public Estimates validateAndEstimate(PropertySizeCalculator valueSizeCalculator) throws IOException {
+    public Estimates validateAndEstimate(PropertySizeCalculator valueSizeCalculator, int numberOfThreads)
+            throws IOException {
         final var seenSourceFiles = new HashSet<String>();
         // parse all node headers and remember all ID spaces
+        final MutableBoolean nodesHasAction = new MutableBoolean();
+        final MutableBoolean relationshipsHasAction = new MutableBoolean();
+        final MutableBoolean hasCompositeIdColumns = new MutableBoolean(false);
+
+        // -1 as a value means that, in different source files,
+        // different numbers of IDs have been used for the same group.
+        final Map<Group, Integer> numberOfIdsPerGroup = new HashMap<>();
+        cachedNodeHeaders = new ArrayList<>();
         final var nodeSample = validateAndEstimate(
                 nodeDataFactory,
                 nodeHeaderFactory,
                 (header, source, noDecorator) -> {
+                    cachedNodeHeaders.add(header);
                     if (Arrays.stream(header.entries()).noneMatch(entry -> entry.type() == Type.LABEL) && noDecorator) {
                         monitor.noNodeLabelsSpecified(source);
                     }
-
-                    var numIdColumns = Arrays.stream(header.entries())
-                            .filter(e -> e.type() == Type.ID)
-                            .count();
-                    if (numIdColumns > 1) {
-                        Preconditions.checkState(
-                                idType == IdType.STRING,
-                                "Having multiple :ID columns requires idType:" + IdType.STRING);
+                    if (Arrays.stream(header.entries()).anyMatch(e -> e.type() == Type.ACTION)) {
+                        nodesHasAction.setTrue();
                     }
-                    var numIdColumnsGroups = Arrays.stream(header.entries())
+
+                    final var idHeaders = Arrays.stream(header.entries())
                             .filter(e -> e.type() == Type.ID)
+                            .toList();
+                    final var numIdColumnsGroups = idHeaders.stream()
                             .map(Header.Entry::group)
                             .distinct()
                             .count();
                     Preconditions.checkState(
                             numIdColumnsGroups <= 1,
                             "There are multiple :ID columns, but they are referring to different groups");
+
+                    if (!idHeaders.isEmpty()) {
+                        final var numIdColumns = idHeaders.size();
+                        if (numIdColumns > 1) {
+                            hasCompositeIdColumns.setTrue();
+                        }
+
+                        final var group = idHeaders.getFirst().group();
+                        if (numberOfIdsPerGroup.getOrDefault(group, numIdColumns) == numIdColumns) {
+                            // Either not set yet or already set to numIdColumns
+                            numberOfIdsPerGroup.put(group, numIdColumns);
+                        } else {
+                            // Already set to a different value
+                            numberOfIdsPerGroup.put(group, -1);
+                        }
+                    }
                 },
                 valueSizeCalculator,
                 node -> node.labels().length,
-                seenSourceFiles);
+                seenSourceFiles,
+                numberOfThreads,
+                EntityType.NODE);
+
+        final MutableBoolean singleStartEndIdColumnRefersToCompositeId = new MutableBoolean(false);
+        final MutableBoolean multipleStartEndIdColumnsRefersToCompositeId = new MutableBoolean(false);
 
         // parse all relationship headers and verify all ID spaces
         final var relationshipSample = validateAndEstimate(
@@ -298,45 +395,138 @@ public class CsvInput implements Input {
                     if (Arrays.stream(header.entries()).noneMatch(entry -> entry.type() == Type.TYPE) && noDecorator) {
                         monitor.noRelationshipTypeSpecified(source);
                     }
+                    if (Arrays.stream(header.entries()).anyMatch(e -> e.type() == Type.ACTION)) {
+                        relationshipsHasAction.setTrue();
+                    }
+
+                    final var startIdHeaders = Arrays.stream(header.entries())
+                            .filter(e -> e.type() == Type.START_ID)
+                            .toList();
+                    final var endIdHeaders = Arrays.stream(header.entries())
+                            .filter(e -> e.type() == Type.END_ID)
+                            .toList();
+
+                    final var numStartIdColumnsGroups = startIdHeaders.stream()
+                            .map(Header.Entry::group)
+                            .distinct()
+                            .count();
+                    Preconditions.checkState(
+                            numStartIdColumnsGroups <= 1,
+                            "There are multiple :START_ID columns, but they are referring to different groups");
+
+                    final var numEndIdColumnsGroups = endIdHeaders.stream()
+                            .map(Header.Entry::group)
+                            .distinct()
+                            .count();
+                    Preconditions.checkState(
+                            numEndIdColumnsGroups <= 1,
+                            "There are multiple :END_ID columns, but they are referring to different groups");
+
+                    final var startIdGroup = startIdHeaders.getFirst().group();
+                    final var endIdGroup = endIdHeaders.getFirst().group();
+
+                    validateStartAndEndIdColumnAmounts(
+                            "START_ID",
+                            numberOfIdsPerGroup.getOrDefault(startIdGroup, 1),
+                            startIdHeaders.size(),
+                            startIdGroup,
+                            singleStartEndIdColumnRefersToCompositeId,
+                            multipleStartEndIdColumnsRefersToCompositeId);
+                    validateStartAndEndIdColumnAmounts(
+                            "END_ID",
+                            numberOfIdsPerGroup.getOrDefault(endIdGroup, 1),
+                            endIdHeaders.size(),
+                            endIdGroup,
+                            singleStartEndIdColumnRefersToCompositeId,
+                            multipleStartEndIdColumnsRefersToCompositeId);
                 },
                 valueSizeCalculator,
                 entity -> 0,
-                seenSourceFiles);
+                seenSourceFiles,
+                numberOfThreads,
+                EntityType.RELATIONSHIP);
 
-        final var propPreAllocAdditional = propertyPreAllocateRounding(nodeSample[2] + relationshipSample[2]) / 2;
+        this.delimitIds = hasCompositeIdColumns.isTrue() && singleStartEndIdColumnRefersToCompositeId.isFalse();
+        this.idType = autoDetectIdType(defaultIdType, cachedNodeHeaders);
+        this.hasBeenValidated = true;
+
+        final var propPreAllocAdditional =
+                propertyPreAllocateRounding(nodeSample.propertySize.get() + relationshipSample.propertySize.get()) / 2;
         return Input.knownEstimates(
-                nodeSample[0],
-                relationshipSample[0],
-                nodeSample[1],
-                relationshipSample[1],
-                nodeSample[2] + propPreAllocAdditional,
-                relationshipSample[2] + propPreAllocAdditional,
-                nodeSample[3]);
+                nodeSample.entityCount.get(),
+                relationshipSample.entityCount.get(),
+                nodeSample.propertyCount.get(),
+                relationshipSample.propertyCount.get(),
+                nodeSample.propertySize.get() + propPreAllocAdditional,
+                relationshipSample.propertySize.get() + propPreAllocAdditional,
+                nodeSample.labelCount.get(),
+                nodesHasAction.isTrue(),
+                relationshipsHasAction.isTrue());
     }
 
-    private long[] validateAndEstimate(
+    private static void validateStartAndEndIdColumnAmounts(
+            String columnName,
+            int numberOfIdColumnsForGroup,
+            int numIdColumns,
+            Group group,
+            MutableBoolean singleStartEndIdColumnRefersToCompositeIdColumn,
+            MutableBoolean multipleStartEndIdColumnsRefersToCompositeIdColumn) {
+        if (numberOfIdColumnsForGroup == 1) {
+            Preconditions.checkState(
+                    numberOfIdColumnsForGroup == numIdColumns,
+                    "There are %d :%s columns for group '%s', but %d :%s columns is expected."
+                            .formatted(numIdColumns, columnName, group.name(), numberOfIdColumnsForGroup, columnName));
+        } else if (numIdColumns == 1) {
+            singleStartEndIdColumnRefersToCompositeIdColumn.setTrue();
+            Preconditions.checkState(
+                    multipleStartEndIdColumnsRefersToCompositeIdColumn.isFalse(), MIXED_COMPOSITE_ID_REFERRALS);
+        } else {
+            multipleStartEndIdColumnsRefersToCompositeIdColumn.setTrue();
+            final int expectedNumberOfStartIdColumns = numberOfIdColumnsForGroup == -1 ? 1 : numberOfIdColumnsForGroup;
+            Preconditions.checkState(
+                    expectedNumberOfStartIdColumns == numIdColumns,
+                    "There are %d :%s columns for group '%s', but %d :%s columns is expected."
+                            .formatted(
+                                    numIdColumns,
+                                    columnName,
+                                    group.name(),
+                                    expectedNumberOfStartIdColumns,
+                                    columnName));
+            Preconditions.checkState(
+                    singleStartEndIdColumnRefersToCompositeIdColumn.isFalse(), MIXED_COMPOSITE_ID_REFERRALS);
+        }
+    }
+
+    private Sample validateAndEstimate(
             Iterable<DataFactory> dataFactories,
             Header.Factory headerFactory,
             TriConsumer<Header, String, Boolean> headerChecker,
             PropertySizeCalculator valueSizeCalculator,
             ToIntFunction<InputEntity> additionalCalculator,
-            Set<String> seenSourceFiles)
+            Set<String> seenSourceFiles,
+            int numberOfThreads,
+            EntityType entityType)
             throws IOException {
-        final var estimates = new long[4]; // [entity count, property count, property size, labels (for nodes only)]
-
-        try (var chunk = new CsvInputChunkProxy()) {
+        Sample sample = new Sample();
+        try (ExecutorService executor = Executors.newFixedThreadPool(numberOfThreads)) {
             final var sampleConfig =
                     config.toBuilder().withReadIsForSampling(true).build();
-            var groupId = 0;
+            int groupId = 0;
+            List<Future<Void>> samplings = new ArrayList<>();
             for (var dataFactory : dataFactories) {
                 // one input group
                 groupId++;
                 Header header = null;
                 final var data = dataFactory.create(sampleConfig);
                 try (var decorator = data.decorator()) {
-                    final var stream = data.stream();
+                    RawIterator<CharReadable, IOException> stream = data.stream();
+                    Iterator<Path> originalFiles = Iterators.iterator(dataFactory.files());
                     while (stream.hasNext()) {
-                        try (var source = stream.next()) {
+                        CharReadable source = stream.next();
+                        // source.file() has undergone "adaptation", see Readables.FromFile.adaptPath.
+                        // But for the headersByPath Map, we want the original file path.
+                        Path originalFile = originalFiles.next();
+                        try {
                             final var sourceDescription = source.sourceDescription();
                             if (!seenSourceFiles.add(sourceDescription)) {
                                 monitor.duplicateSourceFile(sourceDescription);
@@ -347,31 +537,66 @@ public class CsvInput implements Input {
                                 // Extract the header from the first file in this group
                                 // This is the only place we monitor type normalization because it's before import and
                                 // it touches all headers
-                                header = extractHeader(source, headerFactory, idType, sampleConfig, groups, monitor);
+                                header = extractHeader(
+                                        source,
+                                        headerFactory,
+                                        defaultIdType,
+                                        sampleConfig,
+                                        groups,
+                                        monitor,
+                                        entityType);
                                 headerChecker.accept(header, sourceDescription, decorator == NO_DECORATOR);
                             }
+                            headersByPath.put(originalFile, header);
+                        } catch (Throwable t) {
+                            source.close();
+                            throw t;
+                        }
 
+                        int sampleGroupId = groupId;
+                        Header sampleHeader = header;
+                        samplings.add(executor.submit(() -> {
                             sample(
-                                    chunk,
                                     sampleConfig,
                                     source,
-                                    groupId,
-                                    header,
+                                    sampleGroupId,
+                                    sampleHeader,
                                     decorator,
                                     valueSizeCalculator,
                                     additionalCalculator,
-                                    estimates);
-                        }
+                                    sample,
+                                    entityType);
+                            return null;
+                        }));
                     }
                 }
             }
+            try {
+                Futures.getAll(samplings);
+            } catch (ExecutionException e) {
+                // Futures.getAll might make a chain of multiple ExecutionException
+                ExecutionException actualExecutionException = e;
+                while (actualExecutionException.getCause() instanceof ExecutionException ee) {
+                    actualExecutionException = ee;
+                }
+                throwIfInstanceOfOrUnchecked(
+                        actualExecutionException.getCause(), IOException.class, RuntimeException::new);
+            }
         }
+        return sample;
+    }
 
-        return estimates;
+    /**
+     * Whether {@link #validateAndEstimate} reads sample rows to estimate sizes. Header parsing and structural
+     * validation run regardless. Test seam: a subclass returning {@code false} validates the input and sets up state
+     * without parsing data-row values, so malformed values don't fail estimation.
+     */
+    @VisibleForTesting
+    protected boolean shouldSampleData() {
+        return true;
     }
 
     private void sample(
-            CsvInputChunkProxy chunk,
             Configuration sampleConfig,
             CharReadable source,
             int groupId,
@@ -379,26 +604,37 @@ public class CsvInput implements Input {
             Decorator decorator,
             PropertySizeCalculator valueSizeCalculator,
             ToIntFunction<InputEntity> additionalCalculator,
-            long[] estimates)
+            Sample sample,
+            EntityType entityType)
             throws IOException {
-        try (var iterator = new CsvInputIterator(
+        if (!shouldSampleData()) {
+            source.close();
+            return;
+        }
+        // When sampling, we can set delimitIds=false,
+        // since there is no checking of duplicates in this visitor.
+        try (source;
+                var iterator = new CsvInputIterator(
                         source,
                         decorator,
                         header,
                         sampleConfig,
-                        idType,
+                        defaultIdType,
                         EMPTY,
                         CsvGroupInputIterator.extractors(sampleConfig),
                         groupId,
-                        autoSkipHeaders);
-                var entity = new InputEntity()) {
+                        autoSkipHeaders,
+                        false,
+                        entityType);
+                var entity = new InputEntity();
+                var chunk = new CsvInputChunkProxy()) {
             var entities = 0;
             var properties = 0d;
             var propertySize = 0d;
             var additional = 0d;
             while (iterator.position() < ESTIMATE_SAMPLE_SIZE && iterator.next(chunk)) {
                 for (; chunk.next(entity); entities++) {
-                    properties += entity.propertyCount();
+                    properties += entity.properties.size();
                     propertySize +=
                             Inputs.calculatePropertySize(entity, valueSizeCalculator, NULL_CONTEXT, memoryTracker);
                     additional += additionalCalculator.applyAsInt(entity);
@@ -408,33 +644,40 @@ public class CsvInput implements Input {
                 final var position = iterator.position();
                 final var actualFileSize = source.length() / iterator.compressionRatio();
                 final var entityCountInSource = ((actualFileSize / position) * entities);
-                estimates[0] += (long) entityCountInSource;
-                estimates[1] += (long) ((properties / entities) * entityCountInSource);
-                estimates[2] += (long) ((propertySize / entities) * entityCountInSource);
-                estimates[3] += (long) ((additional / entities) * entityCountInSource);
+                sample.entityCount.addAndGet((long) entityCountInSource);
+                sample.propertyCount.addAndGet((long) ((properties / entities) * entityCountInSource));
+                sample.propertySize.addAndGet((long) ((propertySize / entities) * entityCountInSource));
+                sample.labelCount.addAndGet((long) ((additional / entities) * entityCountInSource));
             }
         }
     }
 
     @Override
     public Map<String, SchemaDescriptor> referencedNodeSchema(TokenHolders tokenHolders) {
-        try {
-            // parse all node headers and remember all ID spaces
-            Map<String, SchemaDescriptor> result = new HashMap<>();
-            for (DataFactory dataFactory : nodeDataFactory) {
-                Data data = dataFactory.create(config);
-                try (CharSeeker dataStream = charSeeker(new MultiReadable(data.stream()), config, true)) {
-                    // Parsing and constructing this header will create this group,
-                    // so no need to do something with the result of it right now
-                    Header header =
-                            DataFactories.defaultFormatNodeFileHeader().create(dataStream, config, idType, groups);
-                    collectReferencedNodeSchemaFromHeader(header, tokenHolders, result);
+        if (cachedNodeHeaders == null) {
+            cachedNodeHeaders = new ArrayList<>();
+            try {
+                // parse all node headers and remember all ID spaces
+                for (DataFactory dataFactory : nodeDataFactory) {
+                    Data data = dataFactory.create(config);
+                    try (CharSeeker dataStream =
+                            charSeeker(new MultiReadable(data.stream()), config, false, EntityType.NODE)) {
+                        // Parsing and constructing this header will create this group,
+                        // so no need to do something with the result of it right now
+                        cachedNodeHeaders.add(DataFactories.defaultFormatNodeFileHeader()
+                                .create(dataStream, config, defaultIdType, groups));
+                    }
                 }
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
             }
-            return result;
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
         }
+
+        Map<String, SchemaDescriptor> result = new HashMap<>();
+        for (Header header : cachedNodeHeaders) {
+            collectReferencedNodeSchemaFromHeader(header, tokenHolders, result);
+        }
+        return result;
     }
 
     public static void collectReferencedNodeSchemaFromHeader(
@@ -445,24 +688,26 @@ public class CsvInput implements Input {
                 .ifPresent(entry -> {
                     var options = entry.rawOptions();
                     var labelName = options.get("label");
-                    checkState(labelName != null, "No label was specified for the node index in '%s'", entry);
+                    Preconditions.checkState(
+                            labelName != null, "No label was specified for the node index in '%s'", entry);
                     var keyName = entry.name();
-                    checkState(keyName != null, "No property key was specified for node index in '%s'", entry);
+                    Preconditions.checkState(
+                            keyName != null, "No property key was specified for node index in '%s'", entry);
                     var label = tokenHolders.labelTokens().getIdByName(labelName);
                     var key = tokenHolders.propertyKeyTokens().getIdByName(keyName);
-                    checkState(
+                    Preconditions.checkState(
                             label != TokenConstants.NO_TOKEN,
                             "Label '%s' for node index specified in '%s' does not exist",
                             labelName,
                             entry);
-                    checkState(
+                    Preconditions.checkState(
                             key != TokenConstants.NO_TOKEN,
                             "Property key '%s' for node index specified in '%s' does not exist",
                             keyName,
                             entry);
                     var schemaDescriptor = SchemaDescriptors.forLabel(label, key);
                     var prev = result.put(entry.group().name(), schemaDescriptor);
-                    checkState(
+                    Preconditions.checkState(
                             prev == null || prev.equals(schemaDescriptor),
                             "Multiple different indexes for group " + entry.group());
                 });
@@ -490,6 +735,45 @@ public class CsvInput implements Input {
             case STRING -> extractors.string();
             case INTEGER, ACTUAL -> extractors.long_();
         };
+    }
+
+    /**
+     * @return the {@link IdType} of the {@code IdMapper} that suits the parsed node headers.
+     * Returns {@link IdType#INTEGER} only if every parsed node header contains at most one {@link Type#ID} column
+     * and every {@link Type#ID} column produces a value that can be cast to {@code long}.
+     * Returns {@link IdType#ACTUAL} when the input is configured with that mode.
+     * Falls back to {@code defaultIdType} when no ID column is present at all.
+     */
+    private static IdType autoDetectIdType(IdType defaultIdType, List<Header> nodeHeaders) {
+        if (defaultIdType == IdType.ACTUAL) {
+            return IdType.ACTUAL;
+        }
+        int totalIdColumns = 0;
+        for (Header header : nodeHeaders) {
+            int idColumnsInHeader = 0;
+            for (Header.Entry entry : header.entries()) {
+                if (entry.type() != Type.ID) {
+                    continue;
+                }
+                idColumnsInHeader++;
+                if (!isLongCastable(entry.extractor())) {
+                    return IdType.STRING;
+                }
+            }
+            if (idColumnsInHeader > 1) {
+                return IdType.STRING;
+            }
+            totalIdColumns += idColumnsInHeader;
+        }
+        return totalIdColumns == 0 ? defaultIdType : IdType.INTEGER;
+    }
+
+    private static boolean isLongCastable(Extractor<?> extractor) {
+        if (extractor == null) {
+            return false;
+        }
+        var type = extractor.extractedClass();
+        return type == long.class || type == int.class || type == short.class || type == byte.class;
     }
 
     public interface Monitor extends Header.Monitor {
@@ -559,6 +843,13 @@ public class CsvInput implements Input {
             out.printf(
                     "WARN: file group with header file %s specifies no relationship type, which could be a mistake%n",
                     sourceFile);
+        }
+    }
+
+    private record Sample(
+            AtomicLong entityCount, AtomicLong propertyCount, AtomicLong propertySize, AtomicLong labelCount) {
+        Sample() {
+            this(new AtomicLong(), new AtomicLong(), new AtomicLong(), new AtomicLong());
         }
     }
 }

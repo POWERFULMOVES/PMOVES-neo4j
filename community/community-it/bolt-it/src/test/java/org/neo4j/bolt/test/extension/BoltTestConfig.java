@@ -22,7 +22,11 @@ package org.neo4j.bolt.test.extension;
 import java.util.List;
 import org.junit.jupiter.api.extension.Extension;
 import org.junit.jupiter.api.extension.TestTemplateInvocationContext;
+import org.neo4j.bolt.protocol.common.connector.transport.ConnectorTransport;
+import org.neo4j.bolt.test.connection.resolver.property.TestPropertyContext;
 import org.neo4j.bolt.test.extension.db.ServerInstanceContext;
+import org.neo4j.bolt.test.extension.handler.ConnectionTerminationRetryHandler;
+import org.neo4j.bolt.test.extension.handler.ConnectionTimeoutRetryHandler;
 import org.neo4j.bolt.test.extension.lifecycle.ServerInstanceManager;
 import org.neo4j.bolt.test.extension.lifecycle.TransportConnectionManager;
 import org.neo4j.bolt.test.extension.resolver.connection.ConnectionProviderParameterResolver;
@@ -31,38 +35,42 @@ import org.neo4j.bolt.test.extension.resolver.connection.TransportConnectionPara
 import org.neo4j.bolt.testing.client.TransportType;
 import org.neo4j.bolt.testing.extension.parameter.StaticParameterResolver;
 import org.neo4j.bolt.testing.messages.BoltWire;
-import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 
 /**
  * Encapsulates the configuration with which a given test method is to be invoked.
  *
- * @param databaseFactoryType database factory implementation class reference.
  * @param wire selected wire.
  * @param transport selected transport.
  */
 record BoltTestConfig(
-        Class<? extends TestDatabaseManagementServiceBuilder> databaseFactoryType,
+        TestPropertyContext propertyContext,
         ServerInstanceContext instanceContext,
-        TransportType transport,
+        ConnectorTransport transport,
+        TransportType transportType,
         BoltWire wire)
         implements TestTemplateInvocationContext {
 
     @Override
     public String getDisplayName(int invocationIndex) {
-        return this.wire.getProtocolVersion() + " via " + this.transport.name();
+        return this.wire.getProtocolVersion() + " via " + this.transportType.name();
     }
 
     @Override
     public List<Extension> getAdditionalExtensions() {
-        var connectionManager = new TransportConnectionManager(this.transport);
+        var connectionManager = new TransportConnectionManager();
 
         return List.of(
+                new ConnectionTerminationRetryHandler(),
+                new ConnectionTimeoutRetryHandler(),
                 new ServerInstanceManager(this.instanceContext),
                 connectionManager,
+                new StaticParameterResolver<>(TestPropertyContext.class, this.propertyContext),
                 new StaticParameterResolver<>(BoltWire.class, this.wire),
-                new StaticParameterResolver<>(TransportType.class, this.transport),
+                new StaticParameterResolver<>(TransportType.class, this.transportType),
                 new SocketAddressParameterResolver(),
-                new ConnectionProviderParameterResolver(connectionManager, this.wire, this.transport),
-                new TransportConnectionParameterResolver(connectionManager, this.wire, this.transport));
+                new ConnectionProviderParameterResolver(
+                        connectionManager, this.wire, this.transport, this.transportType),
+                new TransportConnectionParameterResolver(
+                        connectionManager, this.wire, this.transport, this.transportType));
     }
 }

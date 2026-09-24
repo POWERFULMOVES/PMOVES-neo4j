@@ -27,8 +27,6 @@ import static org.neo4j.values.virtual.VirtualValues.EMPTY_MAP;
 
 import org.eclipse.collections.api.set.primitive.IntSet;
 import org.neo4j.exceptions.InvalidArgumentException;
-import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
-import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.internal.helpers.ArrayUtil;
 import org.neo4j.internal.kernel.api.NodeCursor;
 import org.neo4j.internal.kernel.api.PropertyCursor;
@@ -40,6 +38,7 @@ import org.neo4j.kernel.impl.util.RelationshipEntityWrappingValue;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.storageengine.api.PropertySelection;
 import org.neo4j.values.AnyValue;
+import org.neo4j.values.storable.StringValue;
 import org.neo4j.values.storable.TextArray;
 import org.neo4j.values.storable.ValueRepresentation;
 import org.neo4j.values.storable.Values;
@@ -92,19 +91,17 @@ public final class ValuePopulation {
             PropertyCursor propertyCursor,
             MemoryTracker memoryTracker) {
         assert value != null : "value should not be null";
-        if (value instanceof VirtualNodeValue node) {
-            return populate(node, dbAccess, nodeCursor, propertyCursor);
-        } else if (value instanceof VirtualRelationshipValue relationship) {
-            return populate(relationship, dbAccess, relCursor, propertyCursor);
-        } else if (value instanceof VirtualPathValue path) {
-            return populate(path, dbAccess, nodeCursor, relCursor, propertyCursor);
-        } else if (value instanceof ListValue list && needsPopulation(list)) {
-            return populate(list, dbAccess, nodeCursor, relCursor, propertyCursor, memoryTracker);
-        } else if (value instanceof MapValue map && needsPopulation(map)) {
-            return populate(map, dbAccess, nodeCursor, relCursor, propertyCursor, memoryTracker);
-        } else {
-            return value;
-        }
+        return switch (value) {
+            case VirtualNodeValue node -> populate(node, dbAccess, nodeCursor, propertyCursor);
+            case VirtualRelationshipValue relationship -> populate(relationship, dbAccess, relCursor, propertyCursor);
+            case VirtualPathValue path -> populate(path, dbAccess, nodeCursor, relCursor, propertyCursor);
+            case ListValue list
+            when needsPopulation(list) ->
+                populate(list, dbAccess, nodeCursor, relCursor, propertyCursor, memoryTracker);
+            case MapValue map
+            when needsPopulation(map) -> populate(map, dbAccess, nodeCursor, relCursor, propertyCursor, memoryTracker);
+            case null, default -> value;
+        };
     }
 
     public static NodeValue populate(
@@ -231,7 +228,7 @@ public final class ValuePopulation {
             return VirtualValues.nodeValue(id, elementId, EMPTY_TEXT_ARRAY, EMPTY_MAP, true);
         } else {
             nodeCursor.properties(
-                    propertyCursor, PropertySelection.ALL_PROPERTIES.excluding(readPropertyTokens::contains));
+                    propertyCursor, PropertySelection.ALL_PROPERTIES.excluding(readPropertyTokens.toArray()));
             return VirtualValues.nodeValue(
                     id,
                     elementId,
@@ -249,9 +246,7 @@ public final class ValuePopulation {
             if (id == NO_SUCH_NODE) {
                 return MISSING_NODE;
             } else if (!dbAccess.nodeDeletedInThisTransaction(id)) {
-                var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_25N11)
-                        .build();
-                throw new ReadAndDeleteTransactionConflictException(gql, false);
+                throw ReadAndDeleteTransactionConflictException.conflictingTransactionState(false);
             } else {
                 return VirtualValues.nodeValue(id, elementId, EMPTY_TEXT_ARRAY, EMPTY_MAP, true);
             }
@@ -282,7 +277,7 @@ public final class ValuePopulation {
             final var start = VirtualValues.node(relCursor.sourceNodeReference(), idMapper);
             final var end = VirtualValues.node(relCursor.targetNodeReference(), idMapper);
             relCursor.properties(
-                    propertyCursor, PropertySelection.ALL_PROPERTIES.excluding(readPropertyTokens::contains));
+                    propertyCursor, PropertySelection.ALL_PROPERTIES.excluding(readPropertyTokens.toArray()));
             return VirtualValues.relationshipValue(
                     id,
                     elementId,
@@ -303,9 +298,7 @@ public final class ValuePopulation {
             if (id == NO_SUCH_RELATIONSHIP) {
                 return MISSING_REL;
             } else if (!dbAccess.relationshipDeletedInThisTransaction(id)) {
-                var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_25N11)
-                        .build();
-                throw new ReadAndDeleteTransactionConflictException(gql, false);
+                throw ReadAndDeleteTransactionConflictException.conflictingTransactionState(false);
             } else {
                 return VirtualValues.relationshipValue(
                         id, elementId, MISSING_NODE, MISSING_NODE, EMPTY_STRING, EMPTY_MAP, true);
@@ -326,9 +319,12 @@ public final class ValuePopulation {
     }
 
     public static TextArray labels(DbAccess dbAccess, TokenSet labelsTokens) {
-        String[] labels = new String[labelsTokens.numberOfTokens()];
+        // This is used immediately before encoding these labels for bolt.
+        // This uses UTF-8 encoding, so we do it here already to skip
+        // encoding the labels first as UTF-16 and than as UTF-8 again.
+        StringValue[] labels = new StringValue[labelsTokens.numberOfTokens()];
         for (int i = 0; i < labels.length; i++) {
-            labels[i] = dbAccess.nodeLabelName(labelsTokens.token(i));
+            labels[i] = Values.utf8Value(dbAccess.nodeLabelName(labelsTokens.token(i)));
         }
         return Values.stringArray(labels);
     }

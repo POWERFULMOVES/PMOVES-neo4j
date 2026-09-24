@@ -19,22 +19,20 @@
  */
 package org.neo4j.values.storable;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.neo4j.values.virtual.VirtualValues.fromArray;
 
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.exceptions.CypherTypeException;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.values.AnyValue;
 import org.neo4j.values.virtual.ListValue;
 import org.neo4j.values.virtual.VirtualValues;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class ListValueFuzzTest {
     @Inject
     private RandomSupport random;
@@ -44,7 +42,7 @@ class ListValueFuzzTest {
     @Test
     void shouldBeStorableIfAppendToStorableWithCompatibleTypes() {
         for (int i = 0; i < ITERATIONS; i++) {
-            for (ValueType valueType : ValueType.arrayTypes()) {
+            for (ValueType valueType : ValueType.ARRAY_TYPES) {
                 // Given
                 ArrayValue arrayValue = (ArrayValue) random.nextValue(valueType);
                 ListValue inner = fromArray(arrayValue);
@@ -53,7 +51,7 @@ class ListValueFuzzTest {
                 ListValue appended = inner.append(nextCompatible(arrayValue));
 
                 // Then
-                assertEquals(appended, fromArray(appended.toStorableArray()));
+                assertThat(fromArray(appended.toStorableArray())).isEqualTo(appended);
             }
         }
     }
@@ -61,7 +59,7 @@ class ListValueFuzzTest {
     @Test
     void shouldNotBeStorableIfAppendToStorableWithIncompatibleTypes() {
         for (int i = 0; i < ITERATIONS; i++) {
-            for (ValueType valueType : ValueType.arrayTypes()) {
+            for (ValueType valueType : ValueType.ARRAY_TYPES) {
                 // Given
                 ArrayValue arrayValue = (ArrayValue) random.nextValue(valueType);
                 ListValue inner = fromArray(arrayValue);
@@ -70,7 +68,7 @@ class ListValueFuzzTest {
                 ListValue appended = inner.append(nextIncompatible(arrayValue));
 
                 // Then
-                assertThrows(CypherTypeException.class, appended::toStorableArray);
+                assertThatExceptionOfType(CypherTypeException.class).isThrownBy(appended::toStorableArray);
             }
         }
     }
@@ -78,7 +76,7 @@ class ListValueFuzzTest {
     @Test
     void shouldBeStorableIfPrependToStorableWithCompatibleTypes() {
         for (int i = 0; i < ITERATIONS; i++) {
-            for (ValueType valueType : ValueType.arrayTypes()) {
+            for (ValueType valueType : ValueType.ARRAY_TYPES) {
                 // Given
                 ArrayValue arrayValue = (ArrayValue) random.nextValue(valueType);
                 ListValue inner = fromArray(arrayValue);
@@ -87,7 +85,7 @@ class ListValueFuzzTest {
                 ListValue prepended = inner.prepend(nextCompatible(arrayValue));
 
                 // Then
-                assertEquals(prepended, fromArray(prepended.toStorableArray()));
+                assertThat(fromArray(prepended.toStorableArray())).isEqualTo(prepended);
             }
         }
     }
@@ -95,7 +93,7 @@ class ListValueFuzzTest {
     @Test
     void shouldNotBeStorableIfPrependToStorableWithIncompatibleTypes() {
         for (int i = 0; i < ITERATIONS; i++) {
-            for (ValueType valueType : ValueType.arrayTypes()) {
+            for (ValueType valueType : ValueType.ARRAY_TYPES) {
                 // Given
                 ArrayValue arrayValue = (ArrayValue) random.nextValue(valueType);
                 ListValue inner = fromArray(arrayValue);
@@ -104,7 +102,7 @@ class ListValueFuzzTest {
                 ListValue prepended = inner.prepend(nextIncompatible(arrayValue));
 
                 // Then
-                assertThrows(CypherTypeException.class, prepended::toStorableArray);
+                assertThatExceptionOfType(CypherTypeException.class).isThrownBy(prepended::toStorableArray);
             }
         }
     }
@@ -114,26 +112,26 @@ class ListValueFuzzTest {
         for (int i = 0; i < ITERATIONS; i++) {
             boolean seenStorable = false;
             boolean seenNonStorable = false;
-            for (ValueType valueType : ValueType.values()) {
+            for (ValueType valueType : ValueType.ALL_TYPES) {
                 AnyValue value = random.nextValue(valueType);
                 if (value.valueRepresentation().canCreateArrayOfValueGroup()) {
                     ListValue list = VirtualValues.list(value, value, value);
-                    assertEquals(list, fromArray(list.toStorableArray()));
+                    assertThat(fromArray(list.toStorableArray())).isEqualTo(list);
                     seenStorable = true;
                 } else {
                     ListValue list = VirtualValues.list(value, value, value);
-                    assertThrows(CypherTypeException.class, list::toStorableArray);
+                    assertThatExceptionOfType(CypherTypeException.class).isThrownBy(list::toStorableArray);
                     seenNonStorable = true;
                 }
             }
 
-            assertTrue(seenStorable);
-            assertTrue(seenNonStorable);
+            assertThat(seenStorable).isTrue();
+            assertThat(seenNonStorable).isTrue();
         }
     }
 
     private Value nextCompatible(ArrayValue value) {
-        ValueType[] types = ValueType.values();
+        ValueType[] types = ValueType.ALL_TYPES;
         while (true) {
             Value nextValue = random.nextValue(types[random.nextInt(types.length)]);
             if (value.hasCompatibleType(nextValue)) {
@@ -143,7 +141,7 @@ class ListValueFuzzTest {
     }
 
     private Value nextIncompatible(ArrayValue value) {
-        ValueType[] types = ValueType.values();
+        ValueType[] types = ValueType.ALL_TYPES;
         while (true) {
             Value nextValue = random.nextValue(types[random.nextInt(types.length)]);
             if (value.isEmpty()) {

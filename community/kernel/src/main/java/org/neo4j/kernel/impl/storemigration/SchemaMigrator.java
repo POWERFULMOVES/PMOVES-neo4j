@@ -27,44 +27,53 @@ import static org.neo4j.token.api.TokenConstants.NO_TOKEN;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import org.eclipse.collections.impl.map.mutable.primitive.LongObjectHashMap;
 import org.neo4j.batchimport.api.ReadBehaviour;
 import org.neo4j.common.EntityType;
+import org.neo4j.common.TokenNameLookup;
 import org.neo4j.configuration.Config;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.exceptions.UnderlyingStorageException;
 import org.neo4j.internal.helpers.collection.Pair;
 import org.neo4j.internal.kernel.api.TokenRead;
 import org.neo4j.internal.schema.ConstraintDescriptor;
-import org.neo4j.internal.schema.FulltextSchemaDescriptor;
 import org.neo4j.internal.schema.GraphTypeDependence;
+import org.neo4j.internal.schema.IndexConfig;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexPrototype;
-import org.neo4j.internal.schema.NodeLabelExistenceSchemaDescriptor;
-import org.neo4j.internal.schema.RelationshipEndpointLabelSchemaDescriptor;
+import org.neo4j.internal.schema.IndexProviderDescriptor;
+import org.neo4j.internal.schema.IndexType;
 import org.neo4j.internal.schema.SchemaDescriptor;
 import org.neo4j.internal.schema.SchemaDescriptors;
 import org.neo4j.internal.schema.SchemaRule;
+import org.neo4j.internal.schema.SettingsAccessor.IndexConfigAccessor;
 import org.neo4j.internal.schema.constraints.ConstraintDescriptorFactory;
 import org.neo4j.internal.schema.constraints.IndexBackedConstraintDescriptor;
+import org.neo4j.internal.schema.constraints.NodeLabelExistenceConstraintDescriptor;
+import org.neo4j.internal.schema.constraints.RelationshipEndpointLabelConstraintDescriptor;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.api.impl.schema.vector.VectorIndexVersion;
 import org.neo4j.kernel.database.DatabaseTracers;
 import org.neo4j.kernel.impl.newapi.ReadOnlyTokenRead;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
 import org.neo4j.kernel.recovery.LogTailExtractor;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.storageengine.api.SchemaRule44;
+import org.neo4j.storageengine.api.SchemaRule44.Constraint;
+import org.neo4j.storageengine.api.SchemaRule44.Index;
 import org.neo4j.storageengine.api.StorageEngineFactory;
 import org.neo4j.storageengine.migration.SchemaRuleMigrationAccessExtended;
 import org.neo4j.token.TokenHolders;
+import org.neo4j.wal.LogTailLogVersionsMetadata;
+import org.neo4j.wal.LogTailMetadata;
 
 public class SchemaMigrator {
 
@@ -81,7 +90,7 @@ public class SchemaMigrator {
             DatabaseLayout toLayout,
             boolean from44store,
             CursorContextFactory contextFactory,
-            LogTailMetadata fromTailMetadata,
+            LogTailLogVersionsMetadata fromTailMetadata,
             boolean forceBtreeIndexesToRange,
             ReadBehaviour readBehaviour,
             MemoryTracker memoryTracker)
@@ -90,10 +99,10 @@ public class SchemaMigrator {
         LogTailExtractor logTailExtractor = new LogTailExtractor(fs, config, toStorage, DatabaseTracers.EMPTY);
         LogTailMetadata logTail = logTailExtractor.getTailMetadata(toLayout, EmptyMemoryTracker.INSTANCE);
 
-        var tokenHolders = fromStorage.loadReadOnlyTokens(
+        TokenHolders tokenHolders = fromStorage.loadReadOnlyTokens(
                 fs, from, config, pageCache, pageCacheTracer, true, contextFactory, memoryTracker);
 
-        ArrayList<SchemaRule> skippedSchemaRules = new ArrayList<>();
+        List<SchemaRule> skippedSchemaRules = new ArrayList<>();
 
         try (SchemaRuleMigrationAccessExtended schemaRuleMigrationAccess = toStorage.schemaRuleMigrationAccess(
                 fs,
@@ -105,12 +114,13 @@ public class SchemaMigrator {
                 EmptyMemoryTracker.INSTANCE,
                 logTail)) {
             TokenRead tokenRead = new ReadOnlyTokenRead(tokenHolders);
+            TokenHolders dstTokenHolders = schemaRuleMigrationAccess.tokenHolders();
 
             LongObjectHashMap<IndexToConnect> indexesToConnect = new LongObjectHashMap<>();
             LongObjectHashMap<ConstraintToConnect> constraintsToConnect = new LongObjectHashMap<>();
             // Write the rules to the new store.
             //  - Translating the tokens since their ids might be different
-            for (var schemaRule : getSrcSchemaRules(
+            for (SchemaRule schemaRule : getSrcSchemaRules(
                     fromStorage,
                     fs,
                     pageCache,
@@ -135,20 +145,28 @@ public class SchemaMigrator {
                             continue;
                         }
 
-                        SchemaDescriptor schema = translateToNewSchema(
-                                indexDescriptor.schema(), tokenRead, schemaRuleMigrationAccess.tokenHolders());
+                        SchemaDescriptor schema =
+                                translateToNewSchema(indexDescriptor.schema(), tokenRead, dstTokenHolders);
 
                         IndexPrototype newPrototype = indexDescriptor.isUnique()
                                 ? IndexPrototype.uniqueForSchema(schema)
                                 : IndexPrototype.forSchema(schema);
 
                         // Disregard the old index provider of the indexDescriptor and just use the latest one.
-                        var latestIndexProvider = LATEST_INDEX_PROVIDERS.get(indexDescriptor.getIndexType());
+                        IndexProviderDescriptor latestIndexProvider =
+                                LATEST_INDEX_PROVIDERS.get(indexDescriptor.getIndexType());
+
+                        // Interpret original index configuration and produce new index config
+                        IndexConfig indexConfig = migrateIndexConfig(
+                                indexDescriptor.getIndexType(),
+                                indexDescriptor.getIndexProvider(),
+                                latestIndexProvider,
+                                indexDescriptor.getIndexConfig());
 
                         newPrototype = newPrototype
                                 .withName(indexDescriptor.getName())
                                 .withIndexType(indexDescriptor.getIndexType())
-                                .withIndexConfig(indexDescriptor.getIndexConfig())
+                                .withIndexConfig(indexConfig)
                                 .withIndexProvider(latestIndexProvider);
 
                         if (indexDescriptor.isUnique()) {
@@ -174,8 +192,8 @@ public class SchemaMigrator {
                             skippedSchemaRules.add(constraintDescriptor);
                             continue;
                         }
-                        SchemaDescriptor schema = translateToNewSchema(
-                                constraintDescriptor.schema(), tokenRead, schemaRuleMigrationAccess.tokenHolders());
+                        SchemaDescriptor schema =
+                                translateToNewSchema(constraintDescriptor.schema(), tokenRead, dstTokenHolders);
                         ConstraintDescriptor descriptor =
                                 switch (constraintDescriptor.type()) {
                                     case UNIQUE -> {
@@ -184,37 +202,51 @@ public class SchemaMigrator {
                                         yield ConstraintDescriptorFactory.uniqueForSchema(
                                                 schema, indexBacked.indexType());
                                     }
-                                    case EXISTS -> ConstraintDescriptorFactory.existsForSchema(
-                                            schema,
-                                            constraintDescriptor.graphTypeDependence()
-                                                    == GraphTypeDependence.DEPENDENT);
+
+                                    case EXISTS ->
+                                        ConstraintDescriptorFactory.existsForSchema(
+                                                schema,
+                                                constraintDescriptor.graphTypeDependence()
+                                                        == GraphTypeDependence.DEPENDENT);
+
                                     case UNIQUE_EXISTS -> {
                                         IndexBackedConstraintDescriptor indexBacked =
                                                 constraintDescriptor.asIndexBackedConstraint();
                                         yield ConstraintDescriptorFactory.keyForSchema(schema, indexBacked.indexType());
                                     }
-                                    case PROPERTY_TYPE -> ConstraintDescriptorFactory.typeForSchema(
-                                            schema,
-                                            constraintDescriptor
-                                                    .asPropertyTypeConstraint()
-                                                    .propertyType(),
-                                            constraintDescriptor.graphTypeDependence()
-                                                    == GraphTypeDependence.DEPENDENT);
+
+                                    case PROPERTY_TYPE ->
+                                        ConstraintDescriptorFactory.typeForSchema(
+                                                schema,
+                                                constraintDescriptor
+                                                        .asPropertyTypeConstraint()
+                                                        .propertyType(),
+                                                constraintDescriptor.graphTypeDependence()
+                                                        == GraphTypeDependence.DEPENDENT);
+
                                     case RELATIONSHIP_ENDPOINT_LABEL -> {
-                                        var relationshipEndpointLabelSchemaDescriptor =
-                                                constraintDescriptor.asRelationshipEndpointLabelConstraint();
+                                        RelationshipEndpointLabelConstraintDescriptor
+                                                relationshipEndpointLabelSchemaDescriptor =
+                                                        constraintDescriptor.asRelationshipEndpointLabelConstraint();
+                                        int endpointLabelId = dstTokenHolders
+                                                .labelTokens()
+                                                .getOrCreateId(tokenRead.labelGetName(
+                                                        relationshipEndpointLabelSchemaDescriptor.endpointLabelId()));
                                         yield ConstraintDescriptorFactory.relationshipEndpointLabelForSchema(
-                                                schema.asSchemaDescriptorType(
-                                                        RelationshipEndpointLabelSchemaDescriptor.class),
-                                                relationshipEndpointLabelSchemaDescriptor.endpointLabelId(),
+                                                schema.asRelationshipEndpointLabelDescriptor(),
+                                                endpointLabelId,
                                                 relationshipEndpointLabelSchemaDescriptor.endpointType());
                                     }
+
                                     case NODE_LABEL_EXISTENCE -> {
-                                        var nodeLabelExistenceSchemaDescriptor =
+                                        NodeLabelExistenceConstraintDescriptor nodeLabelExistenceSchemaDescriptor =
                                                 constraintDescriptor.asNodeLabelExistenceConstraint();
+                                        int requiredLabelId = dstTokenHolders
+                                                .labelTokens()
+                                                .getOrCreateId(tokenRead.labelGetName(
+                                                        nodeLabelExistenceSchemaDescriptor.requiredLabelId()));
                                         yield ConstraintDescriptorFactory.nodeLabelExistenceForSchema(
-                                                schema.asSchemaDescriptorType(NodeLabelExistenceSchemaDescriptor.class),
-                                                nodeLabelExistenceSchemaDescriptor.requiredLabelId());
+                                                schema.asNodeLabelExistenceSchemaDescriptor(), requiredLabelId);
                                     }
                                 };
                         descriptor = descriptor.withName(constraintDescriptor.getName());
@@ -270,8 +302,8 @@ public class SchemaMigrator {
     }
 
     // Should we skip this index in migration due to it being filtered in some way
-    private static boolean shouldSkipSinceFiltered(
-            ReadBehaviour readBehaviour, TokenHolders tokenHolders, SchemaDescriptor schemaDescriptor) {
+    public static boolean shouldSkipSinceFiltered(
+            ReadBehaviour readBehaviour, TokenNameLookup tokenHolders, SchemaDescriptor schemaDescriptor) {
         String[] entityTokenNames =
                 tokenHolders.entityTokensGetNames(schemaDescriptor.entityType(), schemaDescriptor.getEntityTokenIds());
         switch (schemaDescriptor.schemaPatternMatchingType()) {
@@ -279,7 +311,7 @@ public class SchemaMigrator {
                 switch (schemaDescriptor.entityType()) {
                     case NODE -> {
                         for (int propertyTokenId : schemaDescriptor.getPropertyIds()) {
-                            var propertyKeyName = tokenHolders.propertyKeyGetName(propertyTokenId);
+                            String propertyKeyName = tokenHolders.propertyKeyGetName(propertyTokenId);
                             if (!readBehaviour.shouldIncludeNodeProperty(propertyKeyName, entityTokenNames, true)) {
                                 return true;
                             }
@@ -291,7 +323,7 @@ public class SchemaMigrator {
                     case RELATIONSHIP -> {
                         for (String entityTokenName : entityTokenNames) {
                             for (int propertyTokenId : schemaDescriptor.getPropertyIds()) {
-                                var propertyKeyName = tokenHolders.propertyKeyGetName(propertyTokenId);
+                                String propertyKeyName = tokenHolders.propertyKeyGetName(propertyTokenId);
                                 if (!readBehaviour.shouldIncludeRelationshipProperty(
                                         propertyKeyName, entityTokenName)) {
                                     return true;
@@ -305,7 +337,7 @@ public class SchemaMigrator {
                 switch (schemaDescriptor.entityType()) {
                     case NODE -> {
                         for (int propertyTokenId : schemaDescriptor.getPropertyIds()) {
-                            var propertyKeyName = tokenHolders.propertyKeyGetName(propertyTokenId);
+                            String propertyKeyName = tokenHolders.propertyKeyGetName(propertyTokenId);
                             // Something should be included, do not skip!
                             if (readBehaviour.shouldIncludeNodeProperty(propertyKeyName, entityTokenNames, false)) {
                                 return false;
@@ -321,7 +353,7 @@ public class SchemaMigrator {
                     case RELATIONSHIP -> {
                         for (String entityTokenName : entityTokenNames) {
                             for (int propertyTokenId : schemaDescriptor.getPropertyIds()) {
-                                var propertyKeyName = tokenHolders.propertyKeyGetName(propertyTokenId);
+                                String propertyKeyName = tokenHolders.propertyKeyGetName(propertyTokenId);
                                 if (readBehaviour.shouldIncludeRelationshipProperty(propertyKeyName, entityTokenName)) {
                                     return false;
                                 }
@@ -330,16 +362,14 @@ public class SchemaMigrator {
                     }
                 }
             }
-            case ENTITY_TOKENS -> {
-                // Are not copied
+            case ENTITY_TOKENS -> // Are not copied
                 throw new IllegalArgumentException(
                         schemaDescriptor.schemaPatternMatchingType().name());
-            }
         }
         return false;
     }
 
-    private static List<SchemaRule> getSrcSchemaRules(
+    public static List<SchemaRule> getSrcSchemaRules(
             StorageEngineFactory fromStorage,
             FileSystemAbstraction fs,
             PageCache pageCache,
@@ -348,7 +378,7 @@ public class SchemaMigrator {
             DatabaseLayout from,
             CursorContextFactory contextFactory,
             boolean from44store,
-            LogTailMetadata fromTailMetadata,
+            LogTailLogVersionsMetadata fromTailMetadata,
             boolean forceBtreeIndexesToRange,
             TokenHolders srcTokenHolders,
             MemoryTracker memoryTracker) {
@@ -377,10 +407,10 @@ public class SchemaMigrator {
             }
             for (Pair<SchemaRule44.Constraint, SchemaRule44.Index> constraintPair :
                     schemaInfo44.nonReplacedConstraints()) {
-                var oldConstraint = constraintPair.first();
-                var oldIndex = constraintPair.other();
-                var rangeIndex = asRangeIndex(oldIndex, highestExistingId::incrementAndGet);
-                var rangeBackedConstraint = asRangeBackedConstraint(
+                Constraint oldConstraint = constraintPair.first();
+                Index oldIndex = constraintPair.other();
+                IndexDescriptor rangeIndex = asRangeIndex(oldIndex, highestExistingId::incrementAndGet);
+                ConstraintDescriptor rangeBackedConstraint = asRangeBackedConstraint(
                         oldConstraint, rangeIndex, highestExistingId::incrementAndGet, srcTokenHolders);
                 rangeIndex = rangeIndex.withOwningConstraintId(rangeBackedConstraint.getId());
                 schemaInfo44.toCreate().add(rangeIndex);
@@ -421,8 +451,8 @@ public class SchemaMigrator {
         }
         boolean forNodes = EntityType.NODE.equals(schema.entityType());
 
-        // Fulltext is special and can have multiple entityTokens
-        if (schema.isSchemaDescriptorType(FulltextSchemaDescriptor.class)) {
+        // Semantic search indexes are special and can have multiple entityTokens
+        if (schema.isSemanticSearchSchemaDescriptor()) {
             int[] entityTokenIds = schema.getEntityTokenIds();
             int[] newEntityTokenIds = new int[entityTokenIds.length];
             for (int i = 0; i < entityTokenIds.length; i++) {
@@ -432,7 +462,18 @@ public class SchemaMigrator {
                                 .relationshipTypeTokens()
                                 .getOrCreateId(tokenRead.relationshipTypeName(entityTokenIds[i]));
             }
-            return SchemaDescriptors.fulltext(schema.entityType(), newEntityTokenIds, newPropertyIds);
+            return SchemaDescriptors.forSemanticSearch(schema.entityType(), newEntityTokenIds, newPropertyIds);
+        }
+
+        if (schema.isRelationshipEndpointLabelDescriptor()) {
+            return SchemaDescriptors.forRelationshipEndpointLabel(dstTokenHolders
+                    .relationshipTypeTokens()
+                    .getOrCreateId(tokenRead.relationshipTypeName(schema.getRelTypeId())));
+        }
+
+        if (schema.isNodeLabelExistenceSchemaDescriptor()) {
+            return SchemaDescriptors.forNodeLabelExistence(
+                    dstTokenHolders.labelTokens().getOrCreateId(tokenRead.nodeLabelName(schema.getLabelId())));
         }
 
         if (forNodes) {
@@ -445,5 +486,33 @@ public class SchemaMigrator {
                         .relationshipTypeTokens()
                         .getOrCreateId(tokenRead.relationshipTypeName(schema.getRelTypeId())),
                 newPropertyIds);
+    }
+
+    private static IndexConfig migrateIndexConfig(
+            IndexType indexType,
+            IndexProviderDescriptor indexProvider,
+            IndexProviderDescriptor latestIndexProvider,
+            IndexConfig indexConfig) {
+        if (Objects.equals(indexProvider, latestIndexProvider)) {
+            return indexConfig;
+        }
+
+        return switch (indexType) {
+            case VECTOR -> {
+                VectorIndexVersion version = VectorIndexVersion.fromDescriptor(indexProvider);
+                IndexConfig effectiveFullConfig = version.indexSettingValidator()
+                        .interpretAuthoritativeToTypedConfig(new IndexConfigAccessor(indexConfig))
+                        .effectiveFullConfig();
+
+                // normalize effective full index config
+                VectorIndexVersion latestVersion = VectorIndexVersion.fromDescriptor(latestIndexProvider);
+                yield latestVersion
+                        .indexSettingValidator()
+                        .interpretAuthoritativeToTypedConfig(new IndexConfigAccessor(effectiveFullConfig))
+                        .config();
+            }
+
+            default -> indexConfig;
+        };
     }
 }

@@ -70,7 +70,10 @@ object IndexDescriptor {
       case labelId: LabelId     => Node(labelId)
       case relTypeId: RelTypeId => Relationship(relTypeId)
       case _: PropertyKeyId =>
-        throw new InternalException("Expected LabelId or RelTypeId but go PropertyKeyId")
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          "Expected LabelId or RelTypeId but go PropertyKeyId"
+        )
     }
   }
 
@@ -204,3 +207,35 @@ case class TokenIndexDescriptor(
   entityType: org.neo4j.common.EntityType,
   orderCapability: IndexOrderCapability
 )
+
+sealed trait VectorIndexDescriptor {
+  def property: PropertyKeyId
+  def additionalProperties: Seq[PropertyKeyId]
+  def properties: Seq[PropertyKeyId] = property +: additionalProperties
+}
+
+final case class NodeVectorIndexDescriptor(
+  labelIds: Seq[LabelId],
+  property: PropertyKeyId,
+  additionalProperties: Seq[PropertyKeyId]
+) extends VectorIndexDescriptor
+
+final case class RelationshipVectorIndexDescriptor(
+  relTypeIds: Seq[RelTypeId],
+  property: PropertyKeyId,
+  additionalProperties: Seq[PropertyKeyId]
+) extends VectorIndexDescriptor
+
+sealed trait FulltextIndexDescriptor {
+  def properties: Seq[PropertyKeyId]
+}
+
+final case class NodeFulltextIndexDescriptor(
+  labelIds: Seq[LabelId],
+  properties: Seq[PropertyKeyId]
+) extends FulltextIndexDescriptor
+
+final case class RelationshipFulltextIndexDescriptor(
+  relTypeIds: Seq[RelTypeId],
+  properties: Seq[PropertyKeyId]
+) extends FulltextIndexDescriptor

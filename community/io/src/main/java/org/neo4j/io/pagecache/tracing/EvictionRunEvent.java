@@ -19,12 +19,15 @@
  */
 package org.neo4j.io.pagecache.tracing;
 
+import org.neo4j.io.pagecache.tracing.async.AsyncEvictionEvent;
+
 /**
  * An eviction run is started when the page cache has determined that it
  * needs to evict a batch of pages. The dedicated eviction thread is
  * mostly sleeping when it is not performing an eviction run.
  */
-public interface EvictionRunEvent extends AutoCloseablePageCacheTracerEvent, EvictionEventOpportunity {
+public interface EvictionRunEvent
+        extends AutoCloseablePageCacheTracerEvent, EvictionEventOpportunity, FreeListSizeTrackerEvent {
     /**
      * An EvictionRunEvent that does nothing other than return the EvictionEvent.NULL.
      */
@@ -38,8 +41,14 @@ public interface EvictionRunEvent extends AutoCloseablePageCacheTracerEvent, Evi
         }
 
         @Override
+        public AsyncEvictionEvent beginAsyncEviction(long cachePageId) {
+            return AsyncEvictionEvent.NULL;
+        }
+
+        @Override
         public void close() {}
     };
 
+    @Override
     void freeListSize(int size);
 }

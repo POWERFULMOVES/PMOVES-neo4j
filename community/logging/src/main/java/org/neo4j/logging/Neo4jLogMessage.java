@@ -20,5 +20,11 @@
 package org.neo4j.logging;
 
 import org.apache.logging.log4j.message.Message;
+import org.neo4j.logging.log4j.Neo4jLogMarker;
 
-public interface Neo4jLogMessage extends Message {}
+public interface Neo4jLogMessage extends Message {
+    default Neo4jLogMarker getMarker() {
+        // internal error reporting marker, null if there are no errors to be reported
+        return null;
+    }
+}

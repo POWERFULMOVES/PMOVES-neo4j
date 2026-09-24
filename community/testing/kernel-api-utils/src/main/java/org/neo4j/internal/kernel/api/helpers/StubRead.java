@@ -62,6 +62,7 @@ public class StubRead implements Read {
             IndexReadSession index,
             NodeValueIndexCursor cursor,
             IndexQueryConstraints constraints,
+            boolean includeChangesFromThisTransaction,
             PropertyIndexQuery... query) {
         throw new UnsupportedOperationException();
     }
@@ -81,6 +82,7 @@ public class StubRead implements Read {
             IndexReadSession index,
             RelationshipValueIndexCursor cursor,
             IndexQueryConstraints constraints,
+            boolean includeChangesFromThisTransaction,
             PropertyIndexQuery... query) {
         throw new UnsupportedOperationException();
     }
@@ -96,19 +98,25 @@ public class StubRead implements Read {
 
     @Override
     public long lockingNodeUniqueIndexSeek(
-            IndexDescriptor index, NodeValueIndexCursor cursor, PropertyIndexQuery.ExactPredicate... predicates) {
+            IndexReadSession index, NodeValueIndexCursor cursor, PropertyIndexQuery.ExactPredicate... predicates) {
         throw new UnsupportedOperationException();
     }
 
     @Override
     public long lockingRelationshipUniqueIndexSeek(
-            IndexDescriptor index, RelationshipValueIndexCursor cursor, PropertyIndexQuery.ExactPredicate... predicates)
+            IndexReadSession index,
+            RelationshipValueIndexCursor cursor,
+            PropertyIndexQuery.ExactPredicate... predicates)
             throws KernelException {
         throw new UnsupportedOperationException();
     }
 
     @Override
-    public void nodeIndexScan(IndexReadSession index, NodeValueIndexCursor cursor, IndexQueryConstraints constraints) {
+    public void nodeIndexScan(
+            IndexReadSession index,
+            NodeValueIndexCursor cursor,
+            IndexQueryConstraints constraints,
+            boolean includeChangesFromThisTransaction) {
         throw new UnsupportedOperationException();
     }
 
@@ -120,7 +128,10 @@ public class StubRead implements Read {
 
     @Override
     public void relationshipIndexScan(
-            IndexReadSession index, RelationshipValueIndexCursor cursor, IndexQueryConstraints constraints) {
+            IndexReadSession index,
+            RelationshipValueIndexCursor cursor,
+            IndexQueryConstraints constraints,
+            boolean includeChangesFromThisTransaction) {
         throw new UnsupportedOperationException();
     }
 
@@ -156,17 +167,18 @@ public class StubRead implements Read {
     }
 
     @Override
-    public void nodeLabelScan(
+    public void nodeLabelIndexScan(
             TokenReadSession session,
             NodeLabelIndexCursor cursor,
             IndexQueryConstraints constraints,
             TokenPredicate query,
-            CursorContext cursorContext) {
+            CursorContext cursorContext,
+            boolean includeChangesFromThisTransaction) {
         throw new UnsupportedOperationException();
     }
 
     @Override
-    public void allNodesScan(NodeCursor cursor) {
+    public void allNodesScan(NodeCursor cursor, boolean includeChangesFromThisTransaction) {
         ((StubNodeCursor) cursor).scan();
     }
 
@@ -247,7 +259,7 @@ public class StubRead implements Read {
     }
 
     @Override
-    public void allRelationshipsScan(RelationshipScanCursor cursor) {
+    public void allRelationshipsScan(RelationshipScanCursor cursor, boolean includeChangesFromThisTransaction) {
         throw new UnsupportedOperationException();
     }
 
@@ -279,12 +291,13 @@ public class StubRead implements Read {
     }
 
     @Override
-    public void relationshipTypeScan(
+    public void relationshipTypeIndexScan(
             TokenReadSession session,
             RelationshipTypeIndexCursor cursor,
             IndexQueryConstraints constraints,
             TokenPredicate query,
-            CursorContext cursorContext) {
+            CursorContext cursorContext,
+            boolean includeChangesFromThisTransaction) {
         throw new UnsupportedOperationException();
     }
 
@@ -302,22 +315,7 @@ public class StubRead implements Read {
 
     @Override
     public void relationshipProperties(
-            long nodeReference,
-            long startNodeReference,
-            Reference reference,
-            PropertySelection selection,
-            PropertyCursor cursor) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public void relationshipProperties(
-            long nodeReference,
-            long startNodeReference,
-            int type,
-            Reference reference,
-            PropertySelection selection,
-            PropertyCursor cursor) {
+            long nodeReference, int type, Reference reference, PropertySelection selection, PropertyCursor cursor) {
         throw new UnsupportedOperationException();
     }
 

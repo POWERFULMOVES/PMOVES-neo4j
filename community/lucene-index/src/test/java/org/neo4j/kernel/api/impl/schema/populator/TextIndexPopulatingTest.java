@@ -21,66 +21,88 @@ package org.neo4j.kernel.api.impl.schema.populator;
 
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
-import static org.neo4j.kernel.api.impl.LuceneTestUtil.documentRepresentingProperties;
-import static org.neo4j.kernel.api.impl.schema.TextDocumentStructure.newTermForChangeOrRemove;
+import static org.mockito.Mockito.when;
+import static org.neo4j.kernel.api.impl.index.lucene.LuceneDocumentsFactory.ENTITY_ID_KEY;
 import static org.neo4j.kernel.api.index.IndexQueryHelper.add;
 import static org.neo4j.kernel.api.index.IndexQueryHelper.change;
 import static org.neo4j.kernel.api.index.IndexQueryHelper.remove;
 
-import org.junit.jupiter.api.Test;
-import org.neo4j.internal.schema.SchemaDescriptorSupplier;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.neo4j.internal.schema.IndexDescriptor;
+import org.neo4j.internal.schema.IndexPrototype;
 import org.neo4j.internal.schema.SchemaDescriptors;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneContext;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDocumentsFactory;
 import org.neo4j.kernel.api.impl.schema.AbstractTextIndexProvider;
-import org.neo4j.kernel.api.impl.schema.writer.LuceneIndexWriter;
+import org.neo4j.kernel.api.impl.schema.writer.LucenePartitionIndexWriter;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
+import org.neo4j.values.storable.Values;
 
 @TestDirectoryExtension
 class TextIndexPopulatingTest {
-    private static final SchemaDescriptorSupplier SCHEMA_DESCRIPTOR = () -> SchemaDescriptors.forLabel(1, 42);
+    private static final IndexDescriptor INDEX_DESCRIPTOR = IndexPrototype.forSchema(SchemaDescriptors.forLabel(1, 42))
+            .withName("12")
+            .materialise(13);
 
-    @Test
-    void additionsDeliveredToIndexWriter() throws Exception {
-        LuceneIndexWriter writer = mock(LuceneIndexWriter.class);
+    @ParameterizedTest
+    @EnumSource
+    void additionsDeliveredToIndexWriter(LuceneContext luceneContext) throws Exception {
+        LuceneDocumentsFactory documentsFactory = luceneContext.documentsFactory();
+        LucenePartitionIndexWriter writer = mock(LucenePartitionIndexWriter.class);
+        when(writer.documentsFactory()).thenReturn(documentsFactory);
+
         TextIndexPopulatingUpdater updater = newUpdater(writer);
 
-        updater.process(add(1, SCHEMA_DESCRIPTOR, "foo"));
-        verify(writer).updateDocument(newTermForChangeOrRemove(1), documentRepresentingProperties(1, "foo"));
+        updater.process(add(1, INDEX_DESCRIPTOR, "foo"));
+        verify(writer).updateDocument(ENTITY_ID_KEY, 1, documentsFactory.reusableTextDocument(1, Values.values("foo")));
 
-        updater.process(add(2, SCHEMA_DESCRIPTOR, "bar"));
-        verify(writer).updateDocument(newTermForChangeOrRemove(2), documentRepresentingProperties(2, "bar"));
+        updater.process(add(2, INDEX_DESCRIPTOR, "bar"));
+        verify(writer).updateDocument(ENTITY_ID_KEY, 2, documentsFactory.reusableTextDocument(2, Values.values("bar")));
 
-        updater.process(add(3, SCHEMA_DESCRIPTOR, "qux"));
-        verify(writer).updateDocument(newTermForChangeOrRemove(3), documentRepresentingProperties(3, "qux"));
+        updater.process(add(3, INDEX_DESCRIPTOR, "qux"));
+        verify(writer).updateDocument(ENTITY_ID_KEY, 3, documentsFactory.reusableTextDocument(3, Values.values("qux")));
     }
 
-    @Test
-    void changesDeliveredToIndexWriter() throws Exception {
-        LuceneIndexWriter writer = mock(LuceneIndexWriter.class);
+    @ParameterizedTest
+    @EnumSource
+    void changesDeliveredToIndexWriter(LuceneContext luceneContext) throws Exception {
+        LuceneDocumentsFactory documentsFactory = luceneContext.documentsFactory();
+        LucenePartitionIndexWriter writer = mock(LucenePartitionIndexWriter.class);
+        when(writer.documentsFactory()).thenReturn(documentsFactory);
+
         TextIndexPopulatingUpdater updater = newUpdater(writer);
 
-        updater.process(change(1, SCHEMA_DESCRIPTOR, "before1", "after1"));
-        verify(writer).updateOrDeleteDocument(newTermForChangeOrRemove(1), documentRepresentingProperties(1, "after1"));
+        updater.process(change(1, INDEX_DESCRIPTOR, "before1", "after1"));
+        verify(writer)
+                .updateOrDeleteDocument(
+                        ENTITY_ID_KEY, 1, documentsFactory.reusableTextDocument(1, Values.values("after1")));
 
-        updater.process(change(2, SCHEMA_DESCRIPTOR, "before2", "after2"));
-        verify(writer).updateOrDeleteDocument(newTermForChangeOrRemove(2), documentRepresentingProperties(2, "after2"));
+        updater.process(change(2, INDEX_DESCRIPTOR, "before2", "after2"));
+        verify(writer)
+                .updateOrDeleteDocument(
+                        ENTITY_ID_KEY, 2, documentsFactory.reusableTextDocument(2, Values.values("after2")));
     }
 
-    @Test
-    void removalsDeliveredToIndexWriter() throws Exception {
-        LuceneIndexWriter writer = mock(LuceneIndexWriter.class);
+    @ParameterizedTest
+    @EnumSource
+    void removalsDeliveredToIndexWriter(LuceneContext luceneContext) throws Exception {
+        LuceneDocumentsFactory documentsFactory = luceneContext.documentsFactory();
+        LucenePartitionIndexWriter writer = mock(LucenePartitionIndexWriter.class);
+        when(writer.documentsFactory()).thenReturn(documentsFactory);
         TextIndexPopulatingUpdater updater = newUpdater(writer);
 
-        updater.process(remove(1, SCHEMA_DESCRIPTOR, "foo"));
-        verify(writer).deleteDocuments(newTermForChangeOrRemove(1));
+        updater.process(remove(1, INDEX_DESCRIPTOR, "foo"));
+        verify(writer).deleteDocuments(ENTITY_ID_KEY, 1);
 
-        updater.process(remove(2, SCHEMA_DESCRIPTOR, "bar"));
-        verify(writer).deleteDocuments(newTermForChangeOrRemove(2));
+        updater.process(remove(2, INDEX_DESCRIPTOR, "bar"));
+        verify(writer).deleteDocuments(ENTITY_ID_KEY, 2);
 
-        updater.process(remove(3, SCHEMA_DESCRIPTOR, "baz"));
-        verify(writer).deleteDocuments(newTermForChangeOrRemove(3));
+        updater.process(remove(3, INDEX_DESCRIPTOR, "baz"));
+        verify(writer).deleteDocuments(ENTITY_ID_KEY, 3);
     }
 
-    private static TextIndexPopulatingUpdater newUpdater(LuceneIndexWriter writer) {
+    private static TextIndexPopulatingUpdater newUpdater(LucenePartitionIndexWriter writer) {
         return new TextIndexPopulatingUpdater(writer, AbstractTextIndexProvider.UPDATE_IGNORE_STRATEGY);
     }
 }

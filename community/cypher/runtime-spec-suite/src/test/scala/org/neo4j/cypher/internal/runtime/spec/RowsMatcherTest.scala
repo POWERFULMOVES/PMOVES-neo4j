@@ -19,7 +19,6 @@
  */
 package org.neo4j.cypher.internal.runtime.spec
 
-import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 import org.neo4j.cypher.internal.util.test_helpers.TestName
 import org.neo4j.kernel.impl.util.ValueUtils
 import org.neo4j.values.AnyValue
@@ -30,7 +29,7 @@ import org.neo4j.values.virtual.VirtualValues
 import scala.jdk.CollectionConverters.SeqHasAsJava
 import scala.util.Random
 
-class RowsMatcherTest extends CypherFunSuite with TestName {
+class RowsMatcherTest extends RuntimeSpecSuiteTestSuite with TestName {
 
   private val NO_ROWS = IndexedSeq[Array[AnyValue]]()
   private val NO_PARTIAL_ROWS = IndexedSeq[IndexedSeq[Array[AnyValue]]]()

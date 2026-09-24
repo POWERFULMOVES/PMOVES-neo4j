@@ -23,6 +23,7 @@ import org.neo4j.configuration.Config
 import org.neo4j.configuration.GraphDatabaseInternalSettings
 import org.neo4j.configuration.GraphDatabaseInternalSettings.CypherParallelRuntimeSupport.DISABLED
 import org.neo4j.configuration.GraphDatabaseInternalSettings.cypher_parallel_runtime_support
+import org.neo4j.configuration.GraphDatabaseSettings
 import org.neo4j.cypher.internal.config.CypherConfiguration
 import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 import org.neo4j.exceptions.InvalidCypherOption
@@ -66,44 +67,6 @@ class OptionReaderTest extends CypherFunSuite {
   // to set your new config value instead of `cypher_eager_analysis_implementation`.
   test("there are no debug options that can be read from config") {
     CypherDebugOption.cypherConfigBooleans should be(empty)
-  }
-
-  ignore("Can read debug options from config") {
-    val options = CypherQueryOptions.fromValues(
-      config = CypherConfiguration.fromConfig(
-        Config.newBuilder()
-          .set(
-            GraphDatabaseInternalSettings.cypher_eager_analysis_implementation,
-            GraphDatabaseInternalSettings.EagerAnalysisImplementation.LP
-          )
-          .build()
-      ),
-      keyValues = Set()
-    )
-
-    options
-      .shouldEqual(CypherQueryOptions.defaultOptions.copy(
-        debugOptions = CypherDebugOptions(Set( /*CypherDebugOption.useLPEagerAnalyzer*/ ))
-      ))
-  }
-
-  ignore("Can read debug options from config and key-values") {
-    val options = CypherQueryOptions.fromValues(
-      config = CypherConfiguration.fromConfig(
-        Config.newBuilder()
-          .set(
-            GraphDatabaseInternalSettings.cypher_eager_analysis_implementation,
-            GraphDatabaseInternalSettings.EagerAnalysisImplementation.LP
-          )
-          .build()
-      ),
-      keyValues = Set("debug" -> "toString")
-    )
-
-    options
-      .shouldEqual(CypherQueryOptions.defaultOptions.copy(
-        debugOptions = CypherDebugOptions(Set( /*CypherDebugOption.useLPEagerAnalyzer,*/ CypherDebugOption.tostring))
-      ))
   }
 
   test("Can read options from key-values") {
@@ -185,28 +148,64 @@ class OptionReaderTest extends CypherFunSuite {
     )
   }
 
+  test("Does not fail on parallel runtime config with slotted runtime") {
+    CypherQueryOptions.fromValues(
+      config = CypherConfiguration.fromConfig(Config.defaults()),
+      keyValues = Set("runtime" -> "slotted", "parallelRuntimeConfig" -> "leverageOrder")
+    )
+  }
+
   test("Cypher version can be read") {
     org.neo4j.cypher.internal.CypherVersion.values().foreach {
       case experimentalVersion if experimentalVersion.experimental =>
         intercept[InvalidCypherOption](defaultOptions("cypher version" -> experimentalVersion.versionName)) should
           have message s"$experimentalVersion is not a valid option for cypher version. Valid options are: 5"
       case version =>
-        defaultOptions("cypher version" -> version.versionName).cypherVersion.actualVersion shouldBe version
+        defaultOptions("cypher version" -> version.versionName).cypherVersion.explicitVersion shouldBe Some(version)
     }
   }
 
   test("Cypher version can be read with experimental versions") {
     org.neo4j.cypher.internal.CypherVersion.values().foreach { version =>
       options(
-        Map(GraphDatabaseInternalSettings.enable_experimental_cypher_versions -> java.lang.Boolean.TRUE),
+        Map(
+          // Might need to be enabled when the next experimental version appear:
+          // GraphDatabaseInternalSettings.enable_experimental_cypher_versions -> java.lang.Boolean.TRUE
+        ),
         "cypher version" -> version.versionName
-      ).cypherVersion.actualVersion shouldBe version
+      ).cypherVersion.explicitVersion shouldBe Some(version)
     }
   }
 
-  private def defaultOptions(queryOptions: (String, String)*): CypherQueryOptions = options(Map.empty, queryOptions: _*)
+  test("Cypher version can be read with experimental versions and default setting") {
+    for {
+      versionSetting <- GraphDatabaseSettings.CypherVersion.values()
+      preparserOption <- CypherVersionOption.values
+    } {
+      withClue(s"setting=$versionSetting, preparserOption=${preparserOption.render}") {
+        options(
+          Map(
+            // Might need to be enabled when the next experimental version appear: GraphDatabaseInternalSettings.enable_experimental_cypher_versions -> java.lang.Boolean.TRUE,
+            GraphDatabaseSettings.default_language -> versionSetting
+          ),
+          "cypher version" -> preparserOption.render
+        ).cypherVersion.explicitVersion shouldBe preparserOption.explicitVersion
+      }
+    }
 
-  private def options(settings: Map[Setting[_], AnyRef], queryOptions: (String, String)*): CypherQueryOptions = {
+    for {
+      versionSetting <- GraphDatabaseSettings.CypherVersion.values()
+    } {
+      options(Map(
+        // Might need to be enabled when the next experimental version appear: GraphDatabaseInternalSettings.enable_experimental_cypher_versions -> java.lang.Boolean.TRUE,
+        GraphDatabaseSettings.default_language -> versionSetting
+      )).cypherVersion.explicitVersion shouldBe None
+    }
+  }
+
+  private def defaultOptions(queryOptions: (String, String)*): CypherQueryOptions = options(Map.empty, queryOptions*)
+
+  private def options(settings: Map[Setting[?], AnyRef], queryOptions: (String, String)*): CypherQueryOptions = {
     CypherQueryOptions.fromValues(
       CypherConfiguration.fromConfig(Config.newBuilder().set(settings.asJava).build()),
       queryOptions.toSet

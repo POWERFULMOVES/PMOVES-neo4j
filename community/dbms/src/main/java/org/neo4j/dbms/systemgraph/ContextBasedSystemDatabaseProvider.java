@@ -22,28 +22,59 @@ package org.neo4j.dbms.systemgraph;
 import java.util.Optional;
 import org.neo4j.dbms.database.DatabaseContext;
 import org.neo4j.dbms.database.DatabaseContextProvider;
+import org.neo4j.function.Suppliers;
+import org.neo4j.graphdb.event.DatabaseEventContext;
+import org.neo4j.graphdb.event.DatabaseEventListenerAdapter;
 import org.neo4j.kernel.database.NamedDatabaseId;
-import org.neo4j.kernel.internal.GraphDatabaseAPI;
+import org.neo4j.kernel.monitoring.DatabaseEventListeners;
 
-public class ContextBasedSystemDatabaseProvider implements SystemDatabaseProvider {
+public class ContextBasedSystemDatabaseProvider extends DatabaseEventListenerAdapter implements SystemDatabaseProvider {
     private final DatabaseContextProvider<? extends DatabaseContext> databaseContextProvider;
 
+    private volatile Suppliers.Lazy<Optional<Cache>> cache;
+
     public ContextBasedSystemDatabaseProvider(
-            DatabaseContextProvider<? extends DatabaseContext> databaseContextProvider) {
+            DatabaseContextProvider<? extends DatabaseContext> databaseContextProvider,
+            DatabaseEventListeners databaseEventListeners) {
         this.databaseContextProvider = databaseContextProvider;
+        resetCache();
+        databaseEventListeners.registerDatabaseEventListener(this);
     }
 
     @Override
-    public Optional<GraphDatabaseAPI> optionalDatabase() {
-        return databaseContext().map(DatabaseContext::databaseFacade);
+    public Optional<SystemDatabaseContext> optionalDatabaseContext() {
+        return cache.get().map(Cache::systemDatabaseContext);
     }
 
     @Override
     public <T> Optional<T> dependency(Class<T> type) throws SystemDatabaseUnavailableException {
-        return databaseContext().flatMap(ctx -> SystemDatabaseProvider.dependency(ctx.dependencies(), type));
+        return cache.get()
+                .map(Cache::context)
+                .map(DatabaseContext::dependencies)
+                .flatMap(dep -> dep.resolveOptionalDependency(type));
     }
 
-    private Optional<? extends DatabaseContext> databaseContext() {
-        return databaseContextProvider.getDatabaseContext(NamedDatabaseId.NAMED_SYSTEM_DATABASE_ID);
+    @Override
+    public void databaseCreate(DatabaseEventContext eventContext) {
+        if (eventContext.getDatabaseName().equals(NamedDatabaseId.SYSTEM_DATABASE_NAME)) {
+            resetCache();
+        }
     }
+
+    private void resetCache() {
+        cache = Suppliers.lazySingleton(this::fetch);
+    }
+
+    private Optional<Cache> fetch() {
+        return databaseContextProvider
+                .getDatabaseContext(NamedDatabaseId.NAMED_SYSTEM_DATABASE_ID)
+                .map(ctx -> new Cache(
+                        ctx,
+                        new SystemDatabaseContext(
+                                ctx.databaseFacade(),
+                                ctx.database().getConfig(),
+                                ctx.database().getClock())));
+    }
+
+    private record Cache(DatabaseContext context, SystemDatabaseContext systemDatabaseContext) {}
 }

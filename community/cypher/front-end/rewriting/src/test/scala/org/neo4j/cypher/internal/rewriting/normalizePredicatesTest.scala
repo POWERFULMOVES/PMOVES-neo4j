@@ -16,18 +16,23 @@
  */
 package org.neo4j.cypher.internal.rewriting
 
+import org.neo4j.cypher.internal.CypherVersion
+import org.neo4j.cypher.internal.CypherVersionHelpers
 import org.neo4j.cypher.internal.ast.Statement
 import org.neo4j.cypher.internal.ast.prettifier.ExpressionStringifier
 import org.neo4j.cypher.internal.ast.prettifier.Prettifier
+import org.neo4j.cypher.internal.ast.semantics.SemanticCheckContext
 import org.neo4j.cypher.internal.ast.semantics.SemanticChecker
 import org.neo4j.cypher.internal.ast.semantics.SemanticState
-import org.neo4j.cypher.internal.rewriting.rewriters.LabelExpressionPredicateNormalizer
-import org.neo4j.cypher.internal.rewriting.rewriters.nameAllPatternElements
-import org.neo4j.cypher.internal.rewriting.rewriters.normalizeHasLabelsAndHasType
-import org.neo4j.cypher.internal.rewriting.rewriters.normalizePredicates
+import org.neo4j.cypher.internal.expressions.Expression
+import org.neo4j.cypher.internal.rewriting.rewriters.astRewriters.LabelExpressionPredicateNormalizer
+import org.neo4j.cypher.internal.rewriting.rewriters.astRewriters.NameAllPatternElements
+import org.neo4j.cypher.internal.rewriting.rewriters.astRewriters.NormalizeHasLabelsAndHasType
+import org.neo4j.cypher.internal.rewriting.rewriters.astRewriters.NormalizePredicates
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.cypher.internal.util.CancellationChecker
-import org.neo4j.cypher.internal.util.OpenCypherExceptionFactory
+import org.neo4j.cypher.internal.util.Neo4jCypherExceptionFactory
+import org.neo4j.cypher.internal.util.NotImplementedErrorMessageProvider
 import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.inSequence
 import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
@@ -35,21 +40,23 @@ import org.neo4j.cypher.internal.util.test_helpers.TestName
 
 class normalizePredicatesTest extends CypherFunSuite with TestName with AstRewritingTestSupport {
 
-  private val prettifier = Prettifier(ExpressionStringifier(_.asCanonicalStringVal))
+  private val prettifier = Prettifier(
+    ExpressionStringifier((e: Expression) => e.asCanonicalStringVal)
+  )
 
   def rewriter(semanticState: SemanticState): Rewriter = {
     val anonVarNameGen = new AnonymousVariableNameGenerator
     inSequence(
       LabelExpressionPredicateNormalizer.instance,
-      nameAllPatternElements(anonVarNameGen),
-      normalizePredicates.getRewriter(
+      NameAllPatternElements(anonVarNameGen),
+      NormalizePredicates.getRewriter(
         semanticState,
         Map.empty,
-        OpenCypherExceptionFactory(None),
         new AnonymousVariableNameGenerator,
-        CancellationChecker.neverCancelled()
+        CancellationChecker.neverCancelled(),
+        CypherVersion.Cypher5
       ),
-      normalizeHasLabelsAndHasType(semanticState)
+      NormalizeHasLabelsAndHasType(semanticState)
     )
   }
 
@@ -57,20 +64,22 @@ class normalizePredicatesTest extends CypherFunSuite with TestName with AstRewri
     val anonVarNameGen = new AnonymousVariableNameGenerator
     inSequence(
       LabelExpressionPredicateNormalizer.instance,
-      nameAllPatternElements(anonVarNameGen),
-      normalizeHasLabelsAndHasType(semanticState)
+      NameAllPatternElements(anonVarNameGen),
+      NormalizeHasLabelsAndHasType(semanticState)
     )
   }
 
   def parseForRewriting(queryText: String): Statement = parse(
     queryText.replace("\r\n", "\n"),
-    OpenCypherExceptionFactory(None)
+    Neo4jCypherExceptionFactory(queryText, None)
   )
 
   private def assertRewrite(expectedQuery: String): Unit = {
     def rewrite(query: String, rewriter: SemanticState => Rewriter): Statement = {
       val ast = parseForRewriting(query)
-      ast.endoRewrite(rewriter(SemanticChecker.check(ast).state))
+      val semanticContext =
+        SemanticCheckContext(CypherVersionHelpers.randomVersion(), NotImplementedErrorMessageProvider)
+      ast.endoRewrite(rewriter(SemanticChecker.check(ast, SemanticState.clean, semanticContext).state))
     }
 
     val result = rewrite(testName, rewriter)

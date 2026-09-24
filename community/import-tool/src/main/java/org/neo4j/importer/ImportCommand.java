@@ -22,14 +22,14 @@ package org.neo4j.importer;
 import static java.lang.Math.toIntExact;
 import static java.lang.String.format;
 import static java.util.Arrays.stream;
+import static java.util.stream.Collectors.toCollection;
 import static java.util.stream.Collectors.toSet;
 import static org.eclipse.collections.impl.tuple.Tuples.pair;
 import static org.neo4j.batchimport.api.Configuration.DEFAULT;
+import static org.neo4j.cloud.storage.StorageSettingsDeclaration.adaptPathForSampling;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
 import static org.neo4j.csv.reader.Configuration.COMMAS;
-import static org.neo4j.importer.FileImporter.DEFAULT_REPORT_FILE_NAME;
-import static org.neo4j.kernel.database.DatabaseTracers.EMPTY;
-import static org.neo4j.storageengine.api.StorageEngineFactory.SELECTOR;
+import static org.neo4j.importer.FileImporter.FileInputType.NO_INPUT;
 import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_ID;
 import static picocli.CommandLine.Command;
 import static picocli.CommandLine.Help.Visibility.ALWAYS;
@@ -38,25 +38,38 @@ import static picocli.CommandLine.Help.Visibility.NEVER;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.PrintStream;
-import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.SequencedSet;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import org.apache.commons.lang3.StringUtils;
 import org.eclipse.collections.api.tuple.Pair;
-import org.neo4j.batchimport.api.BatchImporter;
+import org.neo4j.batchimport.api.BatchImporter.HardwareValidation;
 import org.neo4j.batchimport.api.Configuration;
 import org.neo4j.batchimport.api.IndexConfig;
-import org.neo4j.batchimport.api.UnsupportedFormatException;
+import org.neo4j.batchimport.api.Monitor;
+import org.neo4j.batchimport.api.ResumableStateAccessor;
 import org.neo4j.batchimport.api.input.Collector;
+import org.neo4j.batchimport.api.input.FileGroup;
+import org.neo4j.batchimport.api.input.FileGroup.NumberedFile;
 import org.neo4j.batchimport.api.input.IdType;
 import org.neo4j.batchimport.api.input.Input;
 import org.neo4j.cli.AbstractAdminCommand;
@@ -67,48 +80,61 @@ import org.neo4j.cli.Converters.MaxOffHeapMemoryConverter;
 import org.neo4j.cli.ExecutionContext;
 import org.neo4j.cli.ExitCode;
 import org.neo4j.cloud.storage.SchemeFileSystemAbstraction;
+import org.neo4j.cloud.storage.StoragePath;
 import org.neo4j.cloud.storage.StorageUtils;
 import org.neo4j.commandline.dbms.CannotWriteException;
 import org.neo4j.commandline.dbms.LockChecker;
+import org.neo4j.common.DependencyResolver;
+import org.neo4j.common.EntityType;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
-import org.neo4j.importer.FileImporter.CsvImportException;
+import org.neo4j.csv.reader.Magic;
+import org.neo4j.cypher.internal.config.CypherConfiguration;
+import org.neo4j.graphdb.config.Setting;
+import org.neo4j.importer.FileImporter.FileInputType;
 import org.neo4j.importer.SchemaCommandReader.ReaderConfig;
+import org.neo4j.importer.SchemaCommandSource.DeferredSchemaCommands;
+import org.neo4j.importer.SchemaCommandSource.ResolvedSchemaCommands;
 import org.neo4j.internal.batchimport.DefaultAdditionalIds;
-import org.neo4j.internal.schema.SchemaCommand;
+import org.neo4j.internal.batchimport.input.BadCollector;
+import org.neo4j.internal.schema.SchemaCommand.SchemaCommandReaderException;
+import org.neo4j.io.ByteUnit;
 import org.neo4j.io.fs.FileSystemAbstraction;
+import org.neo4j.io.fs.FileSystemAbstraction.PatternStyle;
+import org.neo4j.io.fs.FileSystemUtils;
+import org.neo4j.io.fs.StoreChannel;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.layout.Neo4jLayout;
-import org.neo4j.io.locker.FileLockException;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.context.FixedVersionContextSupplier;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
-import org.neo4j.kernel.KernelVersion;
-import org.neo4j.kernel.api.impl.schema.vector.VectorIndexVersion;
+import org.neo4j.kernel.DatabaseCreationOptions;
+import org.neo4j.kernel.api.exceptions.ConsoleFriendlyException;
+import org.neo4j.kernel.api.index.IndexProvidersAccess;
 import org.neo4j.kernel.database.NormalizedDatabaseName;
-import org.neo4j.kernel.impl.index.schema.DefaultIndexProvidersAccess;
 import org.neo4j.kernel.impl.index.schema.IndexImporterFactoryImpl;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
-import org.neo4j.kernel.impl.transaction.log.files.LogFilesBuilder;
-import org.neo4j.kernel.impl.transaction.log.files.TransactionLogInitializer;
 import org.neo4j.kernel.impl.util.Converters;
-import org.neo4j.kernel.lifecycle.Lifespan;
-import org.neo4j.kernel.recovery.LogTailExtractor;
 import org.neo4j.logging.InternalLogProvider;
 import org.neo4j.logging.internal.LogService;
-import org.neo4j.logging.internal.SimpleLogService;
+import org.neo4j.logging.internal.NullLogService;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.scheduler.JobScheduler;
 import org.neo4j.storageengine.api.DeprecatedFormatWarning;
+import org.neo4j.storageengine.api.LogFilesInitializer;
 import org.neo4j.storageengine.api.StorageEngineFactory;
+import org.neo4j.token.TokenHolders;
+import org.neo4j.util.Preconditions;
 import org.neo4j.util.VisibleForTesting;
+import org.neo4j.wal.files.LogTailMetadataFactoryImpl;
+import org.neo4j.wal.files.TransactionLogInitializer;
 import picocli.CommandLine;
 import picocli.CommandLine.ArgGroup;
 import picocli.CommandLine.ITypeConverter;
+import picocli.CommandLine.Model.OptionSpec;
 import picocli.CommandLine.Option;
+import picocli.CommandLine.ParameterException;
 import picocli.CommandLine.Parameters;
-import picocli.CommandLine.ParentCommand;
 
 @Command(
         name = "import",
@@ -119,14 +145,27 @@ public class ImportCommand {
     /**
      * Arguments and logic shared between Full and Incremental import commands.
      */
-    protected abstract static class Base extends AbstractAdminCommand {
+    public abstract static class Base extends AbstractAdminCommand {
         /**
          * Delimiter used between files in an input group.
          */
         private static final Function<String, Character> CHARACTER_CONVERTER = new CharacterConverter();
 
-        private static final org.neo4j.csv.reader.Configuration DEFAULT_CSV_CONFIG = COMMAS;
+        public static final org.neo4j.csv.reader.Configuration DEFAULT_CSV_CONFIG = COMMAS;
         private static final Configuration DEFAULT_IMPORTER_CONFIG = DEFAULT;
+
+        private static final String RESUME_OPTION = "--resume";
+        protected static final String SKIP_BAD_RELATIONSHIPS_OPTION = "--skip-bad-relationships";
+        protected static final String SKIP_DUPLICATE_NODES_OPTION = "--skip-duplicate-nodes";
+
+        private static final Set<String> BLOCK_FORMATS = Set.of("block", "multiversion_block");
+
+        /**
+         * Options that may be passed alongside {@value #RESUME_OPTION}, overriding what the attempt being resumed
+         * used. Everything else is taken from that attempt, see {@link #rerunFromPreviousAttempt()}.
+         */
+        private static final Set<String> OPTIONS_ALLOWED_WITH_RESUME =
+                Set.of(SKIP_BAD_RELATIONSHIPS_OPTION, SKIP_DUPLICATE_NODES_OPTION);
 
         enum OnOffAuto {
             ON,
@@ -138,6 +177,13 @@ public class ImportCommand {
             @Override
             public OnOffAuto convert(String value) throws Exception {
                 return OnOffAuto.valueOf(value.toUpperCase(Locale.ROOT));
+            }
+        }
+
+        static class PatternStyleConverter implements ITypeConverter<PatternStyle> {
+            @Override
+            public PatternStyle convert(String value) throws Exception {
+                return PatternStyle.valueOf(value.toUpperCase(Locale.ROOT));
             }
         }
 
@@ -160,15 +206,47 @@ public class ImportCommand {
             }
         }
 
-        @ParentCommand
-        private ImportCommand importCommand;
+        @Option(
+                names = "--dry-run",
+                arity = "0..1",
+                showDefaultValue = ALWAYS,
+                paramLabel = "true|false",
+                fallbackValue = "true",
+                description = "Flag used to indicate that a dry run of the import should be performed, i.e. no data "
+                        + "will actually be imported, only the validation of the various arguments and estimation of "
+                        + "size of the import will be performed and reported.")
+        private boolean dryRun;
+
+        @Option(
+                names = "--skidbladnir",
+                arity = "0..1",
+                showDefaultValue = ALWAYS,
+                paramLabel = "true|false",
+                fallbackValue = "true",
+                description = "Zzzing",
+                hidden = true)
+        private boolean skidbladnir;
+
+        @Option(
+                names = RESUME_OPTION,
+                arity = "0..1",
+                showDefaultValue = ALWAYS,
+                paramLabel = "true|false",
+                fallbackValue = "true",
+                description = "Resume the last import. Reruns it with the arguments it was invoked with, so it can "
+                        + "only be combined with the options that are allowed to override those.",
+                hidden = true)
+        private boolean resume;
 
         @Option(
                 names = "--schema",
                 paramLabel = "<path>",
                 description =
-                        "Path to the file containing the Cypher commands for creating indexes and constraints during data import.")
-        private Path schemaCommands;
+                        "Path to the file containing the Cypher commands for creating indexes and constraints during"
+                                + " data import.\n"
+                                + "It is possible to load commands from AWS S3 buckets, Google Cloud storage buckets, and"
+                                + " Azure buckets using the appropriate URI as the path.")
+        private String schemaCommands;
 
         @Parameters(
                 index = "0",
@@ -182,9 +260,8 @@ public class ImportCommand {
         @Option(
                 names = "--report-file",
                 paramLabel = "<path>",
-                defaultValue = DEFAULT_REPORT_FILE_NAME,
                 description = "File in which to store the report of the csv-import.")
-        private Path reportFile = Path.of(DEFAULT_REPORT_FILE_NAME);
+        private Path reportFile;
 
         @Option(
                 names = "--id-type",
@@ -198,7 +275,7 @@ public class ImportCommand {
                         + "For more information on ID handling, please see the Neo4j Manual: "
                         + "https://neo4j.com/docs/operations-manual/current/tools/import/",
                 converter = IdTypeConverter.class)
-        IdType idType = IdType.STRING;
+        IdType defaultIdType = IdType.STRING;
 
         @Option(
                 names = "--input-encoding",
@@ -215,6 +292,15 @@ public class ImportCommand {
                 description = "If unspecified columns should be ignored during the import.")
         private boolean ignoreExtraColumns;
 
+        @Option(
+                names = "--path-pattern-style",
+                showDefaultValue = ALWAYS,
+                paramLabel = "regex|glob|none",
+                converter = PatternStyleConverter.class,
+                defaultValue = "regex",
+                description = "Pattern style to use for matching --nodes and --relationships files.")
+        private PatternStyle patternStyle;
+
         private static final String MULTILINE_FIELDS = "--multiline-fields";
         private static final String MULTILINE_FIELDS_FORMAT = MULTILINE_FIELDS + "-format";
 
@@ -225,28 +311,32 @@ public class ImportCommand {
             @Option(
                     names = MULTILINE_FIELDS,
                     required = true,
-                    showDefaultValue = ALWAYS,
                     paramLabel = "true|false|<path>[,<path>]",
                     fallbackValue = "true",
                     description =
                             "In v1, whether or not fields from an input source can span multiple lines, i.e. contain "
                                     + "newline characters. Setting " + MULTILINE_FIELDS
-                                    + "=true can severely degrade the "
-                                    + "performance of the importer. Therefore, use it with care, especially with large imports. "
-                                    + "In v2, this option will specify the list of files that contain multiline fields. Files can "
-                                    + "also be specified using regular expressions.")
+                                    + "=true can severely degrade the performance of the importer. Therefore, use it"
+                                    + " with care, especially with large imports. In v2, this option will specify the"
+                                    + " list of files that contain multiline fields. Files can also be specified using"
+                                    + " regular expressions.")
             private String multilineFields;
 
             @Option(
                     names = MULTILINE_FIELDS_FORMAT,
                     converter = MultilineFormatConverter.class,
                     showDefaultValue = ALWAYS,
+                    defaultValue = "v1",
                     paramLabel = "v1|v2",
                     description = "Controls the parsing of input source that can span multiple lines, i.e. contain "
                             + "newline characters. When set to v1, the value for " + MULTILINE_FIELDS + " can only be "
                             + "true or false. When set to v2, the value for " + MULTILINE_FIELDS
                             + " should be the list of files that contain multiline fields.")
             private MultilineFormat multilineFormat = MultilineFormat.V1;
+
+            String multilineFields() {
+                return multilineFields;
+            }
         }
 
         @Option(
@@ -256,7 +346,8 @@ public class ImportCommand {
                 paramLabel = "true|false",
                 fallbackValue = "true",
                 description =
-                        "Whether or not empty string fields, i.e. \"\" from input source are ignored, i.e. treated as null.")
+                        "Whether or not empty string fields, i.e. \"\" from input source are ignored, i.e. treated as"
+                                + " null.")
         private boolean ignoreEmptyStrings = DEFAULT_CSV_CONFIG.emptyQuotedStringsAsNull();
 
         @Option(
@@ -277,29 +368,55 @@ public class ImportCommand {
                 description = "Whether or not a backslash-escaped quote e.g. \\\" is interpreted as an inner quote.")
         private boolean legacyStyleQuoting = DEFAULT_CSV_CONFIG.legacyStyleQuoting();
 
+        private static final String DELIMITER_WARNING_CSV =
+                "For CSV data, this value must be different from the one specified in the `--delimiter` option.";
+
         @Option(
                 names = "--delimiter",
                 paramLabel = "<char>",
                 converter = EscapedCharacterConverter.class,
                 description = "Delimiter character between values in CSV data. "
-                        + "Also accepts 'TAB' and e.g. 'U+20AC' for specifying a character using Unicode.")
+                        + "Also accepts 'TAB' and e.g. 'U+002A' for specifying a character using Unicode. Note that "
+                        + "the delimiter character must be a single byte character in UTF-8.")
         private char delimiter = DEFAULT_CSV_CONFIG.delimiter();
+
+        @Option(
+                names = "--accept-multibyte-delimiter",
+                hidden = true,
+                arity = "0..1",
+                fallbackValue = "true",
+                description = "Allow multibyte delimiter character, this will have performance impact and this option"
+                        + " is only here to allow legacy delimiter characters")
+        private boolean allowMultibyteDelimiter = false;
 
         @Option(
                 names = "--array-delimiter",
                 paramLabel = "<char>",
                 converter = EscapedCharacterConverter.class,
                 description = "Delimiter character between array elements within a value in CSV data. "
-                        + "Also accepts 'TAB' and e.g. 'U+20AC' for specifying a character using Unicode.")
+                        + "Also accepts 'TAB' and e.g. 'U+20AC' for specifying a character using Unicode. "
+                        + DELIMITER_WARNING_CSV
+                        + " For Parquet data, this is only needed if the array is encoded as a string.")
         private char arrayDelimiter = DEFAULT_CSV_CONFIG.arrayDelimiter();
+
+        @Option(
+                names = "--vector-delimiter",
+                paramLabel = "<char>",
+                converter = EscapedCharacterConverter.class,
+                description = "Delimiter character between vector coordinates within a value in CSV data. "
+                        + "Also accepts 'TAB' and e.g. 'U+20AC' for specifying a character using Unicode. "
+                        + DELIMITER_WARNING_CSV
+                        + " For Parquet data, this is only needed if the vector is encoded as a string.")
+        private char vectorDelimiter = DEFAULT_CSV_CONFIG.vectorDelimiter();
 
         @Option(
                 names = "--quote",
                 paramLabel = "<char>",
                 converter = EscapedCharacterConverter.class,
                 description =
-                        "Character to treat as quotation character for values in CSV data. Quotes can be escaped as per RFC 4180 by doubling them, "
-                                + "for example \"\" would be interpreted as a literal \". You cannot escape using \\.")
+                        "Character to treat as a quotation mark for values in CSV data. For example, quotes can be escaped as per RFC 4180 by doubling them. "
+                                + "Thus \"\" would be interpreted as a literal \". You cannot escape using \\. "
+                                + DELIMITER_WARNING_CSV)
         private char quote = DEFAULT_CSV_CONFIG.quotationCharacter();
 
         @Option(
@@ -316,10 +433,7 @@ public class ImportCommand {
                 paramLabel = "<size>",
                 defaultValue = "90%",
                 converter = MaxOffHeapMemoryConverter.class,
-                description =
-                        "Maximum memory that neo4j-admin can use for various data structures and caching to improve performance. "
-                                + "Values can be plain numbers, such as 10000000, or 20G for 20 gigabytes. "
-                                + "It can also be specified as a percentage of the available memory, for example 70%%.")
+                description = MaxOffHeapMemoryConverter.DESCRIPTION)
         private long maxOffHeapMemory;
 
         @Option(
@@ -329,30 +443,34 @@ public class ImportCommand {
                 defaultValue = "auto",
                 converter = OnOffAutoConverter.class,
                 description =
-                        "Ignore environment-based heuristics and indicate if the target storage subsystem can support parallel IO with high throughput or auto detect. "
-                                + " Typically this is on for SSDs, large raid arrays, and network-attached storage.")
+                        "Ignore environment-based heuristics and indicate if the target storage subsystem can support"
+                                + " parallel IO with high throughput or auto detect.  Typically this is on for SSDs, large"
+                                + " raid arrays, and network-attached storage.")
         private OnOffAuto highIo;
 
+        private static final String THREADS = "--threads";
+
         @Option(
-                names = "--threads",
+                names = THREADS,
                 paramLabel = "<num>",
-                description =
-                        "(advanced) Max number of worker threads used by the importer. Defaults to the number of available processors reported by the JVM. "
-                                + "There is a certain amount of minimum threads needed so for that reason there is no lower bound for this "
-                                + "value. For optimal performance, this value should not be greater than the number of available processors.")
+                description = "(advanced) Max number of worker threads used by the importer. Defaults to the number of"
+                        + " available processors reported by the JVM. There is a certain amount of minimum threads"
+                        + " needed so for that reason there is no lower bound for this value. For optimal"
+                        + " performance, this value should not be greater than the number of available"
+                        + " processors.")
         private int threads = DEFAULT_IMPORTER_CONFIG.maxNumberOfWorkerThreads();
 
-        private static final String BAD_TOLERANCE_OPTION = "--bad-tolerance";
+        protected static final String BAD_TOLERANCE_OPTION = "--bad-tolerance";
 
         @Option(
                 names = BAD_TOLERANCE_OPTION,
                 paramLabel = "<num>",
-                description =
-                        "Number of bad entries before the import is aborted. The import process is optimized for error-free data. "
-                                + "Therefore, cleaning the data before importing it is highly recommended. If you encounter any bad entries during "
-                                + "the import process, you can set the number of bad entries to a specific value that suits your needs. "
-                                + "However, setting a high value may affect the performance of the tool.")
-        private long badTolerance = 1000;
+                description = "Number of bad entries before the import is aborted. The import process is optimized for"
+                        + " error-free data. Therefore, cleaning the data before importing it is highly"
+                        + " recommended. If you encounter any bad entries during the import process, you can set"
+                        + " the number of bad entries to a specific value that suits your needs. However, setting"
+                        + " a high value may affect the performance of the tool.")
+        private long badTolerance = BadCollector.UNLIMITED_TOLERANCE;
 
         public static final String SKIP_BAD_ENTRIES_LOGGING = "--skip-bad-entries-logging";
 
@@ -363,24 +481,26 @@ public class ImportCommand {
                 paramLabel = "true|false",
                 fallbackValue = "true",
                 description =
-                        "When set to `true`, the details of bad entries are not written in the log. Disabling logging "
-                                + "can improve performance when the data contains lots of faults. Cleaning the data before importing "
-                                + "it is highly recommended because faults dramatically affect the tool's performance even without "
-                                + "logging.")
+                        "When set to `true`, the details of bad entries are not written in the log. Disabling logging"
+                                + " can improve performance when the data contains lots of faults. Cleaning the data"
+                                + " before importing it is highly recommended because faults dramatically affect the"
+                                + " tool's performance even without logging.")
         private boolean skipBadEntriesLogging;
 
         @Option(
-                names = "--skip-bad-relationships",
+                names = SKIP_BAD_RELATIONSHIPS_OPTION,
                 arity = "0..1",
                 showDefaultValue = ALWAYS,
                 paramLabel = "true|false",
                 fallbackValue = "true",
                 description =
-                        "Whether or not to skip importing relationships that refer to missing node IDs, i.e. either start or end node ID/group referring "
-                                + "to a node that was not specified by the node input data. Skipped relationships will be logged, containing at most the number of entities "
-                                + "specified by " + BAD_TOLERANCE_OPTION + ", unless otherwise specified by the "
-                                + SKIP_BAD_ENTRIES_LOGGING + " option.")
-        private boolean skipBadRelationships;
+                        "Whether or not to skip importing relationships that refer to missing node IDs, i.e. either"
+                                + " start or end node ID/group referring to a node that was not specified by the node"
+                                + " input data. Skipped relationships will be logged if they are within the limit of"
+                                + " entities specified by " + BAD_TOLERANCE_OPTION + " and the "
+                                + SKIP_BAD_ENTRIES_LOGGING
+                                + " option is disabled.")
+        boolean skipBadRelationships;
 
         @Option(
                 names = "--strict",
@@ -388,23 +508,25 @@ public class ImportCommand {
                 showDefaultValue = ALWAYS,
                 paramLabel = "true|false",
                 description =
-                        "Whether or not the lookup of nodes referred to from relationships needs to be checked strict. "
-                                + "If disabled, most but not all relationships referring to non-existent nodes will be detected. "
-                                + "If enabled all those relationships will be found but at the cost of lower performance.")
+                        "Whether or not the lookup of nodes referred to from relationships needs to be checked strict."
+                                + " If disabled, most but not all relationships referring to non-existent nodes will be"
+                                + " detected. If enabled all those relationships will be found but at the cost of lower"
+                                + " performance.")
         private boolean strict = false;
 
         @Option(
-                names = "--skip-duplicate-nodes",
+                names = SKIP_DUPLICATE_NODES_OPTION,
                 arity = "0..1",
                 showDefaultValue = ALWAYS,
                 paramLabel = "true|false",
                 fallbackValue = "true",
                 description =
-                        "Whether or not to skip importing nodes that have the same ID/group. In the event of multiple nodes within the same group having "
-                                + "the same ID, the first encountered will be imported, whereas consecutive such nodes will be skipped. Skipped nodes will be logged, "
-                                + "containing at most the number of entities specified by " + BAD_TOLERANCE_OPTION
-                                + ", unless otherwise specified by the " + SKIP_BAD_ENTRIES_LOGGING + " option.")
-        private boolean skipDuplicateNodes;
+                        "Whether or not to skip importing nodes that have the same ID/group. In the event of multiple"
+                                + " nodes within the same group having the same ID, the first encountered will be"
+                                + " imported, whereas consecutive such nodes will be skipped. Skipped nodes will be logged"
+                                + " if they are within the limit of entities specified by " + BAD_TOLERANCE_OPTION
+                                + " and the " + SKIP_BAD_ENTRIES_LOGGING + " option is disabled.")
+        boolean skipDuplicateNodes;
 
         @Option(
                 names = "--normalize-types",
@@ -418,15 +540,15 @@ public class ImportCommand {
 
         @Option(
                 names = "--nodes",
-                required = true,
                 arity = "1..*",
                 converter = NodeFilesConverter.class,
                 paramLabel = "[<label>[:<label>]...=]<files>",
-                description =
-                        "Node CSV header and data. Multiple files will be logically seen as one big file from the perspective of the importer. The first "
-                                + "line must contain the header. Multiple data sources like these can be specified in one import, where each data source has its "
-                                + "own header. Files can also be specified using regular expressions.\n"
-                                + "It is possible to import files from AWS S3 buckets, Google Cloud storage buckets, and Azure buckets using the appropriate URI as the path.")
+                description = "Node CSV header and data. Multiple files will be logically seen as one big file from the"
+                        + " perspective of the importer. The first line must contain the header. Multiple data"
+                        + " sources like these can be specified in one import, where each data source has its own"
+                        + " header. Files can also be specified using regular expressions.\n"
+                        + "It is possible to import files from AWS S3 buckets, Google Cloud storage buckets, and"
+                        + " Azure buckets using the appropriate URI as the path.")
         private List<NodeFilesGroup> nodes;
 
         @Option(
@@ -436,10 +558,12 @@ public class ImportCommand {
                 showDefaultValue = NEVER,
                 paramLabel = "[<type>=]<files>",
                 description =
-                        "Relationship CSV header and data. Multiple files will be logically seen as one big file from the perspective of the importer. "
-                                + "The first line must contain the header. Multiple data sources like these can be specified in one import, where each data source has "
-                                + "its own header. Files can also be specified using regular expressions.\n"
-                                + "It is possible to import files from AWS S3 buckets, Google Cloud storage buckets, and Azure buckets using the appropriate URI as the path.")
+                        "Relationship CSV header and data. Multiple files will be logically seen as one big file from"
+                                + " the perspective of the importer. The first line must contain the header. Multiple data"
+                                + " sources like these can be specified in one import, where each data source has its own"
+                                + " header. Files can also be specified using regular expressions.\n"
+                                + "It is possible to import files from AWS S3 buckets, Google Cloud storage buckets, and"
+                                + " Azure buckets using the appropriate URI as the path.")
         private List<RelationshipFilesGroup> relationships = new ArrayList<>();
 
         @Option(
@@ -449,7 +573,8 @@ public class ImportCommand {
                 paramLabel = "true|false",
                 fallbackValue = "true",
                 description =
-                        "Automatically skip accidental header lines in subsequent files in file groups with more than one file.")
+                        "Automatically skip accidental header lines in subsequent files in file groups with more than"
+                                + " one file.")
         private boolean autoSkipHeaders;
 
         @Option(
@@ -457,20 +582,73 @@ public class ImportCommand {
                 hidden = true,
                 defaultValue = "-1",
                 description =
-                        "(advanced) override the number of ranges the relationship data is split into during import. "
-                                + "Number of ranges relates to reducing unnecessary page faults during import and typically the number of ranges "
-                                + "is automatically and optimally calculated for best performance. However, if it turns out that this calculation "
-                                + "may not be optimal, this option can override this calculation")
+                        "(advanced) override the number of ranges the relationship data is split into during import."
+                                + " Number of ranges relates to reducing unnecessary page faults during import and"
+                                + " typically the number of ranges is automatically and optimally calculated for best"
+                                + " performance. However, if it turns out that this calculation may not be optimal, this"
+                                + " option can override this calculation")
         private int overrideNumRanges;
 
         @Option(
                 names = "--input-type",
-                showDefaultValue = ALWAYS,
                 paramLabel = "csv|parquet",
-                defaultValue = "csv",
                 description = "File type to import from. Can be csv or parquet. Defaults to csv.",
                 converter = FileInputTypeConverter.class)
         FileImporter.FileInputType fileInputType;
+
+        @Option(
+                names = "--temp-path",
+                paramLabel = "<path>",
+                description =
+                        "Provide a path where to store temporary files that are created and deleted during import. If"
+                                + " not specifically provided, the default temp path will be created inside the database"
+                                + " directory of the imported database.")
+        private Path tempPath;
+
+        @Option(
+                names = "--disable-instrumentation",
+                hidden = true,
+                defaultValue = "false",
+                fallbackValue = "true",
+                description = "Disable import performance instrumentation.")
+        private boolean disableInstrumentation;
+
+        @Option(
+                names = "--capture-java-flight-recordings",
+                hidden = true,
+                arity = "0..1",
+                fallbackValue = "true",
+                defaultValue = "true",
+                description = "Enable import performance instrumentation to take java flight recordings when "
+                        + "significant performance issues are found.")
+        private boolean captureJFRs;
+
+        @Option(
+                names = "--capture-thread-dumps",
+                hidden = true,
+                arity = "0..1",
+                fallbackValue = "true",
+                defaultValue = "false",
+                description = "Enable import performance instrumentation to take thread dumps when "
+                        + "significant performance issues are found.")
+        private boolean captureThreadDumps;
+
+        @Option(
+                names = "--profile",
+                arity = "0..1",
+                showDefaultValue = ALWAYS,
+                paramLabel = "true|false",
+                fallbackValue = "true",
+                defaultValue = "false",
+                description = "Capture a java flight recording for the entire duration of the import.")
+        private boolean captureProfile;
+
+        @Option(
+                names = "--profile-results-path",
+                paramLabel = "<path>",
+                description = "Provide a path where to store java flight recordings captured with the --profile "
+                        + "option. Requires --profile or --profile=true to be set to have an effect.")
+        private Path captureProfileResultPath = null;
 
         protected Base(ExecutionContext ctx) {
             super(ctx);
@@ -486,33 +664,52 @@ public class ImportCommand {
             Closeable maybeCheckLock(DatabaseLayout databaseLayout) throws CannotWriteException, IOException;
         }
 
-        public boolean allowEnterpriseFeatures() {
-            return importCommand.allowEnterpriseFeatures();
+        /**
+         * (Optionally) decorates the import context monitor to receive callbacks about the various stages of the
+         * import process.
+         *
+         * @param contextMonitor the import context monitor to decorate
+         * @return the monitor to be used during the import process
+         */
+        public Monitor decorateImportContext(Monitor contextMonitor) {
+            return contextMonitor;
         }
 
-        protected void doExecute(
-                boolean incremental, String format, boolean overwriteDestination, Base.MaybeLocker maybeLockChecker) {
-            try {
-                if (format != null && StorageEngineFactory.isFormatDeprecated(format)) {
-                    ctx.out().println("WARNING: " + DeprecatedFormatWarning.getTargetFormatWarning(format));
-                }
-                final var databaseConfig = loadNeo4jConfig(format);
-                final var databaseLayout = Neo4jLayout.of(databaseConfig).databaseLayout(database.name());
+        @Override
+        public void execute() throws Exception {
+            Path previousContextDir = rerunFromPreviousAttempt();
 
-                try (var ignore = maybeLockChecker.maybeCheckLock(databaseLayout);
-                        var logProvider = FileImporter.createLogProvider(ctx.fs(), databaseConfig);
-                        var fileSystem = new SchemeFileSystemAbstraction(ctx.fs(), databaseConfig, logProvider)) {
-                    final var importerBuilder = FileImporter.builder()
+            var format = importFormat();
+            if (format != null && StorageEngineFactory.isFormatDeprecated(format)) {
+                printf("WARNING: %s%n", DeprecatedFormatWarning.getTargetFormatWarning(format));
+            }
+
+            try (var importContext = ImportContext.create(
+                    ctx.fs(),
+                    database,
+                    previousContextDir,
+                    loadNeo4jConfig(format),
+                    reportFile,
+                    spec.commandLine().getParseResult().expandedArgs(),
+                    includeUpdatesInProgress(),
+                    !disableInstrumentation && captureProfile && captureProfileResultPath == null,
+                    verbose)) {
+                var databaseConfig = importContext.config();
+                var databaseLayout = Neo4jLayout.of(databaseConfig).databaseLayout(database.name());
+                try (var fileSystem = new SchemeFileSystemAbstraction(ctx.fs(), databaseConfig, importContext)) {
+                    importConfigurationValidation(
+                            fileSystem, databaseConfig.get(GraphDatabaseSettings.db_format), databaseConfig);
+
+                    final var importerBuilder = configureFileImporterBuilder(FileImporter.builder()
                             .withCsvConfig(csvConfiguration(fileSystem))
-                            .withImportConfig(importConfiguration())
+                            .withImportConfig(importConfiguration(databaseConfig, importContext.baseDir()))
                             .withDatabaseLayout(databaseLayout)
                             .withDatabaseConfig(databaseConfig)
                             .withFileSystem(fileSystem)
                             .withStdOut(ctx.out())
                             .withStdErr(ctx.err())
-                            .withIdType(idType)
+                            .withDefaultIdType(defaultIdType)
                             .withInputEncoding(inputEncoding)
-                            .withReportFile(reportFile.toAbsolutePath())
                             .withIgnoreExtraColumns(ignoreExtraColumns)
                             .withBadTolerance(badTolerance)
                             .withSkipBadRelationships(skipBadRelationships)
@@ -522,57 +719,424 @@ public class ImportCommand {
                             .withNormalizeTypes(normalizeTypes)
                             .withVerbose(verbose)
                             .withAutoSkipHeaders(autoSkipHeaders)
-                            .withForce(overwriteDestination)
-                            .withIncremental(incremental)
-                            .withLogProvider(logProvider)
                             .withSchemaCommands(parseSchemaCommands(fileSystem, databaseConfig))
-                            .withLogProvider(logProvider)
-                            .withFileInputType(fileInputType);
-                    if (incremental) {
-                        importerBuilder.withCursorContextFactory(new CursorContextFactory(
-                                PageCacheTracer.NULL,
-                                new FixedVersionContextSupplier(getLogTail(fileSystem, databaseLayout, databaseConfig)
-                                        .getLastCommittedTransaction()
-                                        .id())));
+                            .withReportChannel(importContext::collectorChannel)
+                            .withLogProvider(importContext)
+                            .withMonitor(decorateImportContext(importContext))
+                            .withResumableStateAccessor(importContext));
+
+                    FileImporter importer;
+                    if (isDistributedPropShard()) {
+                        // faking this because input will be ignored anyway since input SHOULD come from the graph shard
+                        importer = importerBuilder.withFileInputType(NO_INPUT).build();
                     } else {
-                        importerBuilder.withCursorContextFactory(new CursorContextFactory(
-                                PageCacheTracer.NULL, new FixedVersionContextSupplier(BASE_TX_ID)));
+                        importer = addInputData(fileSystem, importerBuilder).build();
                     }
 
-                    for (var n : nodes) {
-                        importerBuilder.addNodeFiles(n.key, n.toPaths(fileSystem));
-                    }
+                    validateInputType(importer.fileInputType());
 
-                    for (var r : relationships) {
-                        importerBuilder.addRelationshipFiles(r.key, r.toPaths(fileSystem));
+                    if (dryRun) {
+                        importer.dryRun(this);
+                    } else {
+                        try (var ignore = maybeLockChecker().maybeCheckLock(databaseLayout)) {
+                            preImport(importContext, importer);
+                            importer.doImport(this, skidbladnir, resume);
+                            postImport(fileSystem, databaseConfig, importContext, databaseLayout);
+                            importContext.markSuccessful();
+                        }
                     }
-
-                    importerBuilder.build().doImport(this);
-                } catch (FileLockException e) {
-                    throw new CommandFailedException(
-                            "The database is in use. Stop database '%s' and try again."
-                                    .formatted(databaseLayout.getDatabaseName()),
-                            e,
-                            ExitCode.FAIL);
-                } catch (CannotWriteException e) {
-                    throw new CommandFailedException("You do not have permission to import.", e, ExitCode.NOPERM);
-                } catch (CsvImportException e) {
-                    throw new CommandFailedException("Error importing csv file.", e, ExitCode.SOFTWARE);
-                } catch (UnsupportedFormatException e) {
-                    throw new CommandFailedException("Unsupported format.", e, ExitCode.SOFTWARE);
+                } catch (Exception e) {
+                    throw importContext.captureError(e);
                 }
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
             }
         }
 
-        protected abstract SchemaCommandReader.ReaderConfig schemaCommandsReaderConfig(
-                VectorIndexVersion latestVectorIndexVersion);
+        private void preImport(ImportContext importContext, FileImporter importer) throws IOException {
+            // Verify the input files before everything that writes, since a resume records its own input into the
+            // context directory of the attempt it continues - persisting first would replace the record this reads
+            // with a hash of the very input it is meant to reject
+            ArrayList<Path> inputFiles = new ArrayList<>();
+            collectFiles(importer.nodeFiles().values(), inputFiles);
+            collectFiles(importer.relationshipFiles().values(), inputFiles);
+            verifyInputFilesStillMatch(importContext, inputFiles);
+            importContext.preamble(ctx.out());
+            importContext.persistCliArgs();
+            if (skidbladnir) {
+                // only a skidbladnir import can be resumed, and only a resume has any use for the configuration
+                importContext.persistConfig();
+
+                importContext.persistInputFilesHash(inputFiles);
+            }
+        }
+
+        /**
+         * Refuses a resume whose input is no longer the input the attempt being resumed read. That attempt divided its
+         * work over the input as it stood, and the state it left behind is indexed by where in those files it got to,
+         * so continuing over different input would attribute what it already imported to data that was never there.
+         */
+        private void verifyInputFilesStillMatch(ImportContext importContext, ArrayList<Path> inputFiles)
+                throws IOException {
+            if (importContext.inputFilesChanged(inputFiles)) {
+                throw new CommandFailedException(
+                        "ERROR: the input files are no longer the ones the import attempt being resumed read - a file "
+                                + "was added, removed, renamed or has a different size than it had then. Restore them "
+                                + "to resume that attempt, or import again from the start over the input you have.");
+            }
+        }
+
+        private static void collectFiles(Collection<? extends List<FileGroup>> fileGroups, List<Path> into) {
+            for (List<FileGroup> groups : fileGroups) {
+                for (FileGroup group : groups) {
+                    for (NumberedFile file : group.files()) {
+                        into.add(file.path());
+                    }
+                }
+            }
+        }
+
+        /**
+         * A resumed import takes its configuration from the attempt it resumes, so any option passed alongside
+         * '--resume' that is not on {@link #OPTIONS_ALLOWED_WITH_RESUME} would be silently discarded and is
+         * rejected instead. The database to resume may always be given, it identifies the attempt to pick up.
+         */
+        private void rejectOptionsNotAllowedWithResume() {
+            List<String> rejected = matchedOptionNames()
+                    .filter(name -> !name.equals(RESUME_OPTION))
+                    .filter(name -> !OPTIONS_ALLOWED_WITH_RESUME.contains(name))
+                    .toList();
+            if (!rejected.isEmpty()) {
+                throw new ParameterException(
+                        spec.commandLine(),
+                        "ERROR: '%s' reruns the previous import attempt with the arguments that attempt was invoked "
+                                        .formatted(RESUME_OPTION)
+                                + "with, so it can only be combined with %s. Remove: %s"
+                                        .formatted(
+                                                String.join(", ", new TreeSet<>(OPTIONS_ALLOWED_WITH_RESUME)),
+                                                String.join(", ", rejected)));
+            }
+        }
+
+        /**
+         * The options on {@link #OPTIONS_ALLOWED_WITH_RESUME} matched by this invocation, rendered as arguments to
+         * append to the resumed attempt's own arguments - appended last so they win over whatever that attempt used.
+         */
+        private List<String> optionOverridesForResume() {
+            return spec.commandLine().getParseResult().matchedOptions().stream()
+                    .filter(option -> OPTIONS_ALLOWED_WITH_RESUME.contains(option.longestName()))
+                    .distinct()
+                    .flatMap(option -> option.stringValues().stream().map(value -> option.longestName() + "=" + value))
+                    .toList();
+        }
+
+        private Stream<String> matchedOptionNames() {
+            return spec.commandLine().getParseResult().matchedOptions().stream()
+                    .map(OptionSpec::longestName)
+                    .distinct();
+        }
+
+        /**
+         * '--resume' stands in for the whole invocation of the attempt it resumes: this command is populated a
+         * second time, from that attempt's persisted CLI arguments, so that from here on it is indistinguishable
+         * from having been invoked with them directly. That is also what gets persisted for this run, and thus what
+         * a later '--resume' picks up in turn.
+         *
+         * @return the Path to the previous attempt's context directory, or {@code null} if '--resume' was not specified
+         */
+        Path rerunFromPreviousAttempt() throws IOException {
+            if (!resume) {
+                return null;
+            }
+            rejectOptionsNotAllowedWithResume();
+            Path previousAttempt = previousAttemptContextDir();
+            adoptInvocationOf(previousAttempt);
+            verifyPreviousAttemptIsResumable(previousAttempt);
+            // only now does this command load its configuration the way the attempt being resumed asked for it
+            verifyConfigStillMatches(previousAttempt);
+            forceOverwriteDestinationForResume();
+            return previousAttempt;
+        }
+
+        /**
+         * The context directory of the attempt that '--resume' picks up, the most recent one for this database. An
+         * import clears its context directory on completion unless it was retained, so nothing left behind for this
+         * database means there is nothing to pick up either.
+         */
+        private Path previousAttemptContextDir() throws IOException {
+            Path logsDir = loadNeo4jConfig(importFormat())
+                    .get(GraphDatabaseSettings.logs_directory)
+                    .toAbsolutePath();
+            return ImportContext.mostRecentContextDir(ctx.fs(), logsDir, database.name())
+                    .orElseThrow(
+                            () -> new CommandFailedException("ERROR: nothing to resume found for database '%s' in '%s'."
+                                    .formatted(database.name(), logsDir)));
+        }
+
+        /**
+         * Populates this command from the CLI arguments the given attempt was invoked with, so that every option
+         * holds what that attempt resolved it to rather than what this invocation of '--resume' left it at. The
+         * options allowed alongside '--resume' are appended, overriding the attempt where they overlap.
+         */
+        private void adoptInvocationOf(Path contextDir) throws IOException {
+            // the overrides go last, since where they repeat an option the attempt already used the later occurrence
+            // has to win rather than be rejected as a duplicate
+            String[] replayArgs = Stream.concat(
+                            ImportContext.readCliArgs(ctx.fs(), contextDir).orElse(List.of()).stream(),
+                            optionOverridesForResume().stream())
+                    .toArray(String[]::new);
+            new CommandLine(this).setOverwrittenOptionsAllowed(true).parseArgs(replayArgs);
+        }
+
+        /**
+         * Refuses an attempt that cannot be continued: '--skidbladnir' is currently the only importer that produces
+         * resumable state, and an attempt that completed has nothing left to resume - rerunning it would overwrite
+         * the database it produced. Reads what the attempt asked for off the fields {@link #adoptInvocationOf(Path)}
+         * resolved its arguments into, rather than interpreting those arguments a second time here.
+         */
+        private void verifyPreviousAttemptIsResumable(Path contextDir) {
+            if (!isSkidbladnir()) {
+                throw new CommandFailedException(
+                        "ERROR: '--resume' is only supported when the import attempt being resumed used "
+                                + "'--skidbladnir'.");
+            }
+            if (ImportContext.wasSuccessful(ctx.fs(), contextDir)) {
+                throw new CommandFailedException(
+                        ("ERROR: the most recent import for database '%s' completed successfully, so there is nothing "
+                                        + "to resume. Rerun the import itself if you want to import it again, which "
+                                        + "overwrites the database.")
+                                .formatted(database.name()));
+            }
+        }
+
+        /**
+         * Refuses a resume that would continue state laid out under settings this run no longer resolves the same
+         * way. The CLI arguments come from the attempt itself, so what can have moved is everything around them -
+         * 'neo4j.conf', whatever '--additional-config' points at, and the environment those settings derive their
+         * defaults from.
+         */
+        private void verifyConfigStillMatches(Path contextDir) throws IOException {
+            var changed = ImportContext.resumeSensitiveChanges(
+                    contextDir, loadNeo4jConfig(importFormat()), this::resumeSafeSetting);
+            if (!changed.isEmpty()) {
+                throw new CommandFailedException(
+                        ("ERROR: the state left behind by the import attempt being resumed was laid out under "
+                                        + "settings that no longer hold:%n%s%nRestore them to resume that attempt, or "
+                                        + "import again from the start under the settings you want.")
+                                .formatted(changed.stream()
+                                        .map(change -> "  '%s' was '%s' and is now '%s'"
+                                                .formatted(
+                                                        change.setting().name(), change.previous(), change.current()))
+                                        .collect(Collectors.joining(System.lineSeparator()))));
+            }
+        }
+
+        /**
+         * WIP: the batch importer does not yet act on '--resume' itself, so a "resumed" import is really just the
+         * previous attempt's import rerun from scratch. That previous attempt already created (or partially wrote)
+         * the destination, so without this a resumed run would immediately fail because the destination already
+         * exists. Force an overwrite so '--resume' has a chance of completing until real resume is
+         * implemented.
+         * <p>
+         * The overwrite this forces has to retain the import's temporary area, which holds the state being resumed
+         * from. {@link FileImporter#doImport(Base, boolean, boolean)} does that and should be cleaned up together with
+         * removing this.
+         */
+        protected void forceOverwriteDestinationForResume() {}
+
+        /**
+         * Whether a resumed import may continue with the given setting resolving differently than it did for the attempt being resumed.
+         */
+        protected boolean resumeSafeSetting(Setting<?> setting) {
+            return false;
+        }
+
+        protected boolean isDryRun() {
+            return dryRun;
+        }
+
+        protected boolean isSkidbladnir() {
+            return skidbladnir;
+        }
+
+        MultilineFieldOptions multilineFieldOptions() {
+            return multilineFieldOptions;
+        }
+
+        long bufferSize() {
+            return bufferSize;
+        }
+
+        /**
+         * @param resolvedDbFormat the format that is either specified in the command line or resolved from the database config
+         */
+        protected void importConfigurationValidation(
+                SchemeFileSystemAbstraction fs, String resolvedDbFormat, Config config) throws CommandFailedException {
+            if (requiresNodeParameter()) {
+                if (nodes == null) {
+                    throw new ParameterException(spec.commandLine(), "Missing required option: '--nodes'");
+                }
+            }
+
+            if (isDistributedGraphShard() && isDistributedPropShard()) {
+                throw new ParameterException(
+                        spec.commandLine(), "Both distributed graph and property shard options have been specified");
+            }
+
+            if (threads > DEFAULT_IMPORTER_CONFIG.maxNumberOfWorkerThreads()) {
+                printf(
+                        "WARNING: '%s' is set to %d but the total number of cores on this machine is only %d"
+                                + " which could severely impact performance.",
+                        THREADS, threads, DEFAULT_IMPORTER_CONFIG.maxNumberOfWorkerThreads());
+            }
+
+            if (badTolerance == BadCollector.UNLIMITED_TOLERANCE && skipBadEntriesLogging) {
+                printf(
+                        "WARNING: '%s' is set to 'true' but the import process will not be stopped upon a bad entry"
+                                + " being encountered (due to '%s' being set to unlimited). You will be unable to identify"
+                                + "  these bad entries upon completion of the import.",
+                        SKIP_BAD_ENTRIES_LOGGING, BAD_TOLERANCE_OPTION);
+            }
+            // Check if the provided delimiter is multibyte, disallow this
+            if (!allowMultibyteDelimiter && String.valueOf(delimiter).getBytes(StandardCharsets.UTF_8).length > 1) {
+                throw new ParameterException(
+                        spec.commandLine(), "Delimiter must be a single byte character (In UTF-8)");
+            }
+
+            if (BLOCK_FORMATS.contains(resolvedDbFormat) && highIo != OnOffAuto.AUTO) {
+                throw new CommandFailedException("ERROR: '--high-parallel-io=%s' is not supported for the '%s' format."
+                        .formatted(highIo.name().toLowerCase(Locale.ROOT), resolvedDbFormat));
+            }
+            CommandLine.ParseResult parseResult = spec.commandLine().getParseResult();
+            if (isSkidbladnir()) {
+                if (autoSkipHeaders) {
+                    throw new ParameterException(
+                            spec.commandLine(),
+                            "ERROR: Skidbladnir import is not supported with '--auto-skip-subsequent-headers'");
+                }
+                if (allowMultibyteDelimiter) {
+                    throw new ParameterException(
+                            spec.commandLine(),
+                            "ERROR: Skidbladnir import is not supported with multibyte delimiters "
+                                    + "(--accept-multibyte-delimiter)");
+                }
+                if (String.valueOf(quote).getBytes(StandardCharsets.UTF_8).length > 1) {
+                    throw new ParameterException(
+                            spec.commandLine(),
+                            "ERROR: Skidbladnir import is not supported with multibyte quote characters");
+                }
+                if (defaultIdType == IdType.ACTUAL) {
+                    throw new CommandFailedException(
+                            "ERROR: Skidbladnir import is not supported with '--id-type=actual'.");
+                }
+                if (!BLOCK_FORMATS.contains(resolvedDbFormat)) {
+                    throw new CommandFailedException(
+                            "ERROR: Skidbladnir import is only supported for the 'block' format, but '%s' was specified."
+                                    .formatted(resolvedDbFormat));
+                }
+                if (!parseResult.hasMatchedOption("--read-buffer-size")) {
+                    // Default is different for Skidbladnir
+                    bufferSize = org.neo4j.csv.reader.Configuration.Builder.DEFAULT_BUFFER_SIZE_IF_SKIDBLADNIR;
+                }
+                rejectCompressedInput(fs);
+            }
+        }
+
+        private void rejectCompressedInput(SchemeFileSystemAbstraction fs) {
+            if (nodes != null) {
+                for (NodeFilesGroup group : nodes) {
+                    rejectCompressedInput(fs, group);
+                }
+            }
+            for (RelationshipFilesGroup group : relationships) {
+                rejectCompressedInput(fs, group);
+            }
+        }
+
+        private void rejectCompressedInput(SchemeFileSystemAbstraction fs, InputFilesGroup<?> group) {
+            for (Path path : group.toPathArray(fs, patternStyle)) {
+                Magic magic = detectCompression(fs, path);
+                if (magic == Magic.ZIP || magic == Magic.GZIP) {
+                    throw new CommandFailedException(
+                            "ERROR: Skidbladnir import is not supported for compressed (ZIP/GZIP) input, but '%s' is %s-compressed."
+                                    .formatted(path, magic == Magic.ZIP ? "ZIP" : "GZIP"));
+                }
+            }
+        }
+
+        private static Magic detectCompression(FileSystemAbstraction fs, Path path) {
+            if (path instanceof StoragePath sp) {
+                // We only need the first few bytes
+                path = adaptPathForSampling(sp);
+            }
+
+            try (StoreChannel channel = fs.open(path, Set.of(StandardOpenOption.READ))) {
+                ByteBuffer buffer = ByteBuffer.allocate(Magic.longest());
+                channel.read(buffer, 0);
+                buffer.flip();
+                byte[] bytes = new byte[buffer.remaining()];
+                buffer.get(bytes);
+                return Magic.of(bytes);
+            } catch (IOException e) {
+                return Magic.NONE;
+            }
+        }
+
+        protected void validateInputType(FileInputType inputType) {
+            if (isSkidbladnir() && inputType != FileInputType.CSV) {
+                throw new ParameterException(
+                        spec.commandLine(), "ERROR: Skidbladnir import is only supported for CSV input type");
+            }
+        }
+
+        protected void postImport(
+                SchemeFileSystemAbstraction fileSystem,
+                Config config,
+                InternalLogProvider logProvider,
+                DatabaseLayout databaseLayout)
+                throws IOException {}
+
+        public abstract String importType();
+
+        public abstract boolean isDistributedGraphShard();
+
+        public abstract boolean isDistributedPropShard();
+
+        public boolean isDistributed() {
+            return isDistributedPropShard() || isDistributedGraphShard();
+        }
+
+        protected abstract boolean includeUpdatesInProgress();
+
+        protected abstract boolean requiresNodeParameter();
+
+        protected abstract String importFormat();
+
+        protected abstract FileImporter.Builder configureFileImporterBuilder(FileImporter.Builder builder)
+                throws IOException;
+
+        protected abstract MaybeLocker maybeLockChecker();
+
+        protected abstract void doDryRun(
+                Input input,
+                FileSystemAbstraction fileSystem,
+                DatabaseLayout databaseLayout,
+                Config databaseConfig,
+                StorageEngineFactory storageEngineFactory,
+                JobScheduler jobScheduler,
+                CursorContextFactory contextFactory,
+                Configuration importConfig,
+                Supplier<IndexProvidersAccess> indexProvidersAccess,
+                PrintStream stdOut,
+                boolean verbose,
+                ShardingArguments shardingArguments,
+                Monitor monitor)
+                throws IOException;
 
         protected abstract void doImport(
                 FileSystemAbstraction fileSystem,
                 DatabaseLayout databaseLayout,
+                boolean force,
                 Config databaseConfig,
+                StorageEngineFactory storageEngineFactory,
                 JobScheduler jobScheduler,
                 InternalLogProvider logProvider,
                 PageCacheTracer pageCacheTracer,
@@ -584,45 +1148,154 @@ public class ImportCommand {
                 boolean verbose,
                 Collector badCollector,
                 MemoryTracker memoryTracker,
-                Input input)
+                Input input,
+                Supplier<IndexProvidersAccess> indexProvidersAccess,
+                ShardingArguments shardingArguments,
+                Monitor monitor)
                 throws IOException;
 
-        private List<SchemaCommand> parseSchemaCommands(FileSystemAbstraction fileSystem, Config config) {
-            if (schemaCommands == null) {
-                return List.of();
+        protected abstract void doSkidbladnirImport(
+                FileSystemAbstraction fileSystem,
+                DatabaseLayout databaseLayout,
+                boolean force,
+                Config databaseConfig,
+                StorageEngineFactory storageEngineFactory,
+                JobScheduler jobScheduler,
+                InternalLogProvider logProvider,
+                PageCacheTracer pageCacheTracer,
+                CursorContextFactory contextFactory,
+                Configuration importConfig,
+                LogService logService,
+                PrintStream stdOut,
+                PrintStream stdErr,
+                boolean verbose,
+                Collector badCollector,
+                MemoryTracker memoryTracker,
+                Input input,
+                Charset encoding,
+                Map<Set<String>, List<FileGroup>> nodeFileGroupsByAdditionalLabels,
+                Supplier<IndexProvidersAccess> indexProvidersAccess,
+                ShardingArguments shardingArguments,
+                Monitor monitor,
+                ResumableStateAccessor resumableStateAccessor,
+                boolean resume)
+                throws IOException;
+
+        protected IndexConfig customiseIndexConfig(Config databaseConfig, IndexConfig indexConfig) {
+            return setupIndexConfigForImport(indexConfig);
+        }
+
+        private FileImporter.Builder addInputData(FileSystemAbstraction fs, FileImporter.Builder importerBuilder) {
+            var actualInputType = fileInputType;
+            for (NodeFilesGroup n : nodes) {
+                Path[] paths = n.toPathArray(fs, patternStyle);
+                FileGroup fileGroup = importerBuilder.toFileGroup(paths);
+                FileInputType inputType = resolveFileInputType(fileInputType, fileGroup);
+                if (actualInputType == null) {
+                    actualInputType = inputType;
+                } else if (inputType != actualInputType) {
+                    throw unexpectedInputType(actualInputType, inputType, fileInputType != null, true, fileGroup);
+                }
+                importerBuilder.addNodeFiles(n.key, fileGroup);
+            }
+            for (RelationshipFilesGroup r : relationships) {
+                Path[] paths = r.toPathArray(fs, patternStyle);
+                FileGroup fileGroup = importerBuilder.toFileGroup(paths);
+                FileInputType inputType = resolveFileInputType(fileInputType, fileGroup);
+                if (inputType != actualInputType) {
+                    throw unexpectedInputType(actualInputType, inputType, fileInputType != null, false, fileGroup);
+                }
+                importerBuilder.addRelationshipFiles(r.key, fileGroup);
             }
 
-            if (!fileSystem.fileExists(schemaCommands)) {
+            return importerBuilder.withFileInputType(actualInputType);
+        }
+
+        private ConsoleFriendlyException unexpectedInputType(
+                FileInputType expectedType,
+                FileInputType unexpectedType,
+                boolean configuredInCLI,
+                boolean inNodes,
+                FileGroup fileGroup) {
+            var entity = inNodes ? "node" : "relationship";
+            String message;
+            if (configuredInCLI) {
+                message = "The %s files contain a %s file but only files of type %s should be provided."
+                        .formatted(entity, unexpectedType, expectedType);
+            } else {
+                message = "The %s files contain a mixture of both %s and %s files."
+                        .formatted(entity, expectedType, unexpectedType);
+            }
+
+            return new CommandFailedException(message, ExitCode.USAGE)
+                    .addSupplementaryMessage(
+                            "A mixture of both %s and %s files in the import is not currently supported [%s]."
+                                    .formatted(
+                                            expectedType,
+                                            unexpectedType,
+                                            fileGroup
+                                                    .streamPaths()
+                                                    .map(Path::getFileName)
+                                                    .map(Objects::toString)
+                                                    .collect(Collectors.joining(","))));
+        }
+
+        private SchemaCommandSource parseSchemaCommands(SchemeFileSystemAbstraction fileSystem, Config config)
+                throws IOException {
+            if (schemaCommands == null) {
+                return ResolvedSchemaCommands.of();
+            }
+            final var schemaPath = schemaCommandsPath(fileSystem);
+            Preconditions.checkState(
+                    fileSystem.fileExists(schemaPath), "The path to the Cypher schema commands must exist");
+
+            String cypherText;
+            try {
+                cypherText = FileSystemUtils.readString(fileSystem, schemaPath, EmptyMemoryTracker.INSTANCE);
+            } catch (IOException ex) {
+                throw new CommandFailedException("Unable to read schema commands", ex);
+            }
+            if (cypherText == null || cypherText.isEmpty()) {
+                return ResolvedSchemaCommands.of();
+            }
+
+            return new DeferredSchemaCommands((adaptor, tokens) -> {
+                final var reader = schemaCommandReader(fileSystem, config, adaptor, tokens);
+                try {
+                    return reader.parse(cypherText);
+                } catch (SchemaCommandReaderException ex) {
+                    throw new CommandFailedException("Error parsing schema commands", ex);
+                }
+            });
+        }
+
+        protected abstract SchemaCommandReader schemaCommandReader(
+                SchemeFileSystemAbstraction fileSystem,
+                Config config,
+                DeferredSchemaCommands.Adaptor adaptor,
+                TokenHolders tokenHolders);
+
+        private Path schemaCommandsPath(SchemeFileSystemAbstraction fileSystem) throws IOException {
+            assert schemaCommands != null;
+
+            String commandPath;
+            if (schemaCommands.startsWith("'") && schemaCommands.endsWith("'")) {
+                commandPath = schemaCommands.substring(1, schemaCommands.length() - 1);
+            } else {
+                commandPath = schemaCommands;
+            }
+
+            final var schemaPath = fileSystem.resolve(commandPath);
+            if (!fileSystem.fileExists(schemaPath)) {
                 throw new CommandFailedException("The provided schema commands file does not exist.", ExitCode.IOERR);
             }
 
-            if (fileSystem.isDirectory(schemaCommands)) {
+            if (fileSystem.isDirectory(schemaPath)) {
                 throw new CommandFailedException(
                         "The provided schema commands file is not a regular file.", ExitCode.IOERR);
             }
 
-            final var reader = new SchemaCommandReader(
-                    fileSystem,
-                    config,
-                    schemaCommandsReaderConfig(
-                            VectorIndexVersion.latestSupportedVersion(KernelVersion.getLatestVersion(config))));
-            return reader.parse(schemaCommands);
-        }
-
-        private LogTailMetadata getLogTail(
-                FileSystemAbstraction fs, DatabaseLayout databaseLayout, Config databaseConfig) throws IOException {
-            Optional<StorageEngineFactory> storageEngineFactory = SELECTOR.selectStorageEngine(fs, databaseLayout);
-            return getLogTail(fs, databaseLayout, databaseConfig, storageEngineFactory.orElseThrow());
-        }
-
-        private LogTailMetadata getLogTail(
-                FileSystemAbstraction fs,
-                DatabaseLayout databaseLayout,
-                Config config,
-                StorageEngineFactory storageEngineFactory)
-                throws IOException {
-            LogTailExtractor logTailExtractor = new LogTailExtractor(fs, config, storageEngineFactory, EMPTY);
-            return logTailExtractor.getTailMetadata(databaseLayout, EmptyMemoryTracker.INSTANCE);
+            return schemaPath;
         }
 
         @VisibleForTesting
@@ -634,33 +1307,31 @@ public class ImportCommand {
             return builder.build();
         }
 
-        LogTailMetadata readLogTailMetaData(
-                FileSystemAbstraction fileSystem,
-                DatabaseLayout databaseLayout,
-                StorageEngineFactory storageEngineFactory)
-                throws IOException {
-            return LogFilesBuilder.logFilesBasedOnlyBuilder(databaseLayout.getTransactionLogsDirectory(), fileSystem)
-                    .withStorageEngineFactory(storageEngineFactory)
-                    .build()
-                    .getTailMetadata();
-        }
-
-        private org.neo4j.csv.reader.Configuration csvConfiguration(SchemeFileSystemAbstraction fs) {
+        @VisibleForTesting
+        org.neo4j.csv.reader.Configuration csvConfiguration(SchemeFileSystemAbstraction fs) {
             final var builder = DEFAULT_CSV_CONFIG.toBuilder()
                     .withDelimiter(delimiter)
                     .withArrayDelimiter(arrayDelimiter)
+                    .withVectorDelimiter(vectorDelimiter)
                     .withQuotationCharacter(quote)
                     .withEmptyQuotedStringsAsNull(ignoreEmptyStrings)
                     .withTrimStrings(trimStrings)
                     .withLegacyStyleQuoting(legacyStyleQuoting)
                     .withBufferSize(toIntExact(bufferSize));
 
+            if (isSkidbladnir()) {
+                // We use the legacy multiline behaviour only for the nodes (and there the old parser is only used
+                // for validateAndEstimate). The relationships use the old parser, and use the user provided values for
+                // --multiline-fields and --multiline-fields-format.
+                builder.withLegacyMultilineBehaviour(EntityType.NODE);
+            }
             if (multilineFieldOptions != null) {
                 final var multilineFields = multilineFieldOptions.multilineFields;
                 switch (multilineFieldOptions.multilineFormat) {
                     case V1 -> {
                         if (Boolean.TRUE.toString().equalsIgnoreCase(multilineFields)) {
-                            builder.withLegacyMultilineBehaviour();
+                            builder.withLegacyMultilineBehaviour(EntityType.NODE)
+                                    .withLegacyMultilineBehaviour(EntityType.RELATIONSHIP);
                         } else if (!Boolean.FALSE.toString().equalsIgnoreCase(multilineFields)) {
                             throw new IllegalArgumentException(
                                     "Illegal format for %s when using the v1 format - must be either true or false"
@@ -668,7 +1339,7 @@ public class ImportCommand {
                         }
                     }
                     case V2 -> {
-                        final var paths = Arrays.stream(parseFilesList(fs, multilineFields))
+                        final var paths = Arrays.stream(parseFilesList(fs, multilineFields, patternStyle))
                                 .map(StorageUtils::toString)
                                 .collect(toSet());
                         builder.withMultilineDocuments(paths::contains);
@@ -679,7 +1350,7 @@ public class ImportCommand {
             return builder.build();
         }
 
-        private org.neo4j.batchimport.api.Configuration importConfiguration() {
+        private org.neo4j.batchimport.api.Configuration importConfiguration(Config databaseConfig, Path contextDir) {
             return new Configuration.Overridden(Configuration.defaultConfiguration()) {
                 @Override
                 public int maxNumberOfWorkerThreads() {
@@ -699,12 +1370,50 @@ public class ImportCommand {
 
                 @Override
                 public IndexConfig indexConfig() {
-                    return IndexConfig.create().withLabelIndex().withRelationshipTypeIndex();
+                    return customiseIndexConfig(databaseConfig, IndexConfig.create());
                 }
 
                 @Override
                 public boolean strictNodeCheck() {
                     return strict;
+                }
+
+                @Override
+                public boolean enableInstrumentation() {
+                    return !disableInstrumentation;
+                }
+
+                @Override
+                public boolean instrumentationCaptureJFRs() {
+                    return captureJFRs;
+                }
+
+                @Override
+                public boolean instrumentationCaptureThreadDumps() {
+                    return captureThreadDumps;
+                }
+
+                @Override
+                public int intermediaryBufferSize() {
+                    if (skidbladnir) {
+                        return (int) ByteUnit.mebiBytes(1);
+                    }
+                    return super.intermediaryBufferSize();
+                }
+
+                @Override
+                public boolean captureProfile() {
+                    return captureProfile;
+                }
+
+                @Override
+                public Path captureProfileResultPath() {
+                    return captureProfileResultPath != null ? captureProfileResultPath.toAbsolutePath() : null;
+                }
+
+                @Override
+                public Path contextDirectory() {
+                    return contextDir;
                 }
 
                 @Override
@@ -714,7 +1423,35 @@ public class ImportCommand {
                     }
                     return super.forcedNumberOfNodeIdRanges();
                 }
+
+                @Override
+                public Path tempDirectory(Path databaseDirectory) {
+                    if (tempPath != null) {
+                        // The idea is that when providing a specific directory it may be the case that one
+                        // import configuration could be used for multiple internal imports
+                        // (e.g. multi-stage incremental). Therefor guard for this fact by including the db directory
+                        // name on the path too.
+                        return tempPath.resolve(
+                                "temp-" + databaseDirectory.getFileName().toString());
+                    }
+                    return super.tempDirectory(databaseDirectory);
+                }
             };
+        }
+
+        private FileInputType resolveFileInputType(FileInputType expectedType, FileGroup fileGroup) {
+            Predicate<Path> checkForParquet = path ->
+                    path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".parquet");
+            if (expectedType == FileInputType.PARQUET) {
+                // Parquet imports allows the first path of a group to be a header CSV - which obvs isn't .parquet
+                return fileGroup.fileCount() == 1
+                                || fileGroup.streamPaths().skip(1).anyMatch(checkForParquet)
+                        ? FileInputType.PARQUET
+                        : FileInputType.CSV;
+            }
+
+            // default to CSV otherwise
+            return fileGroup.streamPaths().anyMatch(checkForParquet) ? FileInputType.PARQUET : FileInputType.CSV;
         }
 
         static class EscapedCharacterConverter implements ITypeConverter<Character> {
@@ -735,9 +1472,9 @@ public class ImportCommand {
             }
         }
 
-        static class RelationshipFilesConverter implements ITypeConverter<InputFilesGroup<String>> {
+        static class RelationshipFilesConverter implements ITypeConverter<RelationshipFilesGroup> {
             @Override
-            public InputFilesGroup<String> convert(String value) {
+            public RelationshipFilesGroup convert(String value) {
                 try {
                     return parseRelationshipFilesGroup(value);
                 } catch (Exception e) {
@@ -778,8 +1515,8 @@ public class ImportCommand {
 
     @Command(
             name = "full",
-            description = "High-speed initial import of fault-free data from CSV files into a non-existent or empty "
-                    + "database.")
+            description = "High-speed initial import of fault-free data from CSV files into a non-existent or empty"
+                    + " database.")
     public static class Full extends Base {
         @Option(
                 names = "--format",
@@ -787,7 +1524,7 @@ public class ImportCommand {
                 description = "Name of database format. The imported database will be created in the specified format "
                         + "or use the format set in the configuration. Valid formats are `standard`, `aligned`, "
                         + "`high_limit`, and `block`.")
-        private String format;
+        protected String format;
 
         // Was force
         @Option(
@@ -797,110 +1534,113 @@ public class ImportCommand {
                 paramLabel = "true|false",
                 fallbackValue = "true",
                 description = "Delete any existing database files prior to the import.")
-        private boolean overwriteDestination;
+        protected boolean overwriteDestination;
 
         public Full(ExecutionContext ctx) {
             super(ctx);
         }
 
         @Override
-        public void execute() throws Exception {
-            doExecute(false, format, overwriteDestination, databaseLayout -> {
+        protected boolean requiresNodeParameter() {
+            return true;
+        }
+
+        @Override
+        protected void forceOverwriteDestinationForResume() {
+            overwriteDestination = true;
+        }
+
+        @Override
+        public String importType() {
+            return "Full import";
+        }
+
+        @Override
+        protected boolean includeUpdatesInProgress() {
+            return false;
+        }
+
+        @Override
+        public boolean isDistributedGraphShard() {
+            return false;
+        }
+
+        @Override
+        public boolean isDistributedPropShard() {
+            return false;
+        }
+
+        @Override
+        protected String importFormat() {
+            return format;
+        }
+
+        @Override
+        protected FileImporter.Builder configureFileImporterBuilder(FileImporter.Builder builder) {
+            return withStorageEngineFactory(builder.withForce(overwriteDestination)
+                    .withCursorContextFactory(new CursorContextFactory(
+                            PageCacheTracer.NULL, new FixedVersionContextSupplier(BASE_TX_ID))));
+        }
+
+        @Override
+        protected MaybeLocker maybeLockChecker() {
+            return databaseLayout -> {
                 // Create the db folder if it doesn't exist, to be able to create and lock the lockfile.
                 ctx.fs().mkdirs(databaseLayout.databaseDirectory());
                 return LockChecker.checkDatabaseLock(databaseLayout);
-            });
+            };
         }
 
         @Override
-        protected ReaderConfig schemaCommandsReaderConfig(VectorIndexVersion latestVectorIndexVersion) {
-            return new ReaderConfig(allowEnterpriseFeatures(), true, false, latestVectorIndexVersion);
-        }
-
-        @Override
-        protected void doImport(
+        protected void doDryRun(
+                Input input,
                 FileSystemAbstraction fileSystem,
                 DatabaseLayout databaseLayout,
                 Config databaseConfig,
+                StorageEngineFactory storageEngineFactory,
                 JobScheduler jobScheduler,
-                InternalLogProvider logProvider,
-                PageCacheTracer pageCacheTracer,
                 CursorContextFactory contextFactory,
                 Configuration importConfig,
-                LogService logService,
+                Supplier<IndexProvidersAccess> indexProvidersAccess,
                 PrintStream stdOut,
-                PrintStream stdErr,
                 boolean verbose,
-                Collector badCollector,
-                MemoryTracker memoryTracker,
-                Input input)
+                ShardingArguments shardingArguments,
+                Monitor monitor)
                 throws IOException {
-            StorageEngineFactory storageEngineFactory = StorageEngineFactory.selectStorageEngine(databaseConfig);
-            BatchImporter importer = storageEngineFactory.batchImporter(
+            var batchImporter = storageEngineFactory.batchImporter(
                     databaseLayout,
                     fileSystem,
-                    pageCacheTracer,
+                    false,
+                    PageCacheTracer.NULL,
                     importConfig,
-                    logService,
+                    NullLogService.getInstance(),
                     stdOut,
                     verbose,
                     DefaultAdditionalIds.EMPTY,
+                    new LogTailMetadataFactoryImpl(fileSystem),
                     databaseConfig,
-                    new PrintingImportLogicMonitor(stdOut, stdErr),
+                    monitor,
                     jobScheduler,
-                    badCollector,
-                    TransactionLogInitializer.getLogFilesInitializer(),
-                    new IndexImporterFactoryImpl(),
-                    memoryTracker,
-                    contextFactory);
-
-            importer.doImport(input);
-        }
-    }
-
-    @Command(name = "incremental", description = "Incremental import into an existing database.")
-    public static class Incremental extends Base {
-        @Option(
-                names = "--stage",
-                paramLabel = "all|prepare|build|merge",
-                description = "Stage of incremental import. "
-                        + "For incremental import into an existing database use 'all' (which requires "
-                        + "the database to be stopped). For semi-online incremental import run 'prepare' (on "
-                        + "a stopped database) followed by 'build' (on a potentially running database) and "
-                        + "finally 'merge' (on a stopped database).",
-                converter = StageConverter.class)
-        IncrementalStage stage = IncrementalStage.all;
-
-        @Option(names = "--force", required = true, description = "Confirm incremental import by setting this flag.")
-        boolean forced;
-
-        public Incremental(ExecutionContext ctx) {
-            super(ctx);
+                    Collector.EMPTY,
+                    LogFilesInitializer.NULL,
+                    IndexImporterFactoryImpl.EMPTY,
+                    EmptyMemoryTracker.INSTANCE,
+                    contextFactory,
+                    indexProvidersAccess,
+                    shardingArguments == null ? 0 : shardingArguments.numShards(),
+                    shardingArguments == null ? null : shardingArguments.additionalArguments(),
+                    DatabaseCreationOptions.EMPTY_CREATION_OPTIONS,
+                    HardwareValidation.INFORMATION);
+            batchImporter.doDryRun(input, stdOut);
         }
 
         @Override
-        public void execute() throws Exception {
-            if (!forced) {
-                System.err.println(
-                        "ERROR: Incremental import needs to be used with care. Please confirm by specifying --force.");
-                throw new IllegalArgumentException("Missing force");
-            }
-            doExecute(true, null, false, (layout) -> () -> {} /* locking handled in the specific steps */);
-        }
-
-        @Override
-        protected ReaderConfig schemaCommandsReaderConfig(VectorIndexVersion latestVectorIndexVersion) {
-            // This will be the config setting when schema commands are available for incremental
-            // return new ReaderConfig(allowEnterpriseFeatures(), true, true, latestVectorIndexVersion);
-            throw new UnsupportedOperationException(
-                    "Applying schema commands during incremental import is not currently supported");
-        }
-
-        @Override
-        protected void doImport(
+        protected void doSkidbladnirImport(
                 FileSystemAbstraction fileSystem,
                 DatabaseLayout databaseLayout,
+                boolean force,
                 Config databaseConfig,
+                StorageEngineFactory storageEngineFactory,
                 JobScheduler jobScheduler,
                 InternalLogProvider logProvider,
                 PageCacheTracer pageCacheTracer,
@@ -912,72 +1652,117 @@ public class ImportCommand {
                 boolean verbose,
                 Collector badCollector,
                 MemoryTracker memoryTracker,
-                Input input)
+                Input input,
+                Charset encoding,
+                Map<Set<String>, List<FileGroup>> nodeFileGroupsByAdditionalLabels,
+                Supplier<IndexProvidersAccess> indexProvidersAccess,
+                ShardingArguments shardingArguments,
+                Monitor monitor,
+                ResumableStateAccessor resumableStateAccessor,
+                boolean resume)
                 throws IOException {
-            StorageEngineFactory storageEngineFactory = StorageEngineFactory.selectStorageEngine(
-                            fileSystem, databaseLayout)
-                    .orElseThrow();
-            try (Lifespan life = new Lifespan()) {
-                var indexProviders = life.add(new DefaultIndexProvidersAccess(
-                        storageEngineFactory,
-                        fileSystem,
-                        databaseConfig,
-                        jobScheduler,
-                        new SimpleLogService(logProvider),
-                        pageCacheTracer,
-                        contextFactory));
-                var importer = storageEngineFactory.incrementalBatchImporter(
-                        databaseLayout,
-                        fileSystem,
-                        pageCacheTracer,
-                        importConfig,
-                        logService,
-                        stdOut,
-                        verbose,
-                        DefaultAdditionalIds.EMPTY,
-                        () -> readLogTailMetaData(fileSystem, databaseLayout, storageEngineFactory),
-                        databaseConfig,
-                        new PrintingImportLogicMonitor(stdOut, stdErr),
-                        jobScheduler,
-                        badCollector,
-                        TransactionLogInitializer.getLogFilesInitializer(),
-                        new IndexImporterFactoryImpl(),
-                        memoryTracker,
-                        contextFactory,
-                        indexProviders);
-                switch (stage) {
-                    case prepare -> importer.prepare(input);
-                    case build -> importer.build(input);
-                    case merge -> importer.merge();
-                    case all -> importer.doImport(input);
-                    default -> throw new IllegalArgumentException("Unknown import mode " + stage);
-                }
-            }
+            storageEngineFactory
+                    .batchImporter(
+                            databaseLayout,
+                            fileSystem,
+                            force,
+                            pageCacheTracer,
+                            importConfig,
+                            logService,
+                            stdOut,
+                            verbose,
+                            DefaultAdditionalIds.EMPTY,
+                            new LogTailMetadataFactoryImpl(fileSystem),
+                            databaseConfig,
+                            new PrintingImportLogicMonitor(stdOut, stdErr, monitor),
+                            jobScheduler,
+                            badCollector,
+                            TransactionLogInitializer.getLogFilesInitializer(),
+                            new IndexImporterFactoryImpl(),
+                            memoryTracker,
+                            contextFactory,
+                            indexProvidersAccess,
+                            shardingArguments == null ? 0 : shardingArguments.numShards,
+                            shardingArguments == null ? null : shardingArguments.additionalArguments,
+                            DatabaseCreationOptions.EMPTY_CREATION_OPTIONS,
+                            HardwareValidation.WARNING)
+                    // resume is not yet supported by the batch importer itself
+                    .doSkidbladnirImport(input, encoding, nodeFileGroupsByAdditionalLabels, resumableStateAccessor);
         }
 
-        static class StageConverter implements CommandLine.ITypeConverter<IncrementalStage> {
-            @Override
-            public IncrementalStage convert(String in) {
-                in = switch (in) {
-                    case "1" -> "prepare";
-                    case "2" -> "build";
-                    case "3" -> "merge";
-                    default -> in.toLowerCase(Locale.ROOT);
-                };
-                try {
-                    return IncrementalStage.valueOf(in);
+        @Override
+        protected void doImport(
+                FileSystemAbstraction fileSystem,
+                DatabaseLayout databaseLayout,
+                boolean force,
+                Config databaseConfig,
+                StorageEngineFactory storageEngineFactory,
+                JobScheduler jobScheduler,
+                InternalLogProvider logProvider,
+                PageCacheTracer pageCacheTracer,
+                CursorContextFactory contextFactory,
+                Configuration importConfig,
+                LogService logService,
+                PrintStream stdOut,
+                PrintStream stdErr,
+                boolean verbose,
+                Collector badCollector,
+                MemoryTracker memoryTracker,
+                Input input,
+                Supplier<IndexProvidersAccess> indexProvidersAccess,
+                ShardingArguments shardingArguments,
+                Monitor monitor)
+                throws IOException {
+            storageEngineFactory
+                    .batchImporter(
+                            databaseLayout,
+                            fileSystem,
+                            force,
+                            pageCacheTracer,
+                            importConfig,
+                            logService,
+                            stdOut,
+                            verbose,
+                            DefaultAdditionalIds.EMPTY,
+                            new LogTailMetadataFactoryImpl(fileSystem),
+                            databaseConfig,
+                            new PrintingImportLogicMonitor(stdOut, stdErr, monitor),
+                            jobScheduler,
+                            badCollector,
+                            TransactionLogInitializer.getLogFilesInitializer(),
+                            new IndexImporterFactoryImpl(),
+                            memoryTracker,
+                            contextFactory,
+                            indexProvidersAccess,
+                            shardingArguments == null ? 0 : shardingArguments.numShards,
+                            shardingArguments == null ? null : shardingArguments.additionalArguments,
+                            DatabaseCreationOptions.EMPTY_CREATION_OPTIONS,
+                            HardwareValidation.WARNING)
+                    .doImport(input);
+        }
 
-                } catch (Exception e) {
-                    throw new CommandLine.TypeConversionException(format("Invalid stage: %s (%s)", in, e));
-                }
-            }
+        @Override
+        protected SchemaCommandReader schemaCommandReader(
+                SchemeFileSystemAbstraction fileSystem,
+                Config config,
+                DeferredSchemaCommands.Adaptor adaptor,
+                TokenHolders tokenHolders) {
+            return new SchemaCommandReader(
+                    fileSystem,
+                    SchemaCommandParser.createCommunity(CypherConfiguration.fromConfig(config)),
+                    ReaderConfig.communityImporter(config));
+        }
+
+        protected FileImporter.Builder withStorageEngineFactory(FileImporter.Builder builder) {
+            return builder.withStorageEngineFactory(
+                    StorageEngineFactory.selectStorageEngine(builder.getDatabaseConfig()));
         }
     }
 
     private static final String MULTI_FILE_DELIMITER = ",";
 
-    static class NodeFilesGroup extends InputFilesGroup<Set<String>> {
-        NodeFilesGroup(Set<String> key, String files) {
+    static class NodeFilesGroup extends InputFilesGroup<SequencedSet<String>> {
+        NodeFilesGroup(SequencedSet<String> key, String files) {
             super(key, files);
         }
     }
@@ -988,6 +1773,8 @@ public class ImportCommand {
         }
     }
 
+    public record ShardingArguments(int numShards, DependencyResolver additionalArguments) {}
+
     abstract static class InputFilesGroup<T> {
         final T key;
         final String files;
@@ -997,30 +1784,42 @@ public class ImportCommand {
             this.files = files;
         }
 
-        Path[] toPaths(FileSystemAbstraction fs) {
-            return parseFilesList(fs, files);
+        Path[] toPathArray(FileSystemAbstraction fs, PatternStyle patternStyle) {
+            return parseFilesList(fs, files, patternStyle);
         }
     }
 
     @VisibleForTesting
+    public static IndexConfig setupIndexConfigForImport(IndexConfig indexConfig) {
+        return indexConfig.withLabelIndex().withRelationshipTypeIndex();
+    }
+
+    @VisibleForTesting
     static RelationshipFilesGroup parseRelationshipFilesGroup(String str) {
-        final var p = parseInputFilesGroup(str, String::trim);
+        final var p = parseInputFilesGroup(str, s -> s == null ? null : s.trim());
         return new RelationshipFilesGroup(p.getOne(), p.getTwo());
     }
 
     @VisibleForTesting
     static NodeFilesGroup parseNodeFilesGroup(String str) {
-        final var p = parseInputFilesGroup(str, s -> stream(s.split(":"))
-                .map(String::trim)
-                .filter(x -> !x.isEmpty())
-                .collect(toSet()));
+        final var p = parseInputFilesGroup(str, s -> {
+            if (s == null) {
+                return new LinkedHashSet<String>();
+            }
+            // The same import command must always apply the additional labels in the same order, so that their
+            // tokens are created in the same order too, therefore a LinkedHashSet
+            return stream(s.split(":"))
+                    .map(String::trim)
+                    .filter(x -> !x.isEmpty())
+                    .collect(toCollection(LinkedHashSet::new));
+        });
         return new NodeFilesGroup(p.getOne(), p.getTwo());
     }
 
     private static <T> Pair<T, String> parseInputFilesGroup(String str, Function<String, ? extends T> keyParser) {
         final var i = str.indexOf('=');
         if (i < 0) {
-            return pair(keyParser.apply(""), str);
+            return pair(keyParser.apply(null), str);
         }
         if (i == 0 || i == str.length() - 1) {
             throw new IllegalArgumentException("illegal `=` position: " + str);
@@ -1029,8 +1828,8 @@ public class ImportCommand {
         return pair(keyParser.apply(keyStr), str.substring(i + 1));
     }
 
-    private static Path[] parseFilesList(FileSystemAbstraction fs, String str) {
-        return Converters.toFiles(MULTI_FILE_DELIMITER, Converters.regexFiles(fs, true))
+    private static Path[] parseFilesList(FileSystemAbstraction fs, String str, PatternStyle patternStyle) {
+        return Converters.toFiles(MULTI_FILE_DELIMITER, Converters.patternMatchFiles(fs, true, patternStyle))
                 .apply(str);
     }
 
@@ -1039,27 +1838,4 @@ public class ImportCommand {
             usageHelp = true,
             description = "Show this help message and exit.")
     private boolean helpRequested;
-
-    protected boolean allowEnterpriseFeatures() {
-        return false;
-    }
-
-    enum IncrementalStage {
-        /**
-         * Prepares an incremental import. This requires target database to be offline.
-         */
-        prepare,
-        /**
-         * Builds the incremental import. The is disjoint from the target database state.
-         */
-        build,
-        /**
-         * Merges the incremental import into the target database. This requires target database to be offline.
-         */
-        merge,
-        /**
-         * Performs a full incremental import including all steps involved.
-         */
-        all
-    }
 }

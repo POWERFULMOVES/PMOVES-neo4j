@@ -43,18 +43,18 @@ import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.impl.muninn.VersionStorage;
 import org.neo4j.io.pagecache.prefetch.PagePrefetcher;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.KernelVersionProvider;
-import org.neo4j.kernel.database.MetadataCache;
 import org.neo4j.kernel.impl.store.NeoStores;
 import org.neo4j.kernel.impl.store.cursor.CachedStoreCursors;
-import org.neo4j.kernel.impl.transaction.log.EmptyLogTailMetadata;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
 import org.neo4j.lock.LockTracer;
 import org.neo4j.lock.ResourceLocker;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.monitoring.DatabaseHealth;
 import org.neo4j.storageengine.api.CommandCreationContext;
+import org.neo4j.storageengine.api.IndexUpdateListener;
+import org.neo4j.storageengine.api.LogMetadataProviderImpl;
 import org.neo4j.storageengine.api.StandardConstraintRuleAccessor;
 import org.neo4j.storageengine.api.StorageCommand;
 import org.neo4j.storageengine.api.TransactionApplicationMode;
@@ -64,6 +64,8 @@ import org.neo4j.storageengine.api.txstate.ReadableTransactionState;
 import org.neo4j.storageengine.api.txstate.TxStateVisitor;
 import org.neo4j.token.TokenHolders;
 import org.neo4j.token.api.TokenHolder;
+import org.neo4j.wal.EmptyLogTailMetadata;
+import org.neo4j.wal.LogTailMetadata;
 
 public class RecordStorageEngineTestUtils {
     public static RecordStorageEngine openSimpleStorageEngine(
@@ -74,7 +76,7 @@ public class RecordStorageEngineTestUtils {
                 createReadOnlyTokenHolder(TokenHolder.TYPE_RELATIONSHIP_TYPE));
         PageCacheTracer cacheTracer = PageCacheTracer.NULL;
         LogTailMetadata emptyLogTailMetadata = new EmptyLogTailMetadata(config);
-        return new RecordStorageEngine(
+        RecordStorageEngine storageEngine = new RecordStorageEngine(
                 layout,
                 config,
                 pageCache,
@@ -90,13 +92,14 @@ public class RecordStorageEngineTestUtils {
                 new DefaultIdGeneratorFactory(fs, immediate(), cacheTracer, DEFAULT_DATABASE_NAME),
                 immediate(),
                 EmptyMemoryTracker.INSTANCE,
-                emptyLogTailMetadata,
-                new MetadataCache(emptyLogTailMetadata),
-                LockVerificationFactory.NONE,
+                new LogMetadataProviderImpl(emptyLogTailMetadata),
                 new CursorContextFactory(cacheTracer, EMPTY_CONTEXT_SUPPLIER),
                 cacheTracer,
                 VersionStorage.EMPTY_STORAGE,
-                PagePrefetcher.DISABLED);
+                PagePrefetcher.DISABLED,
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
+        storageEngine.addIndexUpdateListener(new IndexUpdateListener.Adapter());
+        return storageEngine;
     }
 
     public static void applyLogicalChanges(
@@ -114,11 +117,11 @@ public class RecordStorageEngineTestUtils {
         when(txState.addedAndRemovedNodes()).thenReturn(LongDiffSets.EMPTY);
         when(txState.addedAndRemovedRelationships()).thenReturn(LongDiffSets.EMPTY);
         NeoStores neoStores = storageEngine.testAccessNeoStores();
-        TransactionIdStore txIdStore = neoStores.getMetaDataStore();
-        KernelVersionProvider kernelVersionProvider = storageEngine.kernelVersionRepository;
+        TransactionIdStore txIdStore = storageEngine.logMetadataProvider();
+        KernelVersionProvider kernelVersionProvider = storageEngine.logMetadataProvider();
         CursorContext cursorContext = NULL_CONTEXT;
         try (RecordStorageCommandCreationContext commandCreationContext =
-                        storageEngine.newCommandCreationContext(false);
+                        storageEngine.newCommandCreationContext(false, EmptyMemoryTracker.INSTANCE);
                 StoreCursors storeCursors = new CachedStoreCursors(neoStores, cursorContext)) {
             commandCreationContext.initialize(
                     kernelVersionProvider,
@@ -141,7 +144,8 @@ public class RecordStorageEngineTestUtils {
                             txIdStore.nextCommittingTransactionId(),
                             storeCursors,
                             commands.toArray(new StorageCommand[0])),
-                    TransactionApplicationMode.EXTERNAL);
+                    TransactionApplicationMode.EXTERNAL,
+                    EmptyMemoryTracker.INSTANCE);
         }
     }
 }

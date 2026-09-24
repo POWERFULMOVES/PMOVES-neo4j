@@ -44,7 +44,6 @@ import java.util.HashSet;
 import java.util.Set;
 import java.util.function.LongConsumer;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.graphdb.Direction;
@@ -65,11 +64,11 @@ import org.neo4j.storageengine.util.EagerDegrees;
 import org.neo4j.storageengine.util.SingleDegree;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.storage.RecordStorageEngineSupport;
 import org.neo4j.token.api.TokenConstants;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 public class RecordStorageReaderRelTypesAndDegreeTest extends RecordStorageReaderTestBase {
     protected static final int RELATIONSHIPS_COUNT = 20;
 
@@ -226,15 +225,15 @@ public class RecordStorageReaderRelTypesAndDegreeTest extends RecordStorageReade
         assertEquals(inRelCount + outRelCount + loopRelCount, degreeForDirection(cursor, BOTH));
     }
 
-    protected static int degreeForDirection(StorageNodeCursor cursor, Direction direction) {
+    protected static long degreeForDirection(StorageNodeCursor cursor, Direction direction) {
         return degree(cursor, selection(direction));
     }
 
-    protected static int degreeForDirectionAndType(StorageNodeCursor cursor, Direction direction, int relType) {
+    protected static long degreeForDirectionAndType(StorageNodeCursor cursor, Direction direction, int relType) {
         return degree(cursor, selection(relType, direction));
     }
 
-    private static int degree(StorageNodeCursor cursor, RelationshipSelection selection) {
+    private static long degree(StorageNodeCursor cursor, RelationshipSelection selection) {
         SingleDegree degree = new SingleDegree();
         cursor.degrees(selection, degree);
         return degree.getTotal();

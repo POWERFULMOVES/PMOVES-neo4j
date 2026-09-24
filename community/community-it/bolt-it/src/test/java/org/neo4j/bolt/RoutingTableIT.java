@@ -19,10 +19,8 @@
  */
 package org.neo4j.bolt;
 
-import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.neo4j.bolt.testing.assertions.BoltConnectionAssertions.assertThat;
 
-import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import org.assertj.core.api.Assertions;
@@ -31,6 +29,7 @@ import org.neo4j.bolt.test.annotation.BoltTestExtension;
 import org.neo4j.bolt.test.annotation.connection.initializer.Authenticated;
 import org.neo4j.bolt.test.annotation.test.ProtocolTest;
 import org.neo4j.bolt.test.annotation.wire.selector.ExcludeWire;
+import org.neo4j.bolt.test.annotation.wire.selector.IncludeWire;
 import org.neo4j.bolt.testing.annotation.Version;
 import org.neo4j.bolt.testing.assertions.BoltConnectionAssertions;
 import org.neo4j.bolt.testing.client.BoltTestConnection;
@@ -46,74 +45,56 @@ import org.neo4j.test.extension.testdirectory.EphemeralTestDirectoryExtension;
 @EphemeralTestDirectoryExtension
 @Neo4jWithSocketExtension
 @BoltTestExtension
-@ExcludeWire(@Version(major = 4, minor = 2, range = 2))
+@ExcludeWire(until = @Version(major = 4, minor = 2))
 public class RoutingTableIT {
 
     @Inject
     private Neo4jWithSocket server;
 
-    private static void assertRoutingTableHasCorrectShape(Map<?, ?> routingTable) {
-        assertAll(
-                () -> {
-                    Assertions.assertThat(routingTable.containsKey("ttl")).isTrue();
-                    Assertions.assertThat(routingTable.get("ttl")).isInstanceOf(Long.class);
-                },
-                () -> {
-                    Assertions.assertThat(routingTable.containsKey("servers")).isTrue();
-                    Assertions.assertThat(routingTable.get("servers"))
+    @SuppressWarnings("unchecked")
+    private static void assertRoutingTableHasCorrectShape(Map<String, Object> routingTable) {
+        Assertions.assertThat(routingTable).containsKeys("ttl", "servers");
+        Assertions.assertThat(routingTable.get("ttl")).isInstanceOf(Long.class);
+        Assertions.assertThat(routingTable.get("servers"))
+                .isInstanceOf(List.class)
+                .asInstanceOf(InstanceOfAssertFactories.LIST)
+                .allSatisfy(srv -> {
+                    Assertions.assertThat(srv).isInstanceOf(Map.class);
+                    var server = (Map<String, Object>) srv;
+                    Assertions.assertThat(server).containsKeys("role", "addresses");
+                    Assertions.assertThat(server.get("role")).isIn("READ", "WRITE", "ROUTE");
+                    Assertions.assertThat(server.get("addresses"))
                             .isInstanceOf(List.class)
-                            .satisfies(s -> {
-                                var servers = (List<?>) s;
-                                for (var srv : servers) {
-                                    Assertions.assertThat(srv).isInstanceOf(Map.class);
-                                    var server = (Map<?, ?>) srv;
-                                    assertAll(
-                                            () -> {
-                                                Assertions.assertThat(server.containsKey("role"))
-                                                        .isTrue();
-                                                Assertions.assertThat(server.get("role"))
-                                                        .isIn("READ", "WRITE", "ROUTE");
-                                            },
-                                            () -> {
-                                                Assertions.assertThat(server.containsKey("addresses"))
-                                                        .isTrue();
-                                                Assertions.assertThat(server.get("addresses"))
-                                                        .isInstanceOf(List.class)
-                                                        .satisfies(ad -> {
-                                                            var addresses = (List<?>) ad;
-                                                            for (var address : addresses) {
-                                                                Assertions.assertThat(address)
-                                                                        .isInstanceOf(String.class);
-                                                            }
-                                                        });
-                                            });
-                                }
-                            });
+                            .asInstanceOf(InstanceOfAssertFactories.LIST)
+                            .allSatisfy(addr -> Assertions.assertThat(addr).isInstanceOf(String.class));
                 });
     }
 
     @ProtocolTest
-    void shouldRespondToRouteMessage(BoltWire wire, @Authenticated BoltTestConnection connection) throws IOException {
+    void shouldRespondToRouteMessage(BoltWire wire, @Authenticated BoltTestConnection connection) {
         connection.send(wire.route());
 
-        assertThat(connection).receivesSuccess(metadata -> Assertions.assertThat(metadata)
-                .hasEntrySatisfying("rt", rt -> Assertions.assertThat(rt)
-                        .asInstanceOf(InstanceOfAssertFactories.map(String.class, Object.class))
-                        .satisfies(RoutingTableIT::assertRoutingTableHasCorrectShape)));
+        assertThat(connection)
+                .receivesSuccess(metadata -> Assertions.assertThat(metadata)
+                        .hasEntrySatisfying(
+                                "rt",
+                                rt -> Assertions.assertThat(rt)
+                                        .asInstanceOf(InstanceOfAssertFactories.map(String.class, Object.class))
+                                        .satisfies(RoutingTableIT::assertRoutingTableHasCorrectShape)));
     }
 
     @ProtocolTest
-    @ExcludeWire({@Version(major = 4), @Version(major = 5, minor = 0)})
-    void shouldReturnTheSameRoutingForTwoDifferentUsers(BoltWire wire, @Authenticated BoltTestConnection connection)
-            throws IOException {
+    @IncludeWire(since = @Version(major = 5, minor = 1))
+    void shouldReturnTheSameRoutingForTwoDifferentUsers(BoltWire wire, @Authenticated BoltTestConnection connection) {
         // Send the routing message and assure it is as intended
         connection.send(wire.route(null, null, "neo4j"));
-        BoltConnectionAssertions.assertThat(connection).receivesSuccess(metadata -> {
-            Assertions.assertThat(metadata.containsKey("rt")).isTrue();
-            Assertions.assertThat(metadata.get("rt"))
-                    .isInstanceOf(Map.class)
-                    .satisfies(rt -> assertRoutingTableHasCorrectShape((Map<?, ?>) rt));
-        });
+        BoltConnectionAssertions.assertThat(connection)
+                .receivesSuccess(metadata -> Assertions.assertThat(metadata)
+                        .hasEntrySatisfying(
+                                "rt",
+                                rt -> Assertions.assertThat(rt)
+                                        .asInstanceOf(InstanceOfAssertFactories.map(String.class, Object.class))
+                                        .satisfies(RoutingTableIT::assertRoutingTableHasCorrectShape)));
 
         // add a new user
         connection.send(wire.run("CREATE USER neo4j2 SET PASSWORD 'neo4jneo4jneo4j' CHANGE NOT REQUIRED"));
@@ -134,30 +115,30 @@ public class RoutingTableIT {
         // Send another route and ensure that it is also correct and the same.
         connection.send(wire.route(null, null, "neo4j"));
 
-        BoltConnectionAssertions.assertThat(connection).receivesSuccess(metadata -> {
-            Assertions.assertThat(metadata.containsKey("rt")).isTrue();
-            Assertions.assertThat(metadata.get("rt"))
-                    .isInstanceOf(Map.class)
-                    .satisfies(rt -> assertRoutingTableHasCorrectShape((Map<?, ?>) rt));
-        });
+        BoltConnectionAssertions.assertThat(connection)
+                .receivesSuccess(metadata -> Assertions.assertThat(metadata)
+                        .hasEntrySatisfying(
+                                "rt",
+                                rt -> Assertions.assertThat(rt)
+                                        .asInstanceOf(InstanceOfAssertFactories.map(String.class, Object.class))
+                                        .satisfies(RoutingTableIT::assertRoutingTableHasCorrectShape)));
     }
 
     @ProtocolTest
-    void shouldRespondToRouteMessageWithBookmark(BoltWire wire, @Authenticated BoltTestConnection connection)
-            throws IOException {
+    void shouldRespondToRouteMessageWithBookmark(BoltWire wire, @Authenticated BoltTestConnection connection) {
         connection.send(wire.route(null, List.of("test-bookmark"), null));
 
-        assertThat(connection).receivesSuccess(metadata -> {
-            Assertions.assertThat(metadata.containsKey("rt")).isTrue();
-            Assertions.assertThat(metadata.get("rt"))
-                    .isInstanceOf(Map.class)
-                    .satisfies(rt -> assertRoutingTableHasCorrectShape((Map<?, ?>) rt));
-        });
+        assertThat(connection)
+                .receivesSuccess(metadata -> Assertions.assertThat(metadata)
+                        .hasEntrySatisfying(
+                                "rt",
+                                rt -> Assertions.assertThat(rt)
+                                        .asInstanceOf(InstanceOfAssertFactories.map(String.class, Object.class))
+                                        .satisfies(RoutingTableIT::assertRoutingTableHasCorrectShape)));
     }
 
     @ProtocolTest
-    void shouldReturnFailureIfRoutingTableFailedToReturn(BoltWire wire, @Authenticated BoltTestConnection connection)
-            throws IOException {
+    void shouldReturnFailureIfRoutingTableFailedToReturn(BoltWire wire, @Authenticated BoltTestConnection connection) {
         connection.send(wire.route(null, null, "DOESNT_EXIST!"));
         assertThat(connection).receivesFailure();
 
@@ -165,17 +146,17 @@ public class RoutingTableIT {
         assertThat(connection).receivesSuccess();
 
         connection.send(wire.route());
-        assertThat(connection).receivesSuccess(metadata -> {
-            Assertions.assertThat(metadata.containsKey("rt")).isTrue();
-            Assertions.assertThat(metadata.get("rt"))
-                    .isInstanceOf(Map.class)
-                    .satisfies(rt -> assertRoutingTableHasCorrectShape((Map<?, ?>) rt));
-        });
+        assertThat(connection)
+                .receivesSuccess(metadata -> Assertions.assertThat(metadata)
+                        .hasEntrySatisfying(
+                                "rt",
+                                rt -> Assertions.assertThat(rt)
+                                        .asInstanceOf(InstanceOfAssertFactories.map(String.class, Object.class))
+                                        .satisfies(RoutingTableIT::assertRoutingTableHasCorrectShape)));
     }
 
     @ProtocolTest
-    void shouldIgnoreRouteMessageWhenInFailedState(BoltWire wire, @Authenticated BoltTestConnection connection)
-            throws IOException {
+    void shouldIgnoreRouteMessageWhenInFailedState(BoltWire wire, @Authenticated BoltTestConnection connection) {
         connection.send(wire.run("✨✨✨ Magical Crash String ✨✨✨"));
         assertThat(connection).receivesFailure();
 

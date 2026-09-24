@@ -23,6 +23,7 @@ import static java.lang.String.format;
 
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
+import org.neo4j.gqlstatus.GqlHelper;
 import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.kernel.api.exceptions.Status;
 
@@ -35,25 +36,14 @@ import org.neo4j.kernel.api.exceptions.Status;
 public class TransientTransactionFailureException extends TransientFailureException {
     private final Status status;
 
-    @Deprecated
-    public TransientTransactionFailureException(Status status, String message) {
-        super(message);
-        this.status = status;
-    }
-
-    public TransientTransactionFailureException(ErrorGqlStatusObject gqlStatusObject, Status status, String message) {
+    protected TransientTransactionFailureException(
+            ErrorGqlStatusObject gqlStatusObject, Status status, String message) {
         super(gqlStatusObject, message);
 
         this.status = status;
     }
 
-    @Deprecated
-    public TransientTransactionFailureException(Status status, String message, Throwable cause) {
-        super(message, cause);
-        this.status = status;
-    }
-
-    protected TransientTransactionFailureException(
+    public TransientTransactionFailureException(
             ErrorGqlStatusObject gqlStatusObject, Status status, String message, Throwable cause) {
         super(gqlStatusObject, message, cause);
 
@@ -99,6 +89,17 @@ public class TransientTransactionFailureException extends TransientFailureExcept
                 gql,
                 Status.Transaction.Outdated,
                 "The transaction read outdated data and cannot be recovered due to concurrent data modification. Retry the transaction.");
+    }
+
+    public static TransientTransactionFailureException internalError(String msgTitle, String message, Status status) {
+        var gql = GqlHelper.get50N00(msgTitle, message);
+        return new TransientTransactionFailureException(gql, status, message);
+    }
+
+    public static TransientTransactionFailureException internalError(
+            String msgTitle, String message, Status status, Throwable cause) {
+        var gql = GqlHelper.get50N00(msgTitle, message);
+        return new TransientTransactionFailureException(gql, status, message, cause);
     }
 
     @Override

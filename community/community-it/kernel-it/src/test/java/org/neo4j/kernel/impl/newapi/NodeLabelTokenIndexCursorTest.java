@@ -19,16 +19,24 @@
  */
 package org.neo4j.kernel.impl.newapi;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.neo4j.internal.kernel.api.IndexQueryConstraints.ordered;
+import static org.neo4j.internal.schema.IndexOrder.ASCENDING;
 import static org.neo4j.kernel.impl.newapi.IndexReadAsserts.assertNodeCount;
 import static org.neo4j.kernel.impl.newapi.IndexReadAsserts.assertNodes;
+import static org.neo4j.values.storable.Values.stringValue;
 
+import java.util.Arrays;
+import org.eclipse.collections.api.map.primitive.MutableIntObjectMap;
 import org.eclipse.collections.api.set.primitive.MutableLongSet;
+import org.eclipse.collections.impl.factory.primitive.IntObjectMaps;
 import org.eclipse.collections.impl.set.mutable.primitive.LongHashSet;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.internal.kernel.api.IndexQueryConstraints;
 import org.neo4j.internal.kernel.api.NodeLabelIndexCursor;
+import org.neo4j.internal.kernel.api.PropertyCursor;
 import org.neo4j.internal.kernel.api.Read;
 import org.neo4j.internal.kernel.api.TokenPredicate;
 import org.neo4j.internal.kernel.api.TokenReadSession;
@@ -38,6 +46,8 @@ import org.neo4j.internal.kernel.api.exceptions.schema.IndexNotFoundKernelExcept
 import org.neo4j.internal.schema.SchemaDescriptors;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.kernel.api.KernelTransaction;
+import org.neo4j.memory.EmptyMemoryTracker;
+import org.neo4j.values.storable.Value;
 
 public class NodeLabelTokenIndexCursorTest extends KernelAPIWriteTestBase<WriteTestSupport> {
 
@@ -185,6 +195,106 @@ public class NodeLabelTokenIndexCursorTest extends KernelAPIWriteTestBase<WriteT
 
                 // then
                 assertNodes(cursor, uniqueIds, inStore, createdInTx);
+            }
+        }
+    }
+
+    @Test
+    void shouldLoadDataOnReadFromStore() throws Exception {
+        // given
+        long first;
+        long second;
+        MutableIntObjectMap<Value> firstProperties = IntObjectMaps.mutable.empty();
+        MutableIntObjectMap<Value> secondProperties = IntObjectMaps.mutable.empty();
+
+        try (KernelTransaction tx = beginTransaction()) {
+            Write write = tx.dataWrite();
+            first = createNode(write, labelOne);
+            second = createNode(write, labelOne);
+            TokenWrite tokenWrite = tx.tokenWrite();
+            int p1 = tokenWrite.propertyKeyGetOrCreateForName("p1");
+            int p2 = tokenWrite.propertyKeyGetOrCreateForName("p2");
+            Value firstNodePropertyOne = stringValue("first node property one");
+            write.nodeSetProperty(first, p1, firstNodePropertyOne);
+            Value firstNodePropertyTwo = stringValue("first node property two");
+            write.nodeSetProperty(first, p2, firstNodePropertyTwo);
+            firstProperties.put(p1, firstNodePropertyOne);
+            firstProperties.put(p2, firstNodePropertyTwo);
+
+            Value secondNodePropertyOne = stringValue("second node property one");
+            write.nodeSetProperty(second, p1, secondNodePropertyOne);
+            secondProperties.put(p1, secondNodePropertyOne);
+            tx.commit();
+        }
+
+        try (KernelTransaction tx = beginTransaction()) {
+            Read read = tx.dataRead();
+
+            var session = getTokenReadSession(tx);
+
+            CursorContext cursorContext = tx.cursorContext();
+            try (NodeLabelIndexCursor cursor = tx.cursors().allocateNodeLabelIndexCursor(cursorContext);
+                    PropertyCursor propertyCursor =
+                            tx.cursors().allocatePropertyCursor(cursorContext, EmptyMemoryTracker.INSTANCE)) {
+
+                // when
+                read.nodeLabelScan(
+                        session,
+                        cursor,
+                        IndexQueryConstraints.unconstrained(),
+                        new TokenPredicate(labelOne),
+                        cursorContext);
+
+                // then
+                assertThat(cursor.next()).isTrue();
+                assertThat(cursor.readFromStore()).isTrue();
+                assertProperties(cursor, propertyCursor, firstProperties);
+
+                assertThat(cursor.next()).isTrue();
+                assertThat(cursor.readFromStore()).isTrue();
+                assertProperties(cursor, propertyCursor, secondProperties);
+                assertThat(cursor.next()).isFalse();
+            }
+        }
+    }
+
+    @Test
+    void shouldNotLoadDeletedNodesOnReadFromStore() throws Exception {
+        // given
+
+        long[] nodes = new long[3];
+        try (KernelTransaction tx = beginTransaction()) {
+            nodes[0] = createNode(tx.dataWrite(), labelOne);
+            nodes[1] = createNode(tx.dataWrite(), labelOne);
+            nodes[2] = createNode(tx.dataWrite(), labelOne);
+            tx.commit();
+        }
+        Arrays.sort(nodes);
+
+        try (KernelTransaction tx = beginTransaction()) {
+            Read read = tx.dataRead();
+            var session = getTokenReadSession(tx);
+            CursorContext cursorContext = tx.cursorContext();
+            try (NodeLabelIndexCursor cursor = tx.cursors().allocateNodeLabelIndexCursor(cursorContext)) {
+                // when
+                read.nodeLabelScan(session, cursor, ordered(ASCENDING), new TokenPredicate(labelOne), cursorContext);
+
+                // then
+                assertThat(cursor.next()).isTrue();
+                assertThat(cursor.readFromStore()).isTrue();
+                assertThat(cursor.nodeReference()).isEqualTo(nodes[0]);
+
+                tx.dataWrite().nodeDelete(nodes[1]);
+
+                assertThat(cursor.next()).isTrue();
+                assertThat(cursor.readFromStore()).isFalse();
+                assertThat(cursor.nodeReference()).isEqualTo(nodes[1]);
+
+                assertThat(cursor.next()).isTrue();
+                assertThat(cursor.readFromStore()).isTrue();
+                assertThat(cursor.nodeReference()).isEqualTo(nodes[2]);
+
+                assertThat(cursor.next()).isFalse();
             }
         }
     }

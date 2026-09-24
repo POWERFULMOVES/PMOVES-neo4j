@@ -20,18 +20,24 @@ import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.Statement
 import org.neo4j.cypher.internal.ast.prettifier.ExpressionStringifier
 import org.neo4j.cypher.internal.ast.prettifier.Prettifier
+import org.neo4j.cypher.internal.ast.semantics.SemanticCheckContext
 import org.neo4j.cypher.internal.ast.semantics.SemanticChecker
-import org.neo4j.cypher.internal.rewriting.rewriters.removeSyntaxTracking
+import org.neo4j.cypher.internal.ast.semantics.SemanticState
+import org.neo4j.cypher.internal.expressions.Expression
+import org.neo4j.cypher.internal.rewriting.rewriters.preparatoryRewriters.RemoveSyntaxTracking
 import org.neo4j.cypher.internal.util.CypherExceptionFactory
-import org.neo4j.cypher.internal.util.OpenCypherExceptionFactory
+import org.neo4j.cypher.internal.util.Neo4jCypherExceptionFactory
+import org.neo4j.cypher.internal.util.NotImplementedErrorMessageProvider
 import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 
 class RemoveSyntaxTrackingTest extends CypherFunSuite with AstRewritingTestSupport {
 
-  private val prettifier = Prettifier(ExpressionStringifier(_.asCanonicalStringVal))
+  private val prettifier = Prettifier(
+    ExpressionStringifier((e: Expression) => e.asCanonicalStringVal)
+  )
 
-  private val rewriterUnderTest: Rewriter = removeSyntaxTracking.instance
+  private val rewriterUnderTest: Rewriter = RemoveSyntaxTracking.instance
 
   test("remove tracking of escaped variable") {
     assertRewriteForEachVersion(
@@ -85,12 +91,13 @@ class RemoveSyntaxTrackingTest extends CypherFunSuite with AstRewritingTestSuppo
   }
 
   def assertRewriteForEachVersion(originalQuery: String, expectedQuery: String): Unit = {
-    val exceptionFactory: CypherExceptionFactory = OpenCypherExceptionFactory(None)
+    val exceptionFactory: CypherExceptionFactory = Neo4jCypherExceptionFactory(originalQuery, None)
 
     CypherVersion.values().foreach { version =>
       val original = parse(version, originalQuery, exceptionFactory)
       val expected = parse(version, expectedQuery, exceptionFactory)
-      SemanticChecker.check(original)
+      val semanticContext = SemanticCheckContext(version, NotImplementedErrorMessageProvider)
+      SemanticChecker.check(original, SemanticState.clean, semanticContext)
       val result = original.rewrite(rewriterUnderTest)
       assert(
         result === expected,

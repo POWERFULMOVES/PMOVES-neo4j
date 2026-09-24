@@ -20,9 +20,13 @@
 package org.neo4j.values;
 
 import static org.neo4j.values.SequenceValue.IterationPreference.RANDOM_ACCESS;
+import static org.neo4j.values.storable.Values.NO_VALUE;
 
+import java.util.ArrayDeque;
 import java.util.Comparator;
 import java.util.Iterator;
+import org.neo4j.values.virtual.ListValue;
+import org.neo4j.values.virtual.ListValueBuilder;
 
 /**
  * Values that represent sequences of values (such as Lists or Arrays) need to implement this interface.
@@ -54,7 +58,23 @@ public interface SequenceValue extends Iterable<AnyValue> {
     int intSize();
 
     default boolean isEmpty() {
-        return intSize() == 0;
+        return actualSize() == 0L;
+    }
+
+    default AnyValue head() {
+        if (isEmpty()) {
+            return NO_VALUE;
+        }
+
+        return value(0);
+    }
+
+    default AnyValue last() {
+        long size = actualSize();
+        if (size == 0L) {
+            return NO_VALUE;
+        }
+        return value(size - 1);
     }
 
     AnyValue value(long offset);
@@ -63,6 +83,14 @@ public interface SequenceValue extends Iterable<AnyValue> {
     Iterator<AnyValue> iterator();
 
     IterationPreference iterationPreference();
+
+    ListValue reverse(); // SequenceValue does not extend AnyValue so ListValue is a better return type
+
+    ListValue asListValue();
+
+    String prettyPrint();
+
+    String getTypeName();
 
     default boolean equals(SequenceValue other) {
         if (other == null) {
@@ -231,5 +259,53 @@ public interface SequenceValue extends Iterable<AnyValue> {
         } else {
             return ternaryEqualsUsingIterators(this, other);
         }
+    }
+
+    default ListValue flatten(final int depth) {
+        // Note, stack safe implementation.
+        // Note, possible to optimize for:
+        // - Lists that support fast random access
+        // - Lists that do not need flattening (could be checked with ListValue#itemRepresentation)
+        final var builder = ListValueBuilder.newListBuilder();
+        final var iterators = new ArrayDeque<Iterator<AnyValue>>(2);
+        iterators.push(iterator());
+
+        int currentDepth = depth - 1;
+        while (!iterators.isEmpty()) {
+            currentDepth += 1;
+            var iterator = iterators.pop(); // Note, `iterator` reference can change.
+            while (iterator.hasNext()) {
+                final var value = iterator.next();
+                if (currentDepth > 0 && value instanceof SequenceValue sequenceValue) {
+                    currentDepth -= 1;
+                    iterators.push(iterator);
+                    iterator = sequenceValue.iterator();
+                } else {
+                    builder.add(value);
+                }
+            }
+        }
+        return builder.build();
+    }
+
+    default ListValue insertAt(int index, AnyValue value) {
+        return asListValue().insertAt(index, value);
+    }
+
+    default ListValue remove(int index) {
+        return asListValue().remove(index);
+    }
+
+    default int indexOf(AnyValue value) {
+        int index = -1;
+        int currentIndex = 0;
+        Iterator<AnyValue> iterator = iterator();
+        while (index == -1 && iterator.hasNext()) {
+            if (iterator.next().ternaryEquals(value) == Equality.TRUE) {
+                index = currentIndex;
+            }
+            currentIndex = currentIndex + 1;
+        }
+        return index;
     }
 }

@@ -569,9 +569,12 @@ class TableOutputFormatterTest extends LocaleDependentTestBase {
                         "| c1   |",
                         "+------+",
                         "| \"xx\" |",
-                        "| \"😅😅\" |",
-                        "| \"🐞🐞🐞 |",
-                        "\\ 🐞🐞🐞\" |",
+                        "| \"😅  |",
+                        "\\ 😅\"  |",
+                        "| \"🐞  |",
+                        "\\ 🐞🐞 |",
+                        "\\ 🐞🐞 |",
+                        "\\ 🐞\"  |",
                         "+------+",
                         NEWLINE));
     }
@@ -592,9 +595,29 @@ class TableOutputFormatterTest extends LocaleDependentTestBase {
                         "| c1   |",
                         "+------+",
                         "| \"xx\" |",
-                        "| \"😅😅\" |",
-                        "| \"🐞🐞… |",
+                        "| \"😅… |",
+                        "| \"🐞… |",
                         "+------+",
+                        NEWLINE));
+    }
+
+    @Test
+    void wrapSmallFormUnicodeContent() {
+        // GIVEN
+        Result result = mockResult(asList("c1"), "\uFE64script\uFE65");
+        // WHEN
+        ToStringLinePrinter printer = new ToStringLinePrinter();
+        new TableOutputFormatter(false, 1).formatAndCount(new ListBoltResult(result.list(), result.consume()), printer);
+        String table = printer.result();
+        // THEN
+        assertThat(table)
+                .isEqualTo(String.join(
+                        NEWLINE,
+                        "+--------------+",
+                        "| c1           |",
+                        "+--------------+",
+                        "| \"\uFE64script\uFE65\" |",
+                        "+--------------+",
                         NEWLINE));
     }
 
@@ -700,9 +723,7 @@ class TableOutputFormatterTest extends LocaleDependentTestBase {
     void printWithHeading() {
         final var result = mockResult(asList("c1", "c2"), "aaaaaaa", 42, "b", 43);
 
-        assertThat(formatResultWithHeading(result, "My Table"))
-                .isEqualToNormalizingNewlines(
-                        """
+        assertThat(formatResultWithHeading(result, "My Table")).isEqualToNormalizingNewlines("""
                         +----------------+
                         | My Table       |
                         +----------------+
@@ -715,8 +736,7 @@ class TableOutputFormatterTest extends LocaleDependentTestBase {
                         """);
 
         assertThat(formatResultWithHeading(result, "Long long long, so very long, heading"))
-                .isEqualToNormalizingNewlines(
-                        """
+                .isEqualToNormalizingNewlines("""
                         +------------------------------------------+
                         | Long long long, so very long, heading    |
                         +------------------------------------------+
@@ -734,7 +754,7 @@ class TableOutputFormatterTest extends LocaleDependentTestBase {
         var gqlStatusObjects = new LinkedHashSet<GqlStatusObject>();
         gqlStatusObjects.add(new InternalGqlNotification(
                 "12345",
-                "info: desc1",
+                "statusDesc1",
                 Map.of(),
                 mock(),
                 NotificationSeverity.INFORMATION,
@@ -746,7 +766,7 @@ class TableOutputFormatterTest extends LocaleDependentTestBase {
                 null));
         gqlStatusObjects.add(new InternalGqlNotification(
                 "12345",
-                "info: desc1",
+                "statusDesc1",
                 Map.of(),
                 mock(),
                 NotificationSeverity.INFORMATION,
@@ -758,7 +778,7 @@ class TableOutputFormatterTest extends LocaleDependentTestBase {
                 null));
         gqlStatusObjects.add(new InternalGqlNotification(
                 "03N63",
-                "warn: desc2",
+                "statusDesc2",
                 Map.of(),
                 mock(),
                 NotificationSeverity.WARNING,
@@ -777,9 +797,7 @@ class TableOutputFormatterTest extends LocaleDependentTestBase {
         var legacySummary = mock(ResultSummary.class);
         given(legacySummary.gqlStatusObjects()).willReturn(Set.of());
         given(legacySummary.notifications()).willReturn(notifications);
-        assertThat(formatNotifications(legacySummary))
-                .isEqualToNormalizingNewlines(
-                        """
+        assertThat(formatNotifications(legacySummary)).isEqualToNormalizingNewlines("""
 
             info: desc1 (code1)
 
@@ -790,13 +808,11 @@ class TableOutputFormatterTest extends LocaleDependentTestBase {
         var summary = mock(ResultSummary.class);
         given(summary.gqlStatusObjects()).willReturn(gqlStatusObjects);
         given(summary.notifications()).willReturn(notifications);
-        assertThat(formatNotifications(summary))
-                .isEqualToNormalizingNewlines(
-                        """
+        assertThat(formatNotifications(summary)).isEqualToNormalizingNewlines("""
 
-            info: desc1 (12345)
+            statusDesc1 (12345)
 
-            warn: desc2 (03N63)
+            statusDesc2 (03N63)
             """);
     }
 
@@ -815,6 +831,176 @@ class TableOutputFormatterTest extends LocaleDependentTestBase {
         // version with GQLSTSTATUS
         gqlStatusObjects.add(new InternalGqlStatusObject("another-status", "another-description", Map.of()));
         assertThat(formatNotifications(summary)).isEmpty();
+    }
+
+    final String longSpec = """
+            {
+             (:`City` => {`name` :: STRING NOT NULL, `population` :: INTEGER}),
+             (:`Person` => :`Resident` {`name` :: STRING, `ssn` :: INTEGER}),
+             (:`Pet` => :`Animal`&`Resident` {`healthCertificate` :: STRING, `insuranceNumber` :: INTEGER, `name` :: STRING}),
+             (:`Robot` => :`Resident` {`application` :: STRING NOT NULL}),
+             (:`Resident`)-[:`LIVES_IN` => {`since` :: DATE NOT NULL}]->(:`City` =>),
+             CONSTRAINT `constraint_5d8979dd` FOR (`n`:`Person` =>) REQUIRE (`n`.`name`, `n`.`ssn`) IS KEY,
+             CONSTRAINT `constraint_bbcb9835` FOR (`n`:`Pet` =>) REQUIRE (`n`.`healthCertificate`) IS UNIQUE,
+             CONSTRAINT `constraint_550b510e` FOR (`n`:`Pet` =>) REQUIRE (`n`.`insuranceNumber`) IS KEY,
+             CONSTRAINT `animal_id` FOR (`n`:`Animal`) REQUIRE (`n`.`id`) IS UNIQUE,
+             CONSTRAINT `company_name` FOR (`n`:`Company`) REQUIRE (`n`.`name`) IS KEY,
+             CONSTRAINT `resident_address` FOR (`n`:`Resident`) REQUIRE (`n`.`address`) IS :: STRING
+            }
+            """;
+
+    @Test
+    void handleLongValuesWithWrapping() {
+        final var result = mockResult(asList("type", "specification"), "OPEN", longSpec);
+
+        ToStringLinePrinter printer = new ToStringLinePrinter();
+        new TableOutputFormatter(true, 2).formatAndCount(new ListBoltResult(result.list(), result.consume()), printer);
+        String table = printer.result();
+
+        assertThat(table).isEqualToNormalizingNewlines("""
+                    +-----------------------------------------------------------------------------------------------------------------------------+
+                    | type   | specification                                                                                                      |
+                    +-----------------------------------------------------------------------------------------------------------------------------+
+                    | "OPEN" | "{                                                                                                                 |
+                    |        \\  (:`City` => {`name` :: STRING NOT NULL, `population` :: INTEGER}),                                                |
+                    |        \\  (:`Person` => :`Resident` {`name` :: STRING, `ssn` :: INTEGER}),                                                  |
+                    |        \\  (:`Pet` => :`Animal`&`Resident` {`healthCertificate` :: STRING, `insuranceNumber` :: INTEGER, `name` :: STRING}), |
+                    |        \\  (:`Robot` => :`Resident` {`application` :: STRING NOT NULL}),                                                     |
+                    |        \\  (:`Resident`)-[:`LIVES_IN` => {`since` :: DATE NOT NULL}]->(:`City` =>),                                          |
+                    |        \\  CONSTRAINT `constraint_5d8979dd` FOR (`n`:`Person` =>) REQUIRE (`n`.`name`, `n`.`ssn`) IS KEY,                    |
+                    |        \\  CONSTRAINT `constraint_bbcb9835` FOR (`n`:`Pet` =>) REQUIRE (`n`.`healthCertificate`) IS UNIQUE,                  |
+                    |        \\  CONSTRAINT `constraint_550b510e` FOR (`n`:`Pet` =>) REQUIRE (`n`.`insuranceNumber`) IS KEY,                       |
+                    |        \\  CONSTRAINT `animal_id` FOR (`n`:`Animal`) REQUIRE (`n`.`id`) IS UNIQUE,                                           |
+                    |        \\  CONSTRAINT `company_name` FOR (`n`:`Company`) REQUIRE (`n`.`name`) IS KEY,                                        |
+                    |        \\  CONSTRAINT `resident_address` FOR (`n`:`Resident`) REQUIRE (`n`.`address`) IS :: STRING                           |
+                    |        \\ }                                                                                                                  |
+                    |        \\ "                                                                                                                  |
+                    +-----------------------------------------------------------------------------------------------------------------------------+
+
+                    """);
+    }
+
+    @Test
+    void handleLongValuesWithWrappingAndLongHeader() {
+        final var longHeader =
+                "specificationnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn";
+        final var result = mockResult(asList("type", longHeader), "OPEN", longSpec);
+
+        ToStringLinePrinter printer = new ToStringLinePrinter();
+        new TableOutputFormatter(true, 2).formatAndCount(new ListBoltResult(result.list(), result.consume()), printer);
+        String table = printer.result();
+
+        assertThat(table).isEqualToNormalizingNewlines("""
+                    +------------------------------------------------------------------------------------------------------------------------------------------------+
+                    | type   | specificationnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn |
+                    +------------------------------------------------------------------------------------------------------------------------------------------------+
+                    | "OPEN" | "{                                                                                                                                    |
+                    |        \\  (:`City` => {`name` :: STRING NOT NULL, `population` :: INTEGER}),                                                                   |
+                    |        \\  (:`Person` => :`Resident` {`name` :: STRING, `ssn` :: INTEGER}),                                                                     |
+                    |        \\  (:`Pet` => :`Animal`&`Resident` {`healthCertificate` :: STRING, `insuranceNumber` :: INTEGER, `name` :: STRING}),                    |
+                    |        \\  (:`Robot` => :`Resident` {`application` :: STRING NOT NULL}),                                                                        |
+                    |        \\  (:`Resident`)-[:`LIVES_IN` => {`since` :: DATE NOT NULL}]->(:`City` =>),                                                             |
+                    |        \\  CONSTRAINT `constraint_5d8979dd` FOR (`n`:`Person` =>) REQUIRE (`n`.`name`, `n`.`ssn`) IS KEY,                                       |
+                    |        \\  CONSTRAINT `constraint_bbcb9835` FOR (`n`:`Pet` =>) REQUIRE (`n`.`healthCertificate`) IS UNIQUE,                                     |
+                    |        \\  CONSTRAINT `constraint_550b510e` FOR (`n`:`Pet` =>) REQUIRE (`n`.`insuranceNumber`) IS KEY,                                          |
+                    |        \\  CONSTRAINT `animal_id` FOR (`n`:`Animal`) REQUIRE (`n`.`id`) IS UNIQUE,                                                              |
+                    |        \\  CONSTRAINT `company_name` FOR (`n`:`Company`) REQUIRE (`n`.`name`) IS KEY,                                                           |
+                    |        \\  CONSTRAINT `resident_address` FOR (`n`:`Resident`) REQUIRE (`n`.`address`) IS :: STRING                                              |
+                    |        \\ }                                                                                                                                     |
+                    |        \\ "                                                                                                                                     |
+                    +------------------------------------------------------------------------------------------------------------------------------------------------+
+
+                    """);
+    }
+
+    @Test
+    void handleLongValuesWithoutWrapping() {
+        final var result = mockResult(asList("type", "specification"), "OPEN", longSpec);
+
+        ToStringLinePrinter printer = new ToStringLinePrinter();
+        new TableOutputFormatter(false, 2).formatAndCount(new ListBoltResult(result.list(), result.consume()), printer);
+        String table = printer.result();
+
+        // Not great, perhaps we could show more by using ␤
+        assertThat(table).isEqualToNormalizingNewlines("""
+                    +------------------------+
+                    | type   | specification |
+                    +------------------------+
+                    | "OPEN" | "{…           |
+                    +------------------------+
+
+                    """);
+    }
+
+    @Test
+    void handleMultiLineColumns() {
+        final var result = mockResult(asList("a", "b", "c"), "a\na\na", "b\nb", "c\nc\nc\nc");
+
+        ToStringLinePrinter printer = new ToStringLinePrinter();
+        new TableOutputFormatter(true, 2).formatAndCount(new ListBoltResult(result.list(), result.consume()), printer);
+        String table = printer.result();
+
+        assertThat(table).isEqualToNormalizingNewlines("""
+                    +--------------+
+                    | a  | b  | c  |
+                    +--------------+
+                    | "a | "b | "c |
+                    \\ a  \\ b" \\ c  |
+                    \\ a" \\    \\ c  |
+                    \\    \\    \\ c" |
+                    +--------------+
+
+                    """);
+    }
+
+    @Test
+    void handleMultiLineColumns2() {
+        final var result = mockResult(
+                asList("a", "b", "c"),
+                "a\na\na",
+                "b\nb",
+                "c\nc\nc\nccc",
+                "a\na\na",
+                "b\nb",
+                "c\nc\nc\nccc",
+                "aaaaaa\na\na",
+                "b\nb",
+                "c\nc\nc\nccccccc",
+                "a\naaaaaaa\na",
+                "b\nbbb",
+                "cccccccc\nc\nc\nc");
+
+        ToStringLinePrinter printer = new ToStringLinePrinter();
+        new TableOutputFormatter(true, 2).formatAndCount(new ListBoltResult(result.list(), result.consume()), printer);
+        String table = printer.result();
+
+        assertThat(table).isEqualToNormalizingNewlines("""
+                    +----------------+
+                    | a  | b  | c    |
+                    +----------------+
+                    | "a | "b | "c   |
+                    \\ a  \\ b" \\ c    |
+                    \\ a" \\    \\ c    |
+                    \\    \\    \\ ccc" |
+                    | "a | "b | "c   |
+                    \\ a  \\ b" \\ c    |
+                    \\ a" \\    \\ c    |
+                    \\    \\    \\ ccc" |
+                    | "a | "b | "c   |
+                    \\ aa \\ b" \\ c    |
+                    \\ aa \\    \\ c    |
+                    \\ a  \\    \\ cccc |
+                    \\ a  \\    \\ ccc" |
+                    \\ a" \\    \\      |
+                    | "a | "b | "ccc |
+                    \\ aa \\ bb \\ cccc |
+                    \\ aa \\ b" \\ c    |
+                    \\ aa \\    \\ c    |
+                    \\ a  \\    \\ c    |
+                    \\ a" \\    \\ c"   |
+                    +----------------+
+
+                    """);
     }
 
     private static String formatResult(Result result) {

@@ -26,7 +26,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
 import static org.neo4j.storageengine.api.PropertySelection.ALL_PROPERTIES;
-import static org.neo4j.values.storable.Values.longValue;
 
 import java.time.LocalDate;
 import java.util.HashSet;
@@ -39,11 +38,8 @@ import org.neo4j.graphdb.RelationshipType;
 import org.neo4j.graphdb.Transaction;
 import org.neo4j.internal.kernel.api.NodeCursor;
 import org.neo4j.internal.kernel.api.PropertyCursor;
-import org.neo4j.internal.kernel.api.RelationshipDataAccessor;
+import org.neo4j.internal.kernel.api.RelationshipCursor;
 import org.neo4j.internal.kernel.api.RelationshipScanCursor;
-import org.neo4j.kernel.api.KernelTransaction;
-import org.neo4j.memory.EmptyMemoryTracker;
-import org.neo4j.storageengine.api.PropertySelection;
 import org.neo4j.values.storable.CoordinateReferenceSystem;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.ValueGroup;
@@ -51,42 +47,17 @@ import org.neo4j.values.storable.Values;
 
 public abstract class PropertyCursorTestBase<G extends KernelAPIReadTestSupport> extends KernelAPIReadTestBase<G> {
     @SuppressWarnings("SpellCheckingInspection")
-    private static final String LONG_STRING = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Pellentesque "
-            + "eget nibh cursus, efficitur risus non, ultrices justo. Nulla laoreet eros mi, non molestie magna "
-            + "luctus in. Fusce nibh neque, tristique ultrices laoreet et, aliquet non dolor. Donec ultrices nisi "
-            + "eget urna luctus volutpat. Vivamus hendrerit eget justo vel scelerisque. Morbi interdum volutpat diam,"
-            + " et cursus arcu efficitur consectetur. Cras vitae facilisis ipsum, vitae ullamcorper orci. Nullam "
-            + "tristique ante sed nibh consequat posuere. Curabitur mauris nisl, condimentum ac varius vel, imperdiet"
-            + " a neque. Sed euismod condimentum nisl, vel efficitur turpis tempus id.\n"
-            + "\n"
-            + "Sed in tempor arcu. Suspendisse molestie rutrum risus a dignissim. Donec et orci non diam tincidunt "
-            + "sollicitudin non id nisi. Aliquam vehicula imperdiet viverra. Cras et lacinia eros. Etiam imperdiet ac"
-            + " dolor ut tristique. Phasellus ut lacinia ex. Pellentesque habitant morbi tristique senectus et netus "
-            + "et malesuada fames ac turpis egestas. Integer libero justo, tincidunt ut felis non, interdum "
-            + "consectetur mauris. Cras eu felis ante. Sed dapibus nulla urna, at elementum tortor ultricies pretium."
-            + " Maecenas sed augue non urna consectetur fringilla vitae eu libero. Vivamus interdum bibendum risus, "
-            + "quis luctus eros.\n"
-            + "\n"
-            + "Sed neque augue, fermentum sit amet iaculis ut, porttitor ac odio. Phasellus et sapien non sapien "
-            + "consequat fermentum accumsan non dolor. Integer eget pellentesque lectus, vitae lobortis ante. Nam "
-            + "elementum, dui ut finibus rutrum, purus mauris efficitur purus, efficitur tempus ante metus bibendum "
-            + "velit. Curabitur commodo, risus et eleifend facilisis, eros augue posuere tortor, eu dictum erat "
-            + "tortor consectetur orci. Fusce a velit dignissim, tempus libero nec, faucibus risus. Nullam pharetra "
-            + "mauris sit amet volutpat facilisis. Pellentesque habitant morbi tristique senectus et netus et "
-            + "malesuada fames ac turpis egestas. Praesent lacinia non felis ut lobortis.\n"
-            + "\n"
-            + "Orci varius natoque penatibus et magnis dis parturient montes, nascetur ridiculus mus. Sed eu nisi dui"
-            + ". Suspendisse imperdiet lorem vel eleifend faucibus. Mauris non venenatis metus. Aenean neque magna, "
-            + "rhoncus vel velit in, dictum convallis leo. Phasellus pulvinar eu sapien ac vehicula. Praesent "
-            + "placerat augue quam, egestas vehicula velit porttitor in. Vivamus velit metus, pellentesque quis "
-            + "fermentum et, porta quis velit. Curabitur sed lacus quis nibh convallis tincidunt.\n"
-            + "\n"
-            + "Etiam eu elit eget dolor dignissim lacinia. Vivamus tortor ex, dapibus id elementum non, suscipit ac "
-            + "nisl. Aenean vel tempor libero, eu venenatis elit. Nunc nec velit eu odio interdum pellentesque sed et"
-            + " eros. Nam quis mi in metus tristique aliquam. Nullam facilisis dapibus lacus, nec lacinia velit. "
-            + "Proin massa enim, accumsan ac libero at, iaculis sodales tellus. Vivamus fringilla justo sed luctus "
-            + "tincidunt. Sed placerat fringilla ex, vel placerat sem faucibus eget. Vestibulum semper dui sit amet "
-            + "efficitur blandit. Donec eu tellus velit. Etiam a mi nec massa euismod posuere. Cras eget lacus leo.";
+    private static final String LONG_STRING = """
+Lorem ipsum dolor sit amet, consectetur adipiscing elit. Pellentesque eget nibh cursus, efficitur risus non, ultrices justo. Nulla laoreet eros mi, non molestie magna luctus in. Fusce nibh neque, tristique ultrices laoreet et, aliquet non dolor. Donec ultrices nisi eget urna luctus volutpat. Vivamus hendrerit eget justo vel scelerisque. Morbi interdum volutpat diam, et cursus arcu efficitur consectetur. Cras vitae facilisis ipsum, vitae ullamcorper orci. Nullam tristique ante sed nibh consequat posuere. Curabitur mauris nisl, condimentum ac varius vel, imperdiet a neque. Sed euismod condimentum nisl, vel efficitur turpis tempus id.
+
+Sed in tempor arcu. Suspendisse molestie rutrum risus a dignissim. Donec et orci non diam tincidunt sollicitudin non id nisi. Aliquam vehicula imperdiet viverra. Cras et lacinia eros. Etiam imperdiet ac dolor ut tristique. Phasellus ut lacinia ex. Pellentesque habitant morbi tristique senectus et netus et malesuada fames ac turpis egestas. Integer libero justo, tincidunt ut felis non, interdum consectetur mauris. Cras eu felis ante. Sed dapibus nulla urna, at elementum tortor ultricies pretium. Maecenas sed augue non urna consectetur fringilla vitae eu libero. Vivamus interdum bibendum risus, quis luctus eros.
+
+Sed neque augue, fermentum sit amet iaculis ut, porttitor ac odio. Phasellus et sapien non sapien consequat fermentum accumsan non dolor. Integer eget pellentesque lectus, vitae lobortis ante. Nam elementum, dui ut finibus rutrum, purus mauris efficitur purus, efficitur tempus ante metus bibendum velit. Curabitur commodo, risus et eleifend facilisis, eros augue posuere tortor, eu dictum erat tortor consectetur orci. Fusce a velit dignissim, tempus libero nec, faucibus risus. Nullam pharetra mauris sit amet volutpat facilisis. Pellentesque habitant morbi tristique senectus et netus et malesuada fames ac turpis egestas. Praesent lacinia non felis ut lobortis.
+
+Orci varius natoque penatibus et magnis dis parturient montes, nascetur ridiculus mus. Sed eu nisi dui. Suspendisse imperdiet lorem vel eleifend faucibus. Mauris non venenatis metus. Aenean neque magna, rhoncus vel velit in, dictum convallis leo. Phasellus pulvinar eu sapien ac vehicula. Praesent placerat augue quam, egestas vehicula velit porttitor in. Vivamus velit metus, pellentesque quis fermentum et, porta quis velit. Curabitur sed lacus quis nibh convallis tincidunt.
+
+Etiam eu elit eget dolor dignissim lacinia. Vivamus tortor ex, dapibus id elementum non, suscipit ac nisl. Aenean vel tempor libero, eu venenatis elit. Nunc nec velit eu odio interdum pellentesque sed et eros. Nam quis mi in metus tristique aliquam. Nullam facilisis dapibus lacus, nec lacinia velit. Proin massa enim, accumsan ac libero at, iaculis sodales tellus. Vivamus fringilla justo sed luctus tincidunt. Sed placerat fringilla ex, vel placerat sem faucibus eget. Vestibulum semper dui sit amet efficitur blandit. Donec eu tellus velit. Etiam a mi nec massa euismod posuere. Cras eget lacus leo.
+""";
 
     private static final String DATE_PROP = "dateProp";
     private static final String POINT_PROP = "pointProp";
@@ -312,7 +283,6 @@ public abstract class PropertyCursorTestBase<G extends KernelAPIReadTestSupport>
 
             read.relationshipProperties(
                     relationship.relationshipReference(),
-                    relationship.sourceNodeReference(),
                     relationship.type(),
                     relationship.propertiesReference(),
                     ALL_PROPERTIES,
@@ -463,27 +433,6 @@ public abstract class PropertyCursorTestBase<G extends KernelAPIReadTestSupport>
         }
     }
 
-    @Test
-    void supportExcludingWithChangesInTxState() throws Exception {
-        try (KernelTransaction tx = beginTransaction()) {
-            var newToken = tx.tokenWrite().propertyKeyGetOrCreateForName("FAIRLY_RANDOM" + System.nanoTime());
-            tx.dataWrite().nodeSetProperty(allPropsNodeId, newToken, longValue(42));
-            var read = tx.dataRead();
-            try (var nodes = tx.cursors().allocateNodeCursor(NULL_CONTEXT);
-                    var props = tx.cursors().allocatePropertyCursor(NULL_CONTEXT, EmptyMemoryTracker.INSTANCE)) {
-                read.singleNode(allPropsNodeId, nodes);
-                while (nodes.next()) {
-                    nodes.properties(props, PropertySelection.ALL_PROPERTIES.excluding(i -> i != newToken));
-                    assertTrue(props.next());
-                    assertEquals(props.propertyKey(), newToken);
-                    assertEquals(props.propertyValue(), longValue(42));
-                    assertFalse(props.next());
-                }
-            }
-            tx.rollback();
-        }
-    }
-
     private void assertAccessSingleNodeProperty(long nodeId, Object expectedValue, ValueGroup expectedValueType) {
         // given
         try (NodeCursor node = cursors.allocateNodeCursor(NULL_CONTEXT);
@@ -525,7 +474,6 @@ public abstract class PropertyCursorTestBase<G extends KernelAPIReadTestSupport>
 
             read.relationshipProperties(
                     relationship.relationshipReference(),
-                    relationship.sourceNodeReference(),
                     relationship.type(),
                     relationship.propertiesReference(),
                     ALL_PROPERTIES,
@@ -541,7 +489,7 @@ public abstract class PropertyCursorTestBase<G extends KernelAPIReadTestSupport>
         return props.next();
     }
 
-    private static boolean hasProperties(RelationshipDataAccessor relationship, PropertyCursor props) {
+    private static boolean hasProperties(RelationshipCursor relationship, PropertyCursor props) {
         relationship.properties(props);
         return props.next();
     }

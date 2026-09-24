@@ -20,7 +20,6 @@
 package org.neo4j.io.layout.recordstorage;
 
 import java.nio.file.Path;
-import java.util.stream.Stream;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.io.fs.FileUtils;
@@ -29,7 +28,9 @@ import org.neo4j.io.layout.DatabaseFile;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.layout.Neo4jLayout;
 import org.neo4j.io.layout.PlainDatabaseLayout;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 
+@SuppressWarnings("OptionalGetWithoutIsPresent")
 public class RecordDatabaseLayout extends PlainDatabaseLayout {
     private RecordDatabaseLayout(Neo4jLayout neo4jLayout, String databaseName) {
         super(neo4jLayout, databaseName);
@@ -47,16 +48,14 @@ public class RecordDatabaseLayout extends PlainDatabaseLayout {
     }
 
     public static RecordDatabaseLayout cast(DatabaseLayout layout) {
-        if (layout instanceof RecordDatabaseLayout) {
-            return (RecordDatabaseLayout) layout;
+        if (layout instanceof RecordDatabaseLayout rdl) {
+            return rdl;
         }
         throw new IllegalArgumentException(layout.toString() + " does not describe a record storage database.");
     }
 
     public static RecordDatabaseLayout convert(DatabaseLayout layout) {
-        return layout instanceof RecordDatabaseLayout
-                ? (RecordDatabaseLayout) layout
-                : of(layout.getNeo4jLayout(), layout.getDatabaseName());
+        return layout instanceof RecordDatabaseLayout rdl ? rdl : of(layout.getNeo4jLayout(), layout.getDatabaseName());
     }
 
     public static RecordDatabaseLayout of(Config config) {
@@ -65,11 +64,11 @@ public class RecordDatabaseLayout extends PlainDatabaseLayout {
 
     @Override
     public Path pathForExistsMarker() {
-        return file(RecordDatabaseFile.EXISTS_MARKER.getName());
+        return file(RecordDatabaseFile.EXISTS_MARKER).baseSegment();
     }
 
     @Override
-    public Path pathForStore(CommonDatabaseStores store) {
+    public StoreFile pathForStore(CommonDatabaseStores store) {
         return switch (store) {
             case NODE -> nodeStore();
             case COUNTS -> countStore();
@@ -82,143 +81,138 @@ public class RecordDatabaseLayout extends PlainDatabaseLayout {
         };
     }
 
-    public Path countStore() {
-        return file(RecordDatabaseFile.COUNTS_STORE.getName());
+    public StoreFile countStore() {
+        return file(RecordDatabaseFile.COUNTS_STORE);
     }
 
-    public Path relationshipGroupDegreesStore() {
-        return file(RecordDatabaseFile.RELATIONSHIP_GROUP_DEGREES_STORE.getName());
+    public StoreFile relationshipGroupDegreesStore() {
+        return file(RecordDatabaseFile.RELATIONSHIP_GROUP_DEGREES_STORE);
     }
 
-    public Path propertyStringStore() {
-        return file(RecordDatabaseFile.PROPERTY_STRING_STORE.getName());
+    public StoreFile propertyStringStore() {
+        return file(RecordDatabaseFile.PROPERTY_STRING_STORE);
     }
 
-    public Path relationshipStore() {
-        return file(RecordDatabaseFile.RELATIONSHIP_STORE.getName());
+    public StoreFile relationshipStore() {
+        return file(RecordDatabaseFile.RELATIONSHIP_STORE);
     }
 
-    public Path propertyStore() {
-        return file(RecordDatabaseFile.PROPERTY_STORE.getName());
+    public StoreFile propertyStore() {
+        return file(RecordDatabaseFile.PROPERTY_STORE);
     }
 
-    public Path nodeStore() {
-        return file(RecordDatabaseFile.NODE_STORE.getName());
+    public StoreFile nodeStore() {
+        return file(RecordDatabaseFile.NODE_STORE);
     }
 
-    public Path nodeLabelStore() {
-        return file(RecordDatabaseFile.NODE_LABEL_STORE.getName());
+    public StoreFile nodeLabelStore() {
+        return file(RecordDatabaseFile.NODE_LABEL_STORE);
     }
 
-    public Path propertyArrayStore() {
-        return file(RecordDatabaseFile.PROPERTY_ARRAY_STORE.getName());
+    public StoreFile propertyArrayStore() {
+        return file(RecordDatabaseFile.PROPERTY_ARRAY_STORE);
     }
 
-    public Path propertyKeyTokenStore() {
-        return file(RecordDatabaseFile.PROPERTY_KEY_TOKEN_STORE.getName());
+    public StoreFile propertyKeyTokenStore() {
+        return file(RecordDatabaseFile.PROPERTY_KEY_TOKEN_STORE);
     }
 
-    public Path propertyKeyTokenNamesStore() {
-        return file(RecordDatabaseFile.PROPERTY_KEY_TOKEN_NAMES_STORE.getName());
+    public StoreFile propertyKeyTokenNamesStore() {
+        return file(RecordDatabaseFile.PROPERTY_KEY_TOKEN_NAMES_STORE);
     }
 
-    public Path relationshipTypeTokenStore() {
-        return file(RecordDatabaseFile.RELATIONSHIP_TYPE_TOKEN_STORE.getName());
+    public StoreFile relationshipTypeTokenStore() {
+        return file(RecordDatabaseFile.RELATIONSHIP_TYPE_TOKEN_STORE);
     }
 
-    public Path relationshipTypeTokenNamesStore() {
-        return file(RecordDatabaseFile.RELATIONSHIP_TYPE_TOKEN_NAMES_STORE.getName());
+    public StoreFile relationshipTypeTokenNamesStore() {
+        return file(RecordDatabaseFile.RELATIONSHIP_TYPE_TOKEN_NAMES_STORE);
     }
 
-    public Path labelTokenStore() {
-        return file(RecordDatabaseFile.LABEL_TOKEN_STORE.getName());
+    public StoreFile labelTokenStore() {
+        return file(RecordDatabaseFile.LABEL_TOKEN_STORE);
     }
 
-    public Path schemaStore() {
-        return file(RecordDatabaseFile.SCHEMA_STORE.getName());
+    public StoreFile schemaStore() {
+        return file(RecordDatabaseFile.SCHEMA_STORE);
     }
 
-    public Path relationshipGroupStore() {
-        return file(RecordDatabaseFile.RELATIONSHIP_GROUP_STORE.getName());
+    public StoreFile relationshipGroupStore() {
+        return file(RecordDatabaseFile.RELATIONSHIP_GROUP_STORE);
     }
 
-    public Path labelTokenNamesStore() {
-        return file(RecordDatabaseFile.LABEL_TOKEN_NAMES_STORE.getName());
-    }
-
-    @Override
-    public Path indexStatisticsStore() {
-        return file(RecordDatabaseFile.INDEX_STATISTICS_STORE.getName());
+    public StoreFile labelTokenNamesStore() {
+        return file(RecordDatabaseFile.LABEL_TOKEN_NAMES_STORE);
     }
 
     @Override
-    public Path metadataStore() {
-        return file(RecordDatabaseFile.METADATA_STORE.getName());
-    }
-
-    public Path idNodeStore() {
-        return idFile(RecordDatabaseFile.NODE_STORE.getName());
-    }
-
-    public Path idNodeLabelStore() {
-        return idFile(RecordDatabaseFile.NODE_LABEL_STORE.getName());
-    }
-
-    public Path idPropertyStore() {
-        return idFile(RecordDatabaseFile.PROPERTY_STORE.getName());
-    }
-
-    public Path idPropertyKeyTokenStore() {
-        return idFile(RecordDatabaseFile.PROPERTY_KEY_TOKEN_STORE.getName());
-    }
-
-    public Path idPropertyKeyTokenNamesStore() {
-        return idFile(RecordDatabaseFile.PROPERTY_KEY_TOKEN_NAMES_STORE.getName());
-    }
-
-    public Path idPropertyStringStore() {
-        return idFile(RecordDatabaseFile.PROPERTY_STRING_STORE.getName());
-    }
-
-    public Path idPropertyArrayStore() {
-        return idFile(RecordDatabaseFile.PROPERTY_ARRAY_STORE.getName());
-    }
-
-    public Path idRelationshipStore() {
-        return idFile(RecordDatabaseFile.RELATIONSHIP_STORE.getName());
-    }
-
-    public Path idRelationshipGroupStore() {
-        return idFile(RecordDatabaseFile.RELATIONSHIP_GROUP_STORE.getName());
-    }
-
-    public Path idRelationshipTypeTokenStore() {
-        return idFile(RecordDatabaseFile.RELATIONSHIP_TYPE_TOKEN_STORE.getName());
-    }
-
-    public Path idRelationshipTypeTokenNamesStore() {
-        return idFile(RecordDatabaseFile.RELATIONSHIP_TYPE_TOKEN_NAMES_STORE.getName());
-    }
-
-    public Path idLabelTokenStore() {
-        return idFile(RecordDatabaseFile.LABEL_TOKEN_STORE.getName());
-    }
-
-    public Path idLabelTokenNamesStore() {
-        return idFile(RecordDatabaseFile.LABEL_TOKEN_NAMES_STORE.getName());
-    }
-
-    public Path idSchemaStore() {
-        return idFile(RecordDatabaseFile.SCHEMA_STORE.getName());
+    public StoreFile indexStatisticsStore() {
+        return file(RecordDatabaseFile.INDEX_STATISTICS_STORE);
     }
 
     @Override
-    protected Stream<RecordDatabaseFile> databaseFiles() {
-        return RecordDatabaseFile.STORE_FILES.stream();
+    public StoreFile metadataStore() {
+        return file(RecordDatabaseFile.METADATA_STORE);
+    }
+
+    public StoreFile idNodeStore() {
+        return idFile(RecordDatabaseFile.NODE_STORE).get();
+    }
+
+    public StoreFile idNodeLabelStore() {
+        return idFile(RecordDatabaseFile.NODE_LABEL_STORE).get();
+    }
+
+    public StoreFile idPropertyStore() {
+        return idFile(RecordDatabaseFile.PROPERTY_STORE).get();
+    }
+
+    public StoreFile idPropertyKeyTokenStore() {
+        return idFile(RecordDatabaseFile.PROPERTY_KEY_TOKEN_STORE).get();
+    }
+
+    public StoreFile idPropertyKeyTokenNamesStore() {
+        return idFile(RecordDatabaseFile.PROPERTY_KEY_TOKEN_NAMES_STORE).get();
+    }
+
+    public StoreFile idPropertyStringStore() {
+        return idFile(RecordDatabaseFile.PROPERTY_STRING_STORE).get();
+    }
+
+    public StoreFile idPropertyArrayStore() {
+        return idFile(RecordDatabaseFile.PROPERTY_ARRAY_STORE).get();
+    }
+
+    public StoreFile idRelationshipStore() {
+        return idFile(RecordDatabaseFile.RELATIONSHIP_STORE).get();
+    }
+
+    public StoreFile idRelationshipGroupStore() {
+        return idFile(RecordDatabaseFile.RELATIONSHIP_GROUP_STORE).get();
+    }
+
+    public StoreFile idRelationshipTypeTokenStore() {
+        return idFile(RecordDatabaseFile.RELATIONSHIP_TYPE_TOKEN_STORE).get();
+    }
+
+    public StoreFile idRelationshipTypeTokenNamesStore() {
+        return idFile(RecordDatabaseFile.RELATIONSHIP_TYPE_TOKEN_NAMES_STORE).get();
+    }
+
+    public StoreFile idLabelTokenStore() {
+        return idFile(RecordDatabaseFile.LABEL_TOKEN_STORE).get();
+    }
+
+    public StoreFile idLabelTokenNamesStore() {
+        return idFile(RecordDatabaseFile.LABEL_TOKEN_NAMES_STORE).get();
+    }
+
+    public StoreFile idSchemaStore() {
+        return idFile(RecordDatabaseFile.SCHEMA_STORE).get();
     }
 
     @Override
-    protected boolean isRecoverableStore(DatabaseFile file) {
+    public boolean isRecoverableStore(DatabaseFile file) {
         assert file instanceof RecordDatabaseFile;
         return RecordDatabaseFile.RECOVERABLE_STORE_FILES.contains(file);
     }

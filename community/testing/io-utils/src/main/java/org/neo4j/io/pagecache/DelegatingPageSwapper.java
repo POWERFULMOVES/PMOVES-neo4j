@@ -21,6 +21,8 @@ package org.neo4j.io.pagecache;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import org.neo4j.io.async.AsyncBlockAccessor;
+import org.neo4j.io.pagecache.impl.muninn.swapper.PageSwapper;
 import org.neo4j.io.pagecache.tracing.PageFileSwapperTracer;
 
 /**
@@ -38,11 +40,6 @@ public class DelegatingPageSwapper implements PageSwapper {
     @Override
     public long read(long filePageId, long bufferAddress) throws IOException {
         return delegate.read(filePageId, bufferAddress);
-    }
-
-    @Override
-    public long read(long filePageId, long bufferAddress, int bufferLength) throws IOException {
-        return delegate.read(filePageId, bufferAddress, bufferLength);
     }
 
     @Override
@@ -73,6 +70,12 @@ public class DelegatingPageSwapper implements PageSwapper {
     @Override
     public long write(long filePageId, long bufferAddress, int bufferLength) throws IOException {
         return delegate.write(filePageId, bufferAddress, bufferLength);
+    }
+
+    @Override
+    public void asyncWrite(AsyncBlockAccessor accessor, long pageRef, long filePageId, long bufferAddress)
+            throws IOException {
+        delegate.asyncWrite(accessor, pageRef, filePageId, bufferAddress);
     }
 
     @Override
@@ -126,9 +129,23 @@ public class DelegatingPageSwapper implements PageSwapper {
     }
 
     @Override
-    public long write(
-            long startFilePageId, long[] bufferAddresses, int[] bufferLengths, int length, int totalAffectedPages)
+    public long write(long startFilePageId, long[] bufferAddresses, int[] bufferLengths, int length)
             throws IOException {
-        return delegate.write(startFilePageId, bufferAddresses, bufferLengths, length, totalAffectedPages);
+        return delegate.write(startFilePageId, bufferAddresses, bufferLengths, length);
+    }
+
+    @Override
+    public void asyncWrite(
+            AsyncBlockAccessor accessor,
+            long startFilePageId,
+            long[] bufferAddresses,
+            int[] bufferLengths,
+            int length,
+            long[] pageRefs,
+            long[] flushStamps,
+            int pagesToFlush)
+            throws IOException {
+        delegate.asyncWrite(
+                accessor, startFilePageId, bufferAddresses, bufferLengths, length, pageRefs, flushStamps, pagesToFlush);
     }
 }

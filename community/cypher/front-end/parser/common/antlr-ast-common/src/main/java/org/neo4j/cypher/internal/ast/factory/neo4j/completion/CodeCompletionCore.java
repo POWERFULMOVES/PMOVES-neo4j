@@ -16,6 +16,7 @@
  */
 package org.neo4j.cypher.internal.ast.factory.neo4j.completion;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -24,10 +25,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
+import org.antlr.v4.runtime.BufferedTokenStream;
 import org.antlr.v4.runtime.Parser;
 import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.Token;
-import org.antlr.v4.runtime.TokenStream;
 import org.antlr.v4.runtime.Vocabulary;
 import org.antlr.v4.runtime.atn.ATN;
 import org.antlr.v4.runtime.atn.ATNState;
@@ -36,6 +37,9 @@ import org.antlr.v4.runtime.atn.RuleStopState;
 import org.antlr.v4.runtime.atn.RuleTransition;
 import org.antlr.v4.runtime.atn.Transition;
 import org.antlr.v4.runtime.misc.IntervalSet;
+import org.neo4j.cypher.internal.parser.AstRuleCtx;
+import org.neo4j.cypher.internal.parser.v25.Cypher25Parser;
+import org.neo4j.cypher.internal.parser.v5.Cypher5Parser;
 
 /*
  * Adapted from https://github.com/mike-lischke/antlr4-c3/blob/c0530ed7e41911e734a5be75abf5d381589398b5/ports/java/src/main/java/com/vmware/antlr4c3/CodeCompletionCore.java#L41
@@ -46,7 +50,7 @@ import org.antlr.v4.runtime.misc.IntervalSet;
  *
  * MIT License
  * Copyright (c) 2017 VMware, Inc. All Rights Reserved.
- * See LICENSES.txt file for more info.
+ * See ThirdPartyLicenses.txt file for more info.
  */
 
 /**
@@ -121,12 +125,12 @@ public class CodeCompletionCore {
 
     // A mapping of rule index to token stream position to end token positions.
     // A rule which has been visited before with the same input position will always produce the same output positions.
-    private final Map<Integer, Map<Integer, Set<Integer>>> shortcutMap = new HashMap<>();
+    private final RuleIndexCache<Map<Integer, Set<Integer>>> shortcutMap = new RuleIndexCache<>();
 
     private final CandidatesCollection candidates =
             new CandidatesCollection(); // The collected candidates (rules and tokens).
 
-    private static final Map<String, Map<Integer, FollowSetsHolder>> followSetsByATN = new HashMap<>();
+    private final Map<String, Map<Integer, FollowSetsHolder>> followSetsByATN = new HashMap<>();
 
     public CodeCompletionCore(Parser parser, Set<Integer> preferredRules, Set<Integer> ignoredTokens) {
         this.parser = parser;
@@ -161,24 +165,50 @@ public class CodeCompletionCore {
         this.candidates.tokens.clear();
         this.statesProcessed = 0;
 
-        this.tokenStartIndex = context != null ? context.start.getTokenIndex() : 0;
-        TokenStream tokenStream = this.parser.getInputStream();
+        if (context != null) {
+            if (context instanceof AstRuleCtx ctx && ctx.lastClauseContext != null) {
+                this.tokenStartIndex = ctx.lastClauseContext.start.getTokenIndex();
+            } else {
+                this.tokenStartIndex = context.start.getTokenIndex();
+            }
+        } else {
+            this.tokenStartIndex = 0;
+        }
+
+        final var tokenStream = (BufferedTokenStream) this.parser.getInputStream();
 
         int currentIndex = tokenStream.index();
         tokenStream.seek(this.tokenStartIndex);
-        this.tokens = new LinkedList<>();
-        int offset = 1;
-        while (true) {
-            Token token = tokenStream.LT(offset++);
-            this.tokens.add(token);
-            if (token.getTokenIndex() >= caretTokenIndex || token.getType() == Token.EOF) {
-                break;
+        this.tokens = new ArrayList<>();
+        final var tokenSize = tokenStream.size();
+        for (int offset = this.tokenStartIndex; offset < tokenSize; ++offset) {
+            Token token = tokenStream.get(offset);
+            if (token.getChannel() == Token.DEFAULT_CHANNEL) {
+                this.tokens.add(token);
+                if (token.getTokenIndex() >= caretTokenIndex || token.getType() == Token.EOF) {
+                    break;
+                }
             }
         }
         tokenStream.seek(currentIndex);
 
         LinkedList<RuleWithStartToken> callStack = new LinkedList<>();
-        int startRule = context != null ? context.getRuleIndex() : 0;
+        int startRule;
+        if (context != null) {
+            // If we have a lastClauseContext we want to use that as context for the start rule,
+            // except if the current context is a StatementsContext, meaning the next token could be a new clause.
+            if (context instanceof AstRuleCtx ctx
+                    && !(ctx instanceof Cypher25Parser.StatementsContext)
+                    && !(ctx instanceof Cypher5Parser.StatementsContext)
+                    && ctx.lastClauseContext != null) {
+                startRule = ctx.lastClauseContext.getRuleIndex();
+            } else {
+                startRule = context.getRuleIndex();
+            }
+        } else {
+            startRule = 0;
+        }
+
         this.processRule(this.atn.ruleToStartState[startRule], 0, callStack, "\n");
 
         tokenStream.seek(currentIndex);
@@ -556,5 +586,25 @@ public class CodeCompletionCore {
         positionMap.put(tokenIndex, result);
 
         return result;
+    }
+}
+
+class RuleIndexCache<T> {
+    // This list will at most have the same size as the number of rules in the grammar (currently 369 in Cypher 25).
+    private final ArrayList<T> map = new ArrayList<>();
+
+    public void clear() {
+        map.clear();
+    }
+
+    public T get(int ruleIndex) {
+        return ruleIndex >= 0 && ruleIndex < map.size() ? map.get(ruleIndex) : null;
+    }
+
+    public void put(int ruleIndex, T positionMap) {
+        if (ruleIndex < 0) return; // Rule index can't be negative, but let's be safe
+        map.ensureCapacity(ruleIndex + 1);
+        while (map.size() <= ruleIndex) map.add(null);
+        map.set(ruleIndex, positionMap);
     }
 }

@@ -50,7 +50,6 @@ import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.api.impl.index.SchemaIndexMigrator;
 import org.neo4j.kernel.api.index.IndexDirectoryStructure;
-import org.neo4j.kernel.impl.transaction.log.EmptyLogTailMetadata;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.StorageEngineFactory;
 import org.neo4j.storageengine.api.StoreVersion;
@@ -58,6 +57,7 @@ import org.neo4j.storageengine.api.format.CapabilityType;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
+import org.neo4j.wal.EmptyLogTailMetadata;
 
 @TestDirectoryExtension
 class SchemaIndexMigratorTest {
@@ -92,10 +92,11 @@ class SchemaIndexMigratorTest {
                 forSchema(SchemaDescriptors.forLabel(1, 2, 3)).withName("n1").materialise(1L));
         schemaRules.add(
                 forSchema(SchemaDescriptors.forRelType(5, 3)).withName("r1").materialise(2L));
-        schemaRules.add(forSchema(SchemaDescriptors.fulltext(RELATIONSHIP, new int[] {1, 2, 3}, new int[] {4, 5, 6}))
-                .withName("r2")
-                .materialise(3L));
-        schemaRules.add(forSchema(SchemaDescriptors.fulltext(NODE, new int[] {1, 2, 3}, new int[] {4, 5, 6}))
+        schemaRules.add(
+                forSchema(SchemaDescriptors.forSemanticSearch(RELATIONSHIP, new int[] {1, 2, 3}, new int[] {4, 5, 6}))
+                        .withName("r2")
+                        .materialise(3L));
+        schemaRules.add(forSchema(SchemaDescriptors.forSemanticSearch(NODE, new int[] {1, 2, 3}, new int[] {4, 5, 6}))
                 .withName("n2")
                 .materialise(4L));
         when(storageEngineFactory.loadSchemaRules(any(), any(), any(), any(), any(), anyBoolean(), any(), any(), any()))

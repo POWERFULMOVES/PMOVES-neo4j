@@ -16,19 +16,46 @@
  */
 package org.neo4j.cypher.internal.rewriting
 
-import org.neo4j.cypher.internal.ast.semantics.SemanticCheckContext
+import org.neo4j.cypher.internal.CypherVersion
+import org.neo4j.cypher.internal.CypherVersionHelpers
+import org.neo4j.cypher.internal.ast.AliasedReturnItem
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheckResult
+import org.neo4j.cypher.internal.ast.semantics.SemanticError
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.LocalCallables
 import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.MultipleDatabases
 import org.neo4j.cypher.internal.ast.semantics.SemanticState
-import org.neo4j.cypher.internal.rewriting.rewriters.normalizeWithAndReturnClauses
-import org.neo4j.cypher.internal.util.OpenCypherExceptionFactory
-import org.neo4j.cypher.internal.util.OpenCypherExceptionFactory.SyntaxException
+import org.neo4j.cypher.internal.rewriting.rewriters.preparatoryRewriters.NormalizeWithAndReturnClauses
+import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.cypher.internal.util.Neo4jCypherExceptionFactory
 import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
+import org.neo4j.cypher.internal.util.test_helpers.DiffPrinter
+import org.neo4j.cypher.internal.util.test_helpers.WindowsStringSafe
+import org.neo4j.exceptions.SyntaxException
+import org.neo4j.gqlstatus.GqlHelper
 
 class NormalizeWithAndReturnClausesTest extends CypherFunSuite with RewriteTest {
-  private val exceptionFactory = OpenCypherExceptionFactory(None)
-  val rewriterUnderTest: Rewriter = normalizeWithAndReturnClauses(exceptionFactory)
+
+  implicit val windowsSafe: WindowsStringSafe.type = WindowsStringSafe
+
+  def rewriterUnderTest: Rewriter =
+    NormalizeWithAndReturnClauses(Neo4jCypherExceptionFactory("test", None), Some(CypherVersion.Cypher5))
+
+  override def rewriterUnderTest(query: String): Rewriter =
+    NormalizeWithAndReturnClauses(Neo4jCypherExceptionFactory(query, None), Some(CypherVersion.Cypher5))
+
+  /**
+   * assertRewrite cannot be used to check `wasAutoAliased`, since it lives in AliasedReturnItem's
+   * second parameter list and is therefore excluded from the case class equality it relies on.
+   * This runs the rewriter directly and maps each resulting AliasedReturnItem's variable name to
+   * its `wasAutoAliased` flag.
+   */
+  private def wasAutoAliasedByName(query: String): Map[String, Boolean] = {
+    val original = parseForRewriting(CypherVersion.Cypher25, query)
+    val result = endoRewrite(original, query)
+    result.folder.findAllByClass[AliasedReturnItem].map(item => item.variable.name -> item.wasAutoAliased).toMap
+  }
 
   test("ensure variables are aliased") {
     assertRewrite(
@@ -86,6 +113,25 @@ class NormalizeWithAndReturnClausesTest extends CypherFunSuite with RewriteTest 
     )
   }
 
+  test("ensure all things are are aliased in UNION ALL") {
+    assertRewrite(
+      """MATCH (n)
+        |RETURN n, 3 + 5
+        |  UNION ALL
+        |MATCH (n)
+        |WITH n {.foo, .bar}
+        |RETURN n {.baz, .bar}, 3 + 5
+      """.stripMargin,
+      """MATCH (n)
+        |RETURN n AS n, 3 + 5 AS `3 + 5`
+        |  UNION ALL
+        |MATCH (n)
+        |WITH n {.foo, .bar} AS n
+        |RETURN n {.baz, .bar} AS n, 3 + 5 AS `3 + 5`
+      """.stripMargin
+    )
+  }
+
   test("ensure valid things are aliased in subqueries") {
     assertRewrite(
       """CALL {
@@ -115,6 +161,80 @@ class NormalizeWithAndReturnClausesTest extends CypherFunSuite with RewriteTest 
     )
   }
 
+  test("ensure valid things are aliased in subqueries - marks auto-aliased items") {
+    val flags = wasAutoAliasedByName("CALL { RETURN 1 } RETURN 2")
+    flags("1") shouldBe true
+    // The outer RETURN is a top-level RETURN, aliased via aliasUnaliasedReturnItems,
+    // which must never set wasAutoAliased.
+    flags("2") shouldBe false
+  }
+
+  test("ensure returns are aliased in when returns") {
+    assertRewrite(
+      CypherVersion.Cypher25,
+      """WHEN true THEN WITH 1 AS x RETURN x""".stripMargin,
+      """WHEN true THEN WITH 1 AS x RETURN x AS x""".stripMargin
+    )
+  }
+
+  test("ensure returns are aliased in when returns - marks auto-aliased items") {
+    val flags = wasAutoAliasedByName("WHEN true THEN WITH 1 AS x RETURN x, 2 AS y, 3")
+    flags("x") shouldBe false
+    flags("y") shouldBe false
+    flags("3") shouldBe true
+  }
+
+  test("ensure returns are aliased in wrapped when returns") {
+    assertRewrite(
+      CypherVersion.Cypher25,
+      """WHEN true THEN { WITH 1 AS x RETURN x }""".stripMargin,
+      """WHEN true THEN { WITH 1 AS x RETURN x AS x }""".stripMargin
+    )
+  }
+
+  test("ensure returns are aliased in wrapped when returns - marks auto-aliased items") {
+    val flags = wasAutoAliasedByName("WHEN true THEN { WITH 1 AS x RETURN x, 2 AS y, 3 }")
+    flags("x") shouldBe false
+    flags("y") shouldBe false
+    flags("3") shouldBe true
+  }
+
+  test("ensure returns are aliased in NEXT - marks auto-aliased items") {
+    val flags = wasAutoAliasedByName("RETURN 2 NEXT RETURN 1")
+    flags("2") shouldBe true
+    // The last query of a NEXT chain is a top-level RETURN, aliased via aliasUnaliasedReturnItems,
+    // which must never set wasAutoAliased.
+    flags("1") shouldBe false
+  }
+
+  test("ensure valid things are aliased in subqueries in conditional query") {
+    assertRewrite(
+      CypherVersion.Cypher25,
+      """WHEN true THEN CALL () {
+        |  MATCH (n:N) RETURN n
+        |    UNION
+        |  MATCH (n:M) RETURN n
+        |} RETURN n
+        |WHEN true THEN CALL (*) {
+        |  MATCH (n)--(m)--(p)
+        |  RETURN p {.foo, .bar} AS n
+        |}
+        |RETURN n
+      """.stripMargin,
+      """WHEN true THEN CALL () {
+        |  MATCH (n:N) RETURN n AS n
+        |    UNION
+        |  MATCH (n:M) RETURN n AS n
+        |} RETURN n AS n
+        |WHEN true THEN CALL (*){
+        |  MATCH (n)--(m)--(p)
+        |  RETURN p {.foo, .bar} AS n
+        |}
+        |RETURN n AS n
+      """.stripMargin
+    )
+  }
+
   test("ensure returns are aliased in Exists expressions") {
     assertRewrite(
       """MATCH (n)
@@ -132,6 +252,66 @@ class NormalizeWithAndReturnClausesTest extends CypherFunSuite with RewriteTest 
         |       ELSE 2
         |    END` }
         |RETURN n AS n
+      """.stripMargin
+    )
+  }
+
+  test("ensure returns are aliased in Exists expressions in when") {
+    assertRewrite(
+      CypherVersion.Cypher25,
+      """WHEN EXISTS {
+        |  RETURN CASE
+        |       WHEN true THEN 1
+        |       ELSE 2
+        |    END
+        |}
+        |THEN RETURN 1 AS n
+      """.stripMargin,
+      """WHEN EXISTS { RETURN CASE WHEN true THEN 1 ELSE 2 END AS `CASE
+        |       WHEN true THEN 1
+        |       ELSE 2
+        |    END` }
+        |THEN RETURN 1 AS n
+      """.stripMargin
+    )
+  }
+
+  test("ensure returns are aliased in COLLECT expressions in when") {
+    assertRewrite(
+      CypherVersion.Cypher25,
+      """WHEN COLLECT {
+        |  RETURN CASE
+        |       WHEN true THEN 1
+        |       ELSE 2
+        |    END
+        |}
+        |THEN RETURN 1 AS n
+      """.stripMargin,
+      """WHEN COLLECT { RETURN CASE WHEN true THEN 1 ELSE 2 END AS `CASE
+        |       WHEN true THEN 1
+        |       ELSE 2
+        |    END` }
+        |THEN RETURN 1 AS n
+      """.stripMargin
+    )
+  }
+
+  test("ensure returns are aliased in Count expressions in when") {
+    assertRewrite(
+      CypherVersion.Cypher25,
+      """WHEN COUNT {
+        |  RETURN CASE
+        |       WHEN true THEN 1
+        |       ELSE 2
+        |    END
+        |} > 1
+        |THEN RETURN 1 AS n
+      """.stripMargin,
+      """WHEN COUNT { RETURN CASE WHEN true THEN 1 ELSE 2 END AS `CASE
+        |       WHEN true THEN 1
+        |       ELSE 2
+        |    END` } > 1
+        |THEN RETURN 1 AS n
       """.stripMargin
     )
   }
@@ -236,10 +416,26 @@ class NormalizeWithAndReturnClausesTest extends CypherFunSuite with RewriteTest 
     )
   }
 
-  test("ensure variables are aliased for SHOW DATABASES") {
+  test("ensure variables are aliased for SHOW DATABASES - Cypher 5") {
     assertRewrite(
+      CypherVersion.Cypher5,
       "SHOW DATABASES YIELD name",
       "SHOW DATABASES YIELD name AS name"
+    )
+  }
+
+  test("ensure variables are aliased for SHOW DATABASES - Cypher 25") {
+    assertRewrite(
+      CypherVersion.Cypher25,
+      "SHOW DATABASES YIELD name",
+      "SHOW DATABASES YIELD name AS name"
+    )
+  }
+
+  test("ensure variables are aliased for SHOW ALIASES") {
+    assertRewrite(
+      "SHOW ALIASES FOR DATABASES YIELD name",
+      "SHOW ALIASES FOR DATABASES YIELD name AS name"
     )
   }
 
@@ -291,6 +487,28 @@ class NormalizeWithAndReturnClausesTest extends CypherFunSuite with RewriteTest 
       """MATCH ()
         |RETURN true AS var0
         |ORDER BY none(var0 IN [1, 2] WHERE true)
+      """.stripMargin
+    )
+  }
+
+  test("RETURN: Existing alias's should not be used within scoped expressions, exists subquery expression") {
+    assertIsNotRewritten(
+      """MATCH ()
+        |RETURN true AS var0
+        |ORDER BY EXISTS { RETURN true AS res }
+      """.stripMargin
+    )
+  }
+
+  test("RETURN: Existing alias's should not be used within scoped expressions, as collection") {
+    assertRewrite(
+      """UNWIND [1,2,3] AS rows
+        |RETURN collect(rows) AS coll
+        |ORDER BY none(var0 IN collect(rows) WHERE var0 < 1)
+      """.stripMargin,
+      """UNWIND [1,2,3] AS rows
+        |RETURN collect(rows) AS coll
+        |ORDER BY none(var0 IN coll WHERE var0 < 1)
       """.stripMargin
     )
   }
@@ -413,6 +631,212 @@ class NormalizeWithAndReturnClausesTest extends CypherFunSuite with RewriteTest 
     assertIsNotRewritten(
       """WITH -0.5 as pa0
         |WITH 1 AS pa0, -pa0 as pa1
+        |WHERE -1 = -pa0
+        |RETURN pa0 AS pa3
+      """.stripMargin
+    )
+  }
+
+  test("does not rewrite aliases which may be redefined even when wrapped with a negation - RETURN") {
+    assertIsNotRewritten(
+      """WITH -0.5 as pa0
+        |RETURN 1 AS pa0, -pa0 as pa1
+        |ORDER BY -1 = -pa0
+      """.stripMargin
+    )
+  }
+
+  test("does not rewrite aliases which may be redefined even when wrapped with a negation and is a property") {
+    assertIsNotRewritten(
+      """WITH {p: -0.5} as pa0
+        |WITH {p: 1} AS pa0, -pa0.p as pa1
+        |WHERE -1 = -pa0.p
+        |RETURN pa0 AS pa3
+      """.stripMargin
+    )
+  }
+
+  test("does not rewrite aliases which may be redefined even when wrapped with a negation and is a property - RETURN") {
+    assertIsNotRewritten(
+      """WITH {p: -0.5} as pa0
+        |RETURN {p: 1} AS pa0, -pa0.p as pa1
+        |ORDER BY -1 = -pa0.p
+      """.stripMargin
+    )
+  }
+
+  test("does not rewrite aliases which may be redefined when a property - WITH") {
+    assertIsNotRewritten(
+      """WITH {p: -0.5} as pa0
+        |WITH {p: 1} AS pa0, pa0.p as pa1
+        |ORDER BY -1 = pa0.p
+        |WHERE -1 = pa0.p
+        |RETURN pa0 AS pa0
+      """.stripMargin
+    )
+  }
+
+  test("does not rewrite aliases which may be redefined when a property - RETURN") {
+    assertIsNotRewritten(
+      """WITH {p: -0.5} as pa0
+        |RETURN {p: 1} AS pa0, pa0.p as pa1
+        |ORDER BY -1 = pa0.p
+      """.stripMargin
+    )
+  }
+
+  test("does rewrite aliases which may be redefined even when exact match - RETURN") {
+    assertRewrite(
+      """WITH -0.5 as pa0
+        |RETURN 1 AS pa0, -pa0 as pa1
+        |ORDER BY -pa0
+      """.stripMargin,
+      """WITH -0.5 as pa0
+        |RETURN 1 AS pa0, -pa0 as pa1
+        |ORDER BY pa1
+      """.stripMargin
+    )
+  }
+
+  test("does not rewrite aliases that are redefined - RETURN") {
+    assertRewrite(
+      """WITH {p: -0.5} as pa0, 1 AS x
+        |RETURN {p: 1} AS pa0, pa0.p as pa1, x AS y
+        |ORDER BY -1 = pa0.p + x
+      """.stripMargin,
+      """WITH {p: -0.5} as pa0, 1 AS x
+        |RETURN {p: 1} AS pa0, pa0.p as pa1, x AS y
+        |ORDER BY -1 = pa0.p + y
+      """.stripMargin
+    )
+  }
+
+  test("does not rewrite aliases that are redefined - RETURN DISTINCT") {
+    assertRewrite(
+      """WITH {p: -0.5} as pa0, 1 AS x
+        |RETURN DISTINCT {p: 1} AS pa0, pa0.p as pa1, x AS y
+        |ORDER BY -1 = pa0.p + x
+      """.stripMargin,
+      """WITH {p: -0.5} as pa0, 1 AS x
+        |RETURN DISTINCT {p: 1} AS pa0, pa0.p as pa1, x AS y
+        |ORDER BY -1 = pa0.p + y
+      """.stripMargin
+    )
+  }
+
+  test("RETURN - properties aliased correctly non-aggregating #1") {
+    assertRewrite(
+      """MATCH (a:A), (b:B)
+        |RETURN a.p, b AS a
+        |  ORDER BY a.p""".stripMargin,
+      """MATCH (a:A), (b:B)
+        |RETURN a.p AS `a.p`, b AS a
+        |  ORDER BY `a.p`""".stripMargin
+    )
+  }
+
+  test("RETURN - properties aliased correctly non-aggregating #2") {
+    assertRewrite(
+      """MATCH (a:A), (b:B)
+        |WITH a.p AS x, b AS a
+        |  ORDER BY a.p
+        |RETURN a AS a""".stripMargin,
+      """MATCH (a:A), (b:B)
+        |WITH a.p AS x, b AS a
+        |  ORDER BY x
+        |RETURN a AS a""".stripMargin
+    )
+  }
+
+  test("RETURN - properties aliased correctly non-aggregating #3") {
+    assertRewrite(
+      """
+      MATCH (a:A), (b:B)
+      WITH toInteger(a.p) AS x, b AS a
+        ORDER BY toInteger(a.p)
+      RETURN a AS a
+      """.stripMargin,
+      """
+      MATCH (a:A), (b:B)
+      WITH toInteger(a.p) AS x, b AS a
+        ORDER BY x
+      RETURN a AS a
+      """.stripMargin
+    )
+  }
+
+  test("RETURN - properties aliased correctly non-aggregating #4") {
+    assertRewrite(
+      """
+      MATCH (a:A), (b:B)
+      WITH 1 + toInteger(a.p) AS x, b AS a
+        ORDER BY 1 + toInteger(a.p)
+      RETURN a AS a
+      """.stripMargin,
+      """
+      MATCH (a:A), (b:B)
+      WITH 1 + toInteger(a.p) AS x, b AS a
+        ORDER BY x
+      RETURN a AS a
+      """.stripMargin
+    )
+  }
+
+  test("RETURN - properties aliased correctly non-aggregating #5") {
+    assertRewrite(
+      """
+      MATCH (a:A), (b:B)
+      WITH 1 + toInteger(a.p) AS x, b AS a
+        ORDER BY 1 + 1 + toInteger(a.p)
+      RETURN a AS a
+      """.stripMargin,
+      """
+      MATCH (a:A), (b:B)
+      WITH 1 + toInteger(a.p) AS x, b AS a
+        ORDER BY 1 + 1 + toInteger(a.p)
+      RETURN a AS a
+      """.stripMargin
+    )
+  }
+
+  test("RETURN - variables aliased correctly non-aggregating #3") {
+    assertRewrite(
+      """
+      MATCH (a:A), (b:B)
+      RETURN a AS b, b AS x
+        ORDER BY b, a
+      """.stripMargin,
+      """
+      MATCH (a:A), (b:B)
+      RETURN a AS b, b AS x
+        ORDER BY b, b
+      """.stripMargin
+    )
+  }
+
+  test("does not rewrite aliases which may be redefined when a variable - RETURN") {
+    assertIsNotRewritten(
+      """WITH 0.5 as pa0
+        |RETURN 1 AS pa0, pa0 as pa1
+        |ORDER BY -1 = -pa0
+      """.stripMargin
+    )
+  }
+
+  test("does not rewrite aliases which may be redefined even when wrapped with a negation - aggregating context") {
+    assertIsNotRewritten(
+      """WITH -0.5 as pa0
+        |WITH 1 AS pa0, -pa0 as pa1, count(*) AS cnt
+        |WHERE -1 = -pa0
+        |RETURN pa0 AS pa3
+      """.stripMargin
+    )
+  }
+
+  test("does not rewrite aliases which may be redefined even when wrapped with a negation - distinct context") {
+    assertIsNotRewritten(
+      """WITH -0.5 as pa0
+        |WITH DISTINCT 1 AS pa0, -pa0 as pa1
         |WHERE -1 = -pa0
         |RETURN pa0 AS pa3
       """.stripMargin
@@ -720,41 +1144,144 @@ class NormalizeWithAndReturnClausesTest extends CypherFunSuite with RewriteTest 
   }
 
   test("WITH: does not attach ORDER BY expressions to unaliased items") {
-    // Note: unaliased items in WITH are invalid, and will be caught during semantic check
-    assertNotRewrittenAndSemanticErrors(
+    // Note: unaliased items in WITH are invalid, and will be caught during semantic check,
+    // even though the item itself now gets an auto-generated alias (marked wasAutoAliased).
+    assertRewriteAndSemanticError(
       """MATCH (n)
         |WITH n.prop ORDER BY n.prop
+        |RETURN prop AS prop
+      """.stripMargin,
+      """MATCH (n)
+        |WITH n.prop AS `n.prop` ORDER BY n.prop
         |RETURN prop AS prop
       """.stripMargin,
       "Expression in WITH must be aliased (use AS) (line 2, column 6 (offset: 15))"
     )
   }
 
-  test("should not introduce aliases in subquery return") {
-    assertNotRewrittenAndSemanticErrors(
+  test("should introduce aliases for when but not in return") {
+    assertRewriteAndSemanticError(
+      CypherVersion.Cypher25,
+      "WHEN true THEN MATCH (n) WITH n RETURN 1",
+      "WHEN true THEN MATCH (n) WITH n AS n RETURN 1 AS `1`",
+      "Expression in WHEN ... THEN ... must be aliased (use AS) (line 1, column 40 (offset: 39))"
+    )
+  }
+
+  test("should introduce aliases for when but not in return wrapped") {
+    assertRewriteAndSemanticError(
+      CypherVersion.Cypher25,
+      "WHEN true THEN { MATCH (n) WITH n RETURN 1 }",
+      "WHEN true THEN { MATCH (n) WITH n AS n RETURN 1 AS `1` }",
+      "Expression in { RETURN ... } must be aliased (use AS) (line 1, column 42 (offset: 41))"
+    )
+  }
+
+  test("should introduce aliases for TLB but not in return") {
+    assertRewriteAndSemanticError(
+      CypherVersion.Cypher25,
+      "{ MATCH (n) WITH n RETURN 1 }",
+      "{ MATCH (n) WITH n AS n RETURN 1 AS `1` }",
+      "Expression in { RETURN ... } must be aliased (use AS) (line 1, column 27 (offset: 26))"
+    )
+  }
+
+  test("should introduce auto-alias in when then return") {
+    assertRewriteAndSemanticError(
+      CypherVersion.Cypher25,
+      "WHEN true THEN RETURN 1",
+      "WHEN true THEN RETURN 1 AS `1`",
+      "Expression in WHEN ... THEN ... must be aliased (use AS) (line 1, column 23 (offset: 22))"
+    )
+  }
+
+  test("should introduce auto-aliases in when then return multiple branches") {
+    assertRewriteAndSemanticError(
+      CypherVersion.Cypher25,
+      """WHEN true THEN RETURN 1
+        |WHEN true THEN RETURN 1
+        |WHEN true THEN RETURN 1
+        |ELSE RETURN 1
+        |""".stripMargin,
+      """WHEN true THEN RETURN 1 AS `1`
+        |WHEN true THEN RETURN 1 AS `1`
+        |WHEN true THEN RETURN 1 AS `1`
+        |ELSE RETURN 1 AS `1`
+        |""".stripMargin,
+      "Expression in WHEN ... THEN ... must be aliased (use AS) (line 1, column 23 (offset: 22))",
+      "Expression in WHEN ... THEN ... must be aliased (use AS) (line 2, column 23 (offset: 46))",
+      "Expression in WHEN ... THEN ... must be aliased (use AS) (line 3, column 23 (offset: 70))",
+      "Expression in WHEN ... THEN ... must be aliased (use AS) (line 4, column 13 (offset: 84))"
+    )
+  }
+
+  test("should introduce auto-alias in when then contained in subquery return") {
+    assertRewriteAndSemanticError(
+      CypherVersion.Cypher25,
+      "CALL () { WHEN true THEN RETURN 1 } RETURN 1 AS one",
+      "CALL () { WHEN true THEN RETURN 1 AS `1` } RETURN 1 AS one",
+      "Expression in CALL () { RETURN ... } must be aliased (use AS) (line 1, column 33 (offset: 32))"
+    )
+  }
+
+  test("should introduce auto-alias in subquery return") {
+    assertRewriteAndSemanticError(
       "CALL { RETURN 1 } RETURN 1 AS one",
+      "CALL { RETURN 1 AS `1` } RETURN 1 AS one",
       "Expression in CALL { RETURN ... } must be aliased (use AS) (line 1, column 15 (offset: 14))"
     )
   }
 
-  test("should not introduce aliases in union subquery return") {
-    assertNotRewrittenAndSemanticErrors(
+  test("should introduce auto-alias in scoped subquery return") {
+    assertRewriteAndSemanticError(
+      "CALL () { RETURN 1 } RETURN 1 AS one",
+      "CALL () { RETURN 1 AS `1` } RETURN 1 AS one",
+      "Expression in CALL () { RETURN ... } must be aliased (use AS) (line 1, column 18 (offset: 17))"
+    )
+  }
+
+  test("should introduce allowed aliases in scoped subquery return") {
+    assertRewrite(
+      "CALL () { WITH 1 AS x RETURN x } RETURN 1 AS one",
+      "CALL () { WITH 1 AS x RETURN x AS x } RETURN 1 AS one"
+    )
+  }
+
+  test("should introduce allowed aliases in multiple branch when") {
+    assertRewrite(
+      CypherVersion.Cypher25,
+      """WHEN false THEN RETURN 1 AS x
+        WHEN true  THEN UNWIND [2,2,2] AS x RETURN x
+        ELSE UNWIND [3,3,3] AS x RETURN x
+    """,
+      """WHEN false THEN RETURN 1 AS x
+        WHEN true  THEN UNWIND [2,2,2] AS x RETURN x AS x
+        ELSE UNWIND [3,3,3] AS x RETURN x AS x
+    """
+    )
+  }
+
+  test("should introduce auto-aliases in union subquery return") {
+    assertRewriteAndSemanticError(
       "CALL { RETURN 1 UNION RETURN 1 } RETURN 1 AS one",
+      "CALL { RETURN 1 AS `1` UNION RETURN 1 AS `1` } RETURN 1 AS one",
       "Expression in CALL { RETURN ... } must be aliased (use AS) (line 1, column 15 (offset: 14))",
       "Expression in CALL { RETURN ... } must be aliased (use AS) (line 1, column 30 (offset: 29))"
     )
   }
 
-  test("should not introduce aliases in correlated subquery return") {
-    assertNotRewrittenAndSemanticErrors(
+  test("should introduce auto-alias in correlated subquery return") {
+    assertRewriteAndSemanticError(
       "MATCH (n) CALL { WITH n AS n RETURN 1 } RETURN 1 AS one",
+      "MATCH (n) CALL { WITH n AS n RETURN 1 AS `1` } RETURN 1 AS one",
       "Expression in CALL { RETURN ... } must be aliased (use AS) (line 1, column 37 (offset: 36))"
     )
   }
 
-  test("should not introduce aliases in correlated union subquery return") {
-    assertNotRewrittenAndSemanticErrors(
+  test("should introduce auto-aliases in correlated union subquery return") {
+    assertRewriteAndSemanticError(
       "MATCH (n) CALL { WITH n AS n RETURN 1 UNION WITH n AS n RETURN 1 } RETURN 1 AS one",
+      "MATCH (n) CALL { WITH n AS n RETURN 1 AS `1` UNION WITH n AS n RETURN 1 AS `1` } RETURN 1 AS one",
       "Expression in CALL { RETURN ... } must be aliased (use AS) (line 1, column 37 (offset: 36))",
       "Expression in CALL { RETURN ... } must be aliased (use AS) (line 1, column 64 (offset: 63))"
     )
@@ -783,10 +1310,15 @@ class NormalizeWithAndReturnClausesTest extends CypherFunSuite with RewriteTest 
   }
 
   test("does not attach WHERE expression to unaliased items") {
-    // Note: unaliased items in WITH are invalid, and will be caught during semantic check
-    assertNotRewrittenAndSemanticErrors(
+    // Note: unaliased items in WITH are invalid, and will be caught during semantic check,
+    // even though the item itself now gets an auto-generated alias (marked wasAutoAliased).
+    assertRewriteAndSemanticError(
       """MATCH (n)
         |WITH n.prop WHERE n.prop
+        |RETURN prop AS prop
+      """.stripMargin,
+      """MATCH (n)
+        |WITH n.prop AS `n.prop` WHERE n.prop
         |RETURN prop AS prop
       """.stripMargin,
       "Expression in WITH must be aliased (use AS) (line 2, column 6 (offset: 15))"
@@ -796,34 +1328,44 @@ class NormalizeWithAndReturnClausesTest extends CypherFunSuite with RewriteTest 
   test("rejects use of aggregation in ORDER BY if aggregation is not used in associated WITH") {
     // Note: aggregations in ORDER BY that don't also appear in WITH are invalid
     try {
-      rewrite(parseForRewriting(
+      val q =
         """MATCH (n)
           |WITH n.prop AS prop ORDER BY max(n.foo)
           |RETURN prop
         """.stripMargin
-      ))
+      rewrite(parseForRewriting(q), q)
       fail("We shouldn't get here")
     } catch {
       case e: SyntaxException =>
         e.getMessage should equal(
-          "Cannot use aggregation in ORDER BY if there are no aggregate expressions in the preceding WITH (line 2, column 1 (offset: 10))"
+          """Cannot use aggregation in ORDER BY if there are no aggregate expressions in the preceding WITH (line 2, column 1 (offset: 10))
+            |"WITH n.prop AS prop ORDER BY max(n.foo)"
+            | ^""".stripMargin
+        )
+        e.gqlStatusObject() should equal(
+          GqlHelper.getGql42001_42N23("WITH", 10, 2, 1)
         )
     }
   }
 
   test("rejects use of aggregation in ORDER BY if aggregation is not used in associated RETURN") {
-    // Note: aggregations in ORDER BY that don't also appear in WITH are invalid
+    // Note: aggregations in ORDER BY that don't also appear in RETURN are invalid
     try {
-      rewrite(parseForRewriting(
+      val q =
         """MATCH (n)
           |RETURN n.prop AS prop ORDER BY max(n.foo)
         """.stripMargin
-      ))
+      rewrite(parseForRewriting(q), q)
       fail("We shouldn't get here")
     } catch {
       case e: SyntaxException =>
         e.getMessage should equal(
-          "Cannot use aggregation in ORDER BY if there are no aggregate expressions in the preceding RETURN (line 2, column 1 (offset: 10))"
+          """Cannot use aggregation in ORDER BY if there are no aggregate expressions in the preceding RETURN (line 2, column 1 (offset: 10))
+            |"RETURN n.prop AS prop ORDER BY max(n.foo)"
+            | ^""".stripMargin
+        )
+        e.gqlStatusObject() should equal(
+          GqlHelper.getGql42001_42N23("RETURN", 10, 2, 1)
         )
     }
   }
@@ -868,6 +1410,7 @@ class NormalizeWithAndReturnClausesTest extends CypherFunSuite with RewriteTest 
   test("does not introduce alias for WHERE containing aggregate") {
     // Note: aggregations in WHERE are invalid, and will be caught during semantic check
     assertNotRewrittenAndSemanticErrors(
+      CypherVersion.Cypher5,
       """MATCH (n)
         |WITH n.prop AS prop WHERE max(n.foo)
         |RETURN prop AS prop
@@ -1035,20 +1578,20 @@ class NormalizeWithAndReturnClausesTest extends CypherFunSuite with RewriteTest 
     "WITH: aggregating: does not change grouping set when introducing aliases for ORDER BY with non-grouping expression"
   ) {
     // Note: using a non-grouping expression for ORDER BY when aggregating is invalid, and will be caught during semantic check
-    assertNotRewrittenAndSemanticErrors(
+    assertNotRewrittenAndSemanticGqlErrors(
       """MATCH (n)
         |WITH DISTINCT n.prop AS prop ORDER BY n.foo
         |RETURN prop AS prop
       """.stripMargin,
-      "In a WITH/RETURN with DISTINCT or an aggregation, it is not possible to access variables declared before the WITH/RETURN: n (line 2, column 39 (offset: 48))"
+      SemanticError.inaccessibleVariable("n", "WITH", InputPosition(48, 2, 39))
     )
 
-    assertNotRewrittenAndSemanticErrors(
+    assertNotRewrittenAndSemanticGqlErrors(
       """MATCH (n)
         |WITH n.prop AS prop, collect(n.foo) AS foos ORDER BY n.foo
         |RETURN prop AS prop, foos AS foos
       """.stripMargin,
-      "In a WITH/RETURN with DISTINCT or an aggregation, it is not possible to access variables declared before the WITH/RETURN: n (line 2, column 54 (offset: 63))"
+      SemanticError.inaccessibleVariable("n", "WITH", InputPosition(63, 2, 54))
     )
   }
 
@@ -1056,37 +1599,37 @@ class NormalizeWithAndReturnClausesTest extends CypherFunSuite with RewriteTest 
     "RETURN: aggregating: does not change grouping set when introducing aliases for ORDER BY with non-grouping expression"
   ) {
     // Note: using a non-grouping expression for ORDER BY when aggregating is invalid, and will be caught during semantic check
-    assertNotRewrittenAndSemanticErrors(
+    assertNotRewrittenAndSemanticGqlErrors(
       """MATCH (n)
         |RETURN DISTINCT n.prop AS prop ORDER BY n.foo
       """.stripMargin,
-      "In a WITH/RETURN with DISTINCT or an aggregation, it is not possible to access variables declared before the WITH/RETURN: n (line 2, column 41 (offset: 50))"
+      SemanticError.inaccessibleVariable("n", "RETURN", InputPosition(50, 2, 41))
     )
 
-    assertNotRewrittenAndSemanticErrors(
+    assertNotRewrittenAndSemanticGqlErrors(
       """MATCH (n)
         |RETURN n.prop AS prop, collect(n.foo) AS foos ORDER BY n.foo
       """.stripMargin,
-      "In a WITH/RETURN with DISTINCT or an aggregation, it is not possible to access variables declared before the WITH/RETURN: n (line 2, column 56 (offset: 65))"
+      SemanticError.inaccessibleVariable("n", "RETURN", InputPosition(65, 2, 56))
     )
   }
 
   test("aggregating: does not change grouping set when introducing aliases for WHERE with non-grouping expression") {
     // Note: using a non-grouping expression for ORDER BY when aggregating is invalid, and will be caught during semantic check
-    assertNotRewrittenAndSemanticErrors(
+    assertNotRewrittenAndSemanticGqlErrors(
       """MATCH (n)
         |WITH DISTINCT n.prop AS prop WHERE n.foo
         |RETURN prop AS prop
       """.stripMargin,
-      "In a WITH/RETURN with DISTINCT or an aggregation, it is not possible to access variables declared before the WITH/RETURN: n (line 2, column 36 (offset: 45))"
+      SemanticError.inaccessibleVariable("n", "WITH", InputPosition(45, 2, 36))
     )
 
-    assertNotRewrittenAndSemanticErrors(
+    assertNotRewrittenAndSemanticGqlErrors(
       """MATCH (n)
         |WITH n.prop AS prop, collect(n.foo) AS foos WHERE n.foo
         |RETURN prop AS prop, foos AS foos
       """.stripMargin,
-      "In a WITH/RETURN with DISTINCT or an aggregation, it is not possible to access variables declared before the WITH/RETURN: n (line 2, column 51 (offset: 60))"
+      SemanticError.inaccessibleVariable("n", "WITH", InputPosition(60, 2, 51))
     )
   }
 
@@ -1180,6 +1723,150 @@ class NormalizeWithAndReturnClausesTest extends CypherFunSuite with RewriteTest 
     )
   }
 
+  // In each of the next four cases, `a`/`b` is shadowed: the alias reusing the aggregate's own argument
+  // name means the pre-projection and post-projection variable are indistinguishable at this point in the
+  // pipeline (before Namespacer runs), so potentiallyRedefined blocks the substitution and the aggregate
+  // is left as-is in ORDER BY. checkIllegalOrdering catches it downstream instead.
+  test(
+    "UNWIND range(1, 10) AS a RETURN sum (a) AS a ORDER BY (sum(a) + 1)"
+  ) {
+    assertRewrite(
+      """UNWIND range(1, 10) AS a
+        |RETURN sum(a) AS a
+        |  ORDER BY (sum(a) + 1)
+      """.stripMargin,
+      """UNWIND range(1, 10) AS a
+        |RETURN sum(a) AS a
+        |  ORDER BY sum(a) + 1 ASCENDING
+      """.stripMargin
+    )
+  }
+
+  test(
+    "UNWIND range(1, 10) AS a WITH sum (a) AS a ORDER BY (sum(a) + 1) RETURN a"
+  ) {
+    assertRewrite(
+      """UNWIND range(1, 10) AS a
+        |WITH sum(a) AS a
+        |  ORDER BY (sum(a) + 1)
+        |RETURN a
+      """.stripMargin,
+      """UNWIND range(1, 10) AS a
+        |WITH sum(a) AS a
+        |  ORDER BY sum(a) + 1 ASCENDING
+        |RETURN a AS a
+      """.stripMargin
+    )
+  }
+
+  test(
+    "UNWIND range(1, 10) AS a WITH a, a / 2 + 5 AS b, a % 3 AS g RETURN g, sum(a) AS a, sum(b) AS b ORDER BY (sum(a) + count(b))"
+  ) {
+    assertRewrite(
+      """UNWIND range(1, 10) AS a
+        |WITH a, a / 2 + 5 AS b, a % 3 AS g
+        |RETURN g, sum(a) AS a, count(b) AS b
+        |  ORDER BY (sum(a) + count(b))
+      """.stripMargin,
+      """UNWIND range(1, 10) AS a
+        |WITH a AS a, a / 2 + 5 AS b, a % 3 AS g
+        |RETURN g AS g, sum(a) AS a, count(b) AS b
+        |  ORDER BY sum(a) + count(b) ASCENDING
+      """.stripMargin
+    )
+  }
+
+  test(
+    "UNWIND range(1, 10) AS a WITH a, a / 2 + 5 AS b, a % 3 AS g WITH g, min(a) AS a, max(b) AS b ORDER BY (min(a) + max(b)) RETURN g, a, b"
+  ) {
+    assertRewrite(
+      """UNWIND range(1, 10) AS a
+        |WITH a, a / 2 + 5 AS b, a % 3 AS g
+        |WITH g, min(a) AS a, max(b) AS b
+        |  ORDER BY (min(a) + max(b))
+        |RETURN g, a, b
+      """.stripMargin,
+      """UNWIND range(1, 10) AS a
+        |WITH a AS a, a / 2 + 5 AS b, a % 3 AS g
+        |WITH g AS g, min(a) AS a, max(b) AS b
+        |  ORDER BY min(a) + max(b) ASCENDING
+        |RETURN g AS g, a AS a, b AS b
+      """.stripMargin
+    )
+  }
+
+  test(
+    "UNWIND range(1, 10) AS a WITH a, a / 2 + 5 AS b, a % 3 AS g RETURN g, avg(a) AS a, count(*) AS b  ORDER BY (a + b)"
+  ) {
+    assertRewrite(
+      """UNWIND range(1, 10) AS a
+        |WITH a, a / 2 + 5 AS b, a % 3 AS g
+        |RETURN g, avg(a) AS a, count(*) AS b
+        |  ORDER BY (a + b)
+      """.stripMargin,
+      """UNWIND range(1, 10) AS a
+        |WITH a AS a, a / 2 + 5 AS b, a % 3 AS g
+        |RETURN g AS g, avg(a) AS a, count(*) AS b
+        |  ORDER BY a + b ASCENDING
+      """.stripMargin
+    )
+  }
+
+  test(
+    "UNWIND range(1, 10) AS a WITH a, a / 2 + 5 AS b, a % 3 AS g WITH g, avg(a) AS a, count(*) AS b  ORDER BY (a + b) RETURN g, a, b"
+  ) {
+    assertRewrite(
+      """UNWIND range(1, 10) AS a
+        |WITH a, a / 2 + 5 AS b, a % 3 AS g
+        |WITH g, avg(a) AS a, count(*) AS b
+        |  ORDER BY (a + b)
+        |RETURN g, a, b
+      """.stripMargin,
+      """UNWIND range(1, 10) AS a
+        |WITH a AS a, a / 2 + 5 AS b, a % 3 AS g
+        |WITH g AS g, avg(a) AS a, count(*) AS b
+        |  ORDER BY a + b ASCENDING
+        |RETURN g AS g, a AS a, b AS b
+      """.stripMargin
+    )
+  }
+
+  test(
+    "UNWIND range(1, 10) AS a WITH a, a / 2 + 5 AS b, a % 3 AS g RETURN g, sum(a) AS a, sum(b) AS b ORDER BY sum(a), count(b)"
+  ) {
+    assertRewrite(
+      """UNWIND range(1, 10) AS a
+        |WITH a, a / 2 + 5 AS b, a % 3 AS g
+        |RETURN g, sum(a) AS a, count(b) AS b
+        |  ORDER BY sum(a), count(b)
+      """.stripMargin,
+      """UNWIND range(1, 10) AS a
+        |WITH a AS a, a / 2 + 5 AS b, a % 3 AS g
+        |RETURN g AS g, sum(a) AS a, count(b) AS b
+        |  ORDER BY a ASCENDING, b ASCENDING
+      """.stripMargin
+    )
+  }
+
+  test(
+    "UNWIND range(1, 10) AS a WITH a, a / 2 + 5 AS b, a % 3 AS g WIHT g, sum(a) AS a, sum(b) AS b ORDER BY sum(a), count(b) RETURN g, a, b"
+  ) {
+    assertRewrite(
+      """UNWIND range(1, 10) AS a
+        |WITH a, a / 2 + 5 AS b, a % 3 AS g
+        |WITH g, sum(a) AS a, count(b) AS b
+        |  ORDER BY sum(a), count(b)
+        |RETURN g, a, b
+      """.stripMargin,
+      """UNWIND range(1, 10) AS a
+        |WITH a AS a, a / 2 + 5 AS b, a % 3 AS g
+        |WITH g AS g, sum(a) AS a, count(b) AS b
+        |  ORDER BY a ASCENDING, b ASCENDING
+        |RETURN g AS g, a AS a, b AS b
+      """.stripMargin
+    )
+  }
+
   test("MATCH (a) WITH a WHERE true return a") {
     assertRewrite(
       """MATCH (a)
@@ -1223,10 +1910,132 @@ class NormalizeWithAndReturnClausesTest extends CypherFunSuite with RewriteTest 
     }
   }
 
+  test(
+    "DEFINE PROCEDURE foo() { MATCH (n) WITH n, 0 AS foo WITH n AS n ORDER BY foo, n.bar RETURN n } CALL foo() WITH n, 0 AS foo WITH n AS n ORDER BY foo, n.bar RETURN n"
+  ) {
+    assertRewrite(
+      CypherVersion.Cypher25,
+      """DEFINE PROCEDURE foo() {
+        |  MATCH (n)
+        |  WITH n, 0 AS foo
+        |  WITH n AS n ORDER BY foo, n.bar
+        |  RETURN n
+        |}
+        |
+        |CALL foo() YIELD n
+        |WITH n, 0 AS foo
+        |WITH n AS n ORDER BY foo, n.bar
+        |RETURN n
+      """.stripMargin,
+      """DEFINE PROCEDURE foo() {
+        |  MATCH (n)
+        |  WITH n AS n, 0 AS foo
+        |  WITH n AS n ORDER BY foo, n.bar
+        |  RETURN n AS n
+        |}
+        |
+        |CALL foo() YIELD n
+        |WITH n AS n, 0 AS foo
+        |WITH n AS n ORDER BY foo, n.bar
+        |RETURN n AS n
+      """.stripMargin,
+      LocalCallables
+    )
+  }
+
+  test(
+    "DEFINE FUNCTION foo() { MATCH (n) WITH n, 0 AS foo WITH n AS n ORDER BY foo, n.bar RETURN n LIMIT 1 } MATCH (n) WITH n, foo() AS foo RETURN n, foo"
+  ) {
+    assertRewrite(
+      CypherVersion.Cypher25,
+      """DEFINE FUNCTION foo() {
+        |  MATCH (n)
+        |  WITH n, 0 AS foo
+        |  WITH n AS n ORDER BY foo, n.bar
+        |  RETURN n LIMIT 1
+        |}
+        |
+        |MATCH (n)
+        |WITH n, foo() AS foo
+        |RETURN n, foo
+      """.stripMargin,
+      """DEFINE FUNCTION foo() {
+        |  MATCH (n)
+        |  WITH n AS n, 0 AS foo
+        |  WITH n AS n ORDER BY foo, n.bar
+        |  RETURN n AS n LIMIT 1
+        |}
+        |
+        |MATCH (n)
+        |WITH n AS n, foo() AS foo
+        |RETURN n AS n, foo AS foo
+      """.stripMargin,
+      LocalCallables
+    )
+  }
+
+  test(
+    "DEFINE FUNCTION foo() { MATCH (n) WITH n, 0 AS foo WITH n AS n ORDER BY foo, n.bar RETURN n LIMIT 1 } RETURN foo() AS foo"
+  ) {
+    assertRewrite(
+      CypherVersion.Cypher25,
+      """DEFINE FUNCTION foo() {
+        |  MATCH (n)
+        |  WITH n, 0 AS foo
+        |  WITH n AS n ORDER BY foo, n.bar
+        |  RETURN n LIMIT 1
+        |}
+        |
+        |RETURN foo() AS foo
+      """.stripMargin,
+      """DEFINE FUNCTION foo() {
+        |  MATCH (n)
+        |  WITH n AS n, 0 AS foo
+        |  WITH n AS n ORDER BY foo, n.bar
+        |  RETURN n AS n LIMIT 1
+        |}
+        |
+        |RETURN foo() AS foo
+      """.stripMargin,
+      LocalCallables
+    )
+  }
+
   private def rewrite(originalQuery: String, expectedQuery: String): SemanticCheckResult = {
     val original = parseForRewriting(originalQuery.replace("\r\n", "\n"))
     val expected = parseForRewriting(expectedQuery.replace("\r\n", "\n"))
-    val result = endoRewrite(original)
+    val result = endoRewrite(original, originalQuery)
+    val actualCypher = prettifier.asString(result)
+    assert(
+      result === expected,
+      s"""
+          $originalQuery
+
+          should be rewritten to:
+          $expectedQuery
+
+          but was rewritten to:
+          $actualCypher
+
+          diff (expected -> actual):
+          ${DiffPrinter.render(expectedQuery, actualCypher)}
+          """
+    )
+    result.semanticCheck.run(
+      SemanticState.clean.withFeature(MultipleDatabases),
+      CypherVersionHelpers.arbitrarySemanticContext()
+    )
+  }
+
+  private def rewrite(
+    version: CypherVersion,
+    originalQuery: String,
+    expectedQuery: String,
+    semanticFeature: SemanticFeature*
+  ): SemanticCheckResult = {
+    val original = parseForRewriting(version, originalQuery.replace("\r\n", "\n"))
+    val expected = parseForRewriting(version, expectedQuery.replace("\r\n", "\n"))
+    val result = endoRewrite(original, originalQuery)
     assert(
       result === expected,
       s"""
@@ -1236,13 +2045,28 @@ class NormalizeWithAndReturnClausesTest extends CypherFunSuite with RewriteTest 
     but was rewritten to:${prettifier.asString(result)}"""
     )
     result.semanticCheck.run(
-      SemanticState.clean.withFeatures(MultipleDatabases),
-      SemanticCheckContext.default
+      SemanticState.clean.withFeatures((MultipleDatabases +: semanticFeature)),
+      CypherVersionHelpers.versionedSemanticContext(version)
     )
   }
 
   override protected def assertRewrite(originalQuery: String, expectedQuery: String): Unit = {
     val checkResult = rewrite(originalQuery, expectedQuery)
+    assert(checkResult.errors === Seq())
+  }
+
+  override protected def assertRewrite(version: CypherVersion, originalQuery: String, expectedQuery: String): Unit = {
+    val checkResult = rewrite(version, originalQuery, expectedQuery)
+    assert(checkResult.errors === Seq())
+  }
+
+  protected def assertRewrite(
+    version: CypherVersion,
+    originalQuery: String,
+    expectedQuery: String,
+    semanticFeature: SemanticFeature*
+  ): Unit = {
+    val checkResult = rewrite(version, originalQuery, expectedQuery, semanticFeature: _*)
     assert(checkResult.errors === Seq())
   }
 
@@ -1258,11 +2082,38 @@ class NormalizeWithAndReturnClausesTest extends CypherFunSuite with RewriteTest 
     )
   }
 
+  protected def assertRewriteAndSemanticError(
+    version: CypherVersion,
+    originalQuery: String,
+    expectedQuery: String,
+    semanticErrors: String*
+  ): Unit = {
+    val checkResult = rewrite(version, originalQuery, expectedQuery)
+    val errors = checkResult.errors.map(error => s"${error.msg} (${error.position})").toSet
+    semanticErrors.foreach(msg =>
+      assert(errors contains msg, s"Error '$msg' not produced (errors: $errors)}")
+    )
+  }
+
   protected def assertNotRewrittenAndSemanticErrors(query: String, semanticErrors: String*): Unit = {
     assertRewriteAndSemanticError(query, query, semanticErrors: _*)
   }
 
+  protected def assertNotRewrittenAndSemanticGqlErrors(query: String, semanticErrors: SemanticError*): Unit = {
+    val checkResult = rewrite(query, query)
+    val errors = checkResult.errors
+    errors should contain theSameElementsAs semanticErrors
+  }
+
+  protected def assertNotRewrittenAndSemanticErrors(
+    version: CypherVersion,
+    query: String,
+    semanticErrors: String*
+  ): Unit = {
+    assertRewriteAndSemanticError(version, query, query, semanticErrors: _*)
+  }
+
   protected def rewriting(queryText: String): Unit = {
-    endoRewrite(parseForRewriting(queryText))
+    endoRewrite(parseForRewriting(queryText), queryText)
   }
 }

@@ -21,9 +21,11 @@ package org.neo4j.cypher
 
 import org.neo4j.configuration.GraphDatabaseSettings
 import org.neo4j.cypher.internal.RewindableExecutionResult
+import org.neo4j.cypher.util.SkipOnSpd
 import org.neo4j.graphdb.Node
 import org.neo4j.graphdb.TransientTransactionFailureException
 import org.neo4j.kernel.DeadlockDetectedException
+import org.neo4j.test.extension.SkipOnSpd.Note
 
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
@@ -105,7 +107,7 @@ class CypherIsolationIntegrationTest extends ExecutionEngineFunSuite {
     nodeGetProperty(n, "x") should equal(THREADS * UPDATES)
   }
 
-  test("Should work around read isolation limitation using explicit lock") {
+  test("Should work around read isolation limitation using explicit lock", SkipOnSpd(note = Note.temporary)) {
     // Given
     val n = createLabeledNode(Map("x" -> 0L), "L")
 
@@ -123,7 +125,10 @@ class CypherIsolationIntegrationTest extends ExecutionEngineFunSuite {
     nodeGetProperty(n, "x") should equal(THREADS * UPDATES)
   }
 
-  test("Should work around read isolation limitations using explicit lock for cached node properties") {
+  test(
+    "Should work around read isolation limitations using explicit lock for cached node properties",
+    SkipOnSpd(note = Note.temporary)
+  ) {
     // Given
     val n = createLabeledNode(Map("x" -> 0L), "L")
     graph.createNodeIndex("L", "x")
@@ -142,7 +147,10 @@ class CypherIsolationIntegrationTest extends ExecutionEngineFunSuite {
     nodeGetProperty(n, "x") should equal(THREADS * UPDATES)
   }
 
-  test("Should work around read isolation limitations using explicit lock for cached node properties with map +=") {
+  test(
+    "Should work around read isolation limitations using explicit lock for cached node properties with map +=",
+    SkipOnSpd(note = Note.temporary)
+  ) {
     // Given
     val n = createLabeledNode(Map("x" -> 0L), "L")
     graph.createNodeIndex("L", "x")
@@ -278,7 +286,6 @@ class CypherIsolationIntegrationTest extends ExecutionEngineFunSuite {
     // And while waiting for all scrambler futures threads to be done,
     // execute the read query and assert on the results
     try {
-      var i = 0
       while (futures.exists(!_.isDone)) {
         var retry = true
         while (retry) {
@@ -291,7 +298,6 @@ class CypherIsolationIntegrationTest extends ExecutionEngineFunSuite {
             case t: Throwable                            => throw new RuntimeException(t)
           }
         }
-        i += 1
       }
     } finally {
       executor.shutdown()
@@ -311,7 +317,7 @@ class CypherIsolationIntegrationTest extends ExecutionEngineFunSuite {
                 execute(query)
                 retry = false
               } catch {
-                case e: DeadlockDetectedException => e
+                case e: DeadlockDetectedException => ()
                 case t: Throwable                 => throw new RuntimeException(t)
               }
             }

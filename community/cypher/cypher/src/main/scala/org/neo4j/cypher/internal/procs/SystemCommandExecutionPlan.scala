@@ -19,20 +19,21 @@
  */
 package org.neo4j.cypher.internal.procs
 
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ExecutionEngine
 import org.neo4j.cypher.internal.ExecutionPlan
-import org.neo4j.cypher.internal.RuntimeName
-import org.neo4j.cypher.internal.SystemCommandRuntimeName
+import org.neo4j.cypher.internal.notification.InternalNotification
 import org.neo4j.cypher.internal.plandescription.Argument
+import org.neo4j.cypher.internal.procs.AdministrationChainedExecutionPlan.formatQuery
 import org.neo4j.cypher.internal.result.InternalExecutionResult
 import org.neo4j.cypher.internal.runtime.ExecutionMode
 import org.neo4j.cypher.internal.runtime.ProfileMode
-import org.neo4j.cypher.internal.util.InternalNotification
 import org.neo4j.cypher.result.RuntimeResult
 import org.neo4j.graphdb.QueryStatistics
-import org.neo4j.internal.kernel.api.security.AccessMode
 import org.neo4j.internal.kernel.api.security.SecurityAuthorizationHandler
 import org.neo4j.internal.kernel.api.security.SecurityContext
+import org.neo4j.internal.kernel.api.security.StaticAccessMode
+import org.neo4j.kernel.api.query.RuntimeName
 import org.neo4j.kernel.impl.query.QuerySubscriber
 import org.neo4j.kernel.impl.query.TransactionalContext
 import org.neo4j.values.AnyValue
@@ -52,7 +53,8 @@ case class SystemCommandExecutionPlan(
   source: Option[ExecutionPlan] = None,
   checkCredentialsExpired: Boolean = true,
   parameterTransformer: ParameterTransformerFunction = ParameterTransformer(),
-  modeConverter: SecurityContext => SecurityContext = s => s.withMode(AccessMode.Static.READ)
+  modeConverter: SecurityContext => SecurityContext = s => s.withMode(StaticAccessMode.READ),
+  cypherVersion: CypherVersion
 ) extends AdministrationChainedExecutionPlan(source) {
 
   override def runSpecific(
@@ -74,7 +76,7 @@ case class SystemCommandExecutionPlan(
 
       val systemSubscriber = new SystemCommandQuerySubscriber(ctx, subscriber, new QueryHandler(), updatedParams)
       val execution = normalExecutionEngine.executeSubquery(
-        queryPrefix + query,
+        formatQuery(query, cypherVersion),
         updatedParams,
         tc,
         isOutermostQuery = false,
@@ -95,7 +97,7 @@ case class SystemCommandExecutionPlan(
     }
   }
 
-  override def runtimeName: RuntimeName = SystemCommandRuntimeName
+  override def runtimeName: RuntimeName = RuntimeName.SYSTEM
 
   override def metadata: Seq[Argument] = Nil
 

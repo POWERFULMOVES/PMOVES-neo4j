@@ -21,11 +21,8 @@ package org.neo4j.dbms.archive;
 
 import static java.util.Collections.emptySet;
 import static org.apache.commons.lang3.ArrayUtils.EMPTY_BYTE_ARRAY;
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.neo4j.dbms.archive.StandardCompressionFormat.GZIP;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -38,8 +35,9 @@ import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.OS;
-import org.neo4j.function.Predicates;
+import org.neo4j.dbms.archive.Dumper.FileOutput;
 import org.neo4j.io.fs.FileSystemAbstraction;
+import org.neo4j.logging.NullLogProvider;
 import org.neo4j.test.extension.DisabledForRoot;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
@@ -58,33 +56,45 @@ class DumperTest {
         Path directory = testDirectory.directory("a-directory");
         Path archive = testDirectory.file("the-archive.dump");
         Files.write(archive, EMPTY_BYTE_ARRAY);
-        FileAlreadyExistsException exception = assertThrows(FileAlreadyExistsException.class, () -> {
-            Dumper dumper = new Dumper(filesystem);
-            dumper.dump(directory, directory, dumper.openForDump(archive), GZIP, Predicates.alwaysFalse());
-        });
-        assertEquals(archive.toString(), exception.getMessage());
+        assertThatThrownBy(() -> {
+                    Dumper dumper = new Dumper(filesystem);
+                    dumper.dump(
+                            FileOutput.of(filesystem, archive),
+                            new DumpGzipFormatV1(),
+                            Dumper.collectManifest(directory));
+                })
+                .isInstanceOf(FileAlreadyExistsException.class)
+                .hasMessage(archive.toString());
     }
 
     @Test
     void shouldGiveAClearErrorMessageIfTheDirectoryDoesntExist() {
         Path directory = testDirectory.file("a-directory");
         Path archive = testDirectory.file("the-archive.dump");
-        NoSuchFileException exception = assertThrows(NoSuchFileException.class, () -> {
-            Dumper dumper = new Dumper(filesystem);
-            dumper.dump(directory, directory, dumper.openForDump(archive), GZIP, Predicates.alwaysFalse());
-        });
-        assertEquals(directory.toString(), exception.getMessage());
+        assertThatThrownBy(() -> {
+                    Dumper dumper = new Dumper(filesystem);
+                    dumper.dump(
+                            FileOutput.of(filesystem, archive),
+                            new DumpGzipFormatV1(),
+                            Dumper.collectManifest(directory));
+                })
+                .isInstanceOf(NoSuchFileException.class)
+                .hasMessage(directory.toString());
     }
 
     @Test
     void shouldGiveAClearErrorMessageIfTheArchivesParentDirectoryDoesntExist() {
         Path directory = testDirectory.directory("a-directory");
         Path archive = testDirectory.file("subdir").resolve("the-archive.dump");
-        NoSuchFileException exception = assertThrows(NoSuchFileException.class, () -> {
-            Dumper dumper = new Dumper(filesystem);
-            dumper.dump(directory, directory, dumper.openForDump(archive), GZIP, Predicates.alwaysFalse());
-        });
-        assertEquals(archive.getParent().toString(), exception.getMessage());
+        assertThatThrownBy(() -> {
+                    Dumper dumper = new Dumper(filesystem);
+                    dumper.dump(
+                            FileOutput.of(filesystem, archive),
+                            new DumpGzipFormatV1(),
+                            Dumper.collectManifest(directory));
+                })
+                .isInstanceOf(NoSuchFileException.class)
+                .hasMessage(archive.getParent().toString());
     }
 
     @Test
@@ -92,11 +102,15 @@ class DumperTest {
         Path directory = testDirectory.directory("a-directory");
         Path archive = testDirectory.file("subdir").resolve("the-archive.dump");
         Files.write(archive.getParent(), EMPTY_BYTE_ARRAY);
-        FileSystemException exception = assertThrows(FileSystemException.class, () -> {
-            Dumper dumper = new Dumper(filesystem);
-            dumper.dump(directory, directory, dumper.openForDump(archive), GZIP, Predicates.alwaysFalse());
-        });
-        assertEquals(archive.getParent() + ": Not a directory", exception.getMessage());
+        assertThatThrownBy(() -> {
+                    Dumper dumper = new Dumper(filesystem);
+                    dumper.dump(
+                            FileOutput.of(filesystem, archive),
+                            new DumpGzipFormatV1(),
+                            Dumper.collectManifest(directory));
+                })
+                .isInstanceOf(FileSystemException.class)
+                .hasMessage(archive.getParent() + ": Not a directory");
     }
 
     @Test
@@ -107,11 +121,15 @@ class DumperTest {
         Path archive = testDirectory.file("subdir").resolve("the-archive.dump");
         Files.createDirectories(archive.getParent());
         try (Closeable ignored = TestUtils.withPermissions(archive.getParent(), emptySet())) {
-            AccessDeniedException exception = assertThrows(AccessDeniedException.class, () -> {
-                Dumper dumper = new Dumper(filesystem);
-                dumper.dump(directory, directory, dumper.openForDump(archive), GZIP, Predicates.alwaysFalse());
-            });
-            assertEquals(archive.getParent().toString(), exception.getMessage());
+            assertThatThrownBy(() -> {
+                        Dumper dumper = new Dumper(filesystem);
+                        dumper.dump(
+                                FileOutput.of(filesystem, archive),
+                                new DumpGzipFormatV1(),
+                                Dumper.collectManifest(directory));
+                    })
+                    .isInstanceOf(AccessDeniedException.class)
+                    .hasMessage(archive.getParent().toString());
         }
     }
 
@@ -127,10 +145,10 @@ class DumperTest {
 
         Path archive = testDirectory.file("the-archive.dump");
         Dumper dumper = new Dumper(filesystem);
-        dumper.dump(db, archive, GZIP, false);
+        dumper.dump(FileOutput.of(filesystem, archive), new DumpGzipFormatV1(), Dumper.collectManifest(db));
 
         // Source unchanged (no diffs)
-        assertArrayEquals(data, Files.readAllBytes(storeFile));
+        assertThat(Files.readAllBytes(storeFile)).isEqualTo(data);
     }
 
     @Test
@@ -144,10 +162,10 @@ class DumperTest {
         Files.write(storeFile, data);
 
         Path archive = testDirectory.file("the-archive.dump");
-        Dumper dumper = new Dumper(filesystem);
-        dumper.dump(db, archive, GZIP, true);
+        Dumper dumper = new Dumper(filesystem, NullLogProvider.getInstance(), true);
+        dumper.dump(FileOutput.of(filesystem, archive), new DumpGzipFormatV1(), Dumper.collectManifest(db));
 
         // Source unchanged (no diffs)
-        assertFalse(Files.exists(storeFile));
+        assertThat(Files.exists(storeFile)).isFalse();
     }
 }

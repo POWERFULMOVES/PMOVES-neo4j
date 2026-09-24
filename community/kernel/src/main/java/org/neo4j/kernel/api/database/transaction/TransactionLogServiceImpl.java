@@ -20,6 +20,7 @@
 package org.neo4j.kernel.api.database.transaction;
 
 import static java.util.Objects.requireNonNull;
+import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_CONSENSUS_INDEX;
 import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_TX_CHECKSUM;
 import static org.neo4j.util.Preconditions.checkState;
 import static org.neo4j.util.Preconditions.requirePositive;
@@ -36,28 +37,30 @@ import org.neo4j.io.fs.StoreChannel;
 import org.neo4j.kernel.BinarySupportedKernelVersions;
 import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.availability.AvailabilityGuard;
-import org.neo4j.kernel.impl.transaction.log.AppendBatchInfo;
-import org.neo4j.kernel.impl.transaction.log.AppendedChunkLogVersionLocator;
-import org.neo4j.kernel.impl.transaction.log.AppendedChunkPositionLocator;
-import org.neo4j.kernel.impl.transaction.log.CommandBatchCursor;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
-import org.neo4j.kernel.impl.transaction.log.LogicalTransactionStore;
-import org.neo4j.kernel.impl.transaction.log.NoSuchLogEntryException;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
-import org.neo4j.kernel.impl.transaction.log.entry.LogHeader;
-import org.neo4j.kernel.impl.transaction.log.entry.VersionAwareLogEntryReader;
-import org.neo4j.kernel.impl.transaction.log.files.LogFile;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
 import org.neo4j.logging.InternalLog;
 import org.neo4j.logging.InternalLogProvider;
+import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.CommandReaderFactory;
-import org.neo4j.storageengine.api.MetadataProvider;
+import org.neo4j.storageengine.api.LogMetadataProvider;
 import org.neo4j.storageengine.api.TransactionId;
+import org.neo4j.wal.AppendBatchInfo;
+import org.neo4j.wal.AppendedChunkConsensusIndexLocator;
+import org.neo4j.wal.AppendedChunkLogVersionLocator;
+import org.neo4j.wal.AppendedChunkPositionLocator;
+import org.neo4j.wal.CommandBatchCursor;
+import org.neo4j.wal.LogFile;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.LogPosition;
+import org.neo4j.wal.LogicalTransactionStore;
+import org.neo4j.wal.NoSuchLogEntryException;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
+import org.neo4j.wal.entry.LogHeader;
+import org.neo4j.wal.entry.VersionAwareLogEntryReader;
 
 public class TransactionLogServiceImpl implements TransactionLogService {
     private final LogicalTransactionStore transactionStore;
-    private final MetadataProvider metadataProvider;
+    private final LogMetadataProvider metadataProvider;
 
     private final Lock pruneLock;
     private final LogFile logFile;
@@ -68,7 +71,7 @@ public class TransactionLogServiceImpl implements TransactionLogService {
     private final BinarySupportedKernelVersions binarySupportedKernelVersions;
 
     public TransactionLogServiceImpl(
-            MetadataProvider metadataProvider,
+            LogMetadataProvider metadataProvider,
             LogFiles logFiles,
             LogicalTransactionStore transactionStore,
             Lock pruneLock,
@@ -116,10 +119,11 @@ public class TransactionLogServiceImpl implements TransactionLogService {
             OptionalLong appendIndex,
             Optional<Byte> kernelVersionByte,
             int checksum,
-            long offset)
+            long offset,
+            Optional<Byte> logFormatByte)
             throws IOException {
         checkState(!availabilityGuard.isAvailable(), "Database should not be available.");
-        return logFile.append(byteBuffer, appendIndex, kernelVersionByte, checksum, offset);
+        return logFile.append(byteBuffer, appendIndex, kernelVersionByte, checksum, offset, logFormatByte);
     }
 
     @Override
@@ -132,25 +136,43 @@ public class TransactionLogServiceImpl implements TransactionLogService {
     public void appendCheckpoint(TransactionId transactionId, long appendIndex, String reason) throws IOException {
         checkState(!availabilityGuard.isAvailable(), "Database should not be available.");
         long appendIndexToLookup = appendIndex + 1;
-        var logHeader = requireNonNull(logFile.extractHeader(logFile.getHighestLogVersion()));
+        var logHeader =
+                requireNonNull(logFile.extractHeader(logFile.getLogRangeInfo().highestVersion()));
 
         var lastHeaderPosition = logHeader.getStartPosition();
         var versionLocator = new AppendedChunkLogVersionLocator(appendIndexToLookup);
         logFile.accept(versionLocator);
 
-        var logEntryReader = new VersionAwareLogEntryReader(commandReaderFactory, binarySupportedKernelVersions);
+        var logEntryReader = new VersionAwareLogEntryReader(
+                commandReaderFactory, binarySupportedKernelVersions, EmptyMemoryTracker.INSTANCE);
         var transactionPositionLocator = new AppendedChunkPositionLocator(appendIndexToLookup, logEntryReader);
         logFile.accept(
                 transactionPositionLocator,
                 versionLocator.getOptionalLogPosition().orElse(lastHeaderPosition));
         var position = transactionPositionLocator.getLogPositionOrThrow();
+        var consensusIndex = lookupConsensusIndex(appendIndex, logEntryReader);
 
         log.info(
-                "Writing checkpoint to force recovery from append index:`%d` from specific position:`%s` with transaction id:'%s'.",
-                appendIndex, position, transactionId);
+                "Writing checkpoint to force recovery from append index:`%d` from specific position:`%s` with transaction id:'%s' and consensus index:`%d`.",
+                appendIndex, position, transactionId, consensusIndex);
 
-        // Write checkpoint at the end of txId
-        checkPointer.forceCheckPoint(transactionId, appendIndex, position, new SimpleTriggerInfo(reason));
+        checkPointer.forceCheckPoint(
+                transactionId, appendIndex, consensusIndex, position, new SimpleTriggerInfo(reason));
+    }
+
+    private long lookupConsensusIndex(long appendIndex, VersionAwareLogEntryReader logEntryReader) throws IOException {
+        var versionLocator = new AppendedChunkLogVersionLocator(appendIndex);
+        logFile.accept(versionLocator);
+        var startPosition = versionLocator.getOptionalLogPosition();
+        if (startPosition.isEmpty()) {
+            // The batch isn't in the logs, which is expected when catching up from a member on an older version.
+            // Consensus index of the last checkpointed batch is used for mvcc databases.
+            // For normal databases, we'll use another consensus index, so it can safely be UNKNOWN_CONSENSUS_INDEX.
+            return UNKNOWN_CONSENSUS_INDEX;
+        }
+        var consensusIndexLocator = new AppendedChunkConsensusIndexLocator(appendIndex, logEntryReader);
+        logFile.accept(consensusIndexLocator, startPosition.get());
+        return consensusIndexLocator.getConsensusIndex();
     }
 
     private AppendBatchInfo getLastAppendBatch() throws IOException {
@@ -173,8 +195,9 @@ public class TransactionLogServiceImpl implements TransactionLogService {
         var channels = new ArrayList<LogChannel>(exposedChannels);
         var internalChannels = LongObjectMaps.mutable.<StoreChannel>ofInitialCapacity(exposedChannels);
         for (long version = minimalVersion; version <= highestLogVersion; version++) {
-            var startPositionAppendIndex = logFileAppendIndex(startingAppendIndex, minimalVersion, version);
-            var kernelVersion = getKernelVersion(startPositionAppendIndex);
+            LogHeader logHeader = logFile.extractHeader(version);
+            var startPositionAppendIndex = logFileAppendIndex(startingAppendIndex, minimalVersion, version, logHeader);
+            var kernelVersion = getKernelVersion(startPositionAppendIndex, logHeader);
             var readOnlyStoreChannel = new ReadOnlyStoreChannel(logFile, version);
             if (version == minimalVersion) {
                 readOnlyStoreChannel.position(minimalLogPosition.getByteOffset());
@@ -182,8 +205,9 @@ public class TransactionLogServiceImpl implements TransactionLogService {
             internalChannels.put(version, readOnlyStoreChannel);
             var endOffset =
                     version < highestLogVersion ? readOnlyStoreChannel.size() : highestLogPosition.getByteOffset();
-            var lastAppendIndex =
-                    version < highestLogVersion ? getHeaderLastAppendIndex(version + 1) : highestAppendIndex;
+            var lastAppendIndex = version < highestLogVersion
+                    ? logFile.extractHeader(version + 1).getLastAppendIndex()
+                    : highestAppendIndex;
             channels.add(new LogChannel(
                     startPositionAppendIndex,
                     kernelVersion,
@@ -191,29 +215,37 @@ public class TransactionLogServiceImpl implements TransactionLogService {
                     readOnlyStoreChannel.position(),
                     endOffset,
                     lastAppendIndex,
-                    logFilePrevChecksum(startPositionAppendIndex, minimalVersion, version)));
+                    logFilePrevChecksum(startPositionAppendIndex, minimalVersion, version, logHeader),
+                    logHeader.getLogFormatVersion()));
         }
         logFile.registerExternalReaders(internalChannels);
         return channels;
     }
 
-    private long logFileAppendIndex(long startingAppendIndex, long minimalVersion, long version) throws IOException {
-        return version == minimalVersion ? startingAppendIndex : getHeaderLastAppendIndex(version) + 1;
+    private long logFileAppendIndex(long startingAppendIndex, long minimalVersion, long version, LogHeader logHeader) {
+        return version == minimalVersion ? startingAppendIndex : logHeader.getLastAppendIndex() + 1;
     }
 
-    // Get the prev checksum if it is easy. If we are in the middle of a file it is ignored for now
-    // because other side should not rotate on it anyway.
-    private int logFilePrevChecksum(long startingAppendIndex, long minimalVersion, long version) throws IOException {
-        LogHeader logHeader = logFile.extractHeader(version);
+    private int logFilePrevChecksum(long startingAppendIndex, long minimalVersion, long version, LogHeader logHeader)
+            throws IOException {
         return version != minimalVersion
                 ? logHeader.getPreviousLogFileChecksum()
-                : (logHeader.getLastAppendIndex() + 1 != startingAppendIndex
-                        ? UNKNOWN_TX_CHECKSUM
-                        : logHeader.getPreviousLogFileChecksum());
+                : logFilePrevChecksumMiddleOfFile(logHeader, startingAppendIndex);
     }
 
-    private long getHeaderLastAppendIndex(long version) throws IOException {
-        return logFile.extractHeader(version).getLastAppendIndex();
+    private int logFilePrevChecksumMiddleOfFile(LogHeader logHeader, long startingAppendIndex) throws IOException {
+        if (!logHeader.getLogFormatVersion().usesSegments()) {
+            // Pre-envelope files doesn't need the checksum for the header on the receiver anyway, let's skip this
+            // lookup
+            return UNKNOWN_TX_CHECKSUM;
+        }
+        try (CommandBatchCursor commandBatchCursor = transactionStore.getCommandBatches(startingAppendIndex)) {
+            commandBatchCursor.next();
+            return commandBatchCursor.get().previousChecksum();
+        } catch (NoSuchLogEntryException e) {
+            throw new IllegalArgumentException(
+                    "Append index " + startingAppendIndex + " not found in transaction logs.", e);
+        }
     }
 
     private LogPosition getLogPosition(long appendIndex) throws IOException {
@@ -227,13 +259,22 @@ public class TransactionLogServiceImpl implements TransactionLogService {
     private AppendBatchInfo getAppendBatchInfo(long appendIndex) throws IOException {
         try (CommandBatchCursor commandBatchCursor = transactionStore.getCommandBatches(appendIndex)) {
             commandBatchCursor.next();
-            return new AppendBatchInfo(appendIndex, commandBatchCursor.position());
+            long consensusIndex = commandBatchCursor.get().commandBatch().consensusIndex();
+            return new AppendBatchInfo(appendIndex, commandBatchCursor.position(), consensusIndex);
         } catch (NoSuchLogEntryException e) {
             throw new IllegalArgumentException("Append index " + appendIndex + " not found in transaction logs.", e);
         }
     }
 
-    private KernelVersion getKernelVersion(long appendIndex) throws IOException {
+    private KernelVersion getKernelVersion(long appendIndex, LogHeader logHeader) throws IOException {
+        KernelVersion logHeaderKernelVersion = logHeader.getKernelVersion();
+        // From the log format with kernel version in the header, each file is guaranteed to only contain entries on one
+        // version.
+        if (logHeaderKernelVersion != null) {
+            return logHeaderKernelVersion;
+        }
+        // The older logs can contain more than one kernel version per file so let's find the exact entry and get
+        // version from there.
         try (CommandBatchCursor commandBatchCursor = transactionStore.getCommandBatches(appendIndex)) {
             if (!commandBatchCursor.next()) {
                 throw new NoSuchLogEntryException(appendIndex);

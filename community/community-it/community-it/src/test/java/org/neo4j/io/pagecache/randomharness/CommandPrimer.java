@@ -21,6 +21,7 @@ package org.neo4j.io.pagecache.randomharness;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 
 import java.nio.file.OpenOption;
@@ -39,6 +40,7 @@ import org.neo4j.io.pagecache.PageCursor;
 import org.neo4j.io.pagecache.PagedFile;
 import org.neo4j.io.pagecache.TinyLockManager;
 import org.neo4j.io.pagecache.impl.muninn.MuninnPageCache;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 
@@ -81,8 +83,7 @@ class CommandPrimer {
         filesTouched = new HashSet<>();
         filesTouched.addAll(mappedFiles);
         recordsWrittenTo = new HashMap<>();
-        var reservedBytes = cache.pageReservedBytes(openOptions);
-        var payloadSize = cache.pageSize() - reservedBytes;
+        var payloadSize = cache.pagePayloadSize(openOptions);
         recordsPerPage = payloadSize / recordFormat.getRecordSize();
         maxRecordCount = filePageCount * recordsPerPage;
         recordLocks = new TinyLockManager();
@@ -115,7 +116,7 @@ class CommandPrimer {
     }
 
     private Action touchFile() {
-        if (mappedFiles.size() > 0) {
+        if (!mappedFiles.isEmpty()) {
             final Path file = mappedFiles.get(rng.nextInt(mappedFiles.size()));
             return new Action(Command.Touch, "[file=%s]", file.getFileName()) {
                 @Override
@@ -144,14 +145,14 @@ class CommandPrimer {
     }
 
     private Action flushFile() {
-        if (mappedFiles.size() > 0) {
+        if (!mappedFiles.isEmpty()) {
             final Path file = mappedFiles.get(rng.nextInt(mappedFiles.size()));
             return new Action(Command.FlushFile, "[file=%s]", file.getFileName()) {
                 @Override
                 public void perform() throws Exception {
                     PagedFile pagedFile = fileMap.get(file);
                     if (pagedFile != null) {
-                        pagedFile.flushAndForce(FileFlushEvent.NULL);
+                        pagedFile.flushAndForce(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR);
                     }
                 }
             };
@@ -169,13 +170,13 @@ class CommandPrimer {
         return new Action(Command.MapFile, "[file=%s]", file) {
             @Override
             public void perform() throws Exception {
-                fileMap.put(file, cache.map(file, filePageSize, DEFAULT_DATABASE_NAME, openOptions));
+                fileMap.put(file, cache.map(new StoreFile(file), filePageSize, DEFAULT_DATABASE_NAME, openOptions));
             }
         };
     }
 
     private Action unmapFile() {
-        if (mappedFiles.size() > 0) {
+        if (!mappedFiles.isEmpty()) {
             final Path file = mappedFiles.remove(rng.nextInt(mappedFiles.size()));
             return new Action(Command.UnmapFile, "[file=%s]", file) {
                 @Override

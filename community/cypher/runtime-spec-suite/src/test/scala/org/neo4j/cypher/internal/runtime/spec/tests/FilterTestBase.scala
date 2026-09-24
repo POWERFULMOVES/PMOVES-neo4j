@@ -25,11 +25,46 @@ import org.neo4j.cypher.internal.runtime.spec.Edition
 import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 
+object FilterTestBase
+
 abstract class FilterTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
   sizeHint: Int
 ) extends RuntimeTestSuite[CONTEXT](edition, runtime) {
+
+  test("should filter on a single variable") {
+
+    val label = "Label"
+    givenGraph {
+      nodeGraph(sizeHint, label)
+    }
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("n")
+      .filter("n <> n")
+      .nodeCountFromCountStore("n", Seq(Some(label)))
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    runtimeResult should beColumns("n").withNoRows()
+  }
+
+  test("should filter on a single node") {
+
+    givenGraph {
+      nodeGraph(sizeHint, "Label")
+    }
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("n")
+      .filter("n <> n")
+      .allNodeScan("n")
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    runtimeResult should beColumns("n").withNoRows()
+  }
 
   test("should filter with (cached) IN expression") {
     // given

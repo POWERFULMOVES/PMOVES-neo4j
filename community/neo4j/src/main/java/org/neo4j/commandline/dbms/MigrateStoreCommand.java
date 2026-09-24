@@ -25,6 +25,8 @@ import static org.neo4j.configuration.GraphDatabaseSettings.SYSTEM_DATABASE_NAME
 import static org.neo4j.configuration.GraphDatabaseSettings.pagecache_memory;
 import static org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker.readOnly;
 import static org.neo4j.io.ByteUnit.bytesToString;
+import static org.neo4j.kernel.database.DatabaseReferenceImpl.GraphShard.isGraphShardName;
+import static org.neo4j.kernel.database.DatabaseReferenceImpl.PropertyShard.isPropertyShardName;
 import static org.neo4j.kernel.impl.pagecache.ConfigurableStandalonePageCacheFactory.createPageCache;
 import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_ID;
 
@@ -33,12 +35,14 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.StringJoiner;
 import org.neo4j.cli.AbstractAdminCommand;
 import org.neo4j.cli.CommandFailedException;
 import org.neo4j.cli.Converters;
+import org.neo4j.cli.Converters.MaxOffHeapMemoryConverter;
 import org.neo4j.cli.ExecutionContext;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
@@ -62,7 +66,7 @@ import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.context.FixedVersionContextSupplier;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
-import org.neo4j.kernel.KernelVersion;
+import org.neo4j.kernel.KernelVersionProviders;
 import org.neo4j.kernel.database.DatabaseTracers;
 import org.neo4j.kernel.extension.DatabaseExtensions;
 import org.neo4j.kernel.extension.ExtensionFactory;
@@ -72,7 +76,6 @@ import org.neo4j.kernel.impl.factory.DbmsInfo;
 import org.neo4j.kernel.impl.scheduler.JobSchedulerFactory;
 import org.neo4j.kernel.impl.storemigration.StoreMigrator;
 import org.neo4j.kernel.impl.storemigration.UnableToMigrateException;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
 import org.neo4j.kernel.impl.transaction.state.StaticIndexProviderMap;
 import org.neo4j.kernel.impl.transaction.state.StaticIndexProviderMapFactory;
 import org.neo4j.kernel.impl.util.Validators;
@@ -92,6 +95,7 @@ import org.neo4j.storageengine.api.DeprecatedFormatWarning;
 import org.neo4j.storageengine.api.StorageEngineFactory;
 import org.neo4j.token.TokenHolders;
 import org.neo4j.token.api.NamedToken;
+import org.neo4j.wal.LogTailMetadata;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 import picocli.CommandLine.Parameters;
@@ -103,6 +107,9 @@ import picocli.CommandLine.Parameters;
                 + "It always migrates the database to the latest combination of major and minor "
                 + "version of the target format.")
 public class MigrateStoreCommand extends AbstractAdminCommand {
+    private static final String OPTION_PAGECACHE = "--pagecache";
+    private static final String OPTION_FORCE_BTREE = "--force-btree-indexes-to-range";
+
     @Parameters(
             arity = "1",
             paramLabel = "<database>",
@@ -122,22 +129,33 @@ public class MigrateStoreCommand extends AbstractAdminCommand {
     private String formatToMigrateTo;
 
     @Option(
-            names = "--pagecache",
+            names = OPTION_PAGECACHE,
             paramLabel = "<size>",
-            description = "The size of the page cache to use for the migration process. "
-                    + "The general rule is that values up to the size of the database proportionally increase "
-                    + "performance.")
+            description =
+                    "(Deprecated in favor of --max-off-heap-memory) The size of the page cache to use for the migration process. "
+                            + "The general rule is that values up to the size of the database proportionally increase "
+                            + "performance.")
     private String pagecacheMemory;
 
     @Option(
-            names = "--force-btree-indexes-to-range",
+            names = MaxOffHeapMemoryConverter.OPTION_NAME,
+            paramLabel = "<size>",
+            defaultValue = "90%",
+            converter = Converters.MaxOffHeapMemoryConverter.class,
+            description = MaxOffHeapMemoryConverter.DESCRIPTION)
+    private long maxOffHeapMemory;
+
+    @Option(
+            names = OPTION_FORCE_BTREE,
             fallbackValue = "true",
-            description = "Special option for automatically turning all BTREE indexes/constraints into RANGE. "
-                    + "Be aware that RANGE indexes are not always the optimal replacement of BTREEs "
-                    + "and performance may be affected while the new indexes are populated. "
-                    + "See the Neo4j v5 migration guide online for more information. "
-                    + "The newly created indexes will be populated in the background on the first database start up "
-                    + "following the migration and users should monitor the successful completion of that process.")
+            description =
+                    "(Deprecated and will be removed. This option was only applicable when migrating from v4 to v5.) "
+                            + "Special option for automatically turning all BTREE indexes/constraints into RANGE. "
+                            + "Be aware that RANGE indexes are not always the optimal replacement of BTREEs "
+                            + "and performance may be affected while the new indexes are populated. "
+                            + "See the Neo4j v5 migration guide online for more information. "
+                            + "The newly created indexes will be populated in the background on the first database start up "
+                            + "following the migration and users should monitor the successful completion of that process.")
     private boolean forceBtreeToRange;
 
     @Option(
@@ -166,6 +184,16 @@ public class MigrateStoreCommand extends AbstractAdminCommand {
 
     @Override
     protected void execute() {
+        if (pagecacheMemory != null) {
+            ctx.err()
+                    .printf(
+                            "%s option is deprecated in favor of %s",
+                            OPTION_PAGECACHE, MaxOffHeapMemoryConverter.OPTION_NAME);
+        }
+        if (forceBtreeToRange) {
+            ctx.err().printf("%s option is deprecated and will be removed.", OPTION_FORCE_BTREE);
+        }
+
         Config config = buildConfig();
         try (Log4jLogProvider logProvider = new Log4jLogProvider(ctx.out(), verbose ? Level.DEBUG : Level.INFO)) {
             migrateStore(config, logProvider);
@@ -200,15 +228,47 @@ public class MigrateStoreCommand extends AbstractAdminCommand {
                 LifeSupport life = new LifeSupport();
                 String formatForDb = formatToMigrateTo;
 
-                try (JobScheduler jobScheduler = life.add(JobSchedulerFactory.createInitialisedScheduler());
-                        PageCache pageCache = createPageCache(fs, config, jobScheduler, pageCacheTracer)) {
+                long migrationPageCacheSize;
+                long remainingMaxOffHeapMemory;
 
+                resultLog.info("Number of CPUs: " + Runtime.getRuntime().availableProcessors());
+
+                if (pagecacheMemory == null) {
+                    // Page cache sizing reasoning unless --pagecache option is provided:
+                    // Regardless of what will take place during migration there's going to be some need for a page
+                    // cache.
+                    // - For minor upgrades only a small page cache is needed generally
+                    // - For migration across formats (within same storage engine, or across) there's generally a
+                    //   need for reading from the source db and writing a new migrated db. It has been observed
+                    //   that the ratio of memory in these scenarios is 1/10th for reading and 9/10ths for writing
+                    //   is a good split.
+                    // Therefor always starting a "migration" page cache of 1/10th of the max off-heap memory limit
+                    // caters for all scenarios, and the remaining 9/10ths limit is given to the migration participants
+                    // so that they know how much additional memory they can use if they're doing bigger things
+                    // (i.e. full migration of db)
+                    migrationPageCacheSize = Math.max(ByteUnit.mebiBytes(8), maxOffHeapMemory / 10);
+                    remainingMaxOffHeapMemory =
+                            Math.max(ByteUnit.mebiBytes(8), maxOffHeapMemory - migrationPageCacheSize);
+                    resultLog.info("Max off-heap memory: " + bytesToString(maxOffHeapMemory));
+                } else {
+                    // Deprecated and legacy behavior:
+                    // This command will allocate a page cache of the specified size and use it for everything
+                    // during migration, i.e. for reading and for writing (even the importer case)
+                    migrationPageCacheSize = ByteUnit.parse(pagecacheMemory);
+                    remainingMaxOffHeapMemory = -1;
+                    resultLog.info("Page cache size: " + bytesToString(migrationPageCacheSize));
+                }
+
+                try (JobScheduler jobScheduler = life.add(JobSchedulerFactory.createInitialisedScheduler());
+                        PageCache pageCache = createPageCache(
+                                fs, withPageCacheSize(config, migrationPageCacheSize), jobScheduler, pageCacheTracer)) {
                     DatabaseLayout databaseLayout = Neo4jLayout.of(config).databaseLayout(dbName);
                     checkDatabaseExistence(databaseLayout);
 
-                    resultLog.info("Number of CPUs: " + Runtime.getRuntime().availableProcessors());
-                    resultLog.info(
-                            "Page cache size: " + bytesToString(pageCache.maxCachedPages() * pageCache.pageSize()));
+                    if (isGraphShardName(dbName) || isPropertyShardName(dbName)) {
+                        throw new CommandFailedException("Can't migrate a sharded database");
+                    }
+
                     resultLog.info("Store size: "
                             + bytesToString(FileSystemUtils.size(fs, databaseLayout.databaseDirectory())));
 
@@ -219,10 +279,15 @@ public class MigrateStoreCommand extends AbstractAdminCommand {
                                 getCurrentStorageEngineFactory(fs, databaseLayout);
 
                         if (SYSTEM_DATABASE_NAME.equals(dbName)) {
-                            formatForDb = "aligned";
+                            formatForDb =
+                                    currentStorageEngineFactory.multiVersioned() ? "multiversion_block" : "aligned";
 
                             checkAllowedToMigrateSystemDb(
                                     currentStorageEngineFactory, fs, databaseLayout, pageCache, contextFactory);
+                        }
+
+                        if (Objects.equals(formatForDb, "spd_block")) {
+                            throw new CommandFailedException("Can't migrate to a sharded database");
                         }
 
                         StorageEngineFactory targetStorageEngineFactory = formatForDb == null
@@ -284,7 +349,10 @@ public class MigrateStoreCommand extends AbstractAdminCommand {
                                         currentStorageEngineFactory,
                                         DatabaseTracers.EMPTY,
                                         databaseLayout,
-                                        memoryTracker)));
+                                        memoryTracker)),
+                                remainingMaxOffHeapMemory,
+                                ctx.out(),
+                                verbose);
 
                         storeMigrator.migrateIfNeeded(formatForDb, forceBtreeToRange, keepNodeIds);
                     } catch (FileLockException e) {
@@ -327,6 +395,13 @@ public class MigrateStoreCommand extends AbstractAdminCommand {
             resultLog.error(failedDbs.toString());
             throw new CommandFailedException(failedDbs.toString(), exceptions);
         }
+    }
+
+    private static Config withPageCacheSize(Config config, long migrationPageCacheSize) {
+        return Config.newBuilder()
+                .fromConfig(config)
+                .set(pagecache_memory, migrationPageCacheSize)
+                .build();
     }
 
     record FailedMigration(String dbName, Exception e) {}
@@ -393,7 +468,7 @@ public class MigrateStoreCommand extends AbstractAdminCommand {
             // If empty tx logs are allowed, and we don't have tx logs we fall back to the latest kernel version.
             // That should be safe since we are trying to migrate to that version anyway.
             return new LogTailExtractor(fs, config, engineFactory, databaseTracers)
-                    .getTailMetadata(layout, memoryTracker, () -> KernelVersion.getLatestVersion(config));
+                    .getTailMetadata(layout, memoryTracker, KernelVersionProviders.latestFromConfig(config));
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
@@ -416,11 +491,7 @@ public class MigrateStoreCommand extends AbstractAdminCommand {
 
     private Config buildConfig() {
         try {
-            var builder = createPrefilledConfigBuilder();
-            if (pagecacheMemory != null) {
-                builder.set(pagecache_memory, ByteUnit.parse(pagecacheMemory));
-            }
-            return builder.build();
+            return createPrefilledConfigBuilder().build();
         } catch (Exception e) {
             throw new CommandFailedException(e.getMessage(), e);
         }
@@ -459,6 +530,7 @@ public class MigrateStoreCommand extends AbstractAdminCommand {
         return life.add(StaticIndexProviderMapFactory.create(
                 life,
                 config,
+                KernelVersionProviders.latestFromConfig(config),
                 pageCache,
                 fs,
                 logService,

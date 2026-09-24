@@ -19,24 +19,27 @@
  */
 package org.neo4j.collection.trackable;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import org.eclipse.collections.api.LongIterable;
+import org.eclipse.collections.api.list.primitive.MutableLongList;
+import org.eclipse.collections.impl.factory.primitive.LongLists;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.collection.PrimitiveLongResourceIterator;
 import org.neo4j.memory.LocalMemoryTracker;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class HeapTrackingLongArrayListTest {
     private final MemoryTracker memoryTracker = new LocalMemoryTracker();
     private HeapTrackingLongArrayList aList;
@@ -148,5 +151,87 @@ class HeapTrackingLongArrayListTest {
             assertEquals(longArray[i++], iterator.next());
         }
         assertEquals(i, longArray.length);
+    }
+
+    @Test
+    void equalsAndHashCode() {
+        try (var a = HeapTrackingLongArrayList.newLongArrayList(memoryTracker);
+                var b = HeapTrackingLongArrayList.newLongArrayList(memoryTracker)) {
+            // Empty lists are equal
+            assertEquals(a, b);
+            assertEquals(a.hashCode(), b.hashCode());
+
+            a.addAll(1L, 2L, 3L);
+            b.addAll(1L, 2L, 3L);
+            // Same elements, potentially different backing-array capacities
+            assertEquals(a, b);
+            assertEquals(a.hashCode(), b.hashCode());
+
+            b.add(4L);
+            assertFalse(a.equals(b));
+        }
+    }
+
+    @Test
+    void sortThis() {
+        try (HeapTrackingLongArrayList list = HeapTrackingLongArrayList.newLongArrayList(memoryTracker)) {
+            // Empty list is a no-op and returns this
+            assertSame(list, list.sortThis());
+
+            // Unsorted list is sorted in place
+            list.addAll(5L, 1L, 3L, 2L);
+            list.sortThis();
+            assertEquals(1L, list.get(0));
+            assertEquals(2L, list.get(1));
+            assertEquals(3L, list.get(2));
+            assertEquals(5L, list.get(3));
+
+            // Already-sorted list is unchanged
+            list.sortThis();
+            assertEquals(1L, list.get(0));
+            assertEquals(2L, list.get(1));
+            assertEquals(3L, list.get(2));
+            assertEquals(5L, list.get(3));
+        }
+    }
+
+    @Test
+    void toArray() {
+        try (HeapTrackingLongArrayList list = HeapTrackingLongArrayList.newLongArrayList(memoryTracker)) {
+            list.addAll(3L, 1L, 2L);
+            long[] arr = list.toArray();
+            assertThat(arr).isEqualTo(new long[] {3L, 1L, 2L});
+
+            // Returned array is a copy, not an alias of internal state
+            arr[0] = 99L;
+            assertEquals(3L, list.get(0));
+        }
+    }
+
+    @Test
+    void asLongIterable() {
+        try (HeapTrackingLongArrayList trackedList = HeapTrackingLongArrayList.newLongArrayList(memoryTracker)) {
+            // Given
+            LongIterable list = trackedList;
+            // Then
+            assertThat(list.toArray()).isEmpty();
+            assertThat(list.size()).isZero();
+            assertThat(list.makeString()).isEmpty();
+
+            // When
+            trackedList.addAll(3, 2, 1);
+            // Then
+            assertThat(list.toArray()).isEqualTo(new long[] {3, 2, 1});
+            assertThat(list.size()).isEqualTo(3);
+            assertThat(list.contains(2)).isTrue();
+            assertThat(list.contains(4)).isFalse();
+            assertThat(list.min()).isEqualTo(1);
+            assertThat(list.max()).isEqualTo(3);
+            assertThat(list.sum()).isEqualTo(6);
+            MutableLongList otherList = LongLists.mutable.empty();
+            list.forEach(otherList::add);
+            assertThat(otherList.toArray()).isEqualTo(new long[] {3, 2, 1});
+            assertThat(list.makeString()).isEqualTo("3, 2, 1");
+        }
     }
 }

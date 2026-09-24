@@ -22,5 +22,5 @@ package org.neo4j.kernel.impl.api.index.sampling;
 import org.neo4j.kernel.impl.api.index.IndexProxy;
 
 public interface IndexSamplingJobFactory {
-    IndexSamplingJob create(long indexId, IndexProxy indexProxy);
+    IndexSamplingTask create(long indexId, IndexProxy indexProxy);
 }

@@ -22,27 +22,30 @@ package org.neo4j.cypher.internal
 import org.neo4j.cypher.internal.ast.semantics.CachableSemanticTable
 import org.neo4j.cypher.internal.compiler.ExecutionModel
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
+import org.neo4j.cypher.internal.notification.InternalNotification
+import org.neo4j.cypher.internal.notification.RecordingNotificationLogger
+import org.neo4j.cypher.internal.notification.RuntimeUnsupportedNotification
 import org.neo4j.cypher.internal.options.CypherDebugOptions
 import org.neo4j.cypher.internal.options.CypherInterpretedPipesFallbackOption
 import org.neo4j.cypher.internal.options.CypherOperatorEngineOption
 import org.neo4j.cypher.internal.options.CypherRuntimeOption
+import org.neo4j.cypher.internal.planner.spi.IndexComparatorFactory
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.EffectiveCardinalities
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.LeveragedOrders
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.ProvidedOrders
+import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.StableLeafPlans
 import org.neo4j.cypher.internal.planner.spi.ReadTokenContext
 import org.neo4j.cypher.internal.runtime.CypherRuntimeConfiguration
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
-import org.neo4j.cypher.internal.util.InternalNotification
-import org.neo4j.cypher.internal.util.RecordingNotificationLogger
 import org.neo4j.cypher.internal.util.attribution.IdGen
 import org.neo4j.exceptions.CantCompileQueryException
 import org.neo4j.exceptions.RuntimeUnsupportedException
 import org.neo4j.internal.kernel.api.Procedures
 import org.neo4j.internal.kernel.api.SchemaRead
 import org.neo4j.kernel.api.AssertOpen
+import org.neo4j.kernel.impl.query.TransactionalContext
 import org.neo4j.kernel.impl.query.TransactionalContext.DatabaseMode
 import org.neo4j.logging.InternalLog
-import org.neo4j.notifications.RuntimeUnsupportedNotification
 
 import java.time.Clock
 
@@ -84,6 +87,7 @@ trait CypherRuntime[-CONTEXT <: RuntimeContext] {
  * @param effectiveCardinalities effective cardinalities (estimated rows when considering selectivity imposed by a limit) of all operators in the logical plan tree
  * @param providedOrders provided order of all operators in the logical plan tree
  * @param leveragedOrders leveragedOrder of all operators in the logical plan tree
+ * @param stableLeafPlans the stable-iterator classification of each leaf plan (defaults to NonMvcc)
  * @param hasLoadCSV a flag showing if the query contains a load csv, used for tracking line numbers
  * @param doProfile `true` if a profiling query otherwise `false`
  * @param executionPlanCacheKeyHash The 32-bit hash of the cache key used to cache the execution plan
@@ -98,6 +102,7 @@ case class LogicalQuery(
   effectiveCardinalities: EffectiveCardinalities,
   providedOrders: ProvidedOrders,
   leveragedOrders: LeveragedOrders,
+  stableLeafPlans: StableLeafPlans,
   hasLoadCSV: Boolean,
   idGen: IdGen,
   doProfile: Boolean,
@@ -117,6 +122,7 @@ abstract class RuntimeContext {
   def compileExpressions: Boolean
   def log: InternalLog
   def anonymousVariableNameGenerator: AnonymousVariableNameGenerator
+  def indexComparatorFactory: IndexComparatorFactory
   def materializedEntitiesMode: Boolean
   def isCommunity: Boolean
 
@@ -136,8 +142,7 @@ trait RuntimeContextManager[+CONTEXT <: RuntimeContext] {
   def create(
     cypherVersion: CypherVersion,
     tokenContext: ReadTokenContext,
-    schemaRead: SchemaRead,
-    procedures: Procedures,
+    transactionalContext: TransactionalContext,
     clock: Clock,
     debugOptions: CypherDebugOptions,
     compileExpressions: Boolean,
@@ -145,7 +150,8 @@ trait RuntimeContextManager[+CONTEXT <: RuntimeContext] {
     operatorEngine: CypherOperatorEngineOption,
     interpretedPipesFallback: CypherInterpretedPipesFallbackOption,
     anonymousVariableNameGenerator: AnonymousVariableNameGenerator,
-    assertOpen: AssertOpen
+    executionModel: ExecutionModel,
+    indexComparatorFactory: IndexComparatorFactory
   ): CONTEXT
 
   def config: CypherRuntimeConfiguration
@@ -186,7 +192,7 @@ case class UnknownRuntime(requestedRuntime: String) extends CypherRuntime[Runtim
     context: RuntimeContext,
     databaseMode: DatabaseMode
   ): ExecutionPlan = {
-    throw CantCompileQueryException.unsupportedRuntimeInThisVersion(String.valueOf(requestedRuntime))
+    throw CantCompileQueryException.unsupportedRuntimeInCommunityEdition(String.valueOf(requestedRuntime))
   }
 }
 
@@ -207,8 +213,8 @@ class FallbackRuntime[CONTEXT <: RuntimeContext](
     case r if r.correspondingRuntimeOption.isDefined => r.correspondingRuntimeOption.get
   }
 
-  private def publicCannotCompile(originalException: Exception) = {
-    throw new RuntimeUnsupportedException(originalException.getMessage, originalException)
+  private def publicCannotCompile(originalException: CantCompileQueryException) = {
+    throw RuntimeUnsupportedException.wrapError(originalException)
   }
 
   override def compileToExecutable(
@@ -224,7 +230,7 @@ class FallbackRuntime[CONTEXT <: RuntimeContext](
     while (i < runtimes.length) {
       val runtime = runtimes(i)
 
-      if (failedAttempt != null && runtime != SchemaCommandRuntime) {
+      if (failedAttempt != null && !runtime.isInstanceOf[SchemaCommandRuntime]) {
         val (failingRuntime, message) = failedAttempt
         logger.log(RuntimeUnsupportedNotification(runtimeConf(failingRuntime), runtimeConf(runtime), message))
         failedAttempt = null
@@ -240,7 +246,7 @@ class FallbackRuntime[CONTEXT <: RuntimeContext](
           lastException = e
 
           if (
-            runtime != SchemaCommandRuntime &&
+            !runtime.isInstanceOf[SchemaCommandRuntime] &&
             requestedRuntime != CypherRuntimeOption.default &&
             i < runtimes.length - 1
           ) {

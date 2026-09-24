@@ -21,15 +21,20 @@ package org.neo4j.kernel.recovery;
 
 import static org.neo4j.kernel.recovery.RecoveryStartInformation.MISSING_LOGS;
 import static org.neo4j.kernel.recovery.RecoveryStartInformation.NO_RECOVERY_REQUIRED;
+import static org.neo4j.storageengine.AppendIndexProvider.BASE_APPEND_INDEX;
 import static org.neo4j.storageengine.api.LogVersionRepository.INITIAL_LOG_VERSION;
 
 import java.io.IOException;
+import org.neo4j.configuration.Config;
+import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.exceptions.UnderlyingStorageException;
 import org.neo4j.function.ThrowingSupplier;
-import org.neo4j.kernel.impl.transaction.log.CheckpointInfo;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
-import org.neo4j.kernel.impl.transaction.log.files.LogTailInformation;
+import org.neo4j.storageengine.api.LogVersionRepository;
+import org.neo4j.wal.CheckpointInfo;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.LogPosition;
+import org.neo4j.wal.entry.LogHeader;
+import org.neo4j.wal.files.LogTailInformation;
 
 /**
  * Utility class to find the log position to start recovery from
@@ -71,10 +76,12 @@ public class RecoveryStartInformationProvider implements ThrowingSupplier<Recove
 
     private final LogFiles logFiles;
     private final Monitor monitor;
+    private final Config config;
 
-    public RecoveryStartInformationProvider(LogFiles logFiles, Monitor monitor) {
+    RecoveryStartInformationProvider(LogFiles logFiles, Monitor monitor, Config config) {
         this.logFiles = logFiles;
         this.monitor = monitor;
+        this.config = config;
     }
 
     @Override
@@ -123,25 +130,35 @@ public class RecoveryStartInformationProvider implements ThrowingSupplier<Recove
     }
 
     private RecoveryStartInformation noCheckpointRecordRecoveryInfo(long appendIndexAfterLastCheckPoint) {
-        long lowestLogVersion = logFiles.getLogFile().getLowestLogVersion();
-        if (lowestLogVersion != INITIAL_LOG_VERSION) {
+        long lowestLogVersion = logFiles.getLogFile().getLogRangeInfo().lowestVersion();
+        if (lowestLogVersion != INITIAL_LOG_VERSION && !mergedLogWithCompleteHistory(lowestLogVersion)) {
             throw new UnderlyingStorageException("No check point found in any log file and transaction log "
                     + "files do not exist from expected version " + INITIAL_LOG_VERSION
                     + ". Lowest found log file is "
                     + lowestLogVersion + ".");
         }
         monitor.noCheckPointFound();
-        LogPosition position = tryExtractHeaderAndGetStartPosition();
+        LogPosition position = tryExtractHeader(lowestLogVersion).getStartPosition();
         return new RecoveryStartInformation(position, position, null, appendIndexAfterLastCheckPoint);
     }
 
-    private LogPosition tryExtractHeaderAndGetStartPosition() {
+    /**
+     * A merged log may legitimately start above {@link LogVersionRepository#INITIAL_LOG_VERSION}: raft bootstrap
+     * advances the file version without appending anything before it. Completeness is proven by the lowest file's
+     * own header - it records what was appended before that file, so a recorded real append index means earlier
+     * files have been pruned away and no-checkpoint recovery would silently start mid-history.
+     */
+    private boolean mergedLogWithCompleteHistory(long lowestLogVersion) {
+        return config.get(GraphDatabaseInternalSettings.merged_log)
+                && tryExtractHeader(lowestLogVersion).getLastAppendIndex() < BASE_APPEND_INDEX;
+    }
+
+    private LogHeader tryExtractHeader(long logVersion) {
         try {
-            return logFiles.getLogFile().extractHeader(INITIAL_LOG_VERSION).getStartPosition();
+            return logFiles.getLogFile().extractHeader(logVersion);
         } catch (IOException e) {
             monitor.failToExtractInitialFileHeader(e);
-            throw new UnderlyingStorageException(
-                    "Unable to read header from log file with version " + INITIAL_LOG_VERSION, e);
+            throw new UnderlyingStorageException("Unable to read header from log file with version " + logVersion, e);
         }
     }
 }

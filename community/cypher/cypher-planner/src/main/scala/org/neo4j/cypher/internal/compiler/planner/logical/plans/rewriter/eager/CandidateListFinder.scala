@@ -37,6 +37,7 @@ import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 import org.neo4j.cypher.internal.logical.plans.LogicalPlans
 import org.neo4j.cypher.internal.logical.plans.OrderedUnion
 import org.neo4j.cypher.internal.logical.plans.PathPropagatingBFS
+import org.neo4j.cypher.internal.logical.plans.RemoteBatchProperties
 import org.neo4j.cypher.internal.logical.plans.Repeat
 import org.neo4j.cypher.internal.logical.plans.RepeatOptions
 import org.neo4j.cypher.internal.logical.plans.RollUpApply
@@ -46,7 +47,8 @@ import org.neo4j.cypher.internal.logical.plans.TransactionApply
 import org.neo4j.cypher.internal.logical.plans.TransactionForeach
 import org.neo4j.cypher.internal.logical.plans.TriadicSelection
 import org.neo4j.cypher.internal.logical.plans.Union
-import org.neo4j.cypher.internal.macros.AssertMacros
+import org.neo4j.cypher.internal.logical.plans.ValueMergeJoin
+import org.neo4j.cypher.internal.macros.AssertMacros3
 import org.neo4j.cypher.internal.util.CancellationChecker
 import org.neo4j.cypher.internal.util.Ref
 import org.neo4j.cypher.internal.util.helpers.MapSupport.PowerMap
@@ -113,7 +115,10 @@ object CandidateListFinder {
      */
     def withAddedCandidate(candidate: Ref[LogicalPlan]): OpenSequence = {
       copy(
-        candidates = candidates.incl(candidate.value.id.x),
+        candidates = candidate.value match {
+          case _: RemoteBatchProperties if candidates.nonEmpty => candidates
+          case _                                               => candidates.incl(candidate.value.id.x)
+        },
         lastCandidate = Some(candidate),
         traversesEagerPlanFromLeft = traversesEagerPlanFromLeft || ((candidate, lastCandidate) match {
           case (Ref(first: EagerLogicalPlan), Some(Ref(second))) if first.lhs.contains(second) => true
@@ -233,6 +238,10 @@ object CandidateListFinder {
             emptyCandidateListsForRHSvsTopConflicts = assertHasReadOnlyRHS(plan)
           )
         case _: CartesianProduct => BinaryPlanEagerizationStrategy(
+            eagerizeLHSvsRHSConflicts = LhsVsRhsEagerization.Yes,
+            emptyCandidateListsForRHSvsTopConflicts = assertHasReadOnlyRHS(plan)
+          )
+        case _: ValueMergeJoin => BinaryPlanEagerizationStrategy(
             eagerizeLHSvsRHSConflicts = LhsVsRhsEagerization.Yes,
             emptyCandidateListsForRHSvsTopConflicts = assertHasReadOnlyRHS(plan)
           )
@@ -472,11 +481,11 @@ object CandidateListFinder {
       processPlan
     )(cancellationChecker)
 
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(sequencesAcc.openSequences.isEmpty)
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(sequencesAcc.openConflicts.isEmpty)
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(sequencesAcc.currentLayer == 0)
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(sequencesAcc.openSequences.isEmpty)
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(sequencesAcc.openConflicts.isEmpty)
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(sequencesAcc.currentLayer == 0)
     val candidateLists = sequencesAcc.candidateLists
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(candidateLists.forall(_.candidates.nonEmpty))
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(candidateLists.forall(_.candidates.nonEmpty))
 
     candidateLists
   }

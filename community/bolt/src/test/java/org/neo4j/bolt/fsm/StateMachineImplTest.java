@@ -19,11 +19,17 @@
  */
 package org.neo4j.bolt.fsm;
 
+import static org.neo4j.bolt.testing.util.ErrorUtil.useNewMessage;
+
+import java.util.stream.Stream;
 import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
+import org.neo4j.bolt.fsm.error.AdmissionControlException;
 import org.neo4j.bolt.fsm.error.ConnectionTerminating;
 import org.neo4j.bolt.fsm.error.NoSuchStateException;
 import org.neo4j.bolt.fsm.error.StateMachineException;
@@ -34,15 +40,18 @@ import org.neo4j.bolt.protocol.common.connector.connection.ConnectionHandle;
 import org.neo4j.bolt.protocol.common.fsm.error.AuthenticationStateTransitionException;
 import org.neo4j.bolt.protocol.common.fsm.response.ResponseHandler;
 import org.neo4j.bolt.protocol.common.message.Error;
-import org.neo4j.bolt.protocol.common.message.request.RequestMessage;
 import org.neo4j.bolt.security.error.AuthenticationException;
 import org.neo4j.bolt.testing.assertions.ErrorAssertions;
-import org.neo4j.bolt.testing.assertions.StateMachineAssertions;
+import org.neo4j.bolt.testing.assertions.StateMachineHandleAssertions;
 import org.neo4j.bolt.testing.mock.ConnectionMockFactory;
 import org.neo4j.bolt.testing.mock.StateMockFactory;
+import org.neo4j.boltmessages.request.RequestMessage;
 import org.neo4j.dbms.admissioncontrol.AdmissionControlResponse;
-import org.neo4j.dbms.admissioncontrol.AdmissionControlService;
 import org.neo4j.dbms.admissioncontrol.AdmissionControlToken;
+import org.neo4j.gqlstatus.ErrorGqlStatusObject;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.kernel.api.exceptions.HasQuery;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.api.exceptions.Status.General;
@@ -58,6 +67,9 @@ class StateMachineImplTest {
     private static final StateReference TEST_REFERENCE = new StateReference("test");
     private static final StateReference DEFAULT_REFERENCE = new StateReference("default");
     private static final StateReference UNKNOWN_REFERENCE = new StateReference("unknown");
+    private static final ErrorGqlStatusObject gqlDummy = ErrorGqlStatusObjectImplementation.from(
+                    GqlStatusInfoCodes.STATUS_50N42)
+            .build();
 
     private StateMachineImpl fsm;
 
@@ -67,13 +79,11 @@ class StateMachineImplTest {
 
     private AssertableLogProvider userLog;
     private AssertableLogProvider internalLog;
-    private AdmissionControlService admissionControlService;
 
     @BeforeEach
     void prepare() throws StateMachineException {
         this.connection = ConnectionMockFactory.newInstance();
         this.configuration = Mockito.mock(StateMachineConfiguration.class);
-        this.admissionControlService = Mockito.mock(AdmissionControlService.class);
         this.initialState = StateMockFactory.newFactory(INITIAL_REFERENCE)
                 .withResult(INITIAL_REFERENCE)
                 .attachTo(this.configuration);
@@ -85,8 +95,7 @@ class StateMachineImplTest {
                 this.connection,
                 this.configuration,
                 new SimpleLogService(this.userLog, this.internalLog),
-                this.initialState,
-                this.admissionControlService);
+                this.initialState);
     }
 
     @Test
@@ -105,16 +114,14 @@ class StateMachineImplTest {
 
     @Test
     void shouldIndicateInitialStateAsCurrentState() {
-        StateMachineAssertions.assertThat(this.fsm).isInState(INITIAL_REFERENCE);
+        StateMachineHandleAssertions.assertThat(this.fsm).isInState(INITIAL_REFERENCE);
     }
 
     @Test
     void shouldForwardLookupToConfiguration() throws NoSuchStateException {
         var someState = StateMockFactory.attachNewInstance(TEST_REFERENCE, this.configuration);
 
-        Mockito.doThrow(new NoSuchStateException(UNKNOWN_REFERENCE))
-                .when(this.configuration)
-                .lookup(UNKNOWN_REFERENCE);
+        Mockito.doThrow(noSuchState(UNKNOWN_REFERENCE)).when(this.configuration).lookup(UNKNOWN_REFERENCE);
 
         var result = this.fsm.lookup(TEST_REFERENCE);
 
@@ -126,7 +133,7 @@ class StateMachineImplTest {
 
     @Test
     void shouldForwardLookupToConfigurationErrors() throws NoSuchStateException {
-        var ex = new NoSuchStateException(UNKNOWN_REFERENCE);
+        var ex = noSuchState(UNKNOWN_REFERENCE);
 
         Mockito.doThrow(ex).when(this.configuration).lookup(UNKNOWN_REFERENCE);
 
@@ -140,16 +147,16 @@ class StateMachineImplTest {
 
     @Test
     void shouldIndicateInitialStateAsDefaultState() {
-        StateMachineAssertions.assertThat(this.fsm).hasDefaultState(INITIAL_REFERENCE);
+        StateMachineHandleAssertions.assertThat(this.fsm).hasDefaultState(INITIAL_REFERENCE);
     }
 
     @Test
     void shouldHandleInterrupts() {
-        StateMachineAssertions.assertThat(this.fsm).isNotInterrupted();
+        StateMachineHandleAssertions.assertThat(this.fsm).isNotInterrupted();
 
         this.fsm.interrupt();
 
-        StateMachineAssertions.assertThat(this.fsm).isInterrupted();
+        StateMachineHandleAssertions.assertThat(this.fsm).isInterrupted();
     }
 
     @Test
@@ -160,15 +167,21 @@ class StateMachineImplTest {
 
         this.fsm.process(Mockito.mock(RequestMessage.class), Mockito.mock(ResponseHandler.class), null);
 
-        StateMachineAssertions.assertThat(this.fsm).isInState(TEST_REFERENCE).isNotInterrupted();
+        StateMachineHandleAssertions.assertThat(this.fsm)
+                .isInState(TEST_REFERENCE)
+                .isNotInterrupted();
 
         this.fsm.interrupt();
 
-        StateMachineAssertions.assertThat(this.fsm).isInState(TEST_REFERENCE).isInterrupted();
+        StateMachineHandleAssertions.assertThat(this.fsm)
+                .isInState(TEST_REFERENCE)
+                .isInterrupted();
 
         this.fsm.reset();
 
-        StateMachineAssertions.assertThat(this.fsm).isInState(INITIAL_REFERENCE).isNotInterrupted();
+        StateMachineHandleAssertions.assertThat(this.fsm)
+                .isInState(INITIAL_REFERENCE)
+                .isNotInterrupted();
     }
 
     @Test
@@ -176,7 +189,7 @@ class StateMachineImplTest {
         var responseHandler = Mockito.mock(ResponseHandler.class);
 
         StateMockFactory.newFactory(TEST_REFERENCE)
-                .withResult(new IllegalRequestParameterException("Something went wrong!"))
+                .withResult(new IllegalRequestParameterException(gqlDummy, "Something went wrong!"))
                 .attachTo(this.configuration);
 
         Mockito.doReturn(TEST_REFERENCE).when(this.initialState).process(Mockito.any(), Mockito.any(), Mockito.any());
@@ -184,32 +197,39 @@ class StateMachineImplTest {
         // advance to someState
         this.fsm.process(Mockito.mock(RequestMessage.class), Mockito.mock(ResponseHandler.class), null);
 
-        StateMachineAssertions.assertThat(this.fsm).isInState(TEST_REFERENCE).hasNotFailed();
+        StateMachineHandleAssertions.assertThat(this.fsm)
+                .isInState(TEST_REFERENCE)
+                .hasNotFailed();
 
         // trigger failure (exception does not bubble up as it is status bearing)
         this.fsm.process(Mockito.mock(RequestMessage.class), responseHandler, null);
 
-        StateMachineAssertions.assertThat(this.fsm).isInState(TEST_REFERENCE).hasFailed();
+        StateMachineHandleAssertions.assertThat(this.fsm)
+                .isInState(TEST_REFERENCE)
+                .hasFailed();
 
         Mockito.verify(responseHandler).onFailure(Mockito.notNull());
 
         this.fsm.reset();
 
-        StateMachineAssertions.assertThat(this.fsm).isInState(INITIAL_REFERENCE).hasNotFailed();
+        StateMachineHandleAssertions.assertThat(this.fsm)
+                .isInState(INITIAL_REFERENCE)
+                .hasNotFailed();
     }
 
     @Test
     void shouldFailWithNoSuchStateExceptionWhenDefaultStateIsUnknown() throws NoSuchStateException {
-        var ex = new NoSuchStateException(DEFAULT_REFERENCE);
+        var ex = noSuchState(DEFAULT_REFERENCE);
 
         Mockito.doThrow(ex).when(this.configuration).lookup(DEFAULT_REFERENCE);
 
         Assertions.assertThatExceptionOfType(NoSuchStateException.class)
                 .isThrownBy(() -> this.fsm.defaultState(DEFAULT_REFERENCE))
-                .withMessage("No such state: default")
+                .withMessage(useNewMessage("50N00: Internal exception raised No such statue: default")
+                        .whenLegacyFallbackTo("No such state: default"))
                 .isSameAs(ex);
 
-        StateMachineAssertions.assertThat(this.fsm)
+        StateMachineHandleAssertions.assertThat(this.fsm)
                 .hasDefaultState(INITIAL_REFERENCE)
                 .hasNotFailed();
     }
@@ -221,23 +241,31 @@ class StateMachineImplTest {
 
         Mockito.doReturn(TEST_REFERENCE).when(this.initialState).process(Mockito.any(), Mockito.any(), Mockito.any());
 
-        StateMachineAssertions.assertThat(this.fsm).isInState(INITIAL_REFERENCE);
+        StateMachineHandleAssertions.assertThat(this.fsm).isInState(INITIAL_REFERENCE);
 
         this.fsm.defaultState(DEFAULT_REFERENCE);
 
-        StateMachineAssertions.assertThat(this.fsm).isInState(INITIAL_REFERENCE).isNotInterrupted();
+        StateMachineHandleAssertions.assertThat(this.fsm)
+                .isInState(INITIAL_REFERENCE)
+                .isNotInterrupted();
 
         this.fsm.process(Mockito.mock(RequestMessage.class), Mockito.mock(ResponseHandler.class), null);
 
-        StateMachineAssertions.assertThat(this.fsm).isInState(TEST_REFERENCE).isNotInterrupted();
+        StateMachineHandleAssertions.assertThat(this.fsm)
+                .isInState(TEST_REFERENCE)
+                .isNotInterrupted();
 
         this.fsm.interrupt();
 
-        StateMachineAssertions.assertThat(this.fsm).isInState(TEST_REFERENCE).isInterrupted();
+        StateMachineHandleAssertions.assertThat(this.fsm)
+                .isInState(TEST_REFERENCE)
+                .isInterrupted();
 
         this.fsm.reset();
 
-        StateMachineAssertions.assertThat(this.fsm).isInState(DEFAULT_REFERENCE).isNotInterrupted();
+        StateMachineHandleAssertions.assertThat(this.fsm)
+                .isInState(DEFAULT_REFERENCE)
+                .isNotInterrupted();
     }
 
     @Test
@@ -246,30 +274,38 @@ class StateMachineImplTest {
 
         StateMockFactory.attachNewInstance(DEFAULT_REFERENCE, this.configuration);
         StateMockFactory.newFactory(TEST_REFERENCE)
-                .withResult(new IllegalRequestParameterException("Something went wrong!"))
+                .withResult(new IllegalRequestParameterException(gqlDummy, "Something went wrong!"))
                 .attachTo(this.configuration);
 
         Mockito.doReturn(TEST_REFERENCE).when(this.initialState).process(Mockito.any(), Mockito.any(), Mockito.any());
 
-        StateMachineAssertions.assertThat(this.fsm).isInState(INITIAL_REFERENCE).hasNotFailed();
+        StateMachineHandleAssertions.assertThat(this.fsm)
+                .isInState(INITIAL_REFERENCE)
+                .hasNotFailed();
 
         this.fsm.defaultState(DEFAULT_REFERENCE);
 
-        StateMachineAssertions.assertThat(this.fsm).isInState(INITIAL_REFERENCE).hasNotFailed();
+        StateMachineHandleAssertions.assertThat(this.fsm)
+                .isInState(INITIAL_REFERENCE)
+                .hasNotFailed();
 
         this.fsm.process(Mockito.mock(RequestMessage.class), Mockito.mock(ResponseHandler.class), null);
 
-        StateMachineAssertions.assertThat(this.fsm).isInState(TEST_REFERENCE).hasNotFailed();
+        StateMachineHandleAssertions.assertThat(this.fsm)
+                .isInState(TEST_REFERENCE)
+                .hasNotFailed();
 
         this.fsm.process(Mockito.mock(RequestMessage.class), responseHandler, null);
 
         Mockito.verify(responseHandler).onFailure(Mockito.notNull());
 
-        StateMachineAssertions.assertThat(this.fsm).isInState(TEST_REFERENCE).hasFailed();
+        StateMachineHandleAssertions.assertThat(this.fsm)
+                .isInState(TEST_REFERENCE)
+                .hasFailed();
 
         this.fsm.reset();
 
-        StateMachineAssertions.assertThat(this.fsm)
+        StateMachineHandleAssertions.assertThat(this.fsm)
                 .isInState(DEFAULT_REFERENCE)
                 .hasNotFailed()
                 .isNotInterrupted();
@@ -283,11 +319,15 @@ class StateMachineImplTest {
 
         Mockito.doReturn(true).when(request).isIgnoredWhenFailed();
 
-        StateMachineAssertions.assertThat(this.fsm).isInState(INITIAL_REFERENCE).isNotInterrupted();
+        StateMachineHandleAssertions.assertThat(this.fsm)
+                .isInState(INITIAL_REFERENCE)
+                .isNotInterrupted();
 
         this.fsm.interrupt();
 
-        StateMachineAssertions.assertThat(this.fsm).isInState(INITIAL_REFERENCE).isInterrupted();
+        StateMachineHandleAssertions.assertThat(this.fsm)
+                .isInState(INITIAL_REFERENCE)
+                .isInterrupted();
 
         this.fsm.process(request, responseHandler, null);
 
@@ -309,17 +349,21 @@ class StateMachineImplTest {
         var responseHandler = Mockito.mock(ResponseHandler.class);
         var request = Mockito.mock(RequestMessage.class);
 
-        Mockito.doThrow(new IllegalRequestParameterException("Something went wrong!"))
+        Mockito.doThrow(new IllegalRequestParameterException(gqlDummy, "Something went wrong!"))
                 .when(this.initialState)
                 .process(Mockito.any(), Mockito.any(), Mockito.any());
 
         Mockito.doReturn(true).when(request).isIgnoredWhenFailed();
 
-        StateMachineAssertions.assertThat(this.fsm).isInState(INITIAL_REFERENCE).hasNotFailed();
+        StateMachineHandleAssertions.assertThat(this.fsm)
+                .isInState(INITIAL_REFERENCE)
+                .hasNotFailed();
 
         this.fsm.process(request, responseHandler, null);
 
-        StateMachineAssertions.assertThat(this.fsm).isInState(INITIAL_REFERENCE).hasFailed();
+        StateMachineHandleAssertions.assertThat(this.fsm)
+                .isInState(INITIAL_REFERENCE)
+                .hasFailed();
 
         var inOrder = Mockito.inOrder(this.initialState, responseHandler);
 
@@ -329,7 +373,9 @@ class StateMachineImplTest {
 
         this.fsm.process(request, responseHandler, null);
 
-        StateMachineAssertions.assertThat(this.fsm).isInState(INITIAL_REFERENCE).hasFailed();
+        StateMachineHandleAssertions.assertThat(this.fsm)
+                .isInState(INITIAL_REFERENCE)
+                .hasFailed();
 
         inOrder.verify(responseHandler).onIgnored();
 
@@ -340,7 +386,9 @@ class StateMachineImplTest {
         this.fsm.reset();
         this.fsm.process(Mockito.mock(RequestMessage.class), responseHandler, null);
 
-        StateMachineAssertions.assertThat(this.fsm).isInState(INITIAL_REFERENCE).hasNotFailed();
+        StateMachineHandleAssertions.assertThat(this.fsm)
+                .isInState(INITIAL_REFERENCE)
+                .hasNotFailed();
 
         inOrder.verify(this.initialState).process(Mockito.notNull(), Mockito.notNull(), Mockito.same(responseHandler));
         inOrder.verify(responseHandler).onSuccess();
@@ -366,7 +414,7 @@ class StateMachineImplTest {
         var responseHandler = Mockito.mock(ResponseHandler.class);
         var request = Mockito.mock(RequestMessage.class);
 
-        Mockito.doThrow(new IllegalRequestParameterException("Something went wrong!"))
+        Mockito.doThrow(new IllegalRequestParameterException(gqlDummy, "Something went wrong!"))
                 .when(this.initialState)
                 .process(Mockito.any(), Mockito.any(), Mockito.any());
 
@@ -381,7 +429,8 @@ class StateMachineImplTest {
 
         ErrorAssertions.assertThat(captor.getValue())
                 .hasStatus(Request.InvalidFormat)
-                .hasMessage("Something went wrong!")
+                .hasMessage(useNewMessage("50N42: Unexpected error has occurred. See debug log for details.")
+                        .whenLegacyFallbackTo("Something went wrong!"))
                 .hasCauseInstanceOf(IllegalRequestParameterException.class);
 
         LogAssertions.assertThat(this.userLog).doesNotContainMessage("Client triggered an unexpected error");
@@ -392,14 +441,15 @@ class StateMachineImplTest {
     void shouldFailWithNoSuchStateExceptionWhenNextStateIsUnknown() throws StateMachineException {
         var responseHandler = Mockito.mock(ResponseHandler.class);
 
-        var ex = new NoSuchStateException(TEST_REFERENCE);
+        var ex = noSuchState(TEST_REFERENCE);
 
         Mockito.doThrow(ex).when(this.configuration).lookup(TEST_REFERENCE);
         Mockito.doReturn(TEST_REFERENCE).when(this.initialState).process(Mockito.any(), Mockito.any(), Mockito.any());
 
         Assertions.assertThatExceptionOfType(NoSuchStateException.class)
                 .isThrownBy(() -> this.fsm.process(Mockito.mock(RequestMessage.class), responseHandler, null))
-                .withMessage("No such state: test")
+                .withMessage(useNewMessage("50N00: Internal exception raised No such statue: test")
+                        .whenLegacyFallbackTo("No such state: test"))
                 .withNoCause();
 
         var captor = ArgumentCaptor.forClass(Error.class);
@@ -407,7 +457,8 @@ class StateMachineImplTest {
 
         ErrorAssertions.assertThat(captor.getValue())
                 .hasStatus(General.UnknownError)
-                .hasMessage("No such state: test")
+                .hasMessage(useNewMessage("50N00: Internal exception raised No such statue: test")
+                        .whenLegacyFallbackTo("No such state: test"))
                 .hasCauseInstanceOf(NoSuchStateException.class);
     }
 
@@ -455,8 +506,8 @@ class StateMachineImplTest {
     @Test
     void shouldRethrowAuthenticationStateTransitionExceptions() throws StateMachineException {
         var responseHandler = Mockito.mock(ResponseHandler.class);
-        var ex = new AuthenticationStateTransitionException(
-                new AuthenticationException(Request.InvalidUsage, "Something went wrong"));
+        var ex = AuthenticationStateTransitionException.wrapError(AuthenticationException.internalError(
+                this.getClass().getSimpleName(), "Something went wrong", Request.InvalidUsage));
 
         Mockito.doThrow(ex).when(this.initialState).process(Mockito.any(), Mockito.any(), Mockito.any());
 
@@ -490,66 +541,57 @@ class StateMachineImplTest {
         var responseHandler = Mockito.mock(ResponseHandler.class);
         var token = Mockito.mock(AdmissionControlToken.class);
 
-        Mockito.doReturn(AdmissionControlResponse.RELEASED)
-                .when(admissionControlService)
-                .awaitRelease(token);
+        Mockito.doReturn(AdmissionControlResponse.RELEASED).when(token).await();
 
         this.fsm.process(request, responseHandler, token);
 
-        Mockito.verify(admissionControlService, Mockito.times(1)).awaitRelease(token);
+        Mockito.verify(token, Mockito.times(1)).await();
         Mockito.verify(responseHandler, Mockito.times(1)).onSuccess();
     }
 
-    @Test
-    @SuppressWarnings("removal")
-    void shouldNotAwaitAdmissionControlWhenNull() throws StateMachineException {
-        var request = Mockito.mock(RequestMessage.class);
-        var responseHandler = Mockito.mock(ResponseHandler.class);
-
-        this.fsm.process(request, responseHandler, null);
-
-        Mockito.verify(admissionControlService, Mockito.times(0)).awaitRelease(Mockito.any());
-        Mockito.verify(responseHandler, Mockito.times(1)).onSuccess();
-    }
-
-    @Test
-    void shouldFailWhenAdmissionControlReturnsQueueFull() throws StateMachineException {
+    @ParameterizedTest
+    @MethodSource("responses")
+    void shouldFailWhenAdmissionControlResponseImpliesFailure(AdmissionControlResponse response)
+            throws StateMachineException {
         var request = Mockito.mock(RequestMessage.class);
         var responseHandler = Mockito.mock(ResponseHandler.class);
         var token = Mockito.mock(AdmissionControlToken.class);
 
-        Mockito.doReturn(AdmissionControlResponse.UNABLE_TO_ALLOCATE_NEW_TOKEN)
-                .when(admissionControlService)
-                .awaitRelease(token);
+        Mockito.doReturn(response).when(token).await();
 
         this.fsm.process(request, responseHandler, token);
 
-        Mockito.verify(admissionControlService, Mockito.times(1)).awaitRelease(Mockito.any());
+        Mockito.verify(token, Mockito.times(1)).await();
 
         var captor = ArgumentCaptor.forClass(Error.class);
         Mockito.verify(responseHandler, Mockito.times(1)).onFailure(captor.capture());
 
-        ErrorAssertions.assertThat(captor.getValue()).hasStatus(Request.ResourceExhaustion);
+        Error captorError = captor.getValue();
+        ErrorAssertions.assertThat(captorError).hasStatus(Request.ResourceExhaustion);
+
+        Throwable wrappedThrowable = captorError.wrappedThrowable();
+
+        Assertions.assertThat(wrappedThrowable).isInstanceOf(AdmissionControlException.class);
+        AdmissionControlException ex = (AdmissionControlException) wrappedThrowable;
+        ErrorGqlStatusObjectAssertions.assertThat(ex)
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_51N59)
+                .hasStatusDescription(
+                        "error: system configuration or operation exception - internal resource exhaustion. "
+                                + "The DBMS is unable to handle the request, please retry later or contact the system operator. "
+                                + "More information is present in the logs.");
+
+        Assertions.assertThat(ex.gqlStatusObject().diagnosticRecord()).containsEntry("_idempotent", true);
     }
 
-    @Test
-    void shouldFailWhenAdmissionControlProcessStopped() throws StateMachineException {
-        var request = Mockito.mock(RequestMessage.class);
-        var responseHandler = Mockito.mock(ResponseHandler.class);
-        var token = Mockito.mock(AdmissionControlToken.class);
+    public static Stream<AdmissionControlResponse> responses() {
+        return Stream.of(
+                AdmissionControlResponse.ADMISSION_CONTROL_PROCESS_STOPPED,
+                AdmissionControlResponse.UNABLE_TO_ALLOCATE_NEW_TOKEN,
+                AdmissionControlResponse.NO_TENANT_CREDIT);
+    }
 
-        Mockito.doReturn(AdmissionControlResponse.ADMISSION_CONTROL_PROCESS_STOPPED)
-                .when(admissionControlService)
-                .awaitRelease(token);
-
-        this.fsm.process(request, responseHandler, token);
-
-        Mockito.verify(admissionControlService, Mockito.times(1)).awaitRelease(Mockito.any());
-
-        var captor = ArgumentCaptor.forClass(Error.class);
-        Mockito.verify(responseHandler, Mockito.times(1)).onFailure(captor.capture());
-
-        ErrorAssertions.assertThat(captor.getValue()).hasStatus(Request.ResourceExhaustion);
+    private NoSuchStateException noSuchState(StateReference reference) {
+        return NoSuchStateException.invalidServerStateTransition("No such statue", reference.name(), reference);
     }
 
     private class MockDatabaseException extends StateMachineException implements HasStatus {

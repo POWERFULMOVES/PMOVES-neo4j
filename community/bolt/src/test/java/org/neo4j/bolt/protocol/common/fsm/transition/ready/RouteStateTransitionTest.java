@@ -19,6 +19,8 @@
  */
 package org.neo4j.bolt.protocol.common.fsm.transition.ready;
 
+import static org.neo4j.bolt.testing.util.ErrorUtil.useNewMessage;
+
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
@@ -33,8 +35,9 @@ import org.neo4j.bolt.fsm.error.state.InternalStateTransitionException;
 import org.neo4j.bolt.protocol.common.connector.Connector;
 import org.neo4j.bolt.protocol.common.fsm.error.AuthenticationStateTransitionException;
 import org.neo4j.bolt.protocol.common.fsm.transition.AbstractStateTransitionTest;
-import org.neo4j.bolt.protocol.common.message.request.connection.RouteMessage;
 import org.neo4j.bolt.security.error.AuthenticationException;
+import org.neo4j.bolt.testing.mock.ConnectorMockFactory;
+import org.neo4j.boltmessages.request.connection.RouteMessage;
 import org.neo4j.dbms.routing.RoutingException;
 import org.neo4j.dbms.routing.RoutingResult;
 import org.neo4j.dbms.routing.RoutingService;
@@ -52,7 +55,7 @@ class RouteStateTransitionTest extends AbstractStateTransitionTest<RouteMessage,
     protected void prepareContext() throws Exception {
         super.prepareContext();
 
-        this.connector = Mockito.mock(Connector.class);
+        this.connector = ConnectorMockFactory.newInstance();
         this.routingService = Mockito.mock(RoutingService.class);
 
         var impersonationCaptor = new AtomicReference<String>();
@@ -86,7 +89,7 @@ class RouteStateTransitionTest extends AbstractStateTransitionTest<RouteMessage,
 
         Mockito.doReturn(routingTable)
                 .when(this.routingService)
-                .route(Mockito.anyString(), Mockito.any(), Mockito.notNull());
+                .route(Mockito.anyString(), Mockito.any(), Mockito.notNull(), Mockito.anyBoolean());
     }
 
     @Override
@@ -97,8 +100,9 @@ class RouteStateTransitionTest extends AbstractStateTransitionTest<RouteMessage,
     @TestFactory
     Stream<DynamicTest> shouldProcessMessage() {
         return Stream.of(Collections.<String>emptyList(), List.of("bookmark-1234"))
-                .flatMap(bookmarks -> Stream.of(null, "neo4j", "foo").flatMap(db -> Stream.of(null, "bob")
-                        .map(impersonatedUser -> new TestParameters(bookmarks, db, impersonatedUser))))
+                .flatMap(bookmarks -> Stream.of(null, "neo4j", "foo")
+                        .flatMap(db -> Stream.of(null, "bob")
+                                .map(impersonatedUser -> new TestParameters(bookmarks, db, impersonatedUser))))
                 .map(parameters -> DynamicTest.dynamicTest(parameters.toString(), () -> {
                     this.prepareContext();
 
@@ -119,7 +123,12 @@ class RouteStateTransitionTest extends AbstractStateTransitionTest<RouteMessage,
 
                     Assertions.assertThat(targetState).isEqualTo(this.initialState());
 
-                    Mockito.verify(this.routingService).route(databaseName, username, request.getRequestContext());
+                    Mockito.verify(this.routingService)
+                            .route(
+                                    databaseName,
+                                    username,
+                                    request.getRequestContext(),
+                                    parameters.databaseName == null);
                     Mockito.verify(this.responseHandler).onRoutingTable(Mockito.eq(databaseName), Mockito.notNull());
                 }));
     }
@@ -128,9 +137,9 @@ class RouteStateTransitionTest extends AbstractStateTransitionTest<RouteMessage,
     void shouldFailWithInternalStateTransitionExceptionOnGenericGetterError() throws RoutingException {
         var request = new RouteMessage(MapValue.EMPTY, List.of(), "databaseName", null);
 
-        Mockito.doThrow(new RoutingException(General.UnknownError, "Something went wrong!"))
+        Mockito.doThrow(new RoutingException(null, General.UnknownError, "Something went wrong!"))
                 .when(this.routingService)
-                .route(Mockito.any(), Mockito.any(), Mockito.any());
+                .route(Mockito.any(), Mockito.any(), Mockito.any(), Mockito.anyBoolean());
 
         Assertions.assertThatExceptionOfType(InternalStateTransitionException.class)
                 .isThrownBy(() -> this.transition.process(this.context, request, this.responseHandler))
@@ -140,7 +149,8 @@ class RouteStateTransitionTest extends AbstractStateTransitionTest<RouteMessage,
 
     @Test
     void shouldFailWithAuthenticationStateTransitionExceptionOnAuthenticationError() throws AuthenticationException {
-        Mockito.doThrow(new AuthenticationException(Request.Invalid, "Something went wrong"))
+        Mockito.doThrow(AuthenticationException.internalError(
+                        this.getClass().getSimpleName(), "Something went wrong", Request.Invalid))
                 .when(this.connection)
                 .impersonate("bob");
 
@@ -148,7 +158,9 @@ class RouteStateTransitionTest extends AbstractStateTransitionTest<RouteMessage,
 
         Assertions.assertThatExceptionOfType(AuthenticationStateTransitionException.class)
                 .isThrownBy(() -> this.transition.process(this.context, request, this.responseHandler))
-                .withMessage("Something went wrong")
+                .withMessage(
+                        useNewMessage("50N00: Internal exception raised RouteStateTransitionTest: Something went wrong")
+                                .whenLegacyFallbackTo("Something went wrong"))
                 .withCauseInstanceOf(AuthenticationException.class);
     }
 

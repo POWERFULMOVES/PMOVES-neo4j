@@ -27,6 +27,7 @@ import static org.neo4j.storageengine.api.UpdateMode.REMOVED;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.function.Supplier;
+import org.neo4j.common.TokenNameLookup;
 import org.neo4j.internal.kernel.api.PropertyIndexQuery;
 import org.neo4j.internal.kernel.api.exceptions.schema.IndexNotApplicableKernelException;
 import org.neo4j.internal.schema.IndexDescriptor;
@@ -35,7 +36,6 @@ import org.neo4j.kernel.api.exceptions.index.IndexEntryConflictException;
 import org.neo4j.kernel.api.index.IndexUpdater;
 import org.neo4j.kernel.api.index.ValueIndexReader;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
-import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
 import org.neo4j.values.storable.ValueTuple;
 
 /**
@@ -63,26 +63,25 @@ public class DeferredConflictCheckingIndexUpdater implements IndexUpdater {
     private final IndexUpdater actual;
     private final Supplier<ValueIndexReader> readerSupplier;
     private final IndexDescriptor indexDescriptor;
-    private final CursorContext cursorContext;
+    private final TokenNameLookup tokenNameLookup;
     private final Set<ValueTuple> touchedTuples = new HashSet<>();
 
     public DeferredConflictCheckingIndexUpdater(
             IndexUpdater actual,
             Supplier<ValueIndexReader> readerSupplier,
             IndexDescriptor indexDescriptor,
-            CursorContext cursorContext) {
+            TokenNameLookup tokenNameLookup) {
         this.actual = actual;
         this.readerSupplier = readerSupplier;
         this.indexDescriptor = indexDescriptor;
-        this.cursorContext = cursorContext;
+        this.tokenNameLookup = tokenNameLookup;
     }
 
     @Override
-    public void process(IndexEntryUpdate<?> update) throws IndexEntryConflictException {
-        ValueIndexEntryUpdate<?> valueUpdate = asValueUpdate(update);
-        actual.process(valueUpdate);
-        if (valueUpdate.updateMode() != REMOVED) {
-            touchedTuples.add(ValueTuple.of(valueUpdate.values()));
+    public void process(IndexEntryUpdate update) throws IndexEntryConflictException {
+        actual.process(update);
+        if (update.updateMode() != REMOVED) {
+            touchedTuples.add(ValueTuple.of(asValueUpdate(update).values()));
         }
     }
 
@@ -92,13 +91,13 @@ public class DeferredConflictCheckingIndexUpdater implements IndexUpdater {
         try (ValueIndexReader reader = readerSupplier.get()) {
             for (ValueTuple tuple : touchedTuples) {
                 try (NodeValueIterator client = new NodeValueIterator()) {
-                    reader.query(client, NULL_CONTEXT, unconstrained(), queryOf(tuple));
+                    reader.query(client, NULL_CONTEXT, CursorContext.NULL_CONTEXT, unconstrained(), queryOf(tuple));
                     if (client.hasNext()) {
                         long firstEntityId = client.next();
                         if (client.hasNext()) {
                             long secondEntityId = client.next();
-                            throw new IndexEntryConflictException(
-                                    indexDescriptor.schema(), firstEntityId, secondEntityId, tuple);
+                            throw IndexEntryConflictException.indexEntryConflict(
+                                    indexDescriptor.schema(), firstEntityId, secondEntityId, tokenNameLookup, tuple);
                         }
                     }
                 }

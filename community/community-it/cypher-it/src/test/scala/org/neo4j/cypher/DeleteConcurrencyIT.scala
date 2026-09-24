@@ -20,6 +20,7 @@
 package org.neo4j.cypher
 
 import org.neo4j.exceptions.CypherExecutionException
+import org.neo4j.exceptions.EntityNotFoundException
 import org.neo4j.exceptions.KernelException
 import org.neo4j.graphdb.NotFoundException
 import org.neo4j.graphdb.TransactionFailureException
@@ -201,14 +202,17 @@ class DeleteConcurrencyIT extends ExecutionEngineFunSuite {
       }
     case ex: CypherExecutionException =>
       ex.status == Status.Statement.EntityNotFound
-    case ex: NotFoundException => true
-    case _                     => false
+    case _: NotFoundException       => true
+    case _: EntityNotFoundException => true
+    case _                          => false
   }
 
   private def prettyPrintErrors(errors: Seq[Throwable]): String = {
     val stringWriter = new StringWriter()
     val writer = new PrintWriter(stringWriter)
-    errors.foreach { e => e.printStackTrace(writer); writer.println() }
+    errors.foreach { e =>
+      e.printStackTrace(writer); writer.println()
+    }
     stringWriter.toString
   }
 

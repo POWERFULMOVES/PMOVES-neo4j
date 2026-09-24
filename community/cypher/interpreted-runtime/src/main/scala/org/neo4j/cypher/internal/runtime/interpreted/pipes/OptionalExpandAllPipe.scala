@@ -21,10 +21,9 @@ package org.neo4j.cypher.internal.runtime.interpreted.pipes
 
 import org.neo4j.cypher.internal.expressions.SemanticDirection
 import org.neo4j.cypher.internal.runtime.ClosingIterator
-import org.neo4j.cypher.internal.runtime.ClosingLongIterator
+import org.neo4j.cypher.internal.runtime.ClosingRelationshipIterator
 import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.runtime.PrimitiveLongHelper
-import org.neo4j.cypher.internal.runtime.RelationshipIterator
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Expression
 import org.neo4j.cypher.internal.util.attribution.Id
 import org.neo4j.cypher.operations.CypherTypeValueMapper
@@ -38,11 +37,12 @@ import org.neo4j.values.virtual.VirtualValues
 abstract class OptionalExpandAllPipe(
   source: Pipe,
   fromName: String,
-  relName: String,
-  toName: String,
+  relName: Option[String],
+  toName: Option[String],
   dir: SemanticDirection,
   types: RelationshipTypes
 ) extends PipeWithSource(source) {
+  protected val writer = Expands.compileWriter(relName, toName)
 
   protected def internalCreateResults(
     input: ClosingIterator[CypherRow],
@@ -84,13 +84,12 @@ abstract class OptionalExpandAllPipe(
   def findMatchIterator(
     row: CypherRow,
     state: QueryState,
-    relationships: ClosingLongIterator with RelationshipIterator,
+    relationships: ClosingRelationshipIterator,
     n: VirtualNodeValue
   ): ClosingIterator[CypherRow]
 
   private def withNulls(row: CypherRow) = {
-    row.set(relName, Values.NO_VALUE, toName, Values.NO_VALUE)
-    row
+    writer.writeRow(rowFactory, row, Values.NO_VALUE, Values.NO_VALUE)
   }
 
   def getFromNode(row: CypherRow): AnyValue = row.getByName(fromName)
@@ -101,8 +100,8 @@ object OptionalExpandAllPipe {
   def apply(
     source: Pipe,
     fromName: String,
-    relName: String,
-    toName: String,
+    relName: Option[String],
+    toName: Option[String],
     dir: SemanticDirection,
     types: RelationshipTypes,
     maybePredicate: Option[Expression]
@@ -115,8 +114,8 @@ object OptionalExpandAllPipe {
 case class NonFilteringOptionalExpandAllPipe(
   source: Pipe,
   fromName: String,
-  relName: String,
-  toName: String,
+  relName: Option[String],
+  toName: Option[String],
   dir: SemanticDirection,
   types: RelationshipTypes
 )(val id: Id = Id.INVALID_ID)
@@ -125,18 +124,17 @@ case class NonFilteringOptionalExpandAllPipe(
   override def findMatchIterator(
     row: CypherRow,
     ignore: QueryState,
-    relationships: ClosingLongIterator with RelationshipIterator,
+    relationships: ClosingRelationshipIterator,
     n: VirtualNodeValue
   ): ClosingIterator[CypherRow] = {
     PrimitiveLongHelper.map(
       relationships,
       r => {
         val other = relationships.otherNodeId(n.id())
-        rowFactory.copyWith(
+        writer.writeRow(
+          rowFactory,
           row,
-          relName,
           VirtualValues.relationship(r, relationships.startNodeId(), relationships.endNodeId(), relationships.typeId()),
-          toName,
           VirtualValues.node(other)
         )
       }
@@ -147,8 +145,8 @@ case class NonFilteringOptionalExpandAllPipe(
 case class FilteringOptionalExpandAllPipe(
   source: Pipe,
   fromName: String,
-  relName: String,
-  toName: String,
+  relName: Option[String],
+  toName: Option[String],
   dir: SemanticDirection,
   types: RelationshipTypes,
   predicate: Expression
@@ -158,7 +156,7 @@ case class FilteringOptionalExpandAllPipe(
   override def findMatchIterator(
     row: CypherRow,
     state: QueryState,
-    relationships: ClosingLongIterator with RelationshipIterator,
+    relationships: ClosingRelationshipIterator,
     n: VirtualNodeValue
   ): ClosingIterator[CypherRow] = {
 
@@ -166,11 +164,10 @@ case class FilteringOptionalExpandAllPipe(
       relationships,
       r => {
         val other = relationships.otherNodeId(n.id())
-        rowFactory.copyWith(
+        writer.writeRow(
+          rowFactory,
           row,
-          relName,
           VirtualValues.relationship(r, relationships.startNodeId(), relationships.endNodeId(), relationships.typeId()),
-          toName,
           VirtualValues.node(other)
         )
       }

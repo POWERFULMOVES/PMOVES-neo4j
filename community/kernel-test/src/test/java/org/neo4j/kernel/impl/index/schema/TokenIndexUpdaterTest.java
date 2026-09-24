@@ -38,13 +38,15 @@ import org.eclipse.collections.impl.factory.primitive.LongSets;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
+import org.neo4j.collection.PrimitiveArrays;
+import org.neo4j.collection.PrimitiveArrays.RemovalsAndAdditions;
 import org.neo4j.index.internal.gbptree.GBPTree;
 import org.neo4j.index.internal.gbptree.GBPTreeBuilder;
 import org.neo4j.index.internal.gbptree.GBPTreeVisitor;
 import org.neo4j.internal.schema.IndexOrder;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
+import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
 import org.neo4j.io.pagecache.tracing.cursor.PageCursorTracer;
@@ -53,11 +55,11 @@ import org.neo4j.storageengine.api.TokenIndexEntryUpdate;
 import org.neo4j.storageengine.api.schema.SimpleEntityTokenClient;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.extension.pagecache.PageCacheExtension;
 import org.neo4j.test.utils.TestDirectory;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 @PageCacheExtension
 class TokenIndexUpdaterTest {
     private static final int LABEL_COUNT = 5;
@@ -92,29 +94,33 @@ class TokenIndexUpdaterTest {
     void addAndSearchSequenceOfNodes() throws Exception {
         int labelId = 2;
         // GIVEN
-        try (var updater = new TokenIndexUpdater(max(5, NODE_COUNT / 100), idLayout)) {
-            updater.initialize(tree.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT), false);
+        try (TokenIndexUpdater updater = new TokenIndexUpdater(max(5, NODE_COUNT / 100), idLayout)) {
+            updater.initialize(
+                    context -> tree.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT), false, CursorContext.NULL_CONTEXT);
 
             // WHEN
             for (long i = 0; i < NODE_COUNT; i++) {
-                var update = TokenIndexEntryUpdate.change(i, null, EMPTY_INT_ARRAY, new int[] {labelId});
+                TokenIndexEntryUpdate update =
+                        TokenIndexEntryUpdate.tokenChange(i, null, EMPTY_INT_ARRAY, new int[] {labelId});
                 updater.process(update);
             }
         }
 
         // THEN
-        SimpleEntityTokenClient client = new SimpleEntityTokenClient();
-        TokenScanValueIndexProgressor progressor = new TokenScanValueIndexProgressor(
-                tree.seek(new TokenScanKey(labelId, 0), new TokenScanKey(labelId, Long.MAX_VALUE), NULL_CONTEXT),
-                client,
-                IndexOrder.ASCENDING,
-                EntityRange.FULL,
-                idLayout,
-                labelId);
-        long expectedNodeId = 0;
-        while (progressor.next()) {
-            assertThat(client.reference).isEqualTo(expectedNodeId);
-            expectedNodeId++;
+        long expectedNodeId;
+        try (SimpleEntityTokenClient client = new SimpleEntityTokenClient()) {
+            TokenScanValueIndexProgressor progressor = TokenScanValueIndexProgressor.create(
+                    tree.seek(new TokenScanKey(labelId, 0), new TokenScanKey(labelId, Long.MAX_VALUE), NULL_CONTEXT),
+                    client,
+                    IndexOrder.ASCENDING,
+                    EntityRange.FULL,
+                    idLayout,
+                    labelId);
+            expectedNodeId = 0;
+            while (progressor.next()) {
+                assertThat(client.reference).isEqualTo(expectedNodeId);
+                expectedNodeId++;
+            }
         }
         assertThat(expectedNodeId).isEqualTo(NODE_COUNT);
     }
@@ -124,11 +130,12 @@ class TokenIndexUpdaterTest {
         // GIVEN
         long[] expected = new long[NODE_COUNT];
         try (TokenIndexUpdater writer = new TokenIndexUpdater(max(5, NODE_COUNT / 100), idLayout)) {
-            writer.initialize(tree.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT), false);
+            writer.initialize(
+                    context -> tree.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT), false, CursorContext.NULL_CONTEXT);
 
             // WHEN
             for (int i = 0; i < NODE_COUNT * 3; i++) {
-                TokenIndexEntryUpdate<?> update = randomUpdate(expected);
+                TokenIndexEntryUpdate update = randomUpdate(expected);
                 writer.process(update);
             }
         }
@@ -136,17 +143,19 @@ class TokenIndexUpdaterTest {
         // THEN
         for (int i = 0; i < LABEL_COUNT; i++) {
             long[] expectedNodeIds = nodesWithLabel(expected, i);
-            SimpleEntityTokenClient client = new SimpleEntityTokenClient();
-            TokenScanValueIndexProgressor progressor = new TokenScanValueIndexProgressor(
-                    tree.seek(new TokenScanKey(i, 0), new TokenScanKey(i, Long.MAX_VALUE), NULL_CONTEXT),
-                    client,
-                    IndexOrder.ASCENDING,
-                    EntityRange.FULL,
-                    idLayout,
-                    i);
-            MutableLongList actualNodeIds = LongLists.mutable.empty();
-            while (progressor.next()) {
-                actualNodeIds.add(client.reference);
+            MutableLongList actualNodeIds;
+            try (SimpleEntityTokenClient client = new SimpleEntityTokenClient()) {
+                TokenScanValueIndexProgressor progressor = TokenScanValueIndexProgressor.create(
+                        tree.seek(new TokenScanKey(i, 0), new TokenScanKey(i, Long.MAX_VALUE), NULL_CONTEXT),
+                        client,
+                        IndexOrder.ASCENDING,
+                        EntityRange.FULL,
+                        idLayout,
+                        i);
+                actualNodeIds = LongLists.mutable.empty();
+                while (progressor.next()) {
+                    actualNodeIds.add(client.reference);
+                }
             }
             assertArrayEquals(expectedNodeIds, actualNodeIds.toArray(), "For label " + i);
         }
@@ -156,15 +165,18 @@ class TokenIndexUpdaterTest {
     void shouldTracePageCacheAccess() throws Exception {
         // Given
         int nodeCount = 5;
-        var cacheTracer = new DefaultPageCacheTracer();
-        var contextFactory = new CursorContextFactory(cacheTracer, EMPTY_CONTEXT_SUPPLIER);
-        var cursorContext = contextFactory.create("tracePageCacheAccessOnWrite");
+        DefaultPageCacheTracer cacheTracer = new DefaultPageCacheTracer();
+        CursorContextFactory contextFactory = new CursorContextFactory(cacheTracer, EMPTY_CONTEXT_SUPPLIER);
+        CursorContext cursorContext = contextFactory.create("tracePageCacheAccessOnWrite");
 
         // When
         try (TokenIndexUpdater writer = new TokenIndexUpdater(nodeCount, idLayout)) {
-            writer.initialize(tree.writer(W_BATCHED_SINGLE_THREADED, cursorContext), false);
+            writer.initialize(
+                    context -> tree.writer(W_BATCHED_SINGLE_THREADED, cursorContext),
+                    false,
+                    CursorContext.NULL_CONTEXT);
             for (int i = 0; i < nodeCount; i++) {
-                writer.process(TokenIndexEntryUpdate.change(i, null, EMPTY_INT_ARRAY, new int[] {1}));
+                writer.process(TokenIndexEntryUpdate.tokenChange(i, null, EMPTY_INT_ARRAY, new int[] {1}));
             }
         }
 
@@ -181,29 +193,17 @@ class TokenIndexUpdaterTest {
         // GIVEN
         assertThatThrownBy(() -> {
                     try (TokenIndexUpdater writer = new TokenIndexUpdater(1, idLayout)) {
-                        writer.initialize(tree.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT), false);
+                        writer.initialize(
+                                context -> tree.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT),
+                                false,
+                                CursorContext.NULL_CONTEXT);
 
                         // WHEN
-                        writer.process(TokenIndexEntryUpdate.change(0, null, EMPTY_INT_ARRAY, new int[] {2, 1}));
+                        writer.process(TokenIndexEntryUpdate.tokenChange(0, null, EMPTY_INT_ARRAY, new int[] {2, 1}));
                     }
                 })
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("unsorted");
-    }
-
-    @Test
-    void shouldNotAcceptInvalidTokens() {
-        // GIVEN
-        assertThatThrownBy(() -> {
-                    try (TokenIndexUpdater writer = new TokenIndexUpdater(1, idLayout)) {
-                        writer.initialize(tree.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT), false);
-
-                        // WHEN
-                        writer.process(TokenIndexEntryUpdate.change(0, null, EMPTY_INT_ARRAY, new int[] {2, -1}));
-                    }
-                })
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("Expected non-negative int value");
     }
 
     @Test
@@ -213,16 +213,17 @@ class TokenIndexUpdaterTest {
         int numberOfNodesInEach = 5;
         int labelId = 1;
         int[] labels = {labelId};
-        var idLayout = this.idLayout;
+        DefaultTokenIndexIdLayout idLayout = this.idLayout;
         try (TokenIndexUpdater writer = new TokenIndexUpdater(max(5, NODE_COUNT / 100), idLayout)) {
-            writer.initialize(tree.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT), false);
+            writer.initialize(
+                    context -> tree.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT), false, CursorContext.NULL_CONTEXT);
 
             // a couple of tree entries with a couple of nodes each
             // concept art: [xxxx          ][xxxx          ][xxxx          ] where x is used node.
             for (int i = 0; i < numberOfTreeEntries; i++) {
                 long baseNodeId = idLayout.firstIdOfRange(i);
                 for (int j = 0; j < numberOfNodesInEach; j++) {
-                    writer.process(TokenIndexEntryUpdate.change(baseNodeId + j, null, EMPTY_INT_ARRAY, labels));
+                    writer.process(TokenIndexEntryUpdate.tokenChange(baseNodeId + j, null, EMPTY_INT_ARRAY, labels));
                 }
             }
         }
@@ -231,10 +232,11 @@ class TokenIndexUpdaterTest {
         // when removing all the nodes from one of the tree nodes
         int treeEntryToRemoveFrom = 1;
         try (TokenIndexUpdater writer = new TokenIndexUpdater(max(5, NODE_COUNT / 100), this.idLayout)) {
-            writer.initialize(tree.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT), false);
+            writer.initialize(
+                    context -> tree.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT), false, CursorContext.NULL_CONTEXT);
             long baseNodeId = idLayout.firstIdOfRange(treeEntryToRemoveFrom);
             for (int i = 0; i < numberOfNodesInEach; i++) {
-                writer.process(TokenIndexEntryUpdate.change(baseNodeId + i, null, labels, EMPTY_INT_ARRAY));
+                writer.process(TokenIndexEntryUpdate.tokenChange(baseNodeId + i, null, labels, EMPTY_INT_ARRAY));
             }
         }
 
@@ -244,7 +246,7 @@ class TokenIndexUpdaterTest {
         assertTreeHasKeysRepresentingIdRanges(expected);
     }
 
-    private TokenIndexEntryUpdate<?> randomUpdate(long[] expected) {
+    private TokenIndexEntryUpdate randomUpdate(long[] expected) {
         int nodeId = random.nextInt(expected.length);
         long labels = expected[nodeId];
         int[] before = getLabels(labels);
@@ -253,7 +255,9 @@ class TokenIndexUpdaterTest {
             labels = flipRandom(labels, LABEL_COUNT, random.random());
         }
         expected[nodeId] = labels;
-        return TokenIndexEntryUpdate.change(nodeId, null, before, getLabels(labels));
+        RemovalsAndAdditions removalsAndAdditions = PrimitiveArrays.toRemovalsAndAdditions(before, getLabels(labels));
+        return TokenIndexEntryUpdate.tokenChange(
+                nodeId, null, removalsAndAdditions.removals(), removalsAndAdditions.additions());
     }
 
     private void assertTreeHasKeysRepresentingIdRanges(MutableLongSet expected) throws IOException {

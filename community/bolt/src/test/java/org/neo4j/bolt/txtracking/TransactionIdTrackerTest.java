@@ -22,7 +22,6 @@ package org.neo4j.bolt.txtracking;
 import static java.time.Duration.ofMillis;
 import static java.time.Duration.ofSeconds;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -37,12 +36,19 @@ import static org.neo4j.kernel.database.DatabaseIdFactory.from;
 import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_ID;
 
 import java.time.Duration;
+import java.util.Optional;
 import java.util.UUID;
+import org.assertj.core.api.ThrowableAssert;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.neo4j.collection.Dependencies;
+import org.neo4j.common.SystemLastTransactionIdProvider;
 import org.neo4j.dbms.api.DatabaseManagementService;
 import org.neo4j.dbms.api.DatabaseNotFoundException;
+import org.neo4j.dbms.api.DatabaseNotFoundHelper;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlExceptionLikeAssert;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.kernel.availability.DatabaseAvailabilityGuard;
 import org.neo4j.kernel.database.AbstractDatabase;
 import org.neo4j.kernel.database.Database;
@@ -59,6 +65,7 @@ class TransactionIdTrackerTest {
     private final TransactionIdStore transactionIdStore = mock(TransactionIdStore.class);
     private final DatabaseAvailabilityGuard databaseAvailabilityGuard = mock(DatabaseAvailabilityGuard.class);
     private final NamedDatabaseId namedDatabaseId = from("foo", UUID.randomUUID());
+    private final Dependencies resolver = mock(Dependencies.class);
     private final Database db = mock(Database.class);
     private final DatabaseManagementService managementService = mock(DatabaseManagementService.class);
 
@@ -67,10 +74,10 @@ class TransactionIdTrackerTest {
     @BeforeEach
     void setup() {
         var dbApi = mock(GraphDatabaseAPI.class);
-        var resolver = mock(Dependencies.class);
 
         when(managementService.database(namedDatabaseId.name())).thenReturn(dbApi);
         when(dbApi.getDependencyResolver()).thenReturn(resolver);
+        when(dbApi.databaseId()).thenReturn(namedDatabaseId);
 
         when(db.getNamedDatabaseId()).thenReturn(namedDatabaseId);
         when(db.isSystem()).thenReturn(false);
@@ -78,6 +85,7 @@ class TransactionIdTrackerTest {
         when(db.getDatabaseAvailabilityGuard()).thenReturn(databaseAvailabilityGuard);
 
         when(resolver.resolveDependency(AbstractDatabase.class)).thenReturn(db);
+        when(resolver.containsDependency(AbstractDatabase.class)).thenReturn(true);
         when(resolver.resolveDependency(TransactionIdStore.class)).thenReturn(transactionIdStore);
 
         when(databaseAvailabilityGuard.isAvailable()).thenReturn(true);
@@ -91,7 +99,7 @@ class TransactionIdTrackerTest {
         transactionIdTracker.awaitUpToDate(namedDatabaseId, BASE_TX_ID, ofSeconds(5));
 
         // then
-        verify(transactionIdStore, never()).getLastClosedTransactionId();
+        verify(transactionIdStore, never()).getHighestGapFreeClosedTransactionId();
     }
 
     @Test
@@ -107,11 +115,15 @@ class TransactionIdTrackerTest {
     }
 
     @Test
-    void shouldWaitForRequestedVersion() {
+    void shouldUseSystemLastTransactionIdProviderIfPresent() {
         // given
         var version = 5L;
 
-        when(transactionIdStore.getLastClosedTransactionId())
+        when(db.isSystem()).thenReturn(true);
+        var systemLastTransactionIdProvider = mock(SystemLastTransactionIdProvider.class);
+        when(resolver.resolveOptionalDependency(SystemLastTransactionIdProvider.class))
+                .thenReturn(Optional.of(systemLastTransactionIdProvider));
+        when(systemLastTransactionIdProvider.lastTransactionId())
                 .thenReturn(1L)
                 .thenReturn(2L)
                 .thenReturn(6L);
@@ -120,7 +132,40 @@ class TransactionIdTrackerTest {
         transactionIdTracker.awaitUpToDate(namedDatabaseId, version, DEFAULT_DURATION);
 
         // then
-        verify(transactionIdStore, times(3)).getLastClosedTransactionId();
+        verify(systemLastTransactionIdProvider, times(3)).lastTransactionId();
+        verifyNoInteractions(transactionIdStore);
+    }
+
+    @Test
+    void shouldThrowUnavailableIfSystemNotFound() {
+        doThrow(DatabaseNotFoundHelper.databaseNotFound(NamedDatabaseId.SYSTEM_DATABASE_NAME))
+                .when(managementService)
+                .database(NamedDatabaseId.SYSTEM_DATABASE_NAME);
+        verifyDbUnavailableError(
+                () -> transactionIdTracker.awaitUpToDate(NamedDatabaseId.NAMED_SYSTEM_DATABASE_ID, 33L, ofSeconds(5)),
+                NamedDatabaseId.SYSTEM_DATABASE_NAME,
+                false);
+        verifyDbUnavailableError(
+                () -> transactionIdTracker.newestTransactionId(NamedDatabaseId.NAMED_SYSTEM_DATABASE_ID),
+                NamedDatabaseId.SYSTEM_DATABASE_NAME,
+                false);
+    }
+
+    @Test
+    void shouldWaitForRequestedVersion() {
+        // given
+        var version = 5L;
+
+        when(transactionIdStore.getHighestGapFreeClosedTransactionId())
+                .thenReturn(1L)
+                .thenReturn(2L)
+                .thenReturn(6L);
+
+        // when
+        transactionIdTracker.awaitUpToDate(namedDatabaseId, version, DEFAULT_DURATION);
+
+        // then
+        verify(transactionIdStore, times(3)).getHighestGapFreeClosedTransactionId();
     }
 
     @Test
@@ -128,13 +173,13 @@ class TransactionIdTrackerTest {
         // given
         when(db.isSystem()).thenReturn(true);
         var version = 42L;
-        when(transactionIdStore.getLastClosedTransactionId()).thenReturn(version);
+        when(transactionIdStore.getHighestGapFreeClosedTransactionId()).thenReturn(version);
 
         // when
         transactionIdTracker.awaitUpToDate(namedDatabaseId, version, DEFAULT_DURATION);
 
         // then
-        verify(transactionIdStore, times(1)).getLastClosedTransactionId();
+        verify(transactionIdStore, times(1)).getHighestGapFreeClosedTransactionId();
     }
 
     @Test
@@ -142,16 +187,12 @@ class TransactionIdTrackerTest {
         // given
         var version = 5L;
         var checkException = new RuntimeException();
-        doThrow(checkException).when(transactionIdStore).getLastClosedTransactionId();
-
-        // when
-        var exception = assertThrows(
-                TransactionIdTrackerException.class,
-                () -> transactionIdTracker.awaitUpToDate(namedDatabaseId, version + 1, ofMillis(50)));
+        doThrow(checkException).when(transactionIdStore).getHighestGapFreeClosedTransactionId();
 
         // then
-        assertEquals(BookmarkTimeout, exception.status());
-        assertEquals(checkException, exception.getCause());
+        verifyBookmarkError(
+                () -> transactionIdTracker.awaitUpToDate(namedDatabaseId, version + 1, ofMillis(50)),
+                namedDatabaseId.name());
     }
 
     @Test
@@ -160,16 +201,12 @@ class TransactionIdTrackerTest {
         when(db.isSystem()).thenReturn(true);
         var version = 3L;
         var checkException = new RuntimeException();
-        doThrow(checkException).when(transactionIdStore).getLastClosedTransactionId();
-
-        // when
-        var exception = assertThrows(
-                TransactionIdTrackerException.class,
-                () -> transactionIdTracker.awaitUpToDate(namedDatabaseId, version + 1, ofMillis(50)));
+        doThrow(checkException).when(transactionIdStore).getHighestGapFreeClosedTransactionId();
 
         // then
-        assertEquals(BookmarkTimeout, exception.status());
-        assertEquals(checkException, exception.getCause());
+        verifyBookmarkError(
+                () -> transactionIdTracker.awaitUpToDate(namedDatabaseId, version + 1, ofMillis(50)),
+                namedDatabaseId.name());
     }
 
     @Test
@@ -177,17 +214,14 @@ class TransactionIdTrackerTest {
         // given
         var version = 5L;
         var checkException = new RuntimeException();
-        doThrow(checkException).when(transactionIdStore).getLastClosedTransactionId();
+        doThrow(checkException).when(transactionIdStore).getHighestGapFreeClosedTransactionId();
         when(databaseAvailabilityGuard.isAvailable()).thenReturn(true, true, false);
 
-        // when
-        var exception = assertThrows(
-                TransactionIdTrackerException.class,
-                () -> transactionIdTracker.awaitUpToDate(namedDatabaseId, version + 1, ofMillis(50)));
-
         // then
-        assertEquals(DatabaseUnavailable, exception.status());
-        assertEquals(checkException, exception.getCause());
+        verifyDbUnavailableError(
+                () -> transactionIdTracker.awaitUpToDate(namedDatabaseId, version + 1, ofMillis(50)),
+                namedDatabaseId.name(),
+                true);
     }
 
     @Test
@@ -196,17 +230,14 @@ class TransactionIdTrackerTest {
         when(db.isSystem()).thenReturn(true);
         var version = 42L;
         var checkException = new RuntimeException();
-        doThrow(checkException).when(transactionIdStore).getLastClosedTransactionId();
+        doThrow(checkException).when(transactionIdStore).getHighestGapFreeClosedTransactionId();
         when(databaseAvailabilityGuard.isAvailable()).thenReturn(true, true, false);
 
-        // when
-        var exception = assertThrows(
-                TransactionIdTrackerException.class,
-                () -> transactionIdTracker.awaitUpToDate(namedDatabaseId, version + 1, ofMillis(50)));
-
         // then
-        assertEquals(DatabaseUnavailable, exception.status());
-        assertEquals(checkException, exception.getCause());
+        verifyDbUnavailableError(
+                () -> transactionIdTracker.awaitUpToDate(namedDatabaseId, version + 1, ofMillis(50)),
+                namedDatabaseId.name(),
+                true);
     }
 
     @Test
@@ -214,14 +245,12 @@ class TransactionIdTrackerTest {
         // given
         when(databaseAvailabilityGuard.isAvailable()).thenReturn(false);
 
-        // when
-        var exception = assertThrows(
-                TransactionIdTrackerException.class,
-                () -> transactionIdTracker.awaitUpToDate(namedDatabaseId, 1000, ofMillis(60_000)));
-
         // then
-        assertEquals(DatabaseUnavailable, exception.status());
-        verify(transactionIdStore, never()).getLastClosedTransactionId();
+        verifyDbUnavailableError(
+                () -> transactionIdTracker.awaitUpToDate(namedDatabaseId, 1000, ofMillis(60_000)),
+                namedDatabaseId.name(),
+                false);
+        verify(transactionIdStore, never()).getHighestGapFreeClosedTransactionId();
     }
 
     @Test
@@ -230,20 +259,18 @@ class TransactionIdTrackerTest {
         when(db.isSystem()).thenReturn(true);
         when(databaseAvailabilityGuard.isAvailable()).thenReturn(false);
 
-        // when
-        var exception = assertThrows(
-                TransactionIdTrackerException.class,
-                () -> transactionIdTracker.awaitUpToDate(namedDatabaseId, 1000, ofMillis(60_000)));
-
         // then
-        assertEquals(DatabaseUnavailable, exception.status());
+        verifyDbUnavailableError(
+                () -> transactionIdTracker.awaitUpToDate(namedDatabaseId, 1000, ofMillis(60_000)),
+                namedDatabaseId.name(),
+                false);
         verifyNoInteractions(transactionIdStore);
     }
 
     @Test
     void shouldReturnNewestTransactionId() {
         // given
-        when(transactionIdStore.getLastClosedTransactionId()).thenReturn(42L);
+        when(transactionIdStore.getHighestGapFreeClosedTransactionId()).thenReturn(42L);
         when(transactionIdStore.getLastCommittedTransactionId()).thenReturn(4242L);
 
         // then
@@ -266,12 +293,8 @@ class TransactionIdTrackerTest {
         var unknownDatabaseId = from("bar", UUID.randomUUID());
         when(managementService.database(unknownDatabaseId.name())).thenThrow(DatabaseNotFoundException.class);
 
-        // when
-        var exception = assertThrows(
-                TransactionIdTrackerException.class, () -> transactionIdTracker.newestTransactionId(unknownDatabaseId));
-
         // then
-        assertEquals(DatabaseNotFound, exception.status());
+        verifyDbNotFoundError(() -> transactionIdTracker.newestTransactionId(unknownDatabaseId), "bar");
     }
 
     @Test
@@ -280,12 +303,50 @@ class TransactionIdTrackerTest {
         var unknownDatabaseId = from("bar", UUID.randomUUID());
         when(managementService.database(unknownDatabaseId.name())).thenThrow(DatabaseNotFoundException.class);
 
-        // when
-        var exception = assertThrows(
-                TransactionIdTrackerException.class,
-                () -> transactionIdTracker.awaitUpToDate(unknownDatabaseId, 1, ofMillis(1)));
-
         // then
-        assertEquals(DatabaseNotFound, exception.status());
+        verifyDbNotFoundError(() -> transactionIdTracker.awaitUpToDate(unknownDatabaseId, 1, ofMillis(1)), "bar");
+    }
+
+    private void verifyDbNotFoundError(ThrowableAssert.ThrowingCallable callable, String databaseName) {
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(callable)
+                .isInstanceOf(TransactionIdTrackerException.class)
+                .hasStatus(DatabaseNotFound)
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22000)
+                .hasStatusDescription("error: data exception")
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N51)
+                .hasStatusDescription(String.format(
+                        "error: data exception - graph reference not found. "
+                                + "A graph reference with the name `%s` was not found. Verify that the spelling is correct.",
+                        databaseName));
+    }
+
+    private void verifyDbUnavailableError(
+            ThrowableAssert.ThrowingCallable callable, String databaseName, boolean runtimeCause) {
+        GqlExceptionLikeAssert assertion = ErrorGqlStatusObjectAssertions.assertThatThrownBy(callable)
+                .isInstanceOf(TransactionIdTrackerException.class)
+                .hasStatus(DatabaseUnavailable)
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_08N09)
+                .hasStatusDescription(String.format(
+                        "error: connection exception - database unavailable. The database `%s` is currently unavailable. "
+                                + "Check the database status. Retry your request at a later time.",
+                        databaseName));
+
+        if (runtimeCause) {
+            assertion.cause().isInstanceOf(RuntimeException.class);
+        }
+    }
+
+    private void verifyBookmarkError(ThrowableAssert.ThrowingCallable callable, String databaseName) {
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(callable)
+                .isInstanceOf(TransactionIdTrackerException.class)
+                .hasStatus(BookmarkTimeout)
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_08N13)
+                .hasStatusDescriptionContaining(String.format(
+                        "error: connection exception - database not up to requested bookmark. "
+                                + "The database `%s` is not up to the requested bookmark",
+                        databaseName))
+                .cause()
+                .isInstanceOf(RuntimeException.class);
     }
 }

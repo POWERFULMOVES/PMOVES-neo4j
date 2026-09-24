@@ -21,10 +21,10 @@ package org.neo4j.internal.recordstorage;
 
 import java.util.OptionalLong;
 import org.eclipse.collections.api.IntIterable;
-import org.eclipse.collections.api.set.primitive.LongSet;
+import org.eclipse.collections.api.set.primitive.IntSet;
+import org.neo4j.common.TokenNameLookup;
+import org.neo4j.exceptions.FeatureUnsupportedOnStoreFormatException;
 import org.neo4j.exceptions.KernelException;
-import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
-import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.internal.kernel.api.Upgrade;
 import org.neo4j.internal.kernel.api.exceptions.schema.DuplicateSchemaRuleException;
 import org.neo4j.internal.kernel.api.exceptions.schema.SchemaRuleNotFoundException;
@@ -33,14 +33,12 @@ import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.SchemaState;
 import org.neo4j.internal.schema.constraints.KeyConstraintDescriptor;
 import org.neo4j.internal.schema.constraints.UniquenessConstraintDescriptor;
-import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.storageengine.api.ConstraintRuleAccessor;
 import org.neo4j.storageengine.api.StorageProperty;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.storageengine.api.txstate.RelationshipModifications;
 import org.neo4j.storageengine.api.txstate.TxStateVisitor;
-import org.neo4j.storageengine.api.txstate.validation.TransactionConflictException;
 
 class TransactionToRecordStateVisitor extends TxStateVisitor.Adapter {
     private boolean clearSchemaState;
@@ -49,29 +47,29 @@ class TransactionToRecordStateVisitor extends TxStateVisitor.Adapter {
     private final SchemaRuleAccess schemaStorage;
     private final SchemaRecordChangeTranslator schemaStateChanger;
     private final ConstraintRuleAccessor constraintSemantics;
-    private final CursorContext cursorContext;
     private final StoreCursors storeCursors;
-    private final boolean transientMissingSchema;
     private final MemoryTracker memoryTracker;
+    private final TokenNameLookup tokenNameLookup;
+    private final String storeFormat;
 
     TransactionToRecordStateVisitor(
             TransactionRecordState recordState,
             SchemaState schemaState,
             SchemaRuleAccess schemaRuleAccess,
             ConstraintRuleAccessor constraintSemantics,
-            CursorContext cursorContext,
             StoreCursors storeCursors,
-            boolean transientMissingSchema,
-            MemoryTracker memoryTracker) {
+            MemoryTracker memoryTracker,
+            TokenNameLookup tokenNameLookup,
+            String storeFormat) {
         this.recordState = recordState;
         this.schemaState = schemaState;
         this.schemaStorage = schemaRuleAccess;
         this.schemaStateChanger = schemaRuleAccess.getSchemaRecordChangeTranslator();
         this.constraintSemantics = constraintSemantics;
-        this.cursorContext = cursorContext;
         this.storeCursors = storeCursors;
-        this.transientMissingSchema = transientMissingSchema;
         this.memoryTracker = memoryTracker;
+        this.tokenNameLookup = tokenNameLookup;
+        this.storeFormat = storeFormat;
     }
 
     @Override
@@ -98,23 +96,16 @@ class TransactionToRecordStateVisitor extends TxStateVisitor.Adapter {
     @Override
     public void visitRelationshipModifications(RelationshipModifications modifications) {
         recordState.relModify(modifications);
-        modifications.creations().forEach((id, t, s, e, props, i1, i2) -> visitAddedRelProperties(id, props));
-        modifications.updates().forEach((id, t, s, e, addedProps, changedProps, removedProps) -> {
+        modifications.creations().forEach((id, t, s, e, props, i2) -> visitAddedRelProperties(id, props));
+        modifications.updates().forEach((id, t, s, e, addedProps, removedProps) -> {
             removedProps.each(relId -> recordState.relRemoveProperty(id, relId));
-            for (StorageProperty property : changedProps) {
-                recordState.relChangeProperty(id, property.propertyKeyId(), property.value());
-            }
             visitAddedRelProperties(id, addedProps);
         });
     }
 
     @Override
-    public void visitNodePropertyChanges(
-            long id, Iterable<StorageProperty> added, Iterable<StorageProperty> changed, IntIterable removed) {
+    public void visitNodePropertyChanges(long id, Iterable<StorageProperty> added, IntIterable removed) {
         removed.each(propId -> recordState.nodeRemoveProperty(id, propId));
-        for (StorageProperty property : changed) {
-            recordState.nodeChangeProperty(id, property.propertyKeyId(), property.value());
-        }
         for (StorageProperty property : added) {
             recordState.nodeAddProperty(id, property.propertyKeyId(), property.value());
         }
@@ -127,10 +118,10 @@ class TransactionToRecordStateVisitor extends TxStateVisitor.Adapter {
     }
 
     @Override
-    public void visitNodeLabelChanges(long id, final LongSet added, final LongSet removed) {
+    public void visitNodeLabelChanges(long id, final IntSet added, final IntSet removed) {
         // record the state changes to be made to the store
-        removed.each(label -> recordState.removeLabelFromNode((int) label, id));
-        added.each(label -> recordState.addLabelToNode((int) label, id));
+        removed.each(label -> recordState.removeLabelFromNode(label, id));
+        added.each(label -> recordState.addLabelToNode(label, id));
     }
 
     @Override
@@ -146,28 +137,26 @@ class TransactionToRecordStateVisitor extends TxStateVisitor.Adapter {
     @Override
     public void visitAddedConstraint(ConstraintDescriptor constraint) throws KernelException {
         clearSchemaState = true;
-        long constraintId = schemaStorage.newRuleId(cursorContext);
-
         switch (constraint.type()) {
-            case UNIQUE -> visitAddedUniquenessConstraint(constraint.asUniquenessConstraint(), constraintId);
-            case UNIQUE_EXISTS -> visitAddedKeyConstraint(constraint.asKeyConstraint(), constraintId);
+            case UNIQUE -> visitAddedUniquenessConstraint(constraint.asUniquenessConstraint(), constraint.getId());
+            case UNIQUE_EXISTS -> visitAddedKeyConstraint(constraint.asKeyConstraint(), constraint.getId());
             case EXISTS -> {
-                ConstraintDescriptor rule = constraintSemantics.createExistenceConstraint(constraintId, constraint);
+                ConstraintDescriptor rule = constraintSemantics.createExistenceConstraint(constraint, tokenNameLookup);
                 schemaStateChanger.createSchemaRule(recordState, rule);
             }
             case PROPERTY_TYPE -> {
                 ConstraintDescriptor rule = constraintSemantics.createPropertyTypeConstraint(
-                        constraintId, constraint.asPropertyTypeConstraint());
+                        constraint.asPropertyTypeConstraint(), tokenNameLookup);
                 schemaStateChanger.createSchemaRule(recordState, rule);
             }
             case RELATIONSHIP_ENDPOINT_LABEL -> {
                 ConstraintDescriptor rule = constraintSemantics.createRelationshipEndpointLabelConstraint(
-                        constraintId, constraint.asRelationshipEndpointLabelConstraint());
+                        constraint.asRelationshipEndpointLabelConstraint(), tokenNameLookup);
                 schemaStateChanger.createSchemaRule(recordState, rule);
             }
             case NODE_LABEL_EXISTENCE -> {
                 ConstraintDescriptor rule = constraintSemantics.createNodeLabelExistenceConstraint(
-                        constraintId, constraint.asNodeLabelExistenceConstraint());
+                        constraint.asNodeLabelExistenceConstraint(), tokenNameLookup);
                 schemaStateChanger.createSchemaRule(recordState, rule);
             }
             default -> throw new IllegalStateException(constraint.type().toString());
@@ -184,7 +173,7 @@ class TransactionToRecordStateVisitor extends TxStateVisitor.Adapter {
         IndexDescriptor indexRule = (IndexDescriptor)
                 schemaStorage.loadSingleSchemaRule(uniqueConstraint.ownedIndexId(), storeCursors, memoryTracker);
         ConstraintDescriptor constraint =
-                constraintSemantics.createUniquenessConstraintRule(constraintId, uniqueConstraint, indexRule.getId());
+                constraintSemantics.createUniquenessConstraintRule(uniqueConstraint, indexRule.getId());
         schemaStateChanger.createSchemaRule(recordState, constraint);
         schemaStateChanger.setConstraintIndexOwner(recordState, indexRule, constraintId);
     }
@@ -194,7 +183,7 @@ class TransactionToRecordStateVisitor extends TxStateVisitor.Adapter {
         IndexDescriptor indexRule = (IndexDescriptor)
                 schemaStorage.loadSingleSchemaRule(uniqueConstraint.ownedIndexId(), storeCursors, memoryTracker);
         ConstraintDescriptor constraint =
-                constraintSemantics.createKeyConstraintRule(constraintId, uniqueConstraint, indexRule.getId());
+                constraintSemantics.createKeyConstraintRule(uniqueConstraint, indexRule.getId(), tokenNameLookup);
         schemaStateChanger.createSchemaRule(recordState, constraint);
         schemaStateChanger.setConstraintIndexOwner(recordState, indexRule, constraintId);
     }
@@ -225,14 +214,6 @@ class TransactionToRecordStateVisitor extends TxStateVisitor.Adapter {
                 }
             }
         } catch (SchemaRuleNotFoundException e) {
-            if (transientMissingSchema) {
-                var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_25N11)
-                        .build();
-                throw new TransactionConflictException(
-                        gql,
-                        "Concurrent modification exception. Constraint to be removed already removed by another transaction.",
-                        e);
-            }
             throw new IllegalStateException(
                     "Constraint to be removed should exist, since its existence should have been validated earlier "
                             + "and the schema should have been locked.",
@@ -255,5 +236,10 @@ class TransactionToRecordStateVisitor extends TxStateVisitor.Adapter {
     @Override
     public void visitCreatedRelationshipTypeToken(long id, String name, boolean internal) {
         recordState.createRelationshipTypeToken(name, id, internal);
+    }
+
+    @Override
+    public void visitCreateVectorStore(VectorStoreIdType vectorStoreToCreate) {
+        throw FeatureUnsupportedOnStoreFormatException.vectorsUnsupportedInStoreFormat(storeFormat);
     }
 }

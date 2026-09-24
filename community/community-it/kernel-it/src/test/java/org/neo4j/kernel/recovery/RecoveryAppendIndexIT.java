@@ -39,19 +39,21 @@ import org.neo4j.io.fs.DefaultFileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.layout.Neo4jLayout;
 import org.neo4j.io.pagecache.PageCache;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
-import org.neo4j.storageengine.api.MetadataProvider;
+import org.neo4j.storageengine.api.LogMetadataProvider;
 import org.neo4j.storageengine.api.StorageEngine;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.Neo4jLayoutExtension;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.test.extension.pagecache.PageCacheExtension;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
 
 @PageCacheExtension
 @Neo4jLayoutExtension
+@SkipOnSpd
 public class RecoveryAppendIndexIT {
 
     @Inject
@@ -89,7 +91,7 @@ public class RecoveryAppendIndexIT {
             createNodesWithRelationship(db, marker);
         }
         long lastAppendIndex = db.getDependencyResolver()
-                .resolveDependency(MetadataProvider.class)
+                .resolveDependency(LogMetadataProvider.class)
                 .getLastAppendIndex();
 
         restartDbms();
@@ -97,7 +99,7 @@ public class RecoveryAppendIndexIT {
         var restartedDb = (GraphDatabaseAPI) dbms.database(GraphDatabaseSettings.DEFAULT_DATABASE_NAME);
         long restartedLastAppendIndex = restartedDb
                 .getDependencyResolver()
-                .resolveDependency(MetadataProvider.class)
+                .resolveDependency(LogMetadataProvider.class)
                 .getLastAppendIndex();
 
         assertEquals(lastAppendIndex, restartedLastAppendIndex);
@@ -113,12 +115,12 @@ public class RecoveryAppendIndexIT {
             createNodesWithRelationship(db, marker);
         }
         long lastAppendIndex = db.getDependencyResolver()
-                .resolveDependency(MetadataProvider.class)
+                .resolveDependency(LogMetadataProvider.class)
                 .getLastAppendIndex();
         Path[] checkpointFiles = db.getDependencyResolver()
                 .resolveDependency(LogFiles.class)
                 .getCheckpointFile()
-                .getDetachedCheckpointFiles();
+                .getMatchedFiles();
 
         restartDbms();
 
@@ -130,7 +132,7 @@ public class RecoveryAppendIndexIT {
         var restartedDb = (GraphDatabaseAPI) dbms.database(GraphDatabaseSettings.DEFAULT_DATABASE_NAME);
         long restartedLastAppendIndex = restartedDb
                 .getDependencyResolver()
-                .resolveDependency(MetadataProvider.class)
+                .resolveDependency(LogMetadataProvider.class)
                 .getLastAppendIndex();
 
         assertEquals(lastAppendIndex, restartedLastAppendIndex);
@@ -154,7 +156,7 @@ public class RecoveryAppendIndexIT {
         }
 
         long lastAppendIndex = db.getDependencyResolver()
-                .resolveDependency(MetadataProvider.class)
+                .resolveDependency(LogMetadataProvider.class)
                 .getLastAppendIndex();
 
         dbms.shutdown();
@@ -165,7 +167,7 @@ public class RecoveryAppendIndexIT {
         var restartedDb = (GraphDatabaseAPI) dbms.database(GraphDatabaseSettings.DEFAULT_DATABASE_NAME);
         long restartedLastAppendIndex = restartedDb
                 .getDependencyResolver()
-                .resolveDependency(MetadataProvider.class)
+                .resolveDependency(LogMetadataProvider.class)
                 .getLastAppendIndex();
 
         assertEquals(lastAppendIndex, restartedLastAppendIndex);
@@ -189,7 +191,7 @@ public class RecoveryAppendIndexIT {
         var restartedDb = (GraphDatabaseAPI) dbms.database(GraphDatabaseSettings.DEFAULT_DATABASE_NAME);
         long restartedLastAppendIndex = restartedDb
                 .getDependencyResolver()
-                .resolveDependency(MetadataProvider.class)
+                .resolveDependency(LogMetadataProvider.class)
                 .getLastAppendIndex();
 
         // we do not create token indexes in this scenario
@@ -215,7 +217,7 @@ public class RecoveryAppendIndexIT {
         var restartedDb = (GraphDatabaseAPI) dbms.database(GraphDatabaseSettings.DEFAULT_DATABASE_NAME);
         long restartedLastAppendIndex = restartedDb
                 .getDependencyResolver()
-                .resolveDependency(MetadataProvider.class)
+                .resolveDependency(LogMetadataProvider.class)
                 .getLastAppendIndex();
 
         if (RecordStorageEngineFactory.NAME.equals(restartedDb

@@ -21,6 +21,7 @@ package org.neo4j.cypher
 
 import org.neo4j.cypher.NFAToProductGraphCursorIT.NFABuilderWrapper
 import org.neo4j.cypher.NFAToProductGraphCursorIT.NFAStateWrapper
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.semantics.SemanticTable
 import org.neo4j.cypher.internal.expressions.False
 import org.neo4j.cypher.internal.expressions.RelTypeName
@@ -38,6 +39,7 @@ import org.neo4j.cypher.internal.logical.plans.NFABuilder
 import org.neo4j.cypher.internal.physicalplanning.SlotConfigurationBuilder
 import org.neo4j.cypher.internal.planner.spi.ReadTokenContext
 import org.neo4j.cypher.internal.runtime.CypherRuntimeConfiguration
+import org.neo4j.cypher.internal.runtime.QueryIndexRegistrator
 import org.neo4j.cypher.internal.runtime.SelectivityTrackerRegistrator
 import org.neo4j.cypher.internal.runtime.ast.ExpressionVariable
 import org.neo4j.cypher.internal.runtime.interpreted.QueryStateHelper
@@ -302,7 +304,9 @@ class NFAToProductGraphCursorIT extends ExecutionEngineFunSuite {
                   ReadTokenContext.EMPTY,
                   new AnonymousVariableNameGenerator(),
                   new SelectivityTrackerRegistrator,
-                  CypherRuntimeConfiguration.defaultConfiguration
+                  CypherRuntimeConfiguration.defaultConfiguration,
+                  CypherVersion.Legacy.legacyVersion(),
+                  QueryIndexRegistrator(tx.kernelTransaction().schemaRead())
                 )
               )
 
@@ -361,12 +365,6 @@ object NFAToProductGraphCursorIT {
         types.map(RelTypeName(_)(InputPosition.NONE)),
         dir
       )
-
-    def nodeExpansionPredicate(predicate: Option[VariablePredicate] = None): NFA.NodeExpansionPredicate =
-      NFA.NodeExpansionPredicate(
-        nextName("n"),
-        predicate
-      )
   }
 
   private case class NFAStateWrapper(state: NFA.State, parent: NFABuilderWrapper) {
@@ -390,15 +388,5 @@ object NFAToProductGraphCursorIT {
       )
     }
 
-    def multiRelExpansion(
-      other: NFAStateWrapper,
-      relPredicates: Seq[NFA.RelationshipExpansionPredicate],
-      nodePredicates: Seq[NFA.NodeExpansionPredicate]
-    ): Unit = {
-      parent.builder.addTransition(
-        state,
-        NFA.MultiRelationshipExpansionTransition(relPredicates, nodePredicates, None, other.state.id)
-      )
-    }
   }
 }

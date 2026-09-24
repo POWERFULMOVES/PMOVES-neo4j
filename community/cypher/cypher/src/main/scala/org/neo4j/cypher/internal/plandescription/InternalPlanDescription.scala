@@ -19,9 +19,10 @@
  */
 package org.neo4j.cypher.internal.plandescription
 
-import org.neo4j.cypher.internal.macros.AssertMacros.checkOnlyWhenAssertionsAreEnabled
+import org.neo4j.cypher.internal.macros.AssertMacros3.checkOnlyWhenAssertionsAreEnabled
 import org.neo4j.cypher.internal.plandescription.Arguments.BatchSize
 import org.neo4j.cypher.internal.plandescription.Arguments.ByteCode
+import org.neo4j.cypher.internal.plandescription.Arguments.CypherPlannerVersion
 import org.neo4j.cypher.internal.plandescription.Arguments.DbHits
 import org.neo4j.cypher.internal.plandescription.Arguments.Details
 import org.neo4j.cypher.internal.plandescription.Arguments.IdArg
@@ -42,6 +43,8 @@ import org.neo4j.cypher.internal.util.attribution.Id
 import org.neo4j.exceptions.InternalException
 import org.neo4j.graphdb.ExecutionPlanDescription
 import org.neo4j.graphdb.ExecutionPlanDescription.ProfilerStatistics
+import org.neo4j.kernel.impl.query.statistic.PlanDetailsToBeLogged
+import org.neo4j.kernel.impl.query.statistic.PlanOperatorDetailsToBeLogged
 
 import java.util
 import java.util.Locale
@@ -64,11 +67,11 @@ sealed trait InternalPlanDescription extends org.neo4j.graphdb.ExecutionPlanDesc
 
   def name: String
 
-  def children: Children
+  def children: Seq[InternalPlanDescription]
 
   def variables: Set[PrettyString]
 
-  def cd(name: String): InternalPlanDescription = children.find(name).head
+  def cd(name: String): InternalPlanDescription = children.flatMap(_.find(name)).head
 
   def map(f: InternalPlanDescription => InternalPlanDescription): InternalPlanDescription
 
@@ -76,21 +79,17 @@ sealed trait InternalPlanDescription extends org.neo4j.graphdb.ExecutionPlanDesc
 
   def addArgument(arg: Argument): InternalPlanDescription
 
-  def flatten: Seq[InternalPlanDescription] = {
+  def flatten: Seq[InternalPlanDescription] = flatten(leftPrecedence = true)
+
+  private def flatten(leftPrecedence: Boolean): Seq[InternalPlanDescription] = {
     val flatten = new ArrayBuffer[InternalPlanDescription]
     val stack = new mutable.Stack[InternalPlanDescription]()
     stack.push(self)
     while (stack.nonEmpty) {
       val plan = stack.pop()
       flatten += plan
-      plan.children match {
-        case NoChildren =>
-        case SingleChild(child) =>
-          stack.push(child)
-        case TwoChildren(l, r) =>
-          stack.push(r)
-          stack.push(l)
-      }
+      val childrenByPrecedence = if (leftPrecedence) plan.children.reverse else plan.children
+      childrenByPrecedence.foreach(stack.push)
     }
     flatten
   }.toSeq
@@ -116,6 +115,44 @@ sealed trait InternalPlanDescription extends org.neo4j.graphdb.ExecutionPlanDesc
       case Details(info) => info.contains(asPrettyString.raw(infoString))
       case _             => false
     }
+
+  private def logInfoSingleOperator(): PlanOperatorDetailsToBeLogged = {
+    val result = new PlanOperatorDetailsToBeLogged()
+
+    result.setOperatorName(name)
+    result.setOperatorId(id.x)
+
+    if (children.nonEmpty) result.setLeftOperatorId(children.head.id.x)
+    if (children.size > 1) result.setRightOperatorId(children(1).id.x)
+
+    arguments.foreach {
+      case Arguments.Details(detailsString) if detailsString.nonEmpty =>
+        result.setDetails(detailsString.mkString(", "))
+      case Arguments.EstimatedRows(effectiveCardinality, cardinality) =>
+        val m = new java.util.LinkedHashMap[String, java.lang.Double]()
+        m.put("effectiveCardinality", effectiveCardinality)
+        cardinality.foreach(c => m.put("rawCardinality", c))
+        result.setEstimatedRows(m)
+      case Arguments.Order(orderString) =>
+        result.setOrder(orderString.prettifiedString)
+      case Arguments.Distinctness(distinctnessString) =>
+        val distinctnessPrettified = distinctnessString.prettifiedString
+        if (distinctnessPrettified.nonEmpty) result.setDistinctness(distinctnessPrettified)
+      case Arguments.PipelineInfo(pipelineId, _, markAsSerial) =>
+        val m = new java.util.LinkedHashMap[String, Object]()
+        m.put("pipelineId", pipelineId.toString)
+        m.put("requiresSerialExecution", Boolean.box(markAsSerial))
+        result.setPipelineInfo(m)
+      case _ =>
+    }
+    result
+  }
+
+  def logInfo(): PlanDetailsToBeLogged = {
+    val operatorDetails = flatten(leftPrecedence = false)
+      .map(_.logInfoSingleOperator()).toArray
+    new PlanDetailsToBeLogged(operatorDetails)
+  }
 
   // Implement public Java API here=
   override def getName: String = name
@@ -148,21 +185,30 @@ sealed trait InternalPlanDescription extends org.neo4j.graphdb.ExecutionPlanDesc
     override def hasTime: Boolean = arguments.exists(_.isInstanceOf[Time])
 
     override def getDbHits: Long =
-      extract { case DbHits(count) => count }.getOrElse(throw new InternalException("Db hits were not recorded."))
+      extract { case DbHits(count) => count }.getOrElse(throw InternalException.internalError(
+        this.getClass.getSimpleName,
+        "Db hits were not recorded."
+      ))
 
     override def getRows: Long =
-      extract { case Rows(count) => count }.getOrElse(throw new InternalException("Rows were not recorded."))
+      extract { case Rows(count) => count }.getOrElse(throw InternalException.internalError(
+        this.getClass.getSimpleName,
+        "Rows were not recorded."
+      ))
 
     override def getPageCacheHits: Long = extract { case PageCacheHits(count) => count }.getOrElse(
-      throw new InternalException("Page cache stats were not recorded.")
+      throw InternalException.internalError(this.getClass.getSimpleName, "Page cache stats were not recorded.")
     )
 
     override def getPageCacheMisses: Long = extract { case PageCacheMisses(count) => count }.getOrElse(
-      throw new InternalException("Page cache stats were not recorded.")
+      throw InternalException.internalError(this.getClass.getSimpleName, "Page cache stats were not recorded.")
     )
 
     override def getTime: Long =
-      extract { case Time(value) => value }.getOrElse(throw new InternalException("Time was not recorded."))
+      extract { case Time(value) => value }.getOrElse(throw InternalException.internalError(
+        this.getClass.getSimpleName,
+        "Time was not recorded."
+      ))
 
     private def extract(f: PartialFunction[Argument, Long]): Option[Long] = arguments.collectFirst(f)
   }
@@ -172,57 +218,17 @@ sealed trait InternalPlanDescription extends org.neo4j.graphdb.ExecutionPlanDesc
 object InternalPlanDescription {
 
   case class TotalHits(hits: Long, uncertain: Boolean) {
-    def +(other: TotalHits) = TotalHits(this.hits + other.hits, this.uncertain || other.uncertain)
+    def +(other: TotalHits): TotalHits = TotalHits(this.hits + other.hits, this.uncertain || other.uncertain)
   }
 
   def error(msg: String): InternalPlanDescription =
-    PlanDescriptionImpl(Id.INVALID_ID, msg, NoChildren, Nil, Set.empty)
-}
-
-sealed trait Children {
-
-  def isEmpty: Boolean = toIndexedSeq.isEmpty
-
-  def tail: Seq[InternalPlanDescription] = toIndexedSeq.tail
-
-  def head: InternalPlanDescription = toIndexedSeq.head
-
-  def toIndexedSeq: Seq[InternalPlanDescription]
-
-  def find(name: String): Seq[InternalPlanDescription] = toIndexedSeq.flatMap(_.find(name))
-
-  def map(f: InternalPlanDescription => InternalPlanDescription): Children
-
-  def foreach[U](f: InternalPlanDescription => U): Unit = {
-    toIndexedSeq.foreach(f)
-  }
-}
-
-case object NoChildren extends Children {
-
-  def toIndexedSeq = Seq.empty
-
-  def map(f: InternalPlanDescription => InternalPlanDescription) = NoChildren
-}
-
-final case class SingleChild(child: InternalPlanDescription) extends Children {
-
-  val toIndexedSeq = Seq(child)
-
-  def map(f: InternalPlanDescription => InternalPlanDescription) = SingleChild(child = child.map(f))
-}
-
-final case class TwoChildren(lhs: InternalPlanDescription, rhs: InternalPlanDescription) extends Children {
-
-  val toIndexedSeq = Seq(lhs, rhs)
-
-  def map(f: InternalPlanDescription => InternalPlanDescription) = TwoChildren(lhs = lhs.map(f), rhs = rhs.map(f))
+    PlanDescriptionImpl(Id.INVALID_ID, msg, Seq.empty, Nil, Set.empty)
 }
 
 final case class PlanDescriptionImpl(
   id: Id,
   name: String,
-  children: Children,
+  children: Seq[InternalPlanDescription],
   arguments: Seq[Argument],
   variables: Set[PrettyString],
   withRawCardinalities: Boolean = false,
@@ -232,16 +238,17 @@ final case class PlanDescriptionImpl(
   checkOnlyWhenAssertionsAreEnabled(arguments.count(_.isInstanceOf[Details]) < 2)
 
   def find(name: String): Seq[InternalPlanDescription] =
-    children.find(name) ++ (if (this.name == name)
-                              Some(this)
-                            else {
-                              None
-                            })
+    children.flatMap(_.find(name)) ++
+      (if (this.name == name)
+         Some(this)
+       else {
+         None
+       })
 
   def addArgument(argument: Argument): InternalPlanDescription = copy(arguments = arguments :+ argument)
 
   def map(f: InternalPlanDescription => InternalPlanDescription): InternalPlanDescription = f(
-    copy(children = children.map(f))
+    copy(children = children.map(_.map(f)))
   )
 
   def toIndexedSeq: Seq[InternalPlanDescription] = this +: children.toIndexedSeq
@@ -252,6 +259,12 @@ final case class PlanDescriptionImpl(
     val version = arguments.collectFirst {
       case Version(v) => s"Cypher $v$NL"
     }
+
+    val plannerVersion = arguments.collectFirst {
+      // TODO: when releasing the display_planner_version feature this check should look at PlannerVersion instead.
+      case v: CypherPlannerVersion => s"Planner version ${v.value.toUpperCase(Locale.ROOT)}$NL"
+    }
+
     val planner = arguments.collectFirst {
       case Planner(n) => s"Planner ${n.toUpperCase(Locale.ROOT)}$NL"
     }
@@ -268,7 +281,7 @@ final case class PlanDescriptionImpl(
       case BatchSize(n) => s"Batch size $n$NL"
     }
 
-    val prefix = version ++ planner ++ runtime ++ runtimeVersion ++ batchSize
+    val prefix = version ++ planner ++ plannerVersion ++ runtime ++ runtimeVersion ++ batchSize
     s"${prefix.mkString("", NL, NL)}${renderAsTreeTable(this, withRawCardinalities, withDistinctness)}$NL${renderSummary(this)}$renderSources"
   }
 
@@ -289,7 +302,7 @@ final case class PlanDescriptionImpl(
         // TODO Better way to achieve this!
         if (id.isInstanceOf[java.lang.Integer]) Id(id.asInstanceOf[java.lang.Integer]) else id.asInstanceOf[Id],
         children(1).asInstanceOf[String],
-        children(2).asInstanceOf[Children],
+        children(2).asInstanceOf[Seq[InternalPlanDescription]],
         children(3).asInstanceOf[Seq[Argument]],
         children(4).asInstanceOf[Set[PrettyString]]
       ).asInstanceOf[this.type]
@@ -311,7 +324,7 @@ final case class CompactedPlanDescription(similar: Seq[InternalPlanDescription])
     acc ++ plan.variables
   }
 
-  override def children: Children = similar.last.children
+  override def children: Seq[InternalPlanDescription] = similar.last.children
 
   override val arguments: Seq[Argument] = {
     var dbHits: Option[Long] = None
@@ -361,9 +374,9 @@ final case class CompactedPlanDescription(similar: Seq[InternalPlanDescription])
 final case class ArgumentPlanDescription(id: Id, arguments: Seq[Argument] = Seq.empty, variables: Set[PrettyString])
     extends InternalPlanDescription {
 
-  def children = NoChildren
+  def children: Seq[InternalPlanDescription] = Seq.empty
 
-  def find(searchedName: String) = if (searchedName == name) Seq(this) else Seq.empty
+  def find(searchedName: String): Seq[InternalPlanDescription] = if (searchedName == name) Seq(this) else Seq.empty
 
   def name = "EmptyRow"
 
@@ -385,6 +398,35 @@ final case class ArgumentPlanDescription(id: Id, arguments: Seq[Argument] = Seq.
         children(0).asInstanceOf[Id],
         children(1).asInstanceOf[Seq[Argument]],
         children(2).asInstanceOf[Set[PrettyString]]
+      ).asInstanceOf[this.type]
+    }
+  }
+}
+
+case class WorkingScopePlanDescription(
+  id: Id,
+  name: String,
+  variables: Set[PrettyString],
+  arguments: Seq[Argument],
+  children: Seq[InternalPlanDescription]
+) extends InternalPlanDescription {
+  override def map(f: InternalPlanDescription => InternalPlanDescription): InternalPlanDescription = f(this)
+
+  override def find(searchedName: String): Seq[InternalPlanDescription] =
+    if (searchedName == name) Seq(this) else Seq.empty
+
+  override def addArgument(arg: Argument): InternalPlanDescription = copy(arguments = arguments :+ arg)
+
+  override def dup(children: Seq[AnyRef]): WorkingScopePlanDescription.this.type = {
+    if (children.iterator eqElements this.treeChildren) {
+      this
+    } else {
+      copy(
+        children(0).asInstanceOf[Id],
+        children(1).asInstanceOf[String],
+        children(2).asInstanceOf[Set[PrettyString]],
+        children(3).asInstanceOf[Seq[Argument]],
+        children(4).asInstanceOf[Seq[InternalPlanDescription]]
       ).asInstanceOf[this.type]
     }
   }

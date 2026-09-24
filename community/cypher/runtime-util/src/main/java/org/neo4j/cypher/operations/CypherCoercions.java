@@ -38,21 +38,30 @@ import static org.neo4j.internal.kernel.api.procs.Neo4jTypes.NTPoint;
 import static org.neo4j.internal.kernel.api.procs.Neo4jTypes.NTRelationship;
 import static org.neo4j.internal.kernel.api.procs.Neo4jTypes.NTString;
 import static org.neo4j.internal.kernel.api.procs.Neo4jTypes.NTTime;
+import static org.neo4j.internal.kernel.api.procs.Neo4jTypes.NTUUID;
+import static org.neo4j.internal.kernel.api.procs.Neo4jTypes.NTVector;
 import static org.neo4j.values.SequenceValue.IterationPreference.RANDOM_ACCESS;
 import static org.neo4j.values.storable.Values.NO_VALUE;
 import static org.neo4j.values.virtual.VirtualValues.EMPTY_LIST;
 
+import java.util.List;
 import java.util.Map;
 import org.eclipse.collections.impl.factory.primitive.IntSets;
 import org.neo4j.cypher.internal.runtime.DbAccess;
-import org.neo4j.cypher.internal.runtime.ExpressionCursors;
+import org.neo4j.cypher.internal.runtime.cursors.ExpressionCursors;
 import org.neo4j.exceptions.CypherTypeException;
 import org.neo4j.internal.kernel.api.NodeCursor;
 import org.neo4j.internal.kernel.api.PropertyCursor;
 import org.neo4j.internal.kernel.api.RelationshipScanCursor;
 import org.neo4j.internal.kernel.api.procs.Neo4jTypes;
+import org.neo4j.internal.schema.IndexDescriptor;
+import org.neo4j.internal.schema.SettingsAccessor;
+import org.neo4j.kernel.KernelVersion;
+import org.neo4j.kernel.api.impl.schema.vector.VectorIndexConfig;
+import org.neo4j.kernel.api.impl.schema.vector.VectorIndexVersion;
 import org.neo4j.values.AnyValue;
 import org.neo4j.values.SequenceValue;
+import org.neo4j.values.VectorCandidate;
 import org.neo4j.values.storable.ArrayValue;
 import org.neo4j.values.storable.BooleanValue;
 import org.neo4j.values.storable.DateTimeValue;
@@ -64,8 +73,10 @@ import org.neo4j.values.storable.NumberValue;
 import org.neo4j.values.storable.PointValue;
 import org.neo4j.values.storable.TextValue;
 import org.neo4j.values.storable.TimeValue;
+import org.neo4j.values.storable.UUIDValue;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.Values;
+import org.neo4j.values.storable.VectorValue;
 import org.neo4j.values.virtual.ListValue;
 import org.neo4j.values.virtual.ListValueBuilder;
 import org.neo4j.values.virtual.MapValue;
@@ -92,15 +103,11 @@ public final class CypherCoercions {
         } else if (anyValue instanceof ListValue list) {
             return list.toStorableArray();
         } else {
-            if (anyValue instanceof Value v)
-                throw CypherTypeException.expectedPrimitivePropertyValue(
-                        String.valueOf(v), v.prettyPrint(), CypherTypeValueMapper.valueType(v), true);
-            else
-                throw CypherTypeException.expectedPrimitivePropertyValue(
-                        String.valueOf(anyValue),
-                        String.valueOf(anyValue),
-                        CypherTypeValueMapper.valueType(anyValue),
-                        true);
+            throw CypherTypeException.expectedPrimitivePropertyValue(
+                    String.valueOf(anyValue),
+                    String.valueOf(anyValue),
+                    CypherTypeValueMapper.valueType(anyValue),
+                    true);
         }
     }
 
@@ -151,6 +158,41 @@ public final class CypherCoercions {
         throw cantCoerce(value, "Path");
     }
 
+    public static float[] validateAndConvertVectorIndexQuery(IndexDescriptor index, AnyValue query) {
+        if (query instanceof VectorCandidate vectorCandidate) {
+            return validateAndConvertVectorIndexQuery(index, vectorCandidate);
+        } else {
+            VectorCandidate vectorCandidate = VectorCandidate.maybeFrom(query);
+            if (vectorCandidate != null) {
+                return validateAndConvertVectorIndexQuery(index, vectorCandidate);
+            }
+            throw CypherTypeException.invalidType(
+                    query.prettyPrint(),
+                    List.of("LIST<INTEGER NOT NULL | FLOAT NOT NULL>", "VECTOR"),
+                    query.getTypeName(),
+                    "LIST<INTEGER NOT NULL | FLOAT NOT NULL>, VECTOR");
+        }
+    }
+
+    public static float[] validateAndConvertVectorIndexQuery(IndexDescriptor index, VectorCandidate query) {
+        return validateAndConvertVectorIndexQuery(index, null, query);
+    }
+
+    public static float[] validateAndConvertVectorIndexQuery(
+            IndexDescriptor index, KernelVersion kernelVersion, VectorCandidate query) {
+        VectorIndexVersion version = VectorIndexVersion.fromDescriptor(index.getIndexProvider());
+        VectorIndexConfig vectorIndexConfig = version.indexSettingValidator(kernelVersion)
+                .interpretAuthoritativeToTypedConfig(new SettingsAccessor.IndexConfigAccessor(index.getIndexConfig()));
+
+        final var dimensions = vectorIndexConfig.dimensions();
+        if (dimensions.isPresent() && query.dimensions() != dimensions.getAsInt()) {
+            throw CypherTypeException.wrongVectorDimension(index.getName(), dimensions.getAsInt(), query.dimensions());
+        }
+
+        final var similarityFunction = vectorIndexConfig.similarityFunction();
+        return similarityFunction.toValidVector(query);
+    }
+
     public static AnyValue asIntegralValueOrNull(AnyValue value) {
         if (value instanceof NumberValue number) {
             return Values.longValue(number.longValue());
@@ -176,6 +218,23 @@ public final class CypherCoercions {
             return NO_VALUE;
         }
         throw cantCoerce(value, "Boolean");
+    }
+
+    public static UUIDValue asUUIDValue(AnyValue value) {
+        assert value != NO_VALUE : "NO_VALUE checks need to happen outside this call";
+        if (!(value instanceof UUIDValue)) {
+            throw cantCoerce(value, "UUID");
+        }
+        return (UUIDValue) value;
+    }
+
+    public static AnyValue asUUIDValueOrNull(AnyValue value) {
+        if (value instanceof UUIDValue uuidValue) {
+            return uuidValue;
+        } else if (value == NO_VALUE) {
+            return NO_VALUE;
+        }
+        throw cantCoerce(value, "UUID");
     }
 
     public static NumberValue asNumberValue(AnyValue value) {
@@ -290,16 +349,38 @@ public final class CypherCoercions {
         return value == NO_VALUE ? NO_VALUE : asMapValue(value, access, nodeCursor, relationshipCursor, propertyCursor);
     }
 
+    /**
+     * Unlike {@link CypherCoercions#asMapValue}, this does not coerce nodes/relationships to maps -
+     * the value must already be a map.
+     */
+    public static MapValue asMapValueStrict(AnyValue value) {
+        assert value != NO_VALUE : "NO_VALUE checks need to happen outside this call";
+        if (value instanceof MapValue map) {
+            return map;
+        }
+        throw CypherTypeException.expectedMap(
+                value.toString(), value.prettyPrint(), CypherTypeValueMapper.valueType(value));
+    }
+
     public static SequenceValue asSequenceValue(AnyValue value) {
         assert value != NO_VALUE : "NO_VALUE checks need to happen outside this call";
-        if (!(value instanceof SequenceValue)) {
-            throw cantCoerce(value, "SequenceValue");
+        if (value instanceof SequenceValue sequence) {
+            return sequence;
         }
-        return (SequenceValue) value;
+        throw cantCoerce(value, "SequenceValue");
+    }
+
+    public static VectorValue asVectorValue(AnyValue value) {
+        assert value != NO_VALUE : "NO_VALUE checks need to happen outside this call";
+        if (!(value instanceof VectorValue)) {
+            throw cantCoerce(value, "VectorValue");
+        }
+        return (VectorValue) value;
     }
 
     static CypherTypeException cantCoerce(AnyValue value, String type) {
-        return new CypherTypeException(format("Can't coerce `%s` to %s", value, type));
+        return CypherTypeException.invalidCoercion(
+                value.toString(), type, format("Can't coerce `%s` to %s", value, type));
     }
 
     public static Coercer coercerFromType(Neo4jTypes.AnyType type) {
@@ -309,12 +390,13 @@ public final class CypherCoercions {
         } else if (type instanceof Neo4jTypes.ListType listType) {
             return new ListCoercer(listType.innerType());
         }
-        throw new CypherTypeException(format("Can't coerce to type %s", type));
+        throw CypherTypeException.invalidCoercion("", type.toString(), format("Can't coerce to type %s", type));
     }
 
     private static final Map<Class<? extends Neo4jTypes.AnyType>, CypherCoercions.Coercer> STATIC_CONVERTERS =
             Map.ofEntries(
                     Map.entry(NTAny.getClass(), (a, ignore2, cursors) -> a),
+                    Map.entry(NTUUID.getClass(), (a, ignore2, cursors) -> asUUIDValueOrNull(a)),
                     Map.entry(NTString.getClass(), (a, ignore2, cursors) -> asTextValueOrNull(a)),
                     Map.entry(NTNumber.getClass(), (a, ignore2, cursors) -> asNumberValueOrNull(a)),
                     Map.entry(NTInteger.getClass(), (a, ignore2, cursors) -> asIntegralValueOrNull(a)),
@@ -338,7 +420,8 @@ public final class CypherCoercions {
                     Map.entry(NTDate.getClass(), (a, ignore2, cursors) -> asDateValueOrNull(a)),
                     Map.entry(NTTime.getClass(), (a, ignore2, cursors) -> asTimeValueOrNull(a)),
                     Map.entry(NTLocalTime.getClass(), (a, ignore2, cursors) -> asLocalTimeValueOrNull(a)),
-                    Map.entry(NTDuration.getClass(), (a, ignore2, cursors) -> asDurationValueOrNull(a)));
+                    Map.entry(NTDuration.getClass(), (a, ignore2, cursors) -> asDurationValueOrNull(a)),
+                    Map.entry(NTVector.getClass(), (a, ignore2, cursors) -> asVectorValue(a)));
 
     /** Value coercer. All implementations must be immutable! They are reused. */
     @FunctionalInterface
@@ -408,6 +491,7 @@ class ListCoercer implements CypherCoercions.Coercer {
             case LOCAL_TIME_ARRAY -> target == NTLocalTime;
             case DURATION_ARRAY -> target == NTDuration;
             case TEXT_ARRAY -> target == NTString;
+            case UUID_ARRAY -> target == NTUUID;
             case BOOLEAN_ARRAY -> target == NTBoolean;
             case INT64_ARRAY -> target == NTInteger || target == NTNumber;
             case FLOAT64_ARRAY -> target == NTFloat || target == NTNumber;
@@ -426,8 +510,11 @@ class ListCoercer implements CypherCoercions.Coercer {
             case LOCAL_TIME -> target == NTLocalTime;
             case DURATION -> target == NTDuration;
             case UTF16_TEXT, UTF8_TEXT -> target == NTString;
+            case UUID -> target == NTUUID;
             case BOOLEAN -> target == NTBoolean;
             case INT64, INT32, INT16, INT8, FLOAT64, FLOAT32 -> target == NTNumber;
+            case INT8_VECTOR, INT16_VECTOR, INT32_VECTOR, INT64_VECTOR, FLOAT32_VECTOR, FLOAT64_VECTOR ->
+                target == NTVector;
             default -> false;
         };
     }

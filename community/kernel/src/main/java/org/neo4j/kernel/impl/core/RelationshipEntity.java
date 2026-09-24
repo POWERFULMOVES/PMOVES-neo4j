@@ -34,8 +34,6 @@ import java.util.Map;
 import java.util.Objects;
 import org.neo4j.common.EntityType;
 import org.neo4j.exceptions.KernelException;
-import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
-import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.graphdb.ConstraintViolationException;
 import org.neo4j.graphdb.DatabaseShutdownException;
 import org.neo4j.graphdb.Node;
@@ -43,9 +41,8 @@ import org.neo4j.graphdb.NotFoundException;
 import org.neo4j.graphdb.NotInTransactionException;
 import org.neo4j.graphdb.Relationship;
 import org.neo4j.graphdb.RelationshipType;
-import org.neo4j.graphdb.TransactionFailureException;
 import org.neo4j.internal.kernel.api.PropertyCursor;
-import org.neo4j.internal.kernel.api.RelationshipDataAccessor;
+import org.neo4j.internal.kernel.api.RelationshipCursor;
 import org.neo4j.internal.kernel.api.RelationshipScanCursor;
 import org.neo4j.internal.kernel.api.TokenRead;
 import org.neo4j.internal.kernel.api.exceptions.EntityNotFoundException;
@@ -55,7 +52,6 @@ import org.neo4j.internal.kernel.api.exceptions.schema.ConstraintValidationExcep
 import org.neo4j.internal.kernel.api.exceptions.schema.IllegalTokenNameException;
 import org.neo4j.internal.kernel.api.exceptions.schema.TokenCapacityExceededKernelException;
 import org.neo4j.kernel.api.KernelTransaction;
-import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.impl.coreapi.InternalTransaction;
 import org.neo4j.storageengine.api.LongReference;
 import org.neo4j.storageengine.api.PropertySelection;
@@ -67,13 +63,13 @@ public class RelationshipEntity implements Relationship, RelationshipVisitor<Run
     public static final long SHALLOW_SIZE = shallowSizeOfInstance(RelationshipEntity.class);
 
     private final InternalTransaction internalTransaction;
-    private final RelationshipDataAccessor cursor;
+    private final RelationshipCursor cursor;
     private long id = LongReference.NULL;
     private long startNode = LongReference.NULL;
     private long endNode = LongReference.NULL;
     private int type;
 
-    public RelationshipEntity(InternalTransaction internalTransaction, RelationshipDataAccessor cursor) {
+    public RelationshipEntity(InternalTransaction internalTransaction, RelationshipCursor cursor) {
         this.internalTransaction = internalTransaction;
         this.cursor = cursor;
         visit(
@@ -230,7 +226,8 @@ public class RelationshipEntity implements Relationship, RelationshipVisitor<Run
         internalTransaction.checkInTransaction();
         int typeId = typeId();
         if (typeId == LongReference.NULL) {
-            throw new NotFoundException(new EntityNotFoundException(EntityType.NODE, getElementId()));
+            throw new NotFoundException(EntityNotFoundException.internalError(
+                    this.getClass().getSimpleName(), EntityType.NODE, getElementId()));
         }
         return internalTransaction.getRelationshipTypeById(typeId);
     }
@@ -293,7 +290,7 @@ public class RelationshipEntity implements Relationship, RelationshipVisitor<Run
             propertyIds[i] = token.propertyKey(key);
         }
 
-        Map<String, Object> properties = new HashMap<>(itemsToReturn);
+        Map<String, Object> properties = HashMap.newHashMap(itemsToReturn);
         PropertyCursor propertyCursor = initializePropertyCursor(
                 transaction.ambientPropertyCursor(), transaction, PropertySelection.selection(propertyIds));
         while (propertyCursor.next()) {
@@ -392,24 +389,17 @@ public class RelationshipEntity implements Relationship, RelationshipVisitor<Run
         } catch (TokenCapacityExceededKernelException e) {
             throw new ConstraintViolationException(e.getMessage(), e);
         } catch (KernelException e) {
-            throw mapStatusException("Unknown error trying to create property key token", e.status(), e);
+            throw mapStatusException(
+                    "Unknown error trying to create property key token",
+                    e.status(),
+                    e,
+                    internalTransaction.exceptionHandlerService());
         }
 
         try {
             transaction.dataWrite().relationshipSetProperty(id, propertyKeyId, Values.of(value, false));
         } catch (ConstraintValidationException e) {
             throw new ConstraintViolationException(e.getUserMessage(transaction.tokenRead()), e);
-        } catch (IllegalArgumentException e) {
-            try {
-                transaction.rollback();
-            } catch (org.neo4j.internal.kernel.api.exceptions.TransactionFailureException ex) {
-                ex.addSuppressed(e);
-                var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_40N01)
-                        .build();
-                throw new TransactionFailureException(
-                        gql, "Fail to rollback transaction.", ex, Status.Transaction.TransactionRollbackFailed);
-            }
-            throw e;
         } catch (EntityNotFoundException e) {
             throw new NotFoundException(e);
         } catch (InvalidTransactionTypeKernelException e) {
@@ -474,7 +464,8 @@ public class RelationshipEntity implements Relationship, RelationshipVisitor<Run
             transaction.dataRead().singleRelationship(id, relationships);
         }
         if (!relationships.next()) {
-            throw new NotFoundException(new EntityNotFoundException(EntityType.RELATIONSHIP, getElementId()));
+            throw new NotFoundException(EntityNotFoundException.internalError(
+                    this.getClass().getSimpleName(), EntityType.RELATIONSHIP, getElementId()));
         }
     }
 

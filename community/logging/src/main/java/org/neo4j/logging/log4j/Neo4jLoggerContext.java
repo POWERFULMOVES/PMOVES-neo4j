@@ -34,11 +34,18 @@ public class Neo4jLoggerContext implements Closeable {
     private final LoggerContext ctx;
     private final Closeable additionalClosable;
     private final String configSourceInfo;
+    public final boolean internalLogMarkersEnabled;
 
-    public Neo4jLoggerContext(LoggerContext ctx, Closeable additionalClosable, String configSourceInfo) {
+    public Neo4jLoggerContext(
+            LoggerContext ctx,
+            Closeable additionalClosable,
+            String configSourceInfo,
+            boolean internalLogMarkersEnabled) {
         this.ctx = ctx;
-        this.additionalClosable = additionalClosable;
+        this.additionalClosable =
+                additionalClosable == System.out || additionalClosable == System.err ? null : additionalClosable;
         this.configSourceInfo = configSourceInfo;
+        this.internalLogMarkersEnabled = internalLogMarkersEnabled;
     }
 
     /**
@@ -65,10 +72,6 @@ public class Neo4jLoggerContext implements Closeable {
      */
     LoggerContext getLoggerContext() {
         return ctx;
-    }
-
-    boolean haveExternalResources() {
-        return additionalClosable != null;
     }
 
     @Override

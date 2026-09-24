@@ -17,10 +17,15 @@
 package org.neo4j.cypher.internal.expressions
 
 import org.neo4j.cypher.internal.expressions.PatternPart.Selector
+import org.neo4j.cypher.internal.expressions.functions.Category
+import org.neo4j.cypher.internal.expressions.functions.FunctionWithName
 import org.neo4j.cypher.internal.label_expressions.LabelExpression
 import org.neo4j.cypher.internal.util.ASTNode
 import org.neo4j.cypher.internal.util.DeprecatedFeature
 import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.cypher.internal.util.helpers.LazyVal
+import org.neo4j.cypher.internal.util.symbols.CTList
+import org.neo4j.cypher.internal.util.symbols.CTPath
 
 import scala.annotation.tailrec
 
@@ -33,15 +38,19 @@ sealed trait Pattern extends ASTNode {
 
   def patternParts: Seq[PatternPart]
 
-  lazy val length: Int = this.folder.fold(0) {
-    case RelationshipChain(_, _, _) => _ + 1
-    case _                          => identity
+  def length: Int = lazyLength.value
+
+  private val lazyLength: LazyVal[Int] = LazyVal {
+    this.folder.fold(0) {
+      case RelationshipChain(_, _, _) => _ + 1
+      case _                          => identity
+    }
   }
 }
 
 object Pattern {
 
-  final case class ForMatch(patternParts: Seq[PatternPartWithSelector])(val position: InputPosition) extends Pattern
+  final case class ForMatch(patternParts: Seq[PrefixedPatternPart])(val position: InputPosition) extends Pattern
 
   final case class ForUpdate(patternParts: Seq[NonPrefixedPatternPart])(val position: InputPosition) extends Pattern
       with HasMappableExpressions[ForUpdate] {
@@ -92,6 +101,23 @@ sealed abstract class PatternPart extends ASTNode {
   def allVariables: Set[LogicalVariable]
   def element: PatternElement
   def dependencies: Set[LogicalVariable]
+  def pathVariable: Option[LogicalVariable]
+
+  def boundaryNodes: Set[LogicalVariable] = lazyBoundaryNodes.value
+
+  def strictInteriorVariables: Set[LogicalVariable] = lazyStrictInteriorVariables.value
+
+  private val lazyBoundaryNodes: LazyVal[Set[LogicalVariable]] =
+    LazyVal(PatternElement.boundaryNodes(element))
+
+  private val lazyStrictInteriorVariables: LazyVal[Set[LogicalVariable]] = LazyVal {
+    element match {
+      // QPPs connect the adjacent nodes but do not have any boundary nodes themselves.
+      // Therefore, everything in a QPP is a strict interior node. Boundary nodes should be connected through a PathConcatenation
+      case _: QuantifiedPath => element.allVariables
+      case element           => element.allVariables.filterNot(boundaryNodes)
+    }
+  }
 
   def isBounded: Boolean
   def isFixedLength: Boolean
@@ -101,17 +127,19 @@ sealed abstract class PatternPart extends ASTNode {
 
 sealed trait NonPrefixedPatternPart extends PatternPart with HasMappableExpressions[NonPrefixedPatternPart]
 
-case class PatternPartWithSelector(selector: Selector, part: NonPrefixedPatternPart) extends PatternPart {
+case class PrefixedPatternPart(selector: Selector, pathMode: PathMode, part: NonPrefixedPatternPart)
+    extends PatternPart {
   override def position: InputPosition = part.position
   override def allVariables: Set[LogicalVariable] = part.allVariables
+  override def pathVariable: Option[LogicalVariable] = part.pathVariable
   override def element: PatternElement = part.element
-  override def isBounded: Boolean = part.isBounded || selector.isBounded
+  override def isBounded: Boolean = part.isBounded
   override def isFixedLength: Boolean = part.isFixedLength
   override def dependencies: Set[LogicalVariable] = part.dependencies
 
-  def isSelective: Boolean = selector.isBounded
+  def isSelective: Boolean = selector.isSelective
 
-  def modifyElement(f: PatternElement => PatternElement): PatternPartWithSelector = {
+  def modifyElement(f: PatternElement => PatternElement): PrefixedPatternPart = {
     def replaceInAnonymous(app: AnonymousPatternPart): AnonymousPatternPart = app match {
       case p: PathPatternPart          => p.copy(element = f(p.element))
       case s: ShortestPathsPatternPart => s.copy(element = f(s.element))(s.position)
@@ -125,10 +153,19 @@ case class PatternPartWithSelector(selector: Selector, part: NonPrefixedPatternP
     copy(part = replaceInNonPrefixed(part))
   }
 
-  def replaceElement(newElement: PatternElement): PatternPartWithSelector =
+  def replaceElement(newElement: PatternElement): PrefixedPatternPart =
     modifyElement(_ => newElement)
 
   override def containsDynamicPattern: Boolean = element.containsDynamicPattern
+}
+
+object PrefixedPatternPart {
+
+  def apply(part: NonPrefixedPatternPart)(position: InputPosition): PrefixedPatternPart =
+    PrefixedPatternPart(PatternPart.AllPaths()(position), PathMode.Walk(implicitlyCreated = true)(position), part)
+
+  def apply(selector: Selector, part: NonPrefixedPatternPart): PrefixedPatternPart =
+    PrefixedPatternPart(selector, PathMode.Walk(implicitlyCreated = true)(selector.position), part)
 }
 
 case class NamedPatternPart(variable: Variable, patternPart: AnonymousPatternPart)(val position: InputPosition)
@@ -136,6 +173,8 @@ case class NamedPatternPart(variable: Variable, patternPart: AnonymousPatternPar
   override def element: PatternElement = patternPart.element
 
   override def allVariables: Set[LogicalVariable] = patternPart.allVariables + variable
+
+  override def pathVariable: Option[LogicalVariable] = Some(variable)
 
   override def isBounded: Boolean = patternPart.isBounded
 
@@ -152,6 +191,7 @@ case class NamedPatternPart(variable: Variable, patternPart: AnonymousPatternPar
 sealed trait AnonymousPatternPart extends NonPrefixedPatternPart {
   override def allVariables: Set[LogicalVariable] = element.allVariables
   override def containsDynamicPattern: Boolean = element.containsDynamicPattern
+  override def pathVariable: Option[LogicalVariable] = None
 }
 
 case class PathPatternPart(element: PatternElement) extends AnonymousPatternPart {
@@ -190,51 +230,119 @@ case class ShortestPathsPatternPart(element: PatternElement, single: Boolean)(va
   override def containsDynamicPattern: Boolean = element.containsDynamicPattern
 }
 
+object ShortestPathShowInfo extends FunctionWithName {
+  def name: String = "shortestPath"
+
+  val functionInfoForShow: Seq[FunctionTypeSignature] = Vector(
+    FunctionTypeSignature(
+      function = this,
+      outputType = CTPath,
+      names = Vector("pathPattern"),
+      description =
+        "Returns the shortest path for a given path pattern with a variable-length relationship. If multiple shortest paths exist, one is returned non-deterministically.",
+      category = Category.PATH,
+      argumentTypes = Vector(CTPath),
+      argumentDescriptions = Map(
+        "pathPattern" -> "A path pattern containing a variable-length relationship."
+      )
+    )
+  )
+}
+
+object AllShortestPathsShowInfo extends FunctionWithName {
+  def name: String = "allShortestPaths"
+
+  val functionInfoForShow: Seq[FunctionTypeSignature] = Vector(
+    FunctionTypeSignature(
+      function = this,
+      outputType = CTList(CTPath),
+      names = Vector("pathPattern"),
+      description =
+        "Returns all shortest paths for a given path pattern with a variable-length relationship.",
+      category = Category.LIST,
+      argumentTypes = Vector(CTPath),
+      argumentDescriptions = Map(
+        "pathPattern" -> "A path pattern containing a variable-length relationship."
+      )
+    )
+  )
+}
+
 object PatternPart {
 
   def apply(element: PatternElement): PathPatternPart =
     PathPatternPart(element)
 
   sealed trait Selector extends ASTNode {
-    def prettified: String
+    def prettified: String = s"$prettifiedPrefix $prettifiedSuffix"
+    def prettifiedPrefix: String
+    def prettifiedSuffix: String
 
-    def isBounded: Boolean
+    def isSelective: Boolean
   }
 
   sealed trait CountedSelector extends Selector {
-    val count: UnsignedDecimalIntegerLiteral
+    val count: Either[PathLengthQuantifier, Parameter]
   }
 
-  sealed trait SelectiveSelector extends Selector
+  sealed trait SelectiveSelector extends Selector {
+    override def isSelective: Boolean = true
+  }
 
-  case class AnyPath(count: UnsignedDecimalIntegerLiteral)(val position: InputPosition) extends SelectiveSelector
+  case class AnyPath(count: Either[PathLengthQuantifier, Parameter])(val position: InputPosition)
+      extends SelectiveSelector
       with CountedSelector {
-    override def prettified: String = s"ANY ${count.value} PATHS"
 
-    override def isBounded: Boolean = true
+    override def prettifiedPrefix: String = count match {
+      case Left(n)  => s"ANY ${n.value}"
+      case Right(p) => s"ANY $$${p.name}"
+    }
+
+    override def prettifiedSuffix: String = "PATHS"
   }
 
   case class AllPaths()(val position: InputPosition) extends Selector {
-    override def prettified: String = "ALL PATHS"
-    override def isBounded: Boolean = false
+    override def prettifiedPrefix: String = "ALL"
+
+    override def prettifiedSuffix: String = "PATHS"
+
+    override def isSelective: Boolean = false
   }
 
-  case class AnyShortestPath(count: UnsignedDecimalIntegerLiteral)(val position: InputPosition)
+  case class AnyShortestPath(count: Either[
+    PathLengthQuantifier,
+    Parameter
+  ])(val position: InputPosition)
       extends SelectiveSelector
       with CountedSelector {
-    override def prettified: String = s"SHORTEST ${count.value} PATHS"
-    override def isBounded: Boolean = true
+
+    override def prettifiedPrefix: String = count match {
+      case Left(n)  => s"SHORTEST ${n.value}"
+      case Right(p) => s"SHORTEST $$${p.name}"
+    }
+
+    override def prettifiedSuffix: String = "PATHS"
   }
 
   case class AllShortestPaths()(val position: InputPosition) extends SelectiveSelector {
-    override def prettified: String = "ALL SHORTEST PATHS"
-    override def isBounded: Boolean = true
+    override def prettifiedPrefix: String = "ALL SHORTEST"
+
+    override def prettifiedSuffix: String = "PATHS"
   }
 
-  case class ShortestGroups(count: UnsignedDecimalIntegerLiteral)(val position: InputPosition) extends SelectiveSelector
+  case class ShortestGroups(count: Either[
+    PathLengthQuantifier,
+    Parameter
+  ])(val position: InputPosition)
+      extends SelectiveSelector
       with CountedSelector {
-    override def prettified: String = s"SHORTEST ${count.value} PATH GROUPS"
-    override def isBounded: Boolean = true
+
+    override def prettifiedPrefix: String = count match {
+      case Left(n)  => s"SHORTEST ${n.value}"
+      case Right(p) => s"SHORTEST $$${p.name}"
+    }
+
+    override def prettifiedSuffix: String = "PATH GROUPS"
   }
 }
 
@@ -247,7 +355,10 @@ object PatternPart {
 case class PathConcatenation(factors: Seq[PathFactor])(val position: InputPosition) extends PatternElement {
   override def allVariables: Set[LogicalVariable] = factors.view.flatMap(_.allVariables).toSet
 
-  def allTopLevelVariablesLeftToRight: Seq[LogicalVariable] = factors.flatMap(_.allTopLevelVariablesLeftToRight)
+  override def allSingletonNodeVariables: Set[LogicalVariable] = factors.view.flatMap(_.allSingletonNodeVariables).toSet
+
+  override def allSingletonVariablesLeftToRight: Seq[LogicalVariable] =
+    factors.flatMap(_.allSingletonVariablesLeftToRight)
 
   override def variable: Option[LogicalVariable] = None
 
@@ -280,7 +391,9 @@ case class QuantifiedPath(
 
   override def allVariables: Set[LogicalVariable] = variableGroupings.map(_.group)
 
-  override def allTopLevelVariablesLeftToRight: Seq[LogicalVariable] = Seq.empty
+  override def allSingletonNodeVariables: Set[LogicalVariable] = Set.empty
+
+  override def allSingletonVariablesLeftToRight: Seq[LogicalVariable] = Seq.empty
 
   override def variable: Option[LogicalVariable] = None
 
@@ -327,6 +440,22 @@ object QuantifiedPath {
   }
 }
 
+case class AllReduceAccumulator(
+  initial: Expression,
+  previous: LogicalVariable,
+  next: LogicalVariable
+)(val position: InputPosition)
+    extends ASTNode with HasMappableExpressions[AllReduceAccumulator] {
+
+  override def toString: String = s"(initial=$initial, previous=${previous.name}, next=${next.name})"
+
+  override def mapExpressions(f: Expression => Expression): AllReduceAccumulator = copy(
+    f(initial),
+    f(previous).asInstanceOf[LogicalVariable],
+    f(next).asInstanceOf[LogicalVariable]
+  )(this.position)
+}
+
 /**
  * Describes a variable that is exposed from a [[QuantifiedPath]].
  *
@@ -361,19 +490,22 @@ case class ParenthesizedPath(
     extends PathFactor with PatternAtom {
 
   override def allVariables: Set[LogicalVariable] = part.element.allVariables
-  override def allTopLevelVariablesLeftToRight: Seq[LogicalVariable] = part.element.allTopLevelVariablesLeftToRight
+
+  override def allSingletonNodeVariables: Set[LogicalVariable] = part.element.allSingletonNodeVariables
+
+  override def allSingletonVariablesLeftToRight: Seq[LogicalVariable] = part.element.allSingletonVariablesLeftToRight
 
   override def variable: Option[LogicalVariable] = None
-
-  override def isBounded: Boolean = part.isBounded
-
-  override def isFixedLength: Boolean = part.isFixedLength
 
   override def mapExpressions(f: Expression => Expression): PatternElement =
     copy(part.mapExpressions(f), optionalWhereClause.map(f))(this.position)
 
   override def dependencies: Set[LogicalVariable] = part.dependencies ++
     optionalWhereClause.toSet[Expression].flatMap(_.dependencies)
+
+  override def isBounded: Boolean = part.isBounded
+
+  override def isFixedLength: Boolean = part.isFixedLength
 
   override def containsDynamicPattern: Boolean = optionalWhereClause.exists(_.containsDynamicExpression) ||
     part.containsDynamicPattern
@@ -388,10 +520,14 @@ object ParenthesizedPath {
 sealed abstract class PatternElement extends ASTNode with HasMappableExpressions[PatternElement] {
   def allVariables: Set[LogicalVariable]
 
+  // TODO Set may not be sufficient when we need to identify boundary nodes for the SIMPLE path mode
+  //  See PLAN-2343
+  def allSingletonNodeVariables: Set[LogicalVariable]
+
   /**
    * In contrast to allVariables, this does not return variables that are nested inside QPPs.
    */
-  def allTopLevelVariablesLeftToRight: Seq[LogicalVariable]
+  def allSingletonVariablesLeftToRight: Seq[LogicalVariable]
   def variable: Option[LogicalVariable]
   def isBounded: Boolean
   def isFixedLength: Boolean
@@ -404,24 +540,41 @@ sealed abstract class PatternElement extends ASTNode with HasMappableExpressions
 object PatternElement {
 
   /**
-   * Returns the boundary nodes of this pattern element. Note, this does not work on QPPs directly.
-   * Therefore, qpps need to have been padded before.
+   * Returns the boundary nodes of this pattern element.
+   *
+   * In well-formed AST shapes encountered after [[QuantifiedPathPatternNodeInsertRewriter]] has run,
+   * QPPs at the boundary of a [[PathConcatenation]] have been padded with filler nodes, so the head
+   * and last factors are [[SimplePattern]]s. During semantic analysis the AST is not yet padded, so
+   * we may encounter a QPP at the boundary; in that case we recurse into the QPP's inner element and
+   * use its boundary singleton (which becomes the boundary node post-padding).
    */
   @tailrec
   def boundaryNodes(element: PatternElement): Set[LogicalVariable] = {
     element match {
-      // Either we have a simple pattern
       case pattern: SimplePattern =>
-        val allVars = pattern.allTopLevelVariablesLeftToRight
-        Set(allVars.head, allVars.last)
-      // or non-simple patterns (QPPs) have been padded (see QppsHavePaddedNodes)
+        val allVars = pattern.allSingletonVariablesLeftToRight
+        Set.empty ++ allVars.headOption ++ allVars.lastOption
       case PathConcatenation(factors) =>
-        val left = factors.head.asInstanceOf[SimplePattern].allTopLevelVariablesLeftToRight.head
-        val right = factors.last.asInstanceOf[SimplePattern].allTopLevelVariablesLeftToRight.last
-        Set(left, right)
+        Set.empty ++ leftBoundaryNode(factors.head) ++ rightBoundaryNode(factors.last)
       case ParenthesizedPath(part, _) => boundaryNodes(part.element)
       case _                          => throw new IllegalStateException()
     }
+  }
+
+  @tailrec
+  private def leftBoundaryNode(element: PatternElement): Option[LogicalVariable] = element match {
+    case sp: SimplePattern          => sp.allSingletonVariablesLeftToRight.headOption
+    case qp: QuantifiedPath         => leftBoundaryNode(qp.part.element)
+    case ParenthesizedPath(part, _) => leftBoundaryNode(part.element)
+    case PathConcatenation(factors) => leftBoundaryNode(factors.head)
+  }
+
+  @tailrec
+  private def rightBoundaryNode(element: PatternElement): Option[LogicalVariable] = element match {
+    case sp: SimplePattern          => sp.allSingletonVariablesLeftToRight.lastOption
+    case qp: QuantifiedPath         => rightBoundaryNode(qp.part.element)
+    case ParenthesizedPath(part, _) => rightBoundaryNode(part.element)
+    case PathConcatenation(factors) => rightBoundaryNode(factors.last)
   }
 }
 
@@ -429,7 +582,7 @@ object PatternElement {
  * A part of the pattern that consists of alternating nodes and relationships, starting and ending in a node.
  */
 sealed abstract class SimplePattern extends PathFactor {
-  def allTopLevelVariablesLeftToRight: Seq[LogicalVariable]
+  def allSingletonVariablesLeftToRight: Seq[LogicalVariable]
 }
 
 case class RelationshipChain(
@@ -443,8 +596,10 @@ case class RelationshipChain(
 
   override def allVariables: Set[LogicalVariable] = element.allVariables ++ relationship.variable ++ rightNode.variable
 
-  override def allTopLevelVariablesLeftToRight: Seq[LogicalVariable] =
-    element.allTopLevelVariablesLeftToRight ++ relationship.variable.toSeq ++ rightNode.allTopLevelVariablesLeftToRight
+  override def allSingletonNodeVariables: Set[LogicalVariable] = element.allSingletonNodeVariables ++ rightNode.variable
+
+  override def allSingletonVariablesLeftToRight: Seq[LogicalVariable] =
+    element.allSingletonVariablesLeftToRight ++ relationship.variable ++ rightNode.variable
 
   override def isBounded: Boolean = relationship.isBounded && element.isBounded
 
@@ -483,7 +638,9 @@ case class NodePattern(
 
   override def allVariables: Set[LogicalVariable] = variable.toSet
 
-  override def allTopLevelVariablesLeftToRight: Seq[LogicalVariable] = variable.toSeq
+  override def allSingletonNodeVariables: Set[LogicalVariable] = variable.toSet
+
+  override def allSingletonVariablesLeftToRight: Seq[LogicalVariable] = variable.toSeq
 
   override def isSingleNode = true
 

@@ -35,7 +35,6 @@ import org.apache.commons.lang3.ArrayUtils;
 import org.assertj.core.util.Arrays;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.TestInstance;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -64,7 +63,9 @@ import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.DbmsExtension;
 import org.neo4j.test.extension.ExtensionCallback;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.values.storable.RandomValues;
+import org.neo4j.values.storable.RandomValuesUtils;
 
 /**
  * Use @TestInstance( TestInstance.Lifecycle.PER_CLASS ) to not setup
@@ -73,7 +74,7 @@ import org.neo4j.test.extension.RandomExtension;
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @DbmsExtension(configurationCallback = "configuration")
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 public class FindEntityByTokenAndPropertyIT {
     private static final String TOKEN = "token";
     private static final String PROPERTY_KEY = "prop";
@@ -97,6 +98,13 @@ public class FindEntityByTokenAndPropertyIT {
 
     @BeforeEach
     void cleanDb() {
+        /* Not all storage engines support vector types. */
+        random.withConfiguration(RandomValuesUtils.selectStorageEngineDependentConfigurationBuilder(db)
+                        .maxVectorNumBytes(
+                                RandomValues.MAX_NUM_BYTES_IN_INDEX_KEY / 3 /* Test assumes that three keys fit */)
+                        .build())
+                .reset();
+
         // Clean reused db between every test
         try (Transaction tx = db.beginTx()) {
             tx.schema().getIndexes().forEach(IndexDefinition::drop);
@@ -131,10 +139,10 @@ public class FindEntityByTokenAndPropertyIT {
 
         try (Transaction tx = db.beginTx()) {
             // When
-            ResourceIterator<? extends Entity> result = findMethod.find(tx, TOKEN, PROPERTY_KEY, value);
-
-            // Then
-            assertFoundEntity(entity, result);
+            try (var result = findMethod.find(tx, TOKEN, PROPERTY_KEY, value)) {
+                // Then
+                assertFoundEntity(entity, result);
+            }
         }
 
         // Then
@@ -164,10 +172,10 @@ public class FindEntityByTokenAndPropertyIT {
 
         try (Transaction tx = db.beginTx()) {
             // When
-            ResourceIterator<? extends Entity> result = findMethod.find(tx, TOKEN, PROPERTY_KEY, value);
-
-            // Then
-            assertFoundEntity(entity, result);
+            try (var result = findMethod.find(tx, TOKEN, PROPERTY_KEY, value)) {
+                // Then
+                assertFoundEntity(entity, result);
+            }
         }
 
         // Then
@@ -195,11 +203,11 @@ public class FindEntityByTokenAndPropertyIT {
 
         try (Transaction tx = db.beginTx()) {
             // When
-            ResourceIterator<? extends Entity> result =
-                    findMethod.find(tx, TOKEN, PROPERTY_KEY, value1, PROPERTY_KEY_2, value2);
+            try (var result = findMethod.find(tx, TOKEN, PROPERTY_KEY, value1, PROPERTY_KEY_2, value2)) {
 
-            // Then
-            assertFoundEntity(entity, result);
+                // Then
+                assertFoundEntity(entity, result);
+            }
         }
 
         // Then
@@ -234,11 +242,11 @@ public class FindEntityByTokenAndPropertyIT {
 
         try (Transaction tx = db.beginTx()) {
             // When
-            ResourceIterator<? extends Entity> result =
-                    findMethod.find(tx, TOKEN, PROPERTY_KEY, value1, PROPERTY_KEY_2, value2);
+            try (var result = findMethod.find(tx, TOKEN, PROPERTY_KEY, value1, PROPERTY_KEY_2, value2)) {
 
-            // Then
-            assertFoundEntity(entity, result);
+                // Then
+                assertFoundEntity(entity, result);
+            }
         }
 
         // Then
@@ -271,11 +279,11 @@ public class FindEntityByTokenAndPropertyIT {
 
         try (Transaction tx = db.beginTx()) {
             // When
-            ResourceIterator<? extends Entity> result =
-                    findMethod.find(tx, TOKEN, PROPERTY_KEY, value1, PROPERTY_KEY_2, value2, PROPERTY_KEY_3, value3);
-
-            // Then
-            assertFoundEntity(entity, result);
+            try (var result =
+                    findMethod.find(tx, TOKEN, PROPERTY_KEY, value1, PROPERTY_KEY_2, value2, PROPERTY_KEY_3, value3)) {
+                // Then
+                assertFoundEntity(entity, result);
+            }
         }
 
         // Then
@@ -311,11 +319,11 @@ public class FindEntityByTokenAndPropertyIT {
 
         try (Transaction tx = db.beginTx()) {
             // When
-            ResourceIterator<? extends Entity> result =
-                    findMethod.find(tx, TOKEN, PROPERTY_KEY, value1, PROPERTY_KEY_2, value2, PROPERTY_KEY_3, value3);
-
-            // Then
-            assertFoundEntity(entity, result);
+            try (var result =
+                    findMethod.find(tx, TOKEN, PROPERTY_KEY, value1, PROPERTY_KEY_2, value2, PROPERTY_KEY_3, value3)) {
+                // Then
+                assertFoundEntity(entity, result);
+            }
         }
 
         // Then
@@ -352,11 +360,11 @@ public class FindEntityByTokenAndPropertyIT {
 
         try (Transaction tx = db.beginTx()) {
             // When
-            ResourceIterator<? extends Entity> result =
-                    findMethod.find(tx, TOKEN, PROPERTY_KEY, template, stringSearchMode);
+            try (var result = findMethod.find(tx, TOKEN, PROPERTY_KEY, template, stringSearchMode)) {
 
-            // Then
-            assertFoundEntity(entity, result);
+                // Then
+                assertFoundEntity(entity, result);
+            }
         }
 
         // Then
@@ -396,11 +404,10 @@ public class FindEntityByTokenAndPropertyIT {
 
         try (Transaction tx = db.beginTx()) {
             // When
-            ResourceIterator<? extends Entity> result =
-                    findMethod.find(tx, TOKEN, PROPERTY_KEY, template, stringSearchMode);
-
-            // Then
-            assertFoundEntity(entity, result);
+            try (var result = findMethod.find(tx, TOKEN, PROPERTY_KEY, template, stringSearchMode)) {
+                // Then
+                assertFoundEntity(entity, result);
+            }
         }
 
         // Then

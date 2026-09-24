@@ -32,7 +32,7 @@ import org.neo4j.util.Preconditions;
 public abstract class ProgressMonitorFactory {
     public static final ProgressMonitorFactory NONE = new ProgressMonitorFactory() {
         @Override
-        protected Indicator newIndicator(String process) {
+        protected Indicator newIndicator(String process, IndicatorListener listener) {
             return Indicator.NONE;
         }
     };
@@ -154,7 +154,7 @@ public abstract class ProgressMonitorFactory {
             final Writer out, boolean deltaTimes, int dotsPerGroup, int groupsPerLine, int numLines) {
         return new ProgressMonitorFactory() {
             @Override
-            protected Indicator newIndicator(String process) {
+            protected Indicator newIndicator(String process, IndicatorListener listener) {
                 return new TextualIndicator(
                         process,
                         writer(),
@@ -163,11 +163,12 @@ public abstract class ProgressMonitorFactory {
                         TextualIndicator.DEFAULT_DELTA_CHARACTER,
                         dotsPerGroup,
                         groupsPerLine,
-                        numLines);
+                        numLines,
+                        listener);
             }
 
             private PrintWriter writer() {
-                return out instanceof PrintWriter ? (PrintWriter) out : new PrintWriter(out);
+                return out instanceof PrintWriter pw ? pw : new PrintWriter(out);
             }
         };
     }
@@ -175,12 +176,12 @@ public abstract class ProgressMonitorFactory {
     public static ProgressMonitorFactory basicTextual(final Writer out, int resolution, int step, String displayText) {
         return new ProgressMonitorFactory() {
             @Override
-            protected Indicator newIndicator(String process) {
-                return new BasicTextualIndicator(process, writer(), resolution, step, displayText);
+            protected Indicator newIndicator(String process, IndicatorListener listener) {
+                return new BasicTextualIndicator(writer(), resolution, step, displayText);
             }
 
             private PrintWriter writer() {
-                return out instanceof PrintWriter ? (PrintWriter) out : new PrintWriter(out);
+                return out instanceof PrintWriter pw ? pw : new PrintWriter(out);
             }
         };
     }
@@ -196,7 +197,7 @@ public abstract class ProgressMonitorFactory {
     public static ProgressMonitorFactory mapped(ProgressListener target, int resolution) {
         return new ProgressMonitorFactory() {
             @Override
-            protected Indicator newIndicator(String process) {
+            protected Indicator newIndicator(String process, IndicatorListener listener) {
                 return new Indicator(resolution) {
                     @Override
                     protected void progress(int from, int to) {
@@ -214,6 +215,23 @@ public abstract class ProgressMonitorFactory {
     }
 
     /**
+     * A way to map one or more other disparate progresses to one combined progress where each of the
+     * "sub" progresses can advance the combined progress a specified fraction of the way.
+     *
+     * @param target the combined {@link ProgressListener}.
+     * @param resolutionFraction the fraction (between 0..1) of the progress a {@link ProgressListener}
+     * produced by the returned {@link ProgressMonitorFactory} will advance the combined progress {@code target}.
+     * @return a {@link ProgressMonitorFactory} that can create a {@link ProgressListener} capable of
+     * advancing the {@code target} progress the given {@code resolutionFraction} of the way.
+     */
+    public static ProgressMonitorFactory mappedFraction(ProgressListener target, float resolutionFraction) {
+        Preconditions.checkArgument(
+                resolutionFraction > 0 && resolutionFraction <= 1, "Require 0 < progressFraction <= 1");
+        int resolution = (int) (target.reportResolution() * resolutionFraction);
+        return mapped(target, resolution);
+    }
+
+    /**
      * Creates a {@link ProgressListener} that can create multiple parts which together constitutes the entire progress,
      * with a known total to progress towards.
      * @param process description of the operation to track progress for.
@@ -221,7 +239,7 @@ public abstract class ProgressMonitorFactory {
      * @return the created progress listener.
      */
     public MultiPartBuilder multipleParts(String process, IndicatorListener listener) {
-        return new MultiPartBuilder(newIndicator(process), listener);
+        return new MultiPartBuilder(newIndicator(process, listener), listener);
     }
 
     public final MultiPartBuilder multipleParts(String process) {
@@ -236,14 +254,23 @@ public abstract class ProgressMonitorFactory {
      * @return the created progress listener.
      */
     public final ProgressListener singlePart(String process, long totalCount, IndicatorListener listener) {
-        return new ProgressListener.SinglePartProgressListener(newIndicator(process), totalCount, listener);
+        return new ProgressListener.SinglePartProgressListener(newIndicator(process, listener), totalCount, listener);
     }
 
     public ProgressListener singlePart(String process, long totalCount) {
         return singlePart(process, totalCount, NO_INDICATOR_LISTENER);
     }
 
-    protected abstract Indicator newIndicator(String process);
+    public ProgressListener singlePartSingleThreaded(String process, long totalCount, IndicatorListener listener) {
+        return new ProgressListener.SingleThreadedSinglePartProgressListener(
+                newIndicator(process, listener), totalCount, listener);
+    }
+
+    public ProgressListener singlePartSingleThreaded(String process, long totalCount) {
+        return singlePartSingleThreaded(process, totalCount, NO_INDICATOR_LISTENER);
+    }
+
+    protected abstract Indicator newIndicator(String process, IndicatorListener listener);
 
     public static class MultiPartBuilder {
         private Aggregator aggregator;
@@ -301,6 +328,10 @@ public abstract class ProgressMonitorFactory {
 
     public interface IndicatorListener {
         void update(long progress, long total);
+
+        default String extraInfo() {
+            return "";
+        }
     }
 
     public abstract static class PercentageIndicatorListener implements IndicatorListener {

@@ -30,6 +30,7 @@ import static org.apache.commons.lang3.ArrayUtils.EMPTY_LONG_ARRAY;
 import static org.apache.commons.lang3.ArrayUtils.EMPTY_SHORT_ARRAY;
 import static org.apache.commons.lang3.ArrayUtils.EMPTY_STRING_ARRAY;
 import static org.neo4j.csv.reader.Configuration.COMMAS;
+import static org.neo4j.internal.helpers.Numbers.getOverflowMessage;
 import static org.neo4j.internal.helpers.Numbers.safeCastLongToByte;
 import static org.neo4j.internal.helpers.Numbers.safeCastLongToInt;
 import static org.neo4j.internal.helpers.Numbers.safeCastLongToShort;
@@ -48,7 +49,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.function.Supplier;
 import org.neo4j.graphdb.spatial.Point;
+import org.neo4j.values.storable.AbstractFloat16Vector;
 import org.neo4j.values.storable.ArrayValue;
+import org.neo4j.values.storable.BFloat16Vector;
 import org.neo4j.values.storable.CSVHeaderInformation;
 import org.neo4j.values.storable.DateArray;
 import org.neo4j.values.storable.DateTimeArray;
@@ -56,21 +59,30 @@ import org.neo4j.values.storable.DateTimeValue;
 import org.neo4j.values.storable.DateValue;
 import org.neo4j.values.storable.DurationArray;
 import org.neo4j.values.storable.DurationValue;
+import org.neo4j.values.storable.Float16Format;
+import org.neo4j.values.storable.Float16Vector;
+import org.neo4j.values.storable.Float32Vector;
+import org.neo4j.values.storable.Float64Vector;
+import org.neo4j.values.storable.Int16Vector;
+import org.neo4j.values.storable.Int32Vector;
+import org.neo4j.values.storable.Int64Vector;
+import org.neo4j.values.storable.Int8Vector;
 import org.neo4j.values.storable.LocalDateTimeArray;
 import org.neo4j.values.storable.LocalDateTimeValue;
 import org.neo4j.values.storable.LocalTimeArray;
 import org.neo4j.values.storable.LocalTimeValue;
 import org.neo4j.values.storable.PointArray;
 import org.neo4j.values.storable.PointValue;
+import org.neo4j.values.storable.TextValue;
 import org.neo4j.values.storable.TimeArray;
 import org.neo4j.values.storable.TimeValue;
-import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.Values;
+import org.neo4j.values.storable.VectorValue;
 
 /**
  * Common implementations of {@link Extractor}. Since array values can have a delimiter of user choice that isn't
  * an enum, but a regular class with a constructor where that delimiter can be specified.
- *
+ * <p>
  * {@link Extractor} instances are (should try to be) state-less and can therefore be used by multiple threads.
  *
  * <pre>
@@ -79,12 +91,15 @@ import org.neo4j.values.storable.Values;
  * Extractors extractors = new Extractors( ';' );
  * int boxFreeIntValue = (Integer) seeker.extract( mark, extractors.int_() );
  * </pre>
- *
+ * <p>
  * Custom {@link Extractor extractors} can also be implemented and used, as need arises
  * and {@link Extractors#add(Extractor) added} to an {@link Extractors} instance, where its
- * {@link Extractor#name() name} value is used as key for lookup in {@link #valueOf(String)}.
+ * {@link Extractor#name() name} value is used as key for lookup in {@link #valueOf(String, CSVHeaderInformation)}.
  */
 public final class Extractors {
+
+    private static final int MAX_LONG_CHARS = String.valueOf(Long.MAX_VALUE).length() + 1;
+
     private final Map<String, Extractor<?>> instances = new HashMap<>();
     private final StringExtractor string;
     private final LongExtractor long_;
@@ -118,31 +133,43 @@ public final class Extractors {
     private final DurationExtractor duration;
     private final TextValueExtractor textValue;
     private final DurationArrayExtractor durationArray;
+    private final Int8VectorExtractor int8Vector;
+    private final Int16VectorExtractor int16Vector;
+    private final Int32VectorExtractor int32Vector;
+    private final Int64VectorExtractor int64Vector;
+    private final Float16VectorExtractor float16Vector;
+    private final BFloat16VectorExtractor bfloat16Vector;
+    private final Float32VectorExtractor float32Vector;
+    private final Float64VectorExtractor float64Vector;
 
     public Extractors() {
-        this(';');
+        this(';', ';');
     }
 
-    public Extractors(char arrayDelimiter) {
-        this(arrayDelimiter, COMMAS.emptyQuotedStringsAsNull(), COMMAS.trimStrings(), inUTC);
+    public Extractors(char arrayDelimiter, char vectorDelimiter) {
+        this(arrayDelimiter, vectorDelimiter, COMMAS.emptyQuotedStringsAsNull(), COMMAS.trimStrings(), inUTC);
     }
 
-    public Extractors(char arrayDelimiter, boolean emptyStringsAsNull) {
-        this(arrayDelimiter, emptyStringsAsNull, COMMAS.trimStrings(), inUTC);
+    public Extractors(char arrayDelimiter, char vectorDelimiter, boolean emptyStringsAsNull) {
+        this(arrayDelimiter, vectorDelimiter, emptyStringsAsNull, COMMAS.trimStrings(), inUTC);
     }
 
-    public Extractors(char arrayDelimiter, boolean emptyStringsAsNull, boolean trimStrings) {
-        this(arrayDelimiter, emptyStringsAsNull, trimStrings, inUTC);
+    public Extractors(char arrayDelimiter, char vectorDelimiter, boolean emptyStringsAsNull, boolean trimStrings) {
+        this(arrayDelimiter, vectorDelimiter, emptyStringsAsNull, trimStrings, inUTC);
     }
 
     /**
      * Why do we have a public constructor here and why isn't this class an enum?
      * It's because the array extractors can be configured with an array delimiter,
-     * something that would be impossible otherwise. There's an equivalent {@link #valueOf(String)}
+     * something that would be impossible otherwise. There's a {@link #valueOf(String, CSVHeaderInformation)}
      * method to keep the feel of an enum.
      */
     public Extractors(
-            char arrayDelimiter, boolean emptyStringsAsNull, boolean trimStrings, Supplier<ZoneId> defaultTimeZone) {
+            char arrayDelimiter,
+            char vectorDelimiter,
+            boolean emptyStringsAsNull,
+            boolean trimStrings,
+            Supplier<ZoneId> defaultTimeZone) {
         add(string = new StringExtractor(emptyStringsAsNull));
         add(long_ = new LongExtractor());
         add(int_ = new IntExtractor(long_));
@@ -175,18 +202,54 @@ public final class Extractors {
         add(duration = new DurationExtractor());
         add(textValue = new TextValueExtractor(emptyStringsAsNull));
         add(durationArray = new DurationArrayExtractor(arrayDelimiter));
+        add(int8Vector = new Int8VectorExtractor(vectorDelimiter));
+        add(int16Vector = new Int16VectorExtractor(vectorDelimiter));
+        add(int32Vector = new Int32VectorExtractor(vectorDelimiter));
+        add(int64Vector = new Int64VectorExtractor(vectorDelimiter));
+        add(float16Vector = new Float16VectorExtractor(vectorDelimiter));
+        add(bfloat16Vector = new BFloat16VectorExtractor(vectorDelimiter));
+        add(float32Vector = new Float32VectorExtractor(vectorDelimiter));
+        add(float64Vector = new Float64VectorExtractor(vectorDelimiter));
     }
 
     public void add(Extractor<?> extractor) {
         instances.put(extractor.name().toUpperCase(Locale.ROOT), extractor);
     }
 
-    public Extractor<?> valueOf(String name) {
-        Extractor<?> instance = instances.get(name.toUpperCase(Locale.ROOT));
+    public Extractor<?> valueOf(String name, CSVHeaderInformation optionalParameter) {
+        final var upperCaseName = name.toUpperCase(Locale.ROOT);
+        Extractor<?> instance = VectorExtractor.COL_NAME.equals(upperCaseName)
+                ? getVectorExtractor(optionalParameter)
+                : instances.get(upperCaseName);
         if (instance == null) {
-            throw new IllegalArgumentException("'" + name + "'");
+            throw new IllegalArgumentException("'" + name + "' is not a valid type.");
         }
         return instance;
+    }
+
+    private Extractor<?> getVectorExtractor(CSVHeaderInformation optionalParameter) {
+        switch (optionalParameter) {
+            case VectorExtractor.VectorCSVHeaderInformation vectorCSVHeaderInformation -> {
+                final var baseExtractor =
+                        switch (vectorCSVHeaderInformation.getCoordinateType()) {
+                            case INTEGER8 -> instances.get(Int8VectorExtractor.NAME.toUpperCase(Locale.ROOT));
+                            case INTEGER16 -> instances.get(Int16VectorExtractor.NAME.toUpperCase(Locale.ROOT));
+                            case INTEGER32 -> instances.get(Int32VectorExtractor.NAME.toUpperCase(Locale.ROOT));
+                            case INTEGER64 -> instances.get(Int64VectorExtractor.NAME.toUpperCase(Locale.ROOT));
+                            case FLOAT16 -> instances.get(Float16VectorExtractor.NAME.toUpperCase(Locale.ROOT));
+                            case BFLOAT16 -> instances.get(BFloat16VectorExtractor.NAME.toUpperCase(Locale.ROOT));
+                            case FLOAT32 -> instances.get(Float32VectorExtractor.NAME.toUpperCase(Locale.ROOT));
+                            case FLOAT64 -> instances.get(Float64VectorExtractor.NAME.toUpperCase(Locale.ROOT));
+                        };
+
+                return ((VectorExtractor<?>) baseExtractor)
+                        .getDimensionVerifyingExtractor(vectorCSVHeaderInformation.getDimensions());
+            }
+            case null ->
+                throw new IllegalArgumentException(
+                        "vector must specify dimensions and coordinate type, e.g.\"v:vector{dimensions:10, coordinateType:byte}\"");
+            default -> throw new IllegalStateException("Wrong header information type: " + optionalParameter);
+        }
     }
 
     public Extractor<String> string() {
@@ -309,12 +372,44 @@ public final class Extractors {
         return duration;
     }
 
-    public Extractor<Value> textValue() {
+    public Extractor<TextValue> textValue() {
         return textValue;
     }
 
     public Extractor<DurationArray> durationArray() {
         return durationArray;
+    }
+
+    public Extractor<Int8Vector> int8Vector() {
+        return int8Vector;
+    }
+
+    public Extractor<Int16Vector> int16Vector() {
+        return int16Vector;
+    }
+
+    public Extractor<Int32Vector> int32Vector() {
+        return int32Vector;
+    }
+
+    public Extractor<Int64Vector> int64Vector() {
+        return int64Vector;
+    }
+
+    public Extractor<Float16Vector> float16Vector() {
+        return float16Vector;
+    }
+
+    public Extractor<BFloat16Vector> bfloat16Vector() {
+        return bfloat16Vector;
+    }
+
+    public Extractor<Float32Vector> float32Vector() {
+        return float32Vector;
+    }
+
+    public Extractor<Float64Vector> float64Vector() {
+        return float64Vector;
     }
 
     private abstract static class AbstractExtractor<T> implements Extractor<T> {
@@ -370,6 +465,11 @@ public final class Extractors {
         }
 
         @Override
+        public Class<?> extractedClass() {
+            return String.class;
+        }
+
+        @Override
         public String extract(
                 char[] data, int offset, int length, boolean hadQuotes, CSVHeaderInformation optionalData) {
             if (length == 0 && (!hadQuotes || emptyStringsAsNull)) {
@@ -385,6 +485,11 @@ public final class Extractors {
         }
 
         @Override
+        public Class<?> extractedClass() {
+            return long.class;
+        }
+
+        @Override
         public Long extract(char[] data, int offset, int length, boolean hadQuotes, CSVHeaderInformation optionalData) {
             return length == 0 ? null : extractLong(data, offset, length);
         }
@@ -393,6 +498,11 @@ public final class Extractors {
     private static final class IntExtractor extends AbstractExtractor<Integer> {
         IntExtractor(LongExtractor longExtractor) {
             super(int.class.getSimpleName(), longExtractor);
+        }
+
+        @Override
+        public Class<?> extractedClass() {
+            return int.class;
         }
 
         @Override
@@ -412,6 +522,11 @@ public final class Extractors {
                 char[] data, int offset, int length, boolean hadQuotes, CSVHeaderInformation optionalData) {
             return length == 0 ? null : safeCastLongToShort(extractLong(data, offset, length));
         }
+
+        @Override
+        public Class<?> extractedClass() {
+            return short.class;
+        }
     }
 
     private static final class ByteExtractor extends AbstractExtractor<Byte> {
@@ -423,13 +538,11 @@ public final class Extractors {
         public Byte extract(char[] data, int offset, int length, boolean hadQuotes, CSVHeaderInformation optionalData) {
             return length == 0 ? null : safeCastLongToByte(extractLong(data, offset, length));
         }
-    }
 
-    private static final char[] BOOLEAN_MATCH;
-
-    static {
-        BOOLEAN_MATCH = new char[Boolean.TRUE.toString().length()];
-        Boolean.TRUE.toString().getChars(0, BOOLEAN_MATCH.length, BOOLEAN_MATCH, 0);
+        @Override
+        public Class<?> extractedClass() {
+            return byte.class;
+        }
     }
 
     private static final class BooleanExtractor extends AbstractExtractor<Boolean> {
@@ -441,6 +554,11 @@ public final class Extractors {
         public Boolean extract(
                 char[] data, int offset, int length, boolean hadQuotes, CSVHeaderInformation optionalData) {
             return length == 0 ? null : extractBoolean(data, offset, length);
+        }
+
+        @Override
+        public Class<?> extractedClass() {
+            return boolean.class;
         }
     }
 
@@ -456,6 +574,11 @@ public final class Extractors {
                 throw new IllegalStateException("Was told to extract a character, but length:" + length);
             }
             return length == 0 ? null : data[offset];
+        }
+
+        @Override
+        public Class<?> extractedClass() {
+            return char.class;
         }
     }
 
@@ -478,6 +601,11 @@ public final class Extractors {
                 throw new NumberFormatException("Not a number: \"" + String.valueOf(data, offset, length) + "\"");
             }
         }
+
+        @Override
+        public Class<?> extractedClass() {
+            return float.class;
+        }
     }
 
     private static final class DoubleExtractor extends AbstractExtractor<Double> {
@@ -498,6 +626,11 @@ public final class Extractors {
             } catch (NumberFormatException ignored) {
                 throw new NumberFormatException("Not a number: \"" + String.valueOf(data, offset, length) + "\"");
             }
+        }
+
+        @Override
+        public Class<?> extractedClass() {
+            return double.class;
         }
     }
 
@@ -529,9 +662,16 @@ public final class Extractors {
                 return emptyElement();
             }
 
+            var hasStartBracket = false;
+            var charIndex = 0;
+            if (allowBracketsToBeStripped() && data[offset] == '[') {
+                hasStartBracket = true;
+                charIndex++;
+            }
+
             E values = createInternalArray(numberOfValues);
-            for (int arrayIndex = 0, charIndex = 0; arrayIndex < numberOfValues; arrayIndex++, charIndex++) {
-                int numberOfChars = charsToNextDelimiter(data, offset + charIndex, length - charIndex);
+            for (int arrayIndex = 0; arrayIndex < numberOfValues; arrayIndex++, charIndex++) {
+                int numberOfChars = charsToNextDelimiter(data, hasStartBracket, offset + charIndex, length - charIndex);
                 parseAndStoreElement(data, offset, charIndex, numberOfChars, optionalData, values, arrayIndex);
                 charIndex += numberOfChars;
             }
@@ -556,11 +696,23 @@ public final class Extractors {
 
         protected abstract T convertListToArrayValue(E values);
 
-        private int charsToNextDelimiter(char[] data, int offset, int length) {
+        public boolean allowBracketsToBeStripped() {
+            return false;
+        }
+
+        private int charsToNextDelimiter(char[] data, boolean hasStartBracket, int offset, int length) {
             for (int i = 0; i < length; i++) {
                 if (data[offset + i] == arrayDelimiter) {
                     return i;
                 }
+            }
+
+            if (hasStartBracket) {
+                if (data[offset + length - 1] != ']') {
+                    throw new IllegalStateException(
+                            "Array content expected between '[' and ']' but no terminal ']' character found");
+                }
+                return length - 1;
             }
             return length;
         }
@@ -629,11 +781,21 @@ public final class Extractors {
         protected String[] convertListToArrayValue(String[] values) {
             return values;
         }
+
+        @Override
+        public Class<?> extractedClass() {
+            return String[].class;
+        }
     }
 
     private static final class ByteArrayExtractor extends ArrayExtractor<byte[], byte[]> {
         ByteArrayExtractor(char arrayDelimiter) {
             super(arrayDelimiter, byte[].class);
+        }
+
+        @Override
+        public boolean allowBracketsToBeStripped() {
+            return true;
         }
 
         @Override
@@ -662,6 +824,492 @@ public final class Extractors {
         protected byte[] convertListToArrayValue(byte[] values) {
             return values;
         }
+
+        @Override
+        public Class<?> extractedClass() {
+            return byte[].class;
+        }
+    }
+
+    private static final class Int8VectorExtractor extends ArrayExtractor<byte[], Int8Vector>
+            implements VectorExtractor<Int8Vector> {
+
+        public static final String NAME = "Int8Vector";
+
+        Int8VectorExtractor(char vectorDelimiter) {
+            super(vectorDelimiter, NAME, null);
+        }
+
+        @Override
+        public Extractor<Int8Vector> getDimensionVerifyingExtractor(int expectedDimensions) {
+            return new DimensionVerifyingVectorExtractorWrapper<>(this, expectedDimensions);
+        }
+
+        @Override
+        public boolean allowBracketsToBeStripped() {
+            return true;
+        }
+
+        @Override
+        protected Int8Vector emptyElement() {
+            return null;
+        }
+
+        @Override
+        protected byte[] createInternalArray(int size) {
+            return new byte[size];
+        }
+
+        @Override
+        public boolean isEmpty(Object value) {
+            return VectorExtractor.super.isEmpty(value);
+        }
+
+        @Override
+        protected void parseAndStoreElement(
+                char[] data,
+                int offset,
+                int charIndex,
+                int numberOfChars,
+                CSVHeaderInformation optionalData,
+                byte[] dest,
+                int destIndex) {
+            dest[destIndex] = safeCastLongToByte(extractLong(data, offset + charIndex, numberOfChars));
+        }
+
+        @Override
+        protected Int8Vector convertListToArrayValue(byte[] values) {
+            return Values.int8Vector(values);
+        }
+
+        @Override
+        public Class<?> extractedClass() {
+            return Int8Vector.class;
+        }
+    }
+
+    private static final class Int16VectorExtractor extends ArrayExtractor<short[], Int16Vector>
+            implements VectorExtractor<Int16Vector> {
+
+        public static final String NAME = "Int16Vector";
+
+        Int16VectorExtractor(char vectorDelimiter) {
+            super(vectorDelimiter, NAME, null);
+        }
+
+        @Override
+        public Extractor<Int16Vector> getDimensionVerifyingExtractor(int expectedDimensions) {
+            return new DimensionVerifyingVectorExtractorWrapper<>(this, expectedDimensions);
+        }
+
+        @Override
+        protected Int16Vector emptyElement() {
+            return null;
+        }
+
+        @Override
+        public boolean allowBracketsToBeStripped() {
+            return true;
+        }
+
+        @Override
+        protected short[] createInternalArray(int size) {
+            return new short[size];
+        }
+
+        @Override
+        public boolean isEmpty(Object value) {
+            return VectorExtractor.super.isEmpty(value);
+        }
+
+        @Override
+        protected void parseAndStoreElement(
+                char[] data,
+                int offset,
+                int charIndex,
+                int numberOfChars,
+                CSVHeaderInformation optionalData,
+                short[] dest,
+                int destIndex) {
+            dest[destIndex] = safeCastLongToShort(extractLong(data, offset + charIndex, numberOfChars));
+        }
+
+        @Override
+        protected Int16Vector convertListToArrayValue(short[] values) {
+            return Values.int16Vector(values);
+        }
+
+        @Override
+        public Class<?> extractedClass() {
+            return Int16Vector.class;
+        }
+    }
+
+    private static final class Int32VectorExtractor extends ArrayExtractor<int[], Int32Vector>
+            implements VectorExtractor<Int32Vector> {
+
+        public static final String NAME = "Int32Vector";
+
+        Int32VectorExtractor(char vectorDelimiter) {
+            super(vectorDelimiter, NAME, null);
+        }
+
+        @Override
+        public Extractor<Int32Vector> getDimensionVerifyingExtractor(int expectedDimensions) {
+            return new DimensionVerifyingVectorExtractorWrapper<>(this, expectedDimensions);
+        }
+
+        @Override
+        protected Int32Vector emptyElement() {
+            return null;
+        }
+
+        @Override
+        public boolean allowBracketsToBeStripped() {
+            return true;
+        }
+
+        @Override
+        protected int[] createInternalArray(int size) {
+            return new int[size];
+        }
+
+        @Override
+        public Class<?> extractedClass() {
+            return Int32Vector.class;
+        }
+
+        @Override
+        public boolean isEmpty(Object value) {
+            return VectorExtractor.super.isEmpty(value);
+        }
+
+        @Override
+        protected void parseAndStoreElement(
+                char[] data,
+                int offset,
+                int charIndex,
+                int numberOfChars,
+                CSVHeaderInformation optionalData,
+                int[] dest,
+                int destIndex) {
+            dest[destIndex] = safeCastLongToInt(extractLong(data, offset + charIndex, numberOfChars));
+        }
+
+        @Override
+        protected Int32Vector convertListToArrayValue(int[] values) {
+            return Values.int32Vector(values);
+        }
+    }
+
+    private static final class Int64VectorExtractor extends ArrayExtractor<long[], Int64Vector>
+            implements VectorExtractor<Int64Vector> {
+
+        public static final String NAME = "Int64Vector";
+
+        Int64VectorExtractor(char vectorDelimiter) {
+            super(vectorDelimiter, NAME, null);
+        }
+
+        @Override
+        public Extractor<Int64Vector> getDimensionVerifyingExtractor(int expectedDimensions) {
+            return new DimensionVerifyingVectorExtractorWrapper<>(this, expectedDimensions);
+        }
+
+        @Override
+        protected Int64Vector emptyElement() {
+            return null;
+        }
+
+        @Override
+        public boolean allowBracketsToBeStripped() {
+            return true;
+        }
+
+        @Override
+        protected long[] createInternalArray(int size) {
+            return new long[size];
+        }
+
+        @Override
+        public Class<?> extractedClass() {
+            return Int64Vector.class;
+        }
+
+        @Override
+        public boolean isEmpty(Object value) {
+            return VectorExtractor.super.isEmpty(value);
+        }
+
+        @Override
+        protected void parseAndStoreElement(
+                char[] data,
+                int offset,
+                int charIndex,
+                int numberOfChars,
+                CSVHeaderInformation optionalData,
+                long[] dest,
+                int destIndex) {
+            dest[destIndex] = extractLong(data, offset + charIndex, numberOfChars);
+        }
+
+        @Override
+        protected Int64Vector convertListToArrayValue(long[] values) {
+            return Values.int64Vector(values);
+        }
+    }
+
+    private abstract static class AbstractFloat16VectorExtractor<T extends AbstractFloat16Vector>
+            extends ArrayExtractor<short[], T> implements VectorExtractor<T> {
+        private final Float16Format format;
+
+        AbstractFloat16VectorExtractor(String name, char vectorDelimiter, Float16Format format) {
+            super(vectorDelimiter, name, null);
+            this.format = format;
+        }
+
+        @Override
+        public Extractor<T> getDimensionVerifyingExtractor(int expectedDimensions) {
+            return new DimensionVerifyingVectorExtractorWrapper<>(this, expectedDimensions);
+        }
+
+        @Override
+        protected T emptyElement() {
+            return null;
+        }
+
+        @Override
+        public boolean allowBracketsToBeStripped() {
+            return true;
+        }
+
+        @Override
+        protected short[] createInternalArray(int size) {
+            return new short[size];
+        }
+
+        @Override
+        public boolean isEmpty(Object value) {
+            return VectorExtractor.super.isEmpty(value);
+        }
+
+        @Override
+        protected void parseAndStoreElement(
+                char[] data,
+                int offset,
+                int charIndex,
+                int numberOfChars,
+                CSVHeaderInformation optionalData,
+                short[] dest,
+                int destIndex) {
+            dest[destIndex] =
+                    format.toFloat16(Float.parseFloat(String.valueOf(data, offset + charIndex, numberOfChars)));
+        }
+
+        @Override
+        protected T convertListToArrayValue(short[] values) {
+            return (T) Values.float16Vector(format, values);
+        }
+    }
+
+    private static final class Float16VectorExtractor extends AbstractFloat16VectorExtractor<Float16Vector> {
+        public static final String NAME = "Float16Vector";
+
+        Float16VectorExtractor(char vectorDelimiter) {
+            super(NAME, vectorDelimiter, Float16Format.FLOAT16);
+        }
+
+        @Override
+        public Class<?> extractedClass() {
+            return Float16Vector.class;
+        }
+    }
+
+    private static final class BFloat16VectorExtractor extends AbstractFloat16VectorExtractor<BFloat16Vector> {
+        public static final String NAME = "BFloat16Vector";
+
+        BFloat16VectorExtractor(char vectorDelimiter) {
+            super(NAME, vectorDelimiter, Float16Format.BFLOAT16);
+        }
+
+        @Override
+        public Class<?> extractedClass() {
+            return BFloat16Vector.class;
+        }
+    }
+
+    private static final class Float32VectorExtractor extends ArrayExtractor<float[], Float32Vector>
+            implements VectorExtractor<Float32Vector> {
+
+        public static final String NAME = "Float32Vector";
+
+        Float32VectorExtractor(char vectorDelimiter) {
+            super(vectorDelimiter, NAME, null);
+        }
+
+        @Override
+        public Extractor<Float32Vector> getDimensionVerifyingExtractor(int expectedDimensions) {
+            return new DimensionVerifyingVectorExtractorWrapper<>(this, expectedDimensions);
+        }
+
+        @Override
+        protected Float32Vector emptyElement() {
+            return null;
+        }
+
+        @Override
+        public boolean allowBracketsToBeStripped() {
+            return true;
+        }
+
+        @Override
+        protected float[] createInternalArray(int size) {
+            return new float[size];
+        }
+
+        @Override
+        public Class<?> extractedClass() {
+            return Float32Vector.class;
+        }
+
+        @Override
+        public boolean isEmpty(Object value) {
+            return VectorExtractor.super.isEmpty(value);
+        }
+
+        @Override
+        protected void parseAndStoreElement(
+                char[] data,
+                int offset,
+                int charIndex,
+                int numberOfChars,
+                CSVHeaderInformation optionalData,
+                float[] dest,
+                int destIndex) {
+            dest[destIndex] = Float.parseFloat(String.valueOf(data, offset + charIndex, numberOfChars));
+        }
+
+        @Override
+        protected Float32Vector convertListToArrayValue(float[] values) {
+            return Values.float32Vector(values);
+        }
+    }
+
+    private static final class Float64VectorExtractor extends ArrayExtractor<double[], Float64Vector>
+            implements VectorExtractor<Float64Vector> {
+
+        public static final String NAME = "Float64Vector";
+
+        Float64VectorExtractor(char vectorDelimiter) {
+            super(vectorDelimiter, NAME, null);
+        }
+
+        @Override
+        public Extractor<Float64Vector> getDimensionVerifyingExtractor(int expectedDimensions) {
+            return new DimensionVerifyingVectorExtractorWrapper<>(this, expectedDimensions);
+        }
+
+        @Override
+        protected Float64Vector emptyElement() {
+            return null;
+        }
+
+        @Override
+        public boolean allowBracketsToBeStripped() {
+            return true;
+        }
+
+        @Override
+        protected double[] createInternalArray(int size) {
+            return new double[size];
+        }
+
+        @Override
+        public Class<?> extractedClass() {
+            return Float64Vector.class;
+        }
+
+        @Override
+        public boolean isEmpty(Object value) {
+            return VectorExtractor.super.isEmpty(value);
+        }
+
+        @Override
+        protected void parseAndStoreElement(
+                char[] data,
+                int offset,
+                int charIndex,
+                int numberOfChars,
+                CSVHeaderInformation optionalData,
+                double[] dest,
+                int destIndex) {
+            dest[destIndex] = Double.parseDouble(String.valueOf(data, offset + charIndex, numberOfChars));
+        }
+
+        @Override
+        protected Float64Vector convertListToArrayValue(double[] values) {
+            return Values.float64Vector(values);
+        }
+    }
+
+    private static final class DimensionVerifyingVectorExtractorWrapper<E, T extends VectorValue>
+            extends ArrayExtractor<E, T> {
+
+        private final ArrayExtractor<E, T> delegate;
+        private final int expectedDimensions;
+
+        DimensionVerifyingVectorExtractorWrapper(ArrayExtractor<E, T> delegate, int expectedDimensions) {
+            super(delegate.arrayDelimiter, delegate.name(), null);
+            this.delegate = delegate;
+            this.expectedDimensions = expectedDimensions;
+        }
+
+        @Override
+        protected T emptyElement() {
+            return delegate.emptyElement();
+        }
+
+        @Override
+        public boolean allowBracketsToBeStripped() {
+            return true;
+        }
+
+        @Override
+        protected E createInternalArray(int size) {
+            return delegate.createInternalArray(size);
+        }
+
+        @Override
+        protected void parseAndStoreElement(
+                char[] data,
+                int offset,
+                int charIndex,
+                int numberOfChars,
+                CSVHeaderInformation optionalData,
+                E dest,
+                int destIndex) {
+            delegate.parseAndStoreElement(data, offset, charIndex, numberOfChars, optionalData, dest, destIndex);
+        }
+
+        @Override
+        protected T convertListToArrayValue(E values) {
+            final var vectorValue = delegate.convertListToArrayValue(values);
+            if (vectorValue.dimensions() != expectedDimensions) {
+                throw new IllegalArgumentException("Header specified %d dimensions, but vector has %d dimensions: %s"
+                        .formatted(expectedDimensions, vectorValue.dimensions(), vectorValue));
+            }
+            return vectorValue;
+        }
+
+        @Override
+        public Class<?> extractedClass() {
+            return delegate.extractedClass();
+        }
+
+        @Override
+        public boolean isEmpty(Object value) {
+            return delegate.isEmpty(value);
+        }
     }
 
     private static final class ShortArrayExtractor extends ArrayExtractor<short[], short[]> {
@@ -672,6 +1320,11 @@ public final class Extractors {
         @Override
         protected short[] emptyElement() {
             return EMPTY_SHORT_ARRAY;
+        }
+
+        @Override
+        public boolean allowBracketsToBeStripped() {
+            return true;
         }
 
         @Override
@@ -695,6 +1348,11 @@ public final class Extractors {
         protected short[] convertListToArrayValue(short[] values) {
             return values;
         }
+
+        @Override
+        public Class<?> extractedClass() {
+            return short[].class;
+        }
     }
 
     private static final class IntArrayExtractor extends ArrayExtractor<int[], int[]> {
@@ -705,6 +1363,11 @@ public final class Extractors {
         @Override
         protected int[] emptyElement() {
             return EMPTY_INT_ARRAY;
+        }
+
+        @Override
+        public boolean allowBracketsToBeStripped() {
+            return true;
         }
 
         @Override
@@ -728,6 +1391,11 @@ public final class Extractors {
         protected int[] convertListToArrayValue(int[] values) {
             return values;
         }
+
+        @Override
+        public Class<?> extractedClass() {
+            return int[].class;
+        }
     }
 
     private static final class LongArrayExtractor extends ArrayExtractor<long[], long[]> {
@@ -738,6 +1406,11 @@ public final class Extractors {
         @Override
         protected long[] emptyElement() {
             return EMPTY_LONG_ARRAY;
+        }
+
+        @Override
+        public boolean allowBracketsToBeStripped() {
+            return true;
         }
 
         @Override
@@ -761,6 +1434,11 @@ public final class Extractors {
         protected long[] convertListToArrayValue(long[] values) {
             return values;
         }
+
+        @Override
+        public Class<?> extractedClass() {
+            return long[].class;
+        }
     }
 
     private static final class FloatArrayExtractor extends ArrayExtractor<float[], float[]> {
@@ -771,6 +1449,11 @@ public final class Extractors {
         @Override
         protected float[] emptyElement() {
             return EMPTY_FLOAT_ARRAY;
+        }
+
+        @Override
+        public boolean allowBracketsToBeStripped() {
+            return true;
         }
 
         @Override
@@ -796,6 +1479,11 @@ public final class Extractors {
         protected float[] convertListToArrayValue(float[] values) {
             return values;
         }
+
+        @Override
+        public Class<?> extractedClass() {
+            return float[].class;
+        }
     }
 
     private static final class DoubleArrayExtractor extends ArrayExtractor<double[], double[]> {
@@ -807,6 +1495,11 @@ public final class Extractors {
         @Override
         protected double[] emptyElement() {
             return EMPTY_DOUBLE_ARRAY;
+        }
+
+        @Override
+        public boolean allowBracketsToBeStripped() {
+            return true;
         }
 
         @Override
@@ -832,6 +1525,11 @@ public final class Extractors {
         protected double[] convertListToArrayValue(double[] values) {
             return values;
         }
+
+        @Override
+        public Class<?> extractedClass() {
+            return double[].class;
+        }
     }
 
     private static final class BooleanArrayExtractor extends ArrayExtractor<boolean[], boolean[]> {
@@ -842,6 +1540,11 @@ public final class Extractors {
         @Override
         protected boolean[] emptyElement() {
             return EMPTY_BOOLEAN_ARRAY;
+        }
+
+        @Override
+        public boolean allowBracketsToBeStripped() {
+            return true;
         }
 
         @Override
@@ -864,6 +1567,11 @@ public final class Extractors {
         @Override
         protected boolean[] convertListToArrayValue(boolean[] values) {
             return values;
+        }
+
+        @Override
+        public Class<?> extractedClass() {
+            return boolean[].class;
         }
     }
 
@@ -892,6 +1600,11 @@ public final class Extractors {
                 return null;
             }
             return PointValue.parse(CharBuffer.wrap(data, offset, length), optionalData);
+        }
+
+        @Override
+        public Class<?> extractedClass() {
+            return PointValue.class;
         }
     }
 
@@ -928,6 +1641,11 @@ public final class Extractors {
         protected PointArray convertListToArrayValue(PointValue[] values) {
             return Values.pointArray(values);
         }
+
+        @Override
+        public Class<?> extractedClass() {
+            return PointArray.class;
+        }
     }
 
     private static final class DateExtractor extends AbstractExtractor<DateValue> {
@@ -944,6 +1662,11 @@ public final class Extractors {
                 return null;
             }
             return DateValue.parse(CharBuffer.wrap(data, offset, length));
+        }
+
+        @Override
+        public Class<?> extractedClass() {
+            return DateValue.class;
         }
     }
 
@@ -981,6 +1704,11 @@ public final class Extractors {
         protected DateArray convertListToArrayValue(LocalDate[] values) {
             return Values.dateArray(values);
         }
+
+        @Override
+        public Class<?> extractedClass() {
+            return DateArray.class;
+        }
     }
 
     private static final class TimeExtractor extends AbstractExtractor<TimeValue> {
@@ -1000,6 +1728,11 @@ public final class Extractors {
                 return null;
             }
             return TimeValue.parse(CharBuffer.wrap(data, offset, length), defaultTimeZone, optionalData);
+        }
+
+        @Override
+        public Class<?> extractedClass() {
+            return TimeValue.class;
         }
     }
 
@@ -1041,6 +1774,11 @@ public final class Extractors {
         protected TimeArray convertListToArrayValue(OffsetTime[] values) {
             return Values.timeArray(values);
         }
+
+        @Override
+        public Class<?> extractedClass() {
+            return TimeArray.class;
+        }
     }
 
     private static final class DateTimeExtractor extends AbstractExtractor<DateTimeValue> {
@@ -1060,6 +1798,11 @@ public final class Extractors {
                 return null;
             }
             return DateTimeValue.parse(CharBuffer.wrap(data, offset, length), defaultTimeZone, optionalData);
+        }
+
+        @Override
+        public Class<?> extractedClass() {
+            return DateTimeValue.class;
         }
     }
 
@@ -1101,6 +1844,11 @@ public final class Extractors {
         protected DateTimeArray convertListToArrayValue(ZonedDateTime[] values) {
             return Values.dateTimeArray(values);
         }
+
+        @Override
+        public Class<?> extractedClass() {
+            return DateTimeArray.class;
+        }
     }
 
     private static final class LocalTimeExtractor extends AbstractExtractor<LocalTimeValue> {
@@ -1117,6 +1865,11 @@ public final class Extractors {
                 return null;
             }
             return LocalTimeValue.parse(CharBuffer.wrap(data, offset, length));
+        }
+
+        @Override
+        public Class<?> extractedClass() {
+            return LocalTimeValue.class;
         }
     }
 
@@ -1154,6 +1907,11 @@ public final class Extractors {
         protected LocalTimeArray convertListToArrayValue(LocalTime[] values) {
             return Values.localTimeArray(values);
         }
+
+        @Override
+        public Class<?> extractedClass() {
+            return LocalTimeArray.class;
+        }
     }
 
     private static final class LocalDateTimeExtractor extends AbstractExtractor<LocalDateTimeValue> {
@@ -1170,6 +1928,11 @@ public final class Extractors {
                 return null;
             }
             return LocalDateTimeValue.parse(CharBuffer.wrap(data, offset, length));
+        }
+
+        @Override
+        public Class<?> extractedClass() {
+            return LocalDateTimeValue.class;
         }
     }
 
@@ -1208,6 +1971,11 @@ public final class Extractors {
         protected LocalDateTimeArray convertListToArrayValue(LocalDateTime[] values) {
             return Values.localDateTimeArray(values);
         }
+
+        @Override
+        public Class<?> extractedClass() {
+            return LocalDateTimeArray.class;
+        }
     }
 
     private static final class DurationExtractor extends AbstractExtractor<DurationValue> {
@@ -1225,9 +1993,14 @@ public final class Extractors {
             }
             return DurationValue.parse(CharBuffer.wrap(data, offset, length));
         }
+
+        @Override
+        public Class<?> extractedClass() {
+            return DurationValue.class;
+        }
     }
 
-    private static final class TextValueExtractor extends AbstractExtractor<Value> {
+    private static final class TextValueExtractor extends AbstractExtractor<TextValue> {
         public static final String NAME = "TextValue";
 
         private final boolean emptyStringsAsNull;
@@ -1238,12 +2011,17 @@ public final class Extractors {
         }
 
         @Override
-        public Value extract(
+        public TextValue extract(
                 char[] data, int offset, int length, boolean hadQuotes, CSVHeaderInformation optionalData) {
             if (length == 0 && (!hadQuotes || emptyStringsAsNull)) {
-                return Values.NO_VALUE;
+                return null;
             }
             return Values.utf8Value(new String(data, offset, length));
+        }
+
+        @Override
+        public Class<?> extractedClass() {
+            return TextValue.class;
         }
     }
 
@@ -1280,13 +2058,16 @@ public final class Extractors {
         protected DurationArray convertListToArrayValue(DurationValue[] values) {
             return Values.durationArray(values);
         }
+
+        @Override
+        public Class<?> extractedClass() {
+            return DurationArray.class;
+        }
     }
 
     private static final Supplier<ZoneId> inUTC = () -> UTC;
 
     private static long extractLong(char[] data, int originalOffset, int fullLength) {
-        long result = 0;
-        boolean negate = false;
         int offset = originalOffset;
         int length = fullLength;
 
@@ -1300,8 +2081,9 @@ public final class Extractors {
             length--;
         }
 
+        var unitFactor = 1;
         if (length > 0 && data[offset] == '-') {
-            negate = true;
+            unitFactor = -1;
             offset++;
             length--;
         }
@@ -1311,31 +2093,44 @@ public final class Extractors {
                     "Not an integer: \"" + String.valueOf(data, originalOffset, fullLength) + "\"");
         }
 
-        try {
-            for (int i = 0; i < length; i++) {
-                result = result * 10 + digit(data[offset + i]);
-            }
-        } catch (NumberFormatException ignored) {
-            throw new NumberFormatException(
-                    "Not an integer: \"" + String.valueOf(data, originalOffset, fullLength) + "\"");
+        // Leading zeros can be ignored
+        while (length > 0 && data[offset] == '0') {
+            offset++;
+            length--;
         }
 
-        return negate ? -result : result;
+        long result = 0;
+        for (int i = 0; i < length && i < MAX_LONG_CHARS; i++) {
+            result = (result * 10) + (digit(data, offset + i, originalOffset, fullLength) * unitFactor);
+        }
+
+        // overflow occurred if positive numbers (unitFactor == 1) went negative
+        // or negative numbers (unitFactor == -1) went positive
+        if (unitFactor == 1 ? result < 0 : result > 0) {
+            throw new ArithmeticException(getOverflowMessage(String.valueOf(data, originalOffset, fullLength), "long"));
+        }
+
+        return result;
     }
 
-    private static int digit(char ch) {
-        int digit = ch - '0';
+    private static int digit(char[] data, int index, int offsetStart, int length) {
+        var digit = data[index] - '0';
         if ((digit < 0) || (digit > 9)) {
-            throw new NumberFormatException();
+            throw new NumberFormatException("Not an integer: \"" + String.valueOf(data, offsetStart, length) + "\"");
         }
         return digit;
     }
 
     private static final char[] BOOLEAN_TRUE_CHARACTERS;
+    private static final char[] BOOLEAN_TRUE_CHARACTERS_UPPER;
 
     static {
-        BOOLEAN_TRUE_CHARACTERS = new char[Boolean.TRUE.toString().length()];
-        Boolean.TRUE.toString().getChars(0, BOOLEAN_TRUE_CHARACTERS.length, BOOLEAN_TRUE_CHARACTERS, 0);
+        String trueStr = Boolean.TRUE.toString();
+        BOOLEAN_TRUE_CHARACTERS = new char[trueStr.length()];
+        trueStr.getChars(0, BOOLEAN_TRUE_CHARACTERS.length, BOOLEAN_TRUE_CHARACTERS, 0);
+        BOOLEAN_TRUE_CHARACTERS_UPPER = new char[trueStr.length()];
+        trueStr.toUpperCase(Locale.ROOT)
+                .getChars(0, BOOLEAN_TRUE_CHARACTERS_UPPER.length, BOOLEAN_TRUE_CHARACTERS_UPPER, 0);
     }
 
     private static boolean extractBoolean(char[] data, int originalOffset, int fullLength) {
@@ -1351,13 +2146,14 @@ public final class Extractors {
             length--;
         }
 
-        // See if the rest exactly match "true"
+        // See if the rest case-insensitively match "true"
         if (length != BOOLEAN_TRUE_CHARACTERS.length) {
             return false;
         }
 
-        for (int i = 0; i < BOOLEAN_TRUE_CHARACTERS.length && i < length; i++) {
-            if (data[offset + i] != BOOLEAN_TRUE_CHARACTERS[i]) {
+        for (int i = 0; i < BOOLEAN_TRUE_CHARACTERS.length; i++) {
+            char c = data[offset + i];
+            if (c != BOOLEAN_TRUE_CHARACTERS[i] && c != BOOLEAN_TRUE_CHARACTERS_UPPER[i]) {
                 return false;
             }
         }

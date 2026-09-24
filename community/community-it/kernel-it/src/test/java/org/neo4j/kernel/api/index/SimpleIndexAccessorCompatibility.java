@@ -67,8 +67,7 @@ import org.neo4j.internal.schema.IndexOrder;
 import org.neo4j.internal.schema.IndexPrototype;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
-import org.neo4j.storageengine.api.IndexEntryUpdate;
-import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.storageengine.api.schema.SimpleEntityValueClient;
 import org.neo4j.values.storable.ArrayValue;
 import org.neo4j.values.storable.CoordinateReferenceSystem;
@@ -77,6 +76,7 @@ import org.neo4j.values.storable.DateValue;
 import org.neo4j.values.storable.LocalDateTimeValue;
 import org.neo4j.values.storable.LocalTimeValue;
 import org.neo4j.values.storable.PointValue;
+import org.neo4j.values.storable.RandomValues;
 import org.neo4j.values.storable.TimeValue;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.ValueType;
@@ -98,16 +98,16 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
                 add(4L, descriptor, "apA"),
                 add(5L, descriptor, "b")));
 
-        assertThat(query(PropertyIndexQuery.stringPrefix(1, stringValue("a")))).isEqualTo(asList(1L, 3L, 4L));
-        assertThat(query(PropertyIndexQuery.stringPrefix(1, stringValue("A")))).isEqualTo(singletonList(2L));
-        assertThat(query(PropertyIndexQuery.stringPrefix(1, stringValue("ba")))).isEqualTo(EMPTY_LIST);
-        assertThat(query(PropertyIndexQuery.stringPrefix(1, stringValue("")))).isEqualTo(asList(1L, 2L, 3L, 4L, 5L));
+        assertThat(query(PropertyIndexQuery.stringPrefix(0, stringValue("a")))).isEqualTo(asList(1L, 3L, 4L));
+        assertThat(query(PropertyIndexQuery.stringPrefix(0, stringValue("A")))).isEqualTo(singletonList(2L));
+        assertThat(query(PropertyIndexQuery.stringPrefix(0, stringValue("ba")))).isEqualTo(EMPTY_LIST);
+        assertThat(query(PropertyIndexQuery.stringPrefix(0, stringValue("")))).isEqualTo(asList(1L, 2L, 3L, 4L, 5L));
     }
 
     @Test
     void testIndexSeekByPrefixOnNonStrings() throws Exception {
         updateAndCommit(asList(add(1L, descriptor, "2a"), add(2L, descriptor, 2L), add(2L, descriptor, 20L)));
-        assertThat(query(PropertyIndexQuery.stringPrefix(1, stringValue("2")))).isEqualTo(singletonList(1L));
+        assertThat(query(PropertyIndexQuery.stringPrefix(0, stringValue("2")))).isEqualTo(singletonList(1L));
     }
 
     @Test
@@ -127,13 +127,13 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
                 add(7L, descriptor, d7),
                 add(8L, descriptor, d8)));
 
-        assertThat(query(range(1, d4, true, d7, true))).containsExactly(4L, 5L, 6L, 7L);
+        assertThat(query(range(0, d4, true, d7, true))).containsExactly(4L, 5L, 6L, 7L);
     }
 
     @Test
     void tracePageCacheAccessOnConsistencyCheck() {
-        var pageCacheTracer = new DefaultPageCacheTracer();
-        var contextFactory = new CursorContextFactory(pageCacheTracer, EMPTY_CONTEXT_SUPPLIER);
+        DefaultPageCacheTracer pageCacheTracer = new DefaultPageCacheTracer();
+        CursorContextFactory contextFactory = new CursorContextFactory(pageCacheTracer, EMPTY_CONTEXT_SUPPLIER);
         accessor.consistencyCheck(
                 ReporterFactories.noopReporterFactory(),
                 contextFactory,
@@ -155,13 +155,13 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
 
         updateAndCommit(asList(add(1L, descriptor, p1), add(2L, descriptor, p2), add(3L, descriptor, p3)));
 
-        assertThat(query(boundingBox(1, p1, p2))).containsExactly(1L, 2L);
+        assertThat(query(boundingBox(0, p1, p2))).containsExactly(1L, 2L);
     }
 
     @Test
     void shouldUpdateWithAllValues() throws Exception {
         // GIVEN
-        List<ValueIndexEntryUpdate<?>> updates = updates(valueSet1);
+        List<EagerValueIndexEntryUpdate> updates = updates(valueSet1);
         updateAndCommit(updates);
 
         // then
@@ -175,7 +175,7 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
     @Test
     void shouldScanAllValues() throws Exception {
         // GIVEN
-        List<ValueIndexEntryUpdate<?>> updates = updates(valueSet1);
+        List<EagerValueIndexEntryUpdate> updates = updates(valueSet1);
         updateAndCommit(updates);
         Long[] allNodes = valueSet1.stream().map(x -> x.nodeId).toArray(Long[]::new);
 
@@ -187,7 +187,7 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
     @Test
     void shouldScanAllValuesThatExistWithPropKey() throws Exception {
         // GIVEN
-        List<ValueIndexEntryUpdate<?>> updates = updates(valueSet1);
+        List<EagerValueIndexEntryUpdate> updates = updates(valueSet1);
         updateAndCommit(updates);
         Long[] allNodes = valueSet1.stream().map(x -> x.nodeId).toArray(Long[]::new);
 
@@ -320,7 +320,7 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
     private void testIndexRangeSeek(Supplier<? extends Value> generator) throws Exception {
         int count = random.nextInt(5, 10);
         List<Value> values = new ArrayList<>();
-        List<ValueIndexEntryUpdate<?>> updates = new ArrayList<>();
+        List<EagerValueIndexEntryUpdate> updates = new ArrayList<>();
         Set<Value> duplicateCheck = new HashSet<>();
         for (int i = 0; i < count; i++) {
             Value value;
@@ -343,7 +343,7 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
                 Value to = values.get(t);
                 for (boolean fromInclusive : new boolean[] {true, false}) {
                     for (boolean toInclusive : new boolean[] {true, false}) {
-                        assertThat(query(range(1, from, fromInclusive, to, toInclusive)))
+                        assertThat(query(range(0, from, fromInclusive, to, toInclusive)))
                                 .isEqualTo(ids(f, fromInclusive, t, toInclusive));
                     }
                 }
@@ -753,71 +753,71 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
     @Test
     void shouldExactMatchPositiveInfinity() throws Exception {
         updateAndCommit(List.of(add(1L, descriptor, Double.POSITIVE_INFINITY)));
-        assertThat(query(exact(1, Double.POSITIVE_INFINITY))).containsExactly(1L);
+        assertThat(query(exact(0, Double.POSITIVE_INFINITY))).containsExactly(1L);
     }
 
     @Test
     void shouldExactMatchNegativeInfinity() throws Exception {
         updateAndCommit(List.of(add(1L, descriptor, Double.NEGATIVE_INFINITY)));
-        assertThat(query(exact(1, Double.NEGATIVE_INFINITY))).containsExactly(1L);
+        assertThat(query(exact(0, Double.NEGATIVE_INFINITY))).containsExactly(1L);
     }
 
     @Test
     void shouldNotExactMatchNaN() throws Exception {
         updateAndCommit(List.of(add(1L, descriptor, Double.NaN)));
-        assertThat(query(exact(1, Double.NaN))).isEmpty();
+        assertThat(query(exact(0, Double.NaN))).isEmpty();
     }
 
     // Range with +Inf
     @Test
     void shouldFindPositiveInfinityInOpenEndRange() throws Exception {
         updateAndCommit(List.of(add(1L, descriptor, Double.POSITIVE_INFINITY)));
-        assertThat(query(range(1, 0, true, null, false))).containsExactly(1L);
+        assertThat(query(range(0, 0, true, null, false))).containsExactly(1L);
     }
 
     @Test
     void shouldFindPositiveInfinityInRangeToPositiveInfinityInclusive() throws Exception {
         updateAndCommit(List.of(add(1L, descriptor, Double.POSITIVE_INFINITY)));
-        assertThat(query(range(1, 0, true, Double.POSITIVE_INFINITY, true))).containsExactly(1L);
+        assertThat(query(range(0, 0, true, Double.POSITIVE_INFINITY, true))).containsExactly(1L);
     }
 
     @Test
     void shouldNotFindPositiveInfinityInRangeToPositiveInfinityExclusive() throws Exception {
         updateAndCommit(List.of(add(1L, descriptor, Double.POSITIVE_INFINITY)));
-        assertThat(query(range(1, 0, true, Double.POSITIVE_INFINITY, false))).isEmpty();
+        assertThat(query(range(0, 0, true, Double.POSITIVE_INFINITY, false))).isEmpty();
     }
 
     // Range with -Inf
     @Test
     void shouldFindNegativeInfinityInOpenStartRange() throws Exception {
         updateAndCommit(List.of(add(1L, descriptor, Double.NEGATIVE_INFINITY)));
-        assertThat(query(range(1, null, true, 0, false))).containsExactly(1L);
+        assertThat(query(range(0, null, true, 0, false))).containsExactly(1L);
     }
 
     @Test
     void shouldFindNegativeInfinityInRangeFromNegativeInfinityInclusive() throws Exception {
         updateAndCommit(List.of(add(1L, descriptor, Double.NEGATIVE_INFINITY)));
-        assertThat(query(range(1, Double.NEGATIVE_INFINITY, true, 0, false))).containsExactly(1L);
+        assertThat(query(range(0, Double.NEGATIVE_INFINITY, true, 0, false))).containsExactly(1L);
     }
 
     @Test
     void shouldNotFindNegativeInfinityInRangeFromNegativeInfinityExclusive() throws Exception {
         updateAndCommit(List.of(add(1L, descriptor, Double.NEGATIVE_INFINITY)));
-        assertThat(query(range(1, Double.NEGATIVE_INFINITY, false, 0, false))).isEmpty();
+        assertThat(query(range(0, Double.NEGATIVE_INFINITY, false, 0, false))).isEmpty();
     }
 
     // Range with NaN
     @Test
     void shouldNotFindNaNInAnyRange() throws Exception {
         updateAndCommit(List.of(add(1L, descriptor, Double.NaN)));
-        assertThat(query(range(1, Double.NaN, true, null, true))).isEmpty();
-        assertThat(query(range(1, Double.NaN, true, null, false))).isEmpty();
-        assertThat(query(range(1, Double.NaN, false, null, true))).isEmpty();
-        assertThat(query(range(1, Double.NaN, false, null, false))).isEmpty();
-        assertThat(query(range(1, null, true, Double.NaN, true))).isEmpty();
-        assertThat(query(range(1, null, true, Double.NaN, false))).isEmpty();
-        assertThat(query(range(1, null, false, Double.NaN, true))).isEmpty();
-        assertThat(query(range(1, null, false, Double.NaN, false))).isEmpty();
+        assertThat(query(range(0, Double.NaN, true, null, true))).isEmpty();
+        assertThat(query(range(0, Double.NaN, true, null, false))).isEmpty();
+        assertThat(query(range(0, Double.NaN, false, null, true))).isEmpty();
+        assertThat(query(range(0, Double.NaN, false, null, false))).isEmpty();
+        assertThat(query(range(0, null, true, Double.NaN, true))).isEmpty();
+        assertThat(query(range(0, null, true, Double.NaN, false))).isEmpty();
+        assertThat(query(range(0, null, false, Double.NaN, true))).isEmpty();
+        assertThat(query(range(0, null, false, Double.NaN, false))).isEmpty();
     }
 
     @Test
@@ -829,10 +829,10 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
                 add(4L, descriptor, Long.MAX_VALUE),
                 add(5L, descriptor, Double.POSITIVE_INFINITY),
                 add(6L, descriptor, Double.NaN)));
-        assertThat(query(range(1, null, true, Double.NaN, true))).isEmpty();
-        assertThat(query(range(1, null, false, Double.NaN, false))).isEmpty();
-        assertThat(query(range(1, Double.NaN, true, null, true))).isEmpty();
-        assertThat(query(range(1, Double.NaN, false, null, false))).isEmpty();
+        assertThat(query(range(0, null, true, Double.NaN, true))).isEmpty();
+        assertThat(query(range(0, null, false, Double.NaN, false))).isEmpty();
+        assertThat(query(range(0, Double.NaN, true, null, true))).isEmpty();
+        assertThat(query(range(0, Double.NaN, false, null, false))).isEmpty();
     }
 
     // Exists with extreme values (NaN, +Inf, -Inf)
@@ -842,7 +842,7 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
                 add(3L, descriptor, Double.NEGATIVE_INFINITY),
                 add(2L, descriptor, Double.POSITIVE_INFINITY),
                 add(1L, descriptor, Double.NaN)));
-        assertThat(queryNoSort(exists(1))).containsExactly(3L, 2L, 1L);
+        assertThat(queryNoSort(exists(0))).containsExactly(3L, 2L, 1L);
     }
 
     // Index scan (all entries) with extreme values (NaN, +Inf, -Inf)
@@ -865,25 +865,24 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
             IndexOrder order, RangeSeekMode rangeSeekMode, int expectedSize, Object... objects) throws Exception {
         PropertyIndexQuery range =
                 switch (rangeSeekMode) {
-                    case CLOSED -> range(
-                            100, Values.of(objects[0]), true, Values.of(objects[objects.length - 1]), true);
-                    case OPEN_END -> range(100, Values.of(objects[0]), true, null, false);
-                    case OPEN_START -> range(100, null, false, Values.of(objects[objects.length - 1]), true);
+                    case CLOSED -> range(0, Values.of(objects[0]), true, Values.of(objects[objects.length - 1]), true);
+                    case OPEN_END -> range(0, Values.of(objects[0]), true, null, false);
+                    case OPEN_START -> range(0, null, false, Values.of(objects[objects.length - 1]), true);
                 };
 
         if (order == IndexOrder.ASCENDING || order == IndexOrder.DESCENDING) {
             assumeTrue(descriptor.getCapability().supportsOrdering(), "Assume support for order " + order);
         }
 
-        List<ValueIndexEntryUpdate<?>> additions =
+        List<EagerValueIndexEntryUpdate> additions =
                 Arrays.stream(objects).map(o -> add(1, descriptor, o)).collect(Collectors.toList());
         Collections.shuffle(additions, random.random());
         updateAndCommit(additions);
 
-        SimpleEntityValueClient client = new SimpleEntityValueClient();
-        try (AutoCloseable ignored = query(client, order, range)) {
+        try (SimpleEntityValueClient client = new SimpleEntityValueClient();
+                AutoCloseable ignored = query(client, order, range)) {
             List<Long> seenIds = assertClientReturnValuesInOrder(client, order);
-            assertThat(seenIds.size()).isEqualTo(expectedSize);
+            assertThat(seenIds).hasSize(expectedSize);
         }
     }
 
@@ -893,16 +892,21 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
         long entityId = random.nextLong(1_000_000_000);
         for (ValueType valueType : valueTypes) {
             // given
-            Value value = random.nextValue(valueType);
-            updateAndCommit(singletonList(IndexEntryUpdate.add(entityId, descriptor, value)));
+            RandomValues rv = RandomValues.create(
+                    random.random(),
+                    RandomValues.newConfigurationBuilder()
+                            .maxVectorNumBytes(RandomValues.MAX_NUM_BYTES_IN_INDEX_KEY)
+                            .build());
+            Value value = rv.nextValueOfType(valueType);
+            updateAndCommit(singletonList(EagerValueIndexEntryUpdate.add(entityId, descriptor, value)));
             assertEquals(singletonList(entityId), query(PropertyIndexQuery.exact(0, value)));
 
             // when
             Value newValue;
             do {
-                newValue = random.nextValue(valueType);
+                newValue = rv.nextValueOfType(valueType);
             } while (value.equals(newValue));
-            updateAndCommit(singletonList(IndexEntryUpdate.change(entityId, descriptor, value, newValue)));
+            updateAndCommit(singletonList(EagerValueIndexEntryUpdate.change(entityId, descriptor, value, newValue)));
 
             // then
             assertEquals(emptyList(), query(PropertyIndexQuery.exact(0, value)));
@@ -916,12 +920,17 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
         long entityId = random.nextLong(1_000_000_000);
         for (ValueType valueType : valueTypes) {
             // given
-            Value value = random.nextValue(valueType);
-            updateAndCommit(singletonList(IndexEntryUpdate.add(entityId, descriptor, value)));
+            RandomValues rv = RandomValues.create(
+                    random.random(),
+                    RandomValues.newConfigurationBuilder()
+                            .maxVectorNumBytes(RandomValues.MAX_NUM_BYTES_IN_INDEX_KEY)
+                            .build());
+            Value value = rv.nextValueOfType(valueType);
+            updateAndCommit(singletonList(EagerValueIndexEntryUpdate.add(entityId, descriptor, value)));
             assertEquals(singletonList(entityId), query(PropertyIndexQuery.exact(0, value)));
 
             // when
-            updateAndCommit(singletonList(IndexEntryUpdate.remove(entityId, descriptor, value)));
+            updateAndCommit(singletonList(EagerValueIndexEntryUpdate.remove(entityId, descriptor, value)));
 
             // then
             assertTrue(query(PropertyIndexQuery.exact(0, value)).isEmpty());
@@ -944,15 +953,15 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
 
             updateAndCommit(asList(add(1L, descriptor, "a"), add(2L, descriptor, "a")));
 
-            assertThat(query(exact(1, "a"))).containsExactly(1L, 2L);
+            assertThat(query(exact(0, "a"))).containsExactly(1L, 2L);
         }
 
         @Test
         void testIndexSeekAndScan() throws Exception {
             updateAndCommit(asList(add(1L, descriptor, "a"), add(2L, descriptor, "a"), add(3L, descriptor, "b")));
 
-            assertThat(query(exact(1, "a"))).containsExactly(1L, 2L);
-            assertThat(query(exists(1))).containsExactly(1L, 2L, 3L);
+            assertThat(query(exact(0, "a"))).containsExactly(1L, 2L);
+            assertThat(query(exists(0))).containsExactly(1L, 2L, 3L);
         }
 
         @Test
@@ -964,11 +973,11 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
                     add(4L, descriptor, 5),
                     add(5L, descriptor, 5)));
 
-            assertThat(query(range(1, -5, true, 5, true))).containsExactly(1L, 2L, 3L, 4L, 5L);
-            assertThat(query(range(1, -3, true, -1, true))).isEmpty();
-            assertThat(query(range(1, -5, true, 4, true))).containsExactly(1L, 2L, 3L);
-            assertThat(query(range(1, -4, true, 5, true))).containsExactly(3L, 4L, 5L);
-            assertThat(query(range(1, -5, true, 5, true))).containsExactly(1L, 2L, 3L, 4L, 5L);
+            assertThat(query(range(0, -5, true, 5, true))).containsExactly(1L, 2L, 3L, 4L, 5L);
+            assertThat(query(range(0, -3, true, -1, true))).isEmpty();
+            assertThat(query(range(0, -5, true, 4, true))).containsExactly(1L, 2L, 3L);
+            assertThat(query(range(0, -4, true, 5, true))).containsExactly(3L, 4L, 5L);
+            assertThat(query(range(0, -5, true, 5, true))).containsExactly(1L, 2L, 3L, 4L, 5L);
         }
 
         @Test
@@ -980,11 +989,11 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
                     add(4L, descriptor, "William"),
                     add(5L, descriptor, "William")));
 
-            assertThat(query(range(1, "Anna", false, "William", false))).containsExactly(3L);
-            assertThat(query(range(1, "Arabella", false, "Bob", false))).isEmpty();
-            assertThat(query(range(1, "Anna", true, "William", false))).containsExactly(1L, 2L, 3L);
-            assertThat(query(range(1, "Anna", false, "William", true))).containsExactly(3L, 4L, 5L);
-            assertThat(query(range(1, "Anna", true, "William", true))).containsExactly(1L, 2L, 3L, 4L, 5L);
+            assertThat(query(range(0, "Anna", false, "William", false))).containsExactly(3L);
+            assertThat(query(range(0, "Arabella", false, "Bob", false))).isEmpty();
+            assertThat(query(range(0, "Anna", true, "William", false))).containsExactly(1L, 2L, 3L);
+            assertThat(query(range(0, "Anna", false, "William", true))).containsExactly(3L, 4L, 5L);
+            assertThat(query(range(0, "Anna", true, "William", true))).containsExactly(1L, 2L, 3L, 4L, 5L);
         }
 
         @Test
@@ -1035,11 +1044,11 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
                     add(4L, descriptor, v4),
                     add(5L, descriptor, v4)));
 
-            assertThat(query(range(1, v1, false, v4, false))).containsExactly(3L);
-            assertThat(query(range(1, v2, false, v3, false))).isEmpty();
-            assertThat(query(range(1, v1, true, v4, false))).containsExactly(1L, 2L, 3L);
-            assertThat(query(range(1, v1, false, v4, true))).containsExactly(3L, 4L, 5L);
-            assertThat(query(range(1, v1, true, v4, true))).containsExactly(1L, 2L, 3L, 4L, 5L);
+            assertThat(query(range(0, v1, false, v4, false))).containsExactly(3L);
+            assertThat(query(range(0, v2, false, v3, false))).isEmpty();
+            assertThat(query(range(0, v1, true, v4, false))).containsExactly(1L, 2L, 3L);
+            assertThat(query(range(0, v1, false, v4, true))).containsExactly(3L, 4L, 5L);
+            assertThat(query(range(0, v1, true, v4, true))).containsExactly(1L, 2L, 3L, 4L, 5L);
         }
 
         @Test
@@ -1051,8 +1060,8 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
                     add(4L, descriptor, "apa"),
                     add(5L, descriptor, "apa")));
 
-            assertThat(query(stringPrefix(1, stringValue("a")))).containsExactly(1L, 3L, 4L, 5L);
-            assertThat(query(stringPrefix(1, stringValue("apa")))).containsExactly(3L, 4L, 5L);
+            assertThat(query(stringPrefix(0, stringValue("a")))).containsExactly(1L, 3L, 4L, 5L);
+            assertThat(query(stringPrefix(0, stringValue("apa")))).containsExactly(3L, 4L, 5L);
         }
 
         @Test
@@ -1067,10 +1076,10 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
                     add(5L, descriptor, "apalong"),
                     add(6L, descriptor, "apa apa")));
 
-            assertThat(query(stringContains(1, stringValue("a")))).containsExactly(1L, 3L, 4L, 5L, 6L);
-            assertThat(query(stringContains(1, stringValue("apa")))).containsExactly(3L, 4L, 5L, 6L);
-            assertThat(query(stringContains(1, stringValue("apa*")))).isEmpty();
-            assertThat(query(stringContains(1, stringValue("pa ap")))).containsExactly(6L);
+            assertThat(query(stringContains(0, stringValue("a")))).containsExactly(1L, 3L, 4L, 5L, 6L);
+            assertThat(query(stringContains(0, stringValue("apa")))).containsExactly(3L, 4L, 5L, 6L);
+            assertThat(query(stringContains(0, stringValue("apa*")))).isEmpty();
+            assertThat(query(stringContains(0, stringValue("pa ap")))).containsExactly(6L);
         }
 
         @Test
@@ -1086,10 +1095,10 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
                     add(6L, descriptor, "apalong"),
                     add(7L, descriptor, "apa apa")));
 
-            assertThat(query(stringSuffix(1, stringValue("a")))).containsExactly(1L, 3L, 4L, 5L, 7L);
-            assertThat(query(stringSuffix(1, stringValue("apa")))).containsExactly(3L, 4L, 5L, 7L);
-            assertThat(query(stringSuffix(1, stringValue("apa*")))).isEmpty();
-            assertThat(query(stringSuffix(1, stringValue("a apa")))).containsExactly(7L);
+            assertThat(query(stringSuffix(0, stringValue("a")))).containsExactly(1L, 3L, 4L, 5L, 7L);
+            assertThat(query(stringSuffix(0, stringValue("apa")))).containsExactly(3L, 4L, 5L, 7L);
+            assertThat(query(stringSuffix(0, stringValue("apa*")))).isEmpty();
+            assertThat(query(stringSuffix(0, stringValue("a apa")))).containsExactly(7L);
         }
 
         @Test
@@ -1099,7 +1108,7 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
         }
 
         private void doTestShouldHandleLargeAmountOfDuplicates(Object value) throws Exception {
-            List<ValueIndexEntryUpdate<?>> updates = new ArrayList<>();
+            List<EagerValueIndexEntryUpdate> updates = new ArrayList<>();
             List<Long> nodeIds = new ArrayList<>();
             for (long i = 0; i < 1000; i++) {
                 nodeIds.add(i);
@@ -1107,7 +1116,7 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
             }
             updateAndCommit(updates);
 
-            assertThat(query(exists(1))).containsAll(nodeIds);
+            assertThat(query(exists(0))).containsAll(nodeIds);
         }
 
         private Value nextRandomValidArrayValue() {
@@ -1136,15 +1145,15 @@ abstract class SimpleIndexAccessorCompatibility extends IndexAccessorCompatibili
 
             updateAndCommit(asList(add(1L, descriptor, "a"), add(2L, descriptor, "a")));
 
-            assertThat(query(exact(1, "a"))).containsExactly(1L, 2L);
+            assertThat(query(exact(0, "a"))).containsExactly(1L, 2L);
         }
 
         @Test
         void testIndexSeekAndScan() throws Exception {
             updateAndCommit(asList(add(1L, descriptor, "a"), add(2L, descriptor, "b"), add(3L, descriptor, "c")));
 
-            assertThat(query(exact(1, "a"))).containsExactly(1L);
-            assertThat(query(PropertyIndexQuery.exists(1))).containsExactly(1L, 2L, 3L);
+            assertThat(query(exact(0, "a"))).containsExactly(1L);
+            assertThat(query(PropertyIndexQuery.exists(0))).containsExactly(1L, 2L, 3L);
         }
     }
 

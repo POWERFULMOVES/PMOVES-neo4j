@@ -19,7 +19,6 @@
  */
 package org.neo4j.bolt.protocol.io.reader.legacy;
 
-import static java.lang.String.format;
 import static java.time.ZoneOffset.UTC;
 
 import java.time.DateTimeException;
@@ -59,7 +58,7 @@ public final class LegacyDateTimeZoneIdReader<CTX> implements StructReader<CTX, 
     @Override
     public DateTimeValue read(CTX ctx, PackstreamBuf buffer, StructHeader header) throws PackstreamReaderException {
         if (header.length() != 3) {
-            throw new IllegalStructSizeException(3, header.length());
+            throw IllegalStructSizeException.illegalStructSize(3, header.length());
         }
 
         var epochSecond = buffer.readInt();
@@ -79,7 +78,7 @@ public final class LegacyDateTimeZoneIdReader<CTX> implements StructReader<CTX, 
             zoneId = ZoneId.of(zoneName);
             localDateTime = LocalDateTime.ofInstant(instant, UTC);
         } catch (ZoneRulesException ex) {
-            throw new IllegalStructArgumentException("tz_id", format("Illegal zone identifier: \"%s\"", zoneName), ex);
+            throw IllegalStructArgumentException.invalidZoneId(zoneName, ex);
         } catch (DateTimeException | ArithmeticException ex) {
             // DRI-011
             throw IllegalStructArgumentException.invalidTemporalComponent("seconds", epochSecond, nanos, ex);

@@ -20,9 +20,8 @@
 package org.neo4j.kernel.impl.index.schema;
 
 import static org.apache.commons.lang3.ArrayUtils.EMPTY_INT_ARRAY;
-import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
 import static org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker.writable;
@@ -40,6 +39,9 @@ import org.eclipse.collections.api.factory.Sets;
 import org.eclipse.collections.api.map.primitive.MutableLongObjectMap;
 import org.eclipse.collections.impl.factory.primitive.LongObjectMaps;
 import org.junit.jupiter.api.Test;
+import org.neo4j.collection.PrimitiveArrays;
+import org.neo4j.collection.PrimitiveArrays.RemovalsAndAdditions;
+import org.neo4j.index.internal.gbptree.CompactionReport;
 import org.neo4j.index.internal.gbptree.MultiRootGBPTree;
 import org.neo4j.internal.schema.AllIndexProviderDescriptors;
 import org.neo4j.internal.schema.IndexDescriptor;
@@ -50,7 +52,6 @@ import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.api.exceptions.index.IndexEntryConflictException;
 import org.neo4j.kernel.api.index.IndexUpdater;
 import org.neo4j.monitoring.Monitors;
-import org.neo4j.storageengine.api.IndexEntryUpdate;
 import org.neo4j.storageengine.api.TokenIndexEntryUpdate;
 
 class TokenIndexPopulatorTest extends IndexPopulatorTests<TokenScanKey, TokenScanValue, TokenScanLayout> {
@@ -107,7 +108,7 @@ class TokenIndexPopulatorTest extends IndexPopulatorTests<TokenScanKey, TokenSca
 
         populator.create();
 
-        List<TokenIndexEntryUpdate<?>> updates = TokenIndexUtility.generateSomeRandomUpdates(entityTokens, random);
+        List<TokenIndexEntryUpdate> updates = TokenIndexUtility.generateSomeRandomUpdates(entityTokens, random);
         // Add updates to populator
         populator.add(updates, NULL_CONTEXT);
 
@@ -124,10 +125,10 @@ class TokenIndexPopulatorTest extends IndexPopulatorTests<TokenScanKey, TokenSca
 
         populator.create();
 
-        List<TokenIndexEntryUpdate<?>> updates = TokenIndexUtility.generateSomeRandomUpdates(entityTokens, random);
+        List<TokenIndexEntryUpdate> updates = TokenIndexUtility.generateSomeRandomUpdates(entityTokens, random);
 
         try (IndexUpdater updater = populator.newPopulatingUpdater(NULL_CONTEXT)) {
-            for (TokenIndexEntryUpdate<?> update : updates) {
+            for (TokenIndexEntryUpdate update : updates) {
                 updater.process(update);
             }
         }
@@ -147,11 +148,10 @@ class TokenIndexPopulatorTest extends IndexPopulatorTests<TokenScanKey, TokenSca
         // when
         updater.close();
 
-        IllegalStateException e = assertThrows(
-                IllegalStateException.class,
-                () -> updater.process(IndexEntryUpdate.change(
-                        random.nextInt(), null, EMPTY_INT_ARRAY, TokenIndexUtility.generateRandomTokens(random))));
-        assertThat(e).hasMessageContaining("Updater has been closed");
+        assertThatThrownBy(() -> updater.process(TokenIndexEntryUpdate.tokenChange(
+                        random.nextInt(), null, EMPTY_INT_ARRAY, TokenIndexUtility.generateRandomTokens(random))))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Updater has been closed");
         populator.close(true, NULL_CONTEXT);
     }
 
@@ -166,7 +166,7 @@ class TokenIndexPopulatorTest extends IndexPopulatorTests<TokenScanKey, TokenSca
 
         while (currentScanId < numberOfEntities) {
             // Collect a batch of max 100 updates from scan
-            List<TokenIndexEntryUpdate<?>> updates = new ArrayList<>();
+            List<TokenIndexEntryUpdate> updates = new ArrayList<>();
             for (int i = 0; i < 100 && currentScanId < numberOfEntities; i++) {
                 TokenIndexUtility.generateRandomUpdate(currentScanId, entityTokens, updates, random);
 
@@ -187,7 +187,10 @@ class TokenIndexPopulatorTest extends IndexPopulatorTests<TokenScanKey, TokenSca
                     }
                     int[] afterTokens = TokenIndexUtility.generateRandomTokens(random);
                     entityTokens.put(entityId, Arrays.copyOf(afterTokens, afterTokens.length));
-                    updater.process(IndexEntryUpdate.change(entityId, null, beforeTokens, afterTokens));
+                    RemovalsAndAdditions removalsAndAdditions =
+                            PrimitiveArrays.toRemovalsAndAdditions(beforeTokens, afterTokens);
+                    updater.process(TokenIndexEntryUpdate.tokenChange(
+                            entityId, null, removalsAndAdditions.removals(), removalsAndAdditions.additions()));
                 }
             }
         }
@@ -250,7 +253,7 @@ class TokenIndexPopulatorTest extends IndexPopulatorTests<TokenScanKey, TokenSca
             AtomicBoolean checkpointCompletedCall) {
         return new MultiRootGBPTree.Monitor.Adaptor() {
             @Override
-            public void checkpointCompleted() {
+            public void checkpointCompleted(CompactionReport compactionReport) {
                 checkpointCompletedCall.set(true);
             }
         };

@@ -39,12 +39,16 @@ import java.time.Period;
 import java.time.ZonedDateTime;
 import java.time.temporal.Temporal;
 import java.time.temporal.TemporalAmount;
-import java.time.temporal.TemporalUnit;
 import java.util.Arrays;
 import java.util.Objects;
+import java.util.UUID;
 import org.apache.commons.lang3.ArrayUtils;
+import org.neo4j.graphdb.Vector;
 import org.neo4j.graphdb.spatial.CRS;
 import org.neo4j.graphdb.spatial.Point;
+import org.neo4j.values.AnyValue;
+import org.neo4j.values.SequenceValue;
+import org.neo4j.values.virtual.ListValue;
 
 /**
  * Entry point to the values library.
@@ -69,11 +73,11 @@ public final class Values {
     public static final Value MAX_NUMBER = Values.doubleValue(Double.NaN);
     public static final Value ZERO_FLOAT = Values.doubleValue(0.0);
     public static final IntegralValue ZERO_INT = Values.longValue(0);
+    public static final StringValue EMPTY_STRING = StringValue.EMPTY;
     public static final Value MIN_STRING = StringValue.EMPTY;
-    public static final Value MAX_STRING = Values.booleanValue(false);
-    public static final BooleanValue TRUE = Values.booleanValue(true);
-    public static final BooleanValue FALSE = Values.booleanValue(false);
-    public static final TextValue EMPTY_STRING = StringValue.EMPTY;
+    public static final Value MAX_STRING = BooleanValue.FALSE;
+    public static final BooleanValue TRUE = BooleanValue.TRUE;
+    public static final BooleanValue FALSE = BooleanValue.FALSE;
     public static final DoubleValue E = Values.doubleValue(Math.E);
     public static final DoubleValue PI = Values.doubleValue(Math.PI);
     public static final DoubleValue NaN = Values.doubleValue(Double.NaN);
@@ -87,7 +91,7 @@ public final class Values {
     public static final ArrayValue EMPTY_LONG_ARRAY = Values.longArray(ArrayUtils.EMPTY_LONG_ARRAY);
     public static final ArrayValue EMPTY_FLOAT_ARRAY = Values.floatArray(ArrayUtils.EMPTY_FLOAT_ARRAY);
     public static final ArrayValue EMPTY_DOUBLE_ARRAY = Values.doubleArray(ArrayUtils.EMPTY_DOUBLE_ARRAY);
-    public static final TextArray EMPTY_TEXT_ARRAY = Values.stringArray();
+    public static final TextArray EMPTY_TEXT_ARRAY = new StringArray(new StringValue[0]);
 
     private Values() {}
 
@@ -99,16 +103,8 @@ public final class Values {
      */
     public static final ValueComparator COMPARATOR = new ValueComparator(ValueGroup::compareTo);
 
-    public static boolean isNumberValue(Object value) {
-        return value instanceof NumberValue;
-    }
-
     public static boolean isBooleanValue(Object value) {
         return value instanceof BooleanValue;
-    }
-
-    public static boolean isTextValue(Object value) {
-        return value instanceof TextValue;
     }
 
     public static boolean isArrayValue(Value value) {
@@ -123,90 +119,42 @@ public final class Values {
         return value instanceof PointArray;
     }
 
-    public static boolean isTemporalValue(Value value) {
-        return value instanceof TemporalValue || value instanceof DurationValue;
-    }
-
-    public static boolean isTemporalArray(Value value) {
-        return value instanceof TemporalArray || value instanceof DurationArray;
-    }
-
-    public static double coerceToDouble(Value value) {
-        if (value instanceof IntegralValue integralValue) {
-            return integralValue.longValue();
-        }
-        if (value instanceof FloatingPointValue floatingPointValue) {
-            return floatingPointValue.doubleValue();
-        }
-        throw new UnsupportedOperationException(format("Cannot coerce %s to double", value));
-    }
-
     // DIRECT FACTORY METHODS
 
-    public static TextValue utf8Value(String value) {
+    public static StringValue utf8Value(String value) {
         return utf8Value(value.getBytes(StandardCharsets.UTF_8));
     }
 
     public static Value ut8fOrNoValue(String value) {
-        if (value == null) {
-            return NO_VALUE;
-        } else {
-            return utf8Value(value);
-        }
+        return value == null ? NO_VALUE : utf8Value(value);
     }
 
-    public static TextValue utf8Value(byte[] bytes) {
-        if (bytes.length == 0) {
-            return EMPTY_STRING;
-        }
-
-        return utf8Value(bytes, 0, bytes.length);
+    public static StringValue utf8Value(byte[] bytes) {
+        return bytes.length == 0 ? EMPTY_STRING : utf8Value(bytes, 0, bytes.length);
     }
 
-    public static TextValue utf8Value(byte[] bytes, int offset, int length) {
-        if (length == 0) {
-            return EMPTY_STRING;
-        }
-
-        return new UTF8StringValue(bytes, offset, length);
+    public static StringValue utf8Value(byte[] bytes, int offset, int length) {
+        return length == 0 ? EMPTY_STRING : new UTF8StringValue(bytes, offset, length);
     }
 
-    public static TextValue stringValue(String value) {
-        if (value.isEmpty()) {
-            return EMPTY_STRING;
-        }
-        return new StringWrappingStringValue(value);
+    public static StringValue stringValue(String value) {
+        return value.isEmpty() ? EMPTY_STRING : new StringWrappingStringValue(value);
     }
 
     public static Value stringOrNoValue(String value) {
-        if (value == null) {
-            return NO_VALUE;
-        } else {
-            return stringValue(value);
-        }
+        return value == null ? NO_VALUE : stringValue(value);
     }
 
     public static NumberValue numberValue(Number number) {
-        if (number instanceof Long longNumber) {
-            return longValue(longNumber);
-        }
-        if (number instanceof Integer intNumber) {
-            return intValue(intNumber);
-        }
-        if (number instanceof Double doubleNumber) {
-            return doubleValue(doubleNumber);
-        }
-        if (number instanceof Byte byteNumber) {
-            return byteValue(byteNumber);
-        }
-        if (number instanceof Float floatNumber) {
-            return floatValue(floatNumber);
-        }
-        if (number instanceof Short shortNumber) {
-            return shortValue(shortNumber);
-        }
-
-        throw new UnsupportedOperationException("Unsupported type of Number " + number);
+        return switch (number) {
+            case Long longNumber -> longValue(longNumber);
+            case Integer intNumber -> intValue(intNumber);
+            case Double doubleNumber -> doubleValue(doubleNumber);
+            case Byte byteNumber -> byteValue(byteNumber);
+            case Float floatNumber -> floatValue(floatNumber);
+            case Short shortNumber -> shortValue(shortNumber);
+            default -> throw new UnsupportedOperationException("Unsupported type of Number " + number);
+        };
     }
 
     public static LongValue longValue(long value) {
@@ -241,7 +189,21 @@ public final class Values {
         return new FloatValue(value);
     }
 
+    /**
+     * This method creates a copy of the input and converts all strings to StringValue.
+     * It is preferable to use {@link #stringArray(StringValue...)} if you already have StringValues.
+     */
     public static TextArray stringArray(String... value) {
+        StringValue[] values = new StringValue[value.length];
+        for (int i = 0; i < value.length; i++) {
+            String s = value[i];
+            values[i] = s == null ? null : stringValue(s);
+        }
+
+        return new StringArray(values);
+    }
+
+    public static TextArray stringArray(StringValue... value) {
         return new StringArray(value);
     }
 
@@ -285,10 +247,13 @@ public final class Values {
     }
 
     public static PointValue point(Point point) {
-        // An optimization could be to do an instanceof PointValue check here
-        // and in that case just return the casted argument.
-        double[] coords = point.getCoordinate().getCoordinateCopy();
-        return new PointValue(crs(point.getCRS()), coords);
+        return switch (point) {
+            case PointValue pointValue -> pointValue;
+            default -> {
+                double[] coords = point.getCoordinate().getCoordinateCopy();
+                yield new PointValue(crs(point.getCRS()), coords);
+            }
+        };
     }
 
     public static PointValue minPointValue(PointValue reference) {
@@ -311,12 +276,12 @@ public final class Values {
         PointValue[] values = new PointValue[maybePoints.length];
         for (int i = 0; i < maybePoints.length; i++) {
             Value maybePoint = maybePoints[i];
-            if (!(maybePoint instanceof PointValue)) {
+            if (!(maybePoint instanceof PointValue pointValue)) {
                 throw new IllegalArgumentException(format(
                         "[%s:%s] is not a supported point value",
                         maybePoint, maybePoint.getClass().getName()));
             }
-            values[i] = Values.point((PointValue) maybePoint);
+            values[i] = Values.point(pointValue);
         }
         return pointArray(values);
     }
@@ -330,49 +295,32 @@ public final class Values {
     }
 
     public static Value temporalValue(Temporal value) {
-        if (value instanceof ZonedDateTime zonedDateTime) {
-            return datetime(zonedDateTime);
-        }
-        if (value instanceof OffsetDateTime offsetDateTime) {
-            return datetime(offsetDateTime);
-        }
-        if (value instanceof LocalDateTime localDateTime) {
-            return localDateTime(localDateTime);
-        }
-        if (value instanceof OffsetTime offsetTime) {
-            return time(offsetTime);
-        }
-        if (value instanceof LocalDate localDate) {
-            return date(localDate);
-        }
-        if (value instanceof LocalTime localTime) {
-            return localTime(localTime);
-        }
-        if (value instanceof TemporalValue temporalValue) {
-            return temporalValue;
-        }
-        if (value == null) {
-            return NO_VALUE;
-        }
-
-        throw new UnsupportedOperationException("Unsupported type of Temporal " + value);
+        return switch (value) {
+            case ZonedDateTime zonedDateTime -> datetime(zonedDateTime);
+            case OffsetDateTime offsetDateTime -> datetime(offsetDateTime);
+            case LocalDateTime localDateTime -> localDateTime(localDateTime);
+            case OffsetTime offsetTime -> time(offsetTime);
+            case LocalDate localDate -> date(localDate);
+            case LocalTime localTime -> localTime(localTime);
+            case TemporalValue<?, ?> temporalValue -> temporalValue;
+            case null -> NO_VALUE;
+            default -> throw new UnsupportedOperationException("Unsupported type of Temporal " + value);
+        };
     }
 
     public static DurationValue durationValue(TemporalAmount value) {
-        if (value instanceof Duration duration) {
-            return duration(duration);
-        }
-        if (value instanceof Period period) {
-            return duration(period);
-        }
-        if (value instanceof DurationValue durationValue) {
-            return durationValue;
-        }
-        DurationValue duration = duration(0, 0, 0, 0);
-        for (TemporalUnit unit : value.getUnits()) {
-            duration = duration.plus(value.get(unit), unit);
-        }
-        return duration;
+        return switch (value) {
+            case Duration duration -> duration(duration);
+            case Period period -> duration(period);
+            case DurationValue durationValue -> durationValue;
+            default -> {
+                var duration = duration(0, 0, 0, 0);
+                for (final var unit : value.getUnits()) {
+                    duration = duration.plus(value.get(unit), unit);
+                }
+                yield duration;
+            }
+        };
     }
 
     public static DateTimeArray dateTimeArray(ZonedDateTime[] values) {
@@ -407,6 +355,123 @@ public final class Values {
         return new DurationArray(durations);
     }
 
+    public static VectorValue vectorValue(Vector vector) {
+        return switch (vector) {
+            case VectorValue value -> value;
+            default -> throw new UnsupportedOperationException("Unsupported type of Vector " + vector);
+        };
+    }
+
+    public static VectorValue vectorValue(NumberArray array) {
+        return switch (array) {
+            case ByteArray byteArray -> int8Vector(byteArray.asObjectCopy());
+            case ShortArray shortArray -> int16Vector(shortArray.asObjectCopy());
+            case IntArray intArray -> int32Vector(intArray.asObjectCopy());
+            case LongArray longArray -> int64Vector(longArray.asObjectCopy());
+            case FloatArray floatArray -> float32Vector(floatArray.asObjectCopy());
+            case DoubleArray doubleArray -> float64Vector(doubleArray.asObjectCopy());
+        };
+    }
+
+    public static VectorValue vectorValue(AnyValue value) {
+        return switch (value) {
+            case VectorValue vector -> vector;
+            case NumberArray array -> vectorValue(array);
+            case SequenceValue sequence -> {
+                ListValue list = sequence.asListValue();
+                if (list.itemValueRepresentation().valueGroup() == ValueGroup.NUMBER
+                        && list.toStorableArray() instanceof NumberArray array) {
+                    yield vectorValue(array);
+                }
+                throw new UnsupportedOperationException("Unsupported type of SequenceValue " + value);
+            }
+            default -> throw new UnsupportedOperationException("Unsupported type of AnyValue " + value);
+        };
+    }
+
+    public static Int64Vector int64Vector(long... coordinates) {
+        VectorValue.ensureValidDimensions(coordinates.length);
+        return new Int64Vector(coordinates);
+    }
+
+    public static Int32Vector int32Vector(int... coordinates) {
+        VectorValue.ensureValidDimensions(coordinates.length);
+        return new Int32Vector(coordinates);
+    }
+
+    public static Int16Vector int16Vector(short... coordinates) {
+        VectorValue.ensureValidDimensions(coordinates.length);
+        return new Int16Vector(coordinates);
+    }
+
+    public static Int8Vector int8Vector(byte... coordinates) {
+        VectorValue.ensureValidDimensions(coordinates.length);
+        return new Int8Vector(coordinates);
+    }
+
+    public static Float64Vector float64Vector(double... coordinates) {
+        VectorValue.ensureValidDimensions(coordinates.length);
+        VectorValue.ensureFiniteCoordinates(coordinates);
+        return uncheckedFloat64Vector(coordinates);
+    }
+
+    public static Float64Vector uncheckedFloat64Vector(double[] coordinates) {
+        return new Float64Vector(coordinates);
+    }
+
+    public static Float32Vector float32Vector(float... coordinates) {
+        VectorValue.ensureValidDimensions(coordinates.length);
+        VectorValue.ensureFiniteCoordinates(coordinates);
+        return uncheckedFloat32Vector(coordinates);
+    }
+
+    public static Float32Vector uncheckedFloat32Vector(float[] coordinates) {
+        return new Float32Vector(coordinates);
+    }
+
+    public static VectorArray vectorArray(SequenceValue sequence) {
+        VectorValue[] vectors = new VectorValue[sequence.intSize()];
+        int i = 0;
+        for (AnyValue value : sequence) {
+            vectors[i++] = Values.vectorValue(value);
+        }
+        return vectorArray(vectors);
+    }
+
+    public static VectorArray vectorArray(VectorValue... vectors) {
+        return new VectorArray(vectors);
+    }
+
+    public static AbstractFloat16Vector float16Vector(Float16Format format, short... coordinates) {
+        VectorValue.ensureValidDimensions(coordinates.length);
+        VectorValue.ensureFiniteCoordinates(format, coordinates);
+        return uncheckedFloat16Vector(format, coordinates);
+    }
+
+    public static AbstractFloat16Vector uncheckedFloat16Vector(Float16Format format, short[] coordinates) {
+        return format.instantiateVectorValue(coordinates);
+    }
+
+    public static UUIDValue uuidValue(long msb, long lsb) {
+        return new UUIDValue(new UUID(msb, lsb));
+    }
+
+    public static UUIDValue uuidValue(UUID uuid) {
+        return new UUIDValue(uuid);
+    }
+
+    public static UUIDValue uuidValue(String uuid) {
+        return new UUIDValue(UUID.fromString(uuid));
+    }
+
+    public static UUIDArray uuidArray(UUID[] values) {
+        return new UUIDArray(values);
+    }
+
+    public static UnsupportedValue unsupportedValue(String name, String minProtocolVersion, String message) {
+        return new UnsupportedValue(name, minProtocolVersion, message);
+    }
+
     // BOXED FACTORY METHODS
 
     /**
@@ -437,67 +502,36 @@ public final class Values {
     }
 
     public static Value unsafeOf(Object value, boolean allowNull) {
-        if (value == null) {
-            if (allowNull) {
-                return NO_VALUE;
+        return switch (value) {
+            case null -> {
+                if (allowNull) {
+                    yield NO_VALUE;
+                }
+                throw new IllegalArgumentException("[null] is not a supported property value");
             }
-            throw new IllegalArgumentException("[null] is not a supported property value");
-        }
-        if (value instanceof String string) {
-            return utf8Value(string.getBytes(StandardCharsets.UTF_8));
-        }
-        if (value instanceof Object[] array) {
-            return arrayValue(array, true);
-        }
-        if (value instanceof Boolean bool) {
-            return booleanValue(bool);
-        }
-        if (value instanceof Number number) {
-            return numberValue(number);
-        }
-        if (value instanceof Character character) {
-            return charValue(character);
-        }
-        if (value instanceof Temporal temporal) {
-            return temporalValue(temporal);
-        }
-        if (value instanceof TemporalAmount temporalAmount) {
-            return durationValue(temporalAmount);
-        }
-        if (value instanceof byte[] byteArray) {
-            return byteArray(Arrays.copyOf(byteArray, byteArray.length));
-        }
-        if (value instanceof long[] longArray) {
-            return longArray(Arrays.copyOf(longArray, longArray.length));
-        }
-        if (value instanceof int[] intArray) {
-            return intArray(Arrays.copyOf(intArray, intArray.length));
-        }
-        if (value instanceof double[] doubleArray) {
-            return doubleArray(Arrays.copyOf(doubleArray, doubleArray.length));
-        }
-        if (value instanceof float[] floatArray) {
-            return floatArray(Arrays.copyOf(floatArray, floatArray.length));
-        }
-        if (value instanceof boolean[] boolArray) {
-            return booleanArray(Arrays.copyOf(boolArray, boolArray.length));
-        }
-        if (value instanceof char[] charArray) {
-            return charArray(Arrays.copyOf(charArray, charArray.length));
-        }
-        if (value instanceof short[] shortArray) {
-            return shortArray(Arrays.copyOf(shortArray, shortArray.length));
-        }
-        if (value instanceof Point point) {
-            return Values.point(point);
-        }
-        if (value instanceof Value) {
-            throw new UnsupportedOperationException(
-                    "Converting a Value to a Value using Values.of() is not supported.");
-        }
-
-        // otherwise fail
-        return null;
+            case String string -> utf8Value(string.getBytes(StandardCharsets.UTF_8));
+            case Object[] array -> arrayValue(array, true);
+            case Boolean bool -> booleanValue(bool);
+            case Number number -> numberValue(number);
+            case Character character -> charValue(character);
+            case Temporal temporal -> temporalValue(temporal);
+            case TemporalAmount temporalAmount -> durationValue(temporalAmount);
+            case byte[] byteArray -> byteArray(Arrays.copyOf(byteArray, byteArray.length));
+            case long[] longArray -> longArray(Arrays.copyOf(longArray, longArray.length));
+            case int[] intArray -> intArray(Arrays.copyOf(intArray, intArray.length));
+            case double[] doubleArray -> doubleArray(Arrays.copyOf(doubleArray, doubleArray.length));
+            case float[] floatArray -> floatArray(Arrays.copyOf(floatArray, floatArray.length));
+            case boolean[] boolArray -> booleanArray(Arrays.copyOf(boolArray, boolArray.length));
+            case char[] charArray -> charArray(Arrays.copyOf(charArray, charArray.length));
+            case short[] shortArray -> shortArray(Arrays.copyOf(shortArray, shortArray.length));
+            case Point point -> point(point);
+            case Vector vector -> vectorValue(vector);
+            case UUID uuid -> uuidValue(uuid);
+            case Value ignored ->
+                throw new UnsupportedOperationException(
+                        "Converting a Value to a Value using Values.of() is not supported.");
+            default -> null; // otherwise fail
+        };
     }
 
     /**
@@ -520,60 +554,48 @@ public final class Values {
     }
 
     public static ArrayValue arrayValue(Object[] value, boolean copyDefensively) {
-        if (value instanceof String[] array) {
-            return stringArray(copyDefensively ? copy(value, new String[value.length]) : array);
-        }
-        if (value instanceof Byte[]) {
-            return byteArray(copy(value, new byte[value.length]));
-        }
-        if (value instanceof Long[]) {
-            return longArray(copy(value, new long[value.length]));
-        }
-        if (value instanceof Integer[]) {
-            return intArray(copy(value, new int[value.length]));
-        }
-        if (value instanceof Double[]) {
-            return doubleArray(copy(value, new double[value.length]));
-        }
-        if (value instanceof Float[]) {
-            return floatArray(copy(value, new float[value.length]));
-        }
-        if (value instanceof Boolean[]) {
-            return booleanArray(copy(value, new boolean[value.length]));
-        }
-        if (value instanceof Character[]) {
-            return charArray(copy(value, new char[value.length]));
-        }
-        if (value instanceof Short[]) {
-            return shortArray(copy(value, new short[value.length]));
-        }
-        if (value instanceof PointValue[] array) {
-            return pointArray(copyDefensively ? copy(value, new PointValue[value.length]) : array);
-        }
-        if (value instanceof Point[] array) {
-            // no need to copy here, since the pointArray(...) method will copy into a PointValue[]
-            return pointArray(array);
-        }
-        if (value instanceof ZonedDateTime[] array) {
-            return dateTimeArray(copyDefensively ? copy(value, new ZonedDateTime[value.length]) : array);
-        }
-        if (value instanceof LocalDateTime[] array) {
-            return localDateTimeArray(copyDefensively ? copy(value, new LocalDateTime[value.length]) : array);
-        }
-        if (value instanceof LocalTime[] array) {
-            return localTimeArray(copyDefensively ? copy(value, new LocalTime[value.length]) : array);
-        }
-        if (value instanceof OffsetTime[] array) {
-            return timeArray(copyDefensively ? copy(value, new OffsetTime[value.length]) : array);
-        }
-        if (value instanceof LocalDate[] array) {
-            return dateArray(copyDefensively ? copy(value, new LocalDate[value.length]) : array);
-        }
-        if (value instanceof TemporalAmount[] array) {
-            // no need to copy here, since the durationArray(...) method will perform copying as appropriate
-            return durationArray(array);
-        }
-        return null;
+        return switch (value) {
+            case String[] array -> {
+                if (copyDefensively) {
+                    // If we copy anyway, we might as well make them all UTF-8
+                    StringValue[] copy = new StringValue[value.length];
+                    for (int i = 0; i < value.length; i++) {
+                        String s = array[i];
+                        copy[i] = s == null ? null : utf8Value(s);
+                    }
+                    yield stringArray(copy);
+                } else {
+                    yield stringArray(array);
+                }
+            }
+            case Byte[] array -> byteArray(copy(array, new byte[array.length]));
+            case Long[] array -> longArray(copy(array, new long[array.length]));
+            case Integer[] array -> intArray(copy(array, new int[array.length]));
+            case Double[] array -> doubleArray(copy(array, new double[array.length]));
+            case Float[] array -> floatArray(copy(array, new float[array.length]));
+            case Boolean[] array -> booleanArray(copy(array, new boolean[array.length]));
+            case Character[] array -> charArray(copy(array, new char[array.length]));
+            case Short[] array -> shortArray(copy(array, new short[array.length]));
+            case PointValue[] array -> pointArray(copyDefensively ? copy(array, new PointValue[array.length]) : array);
+            case Point[] array -> pointArray(array); // no need to copy here, pointArray copies
+            case ZonedDateTime[] array ->
+                dateTimeArray(copyDefensively ? copy(array, new ZonedDateTime[array.length]) : array);
+            case LocalDateTime[] array ->
+                localDateTimeArray(copyDefensively ? copy(array, new LocalDateTime[array.length]) : array);
+            case OffsetTime[] array -> timeArray(copyDefensively ? copy(array, new OffsetTime[array.length]) : array);
+            case OffsetDateTime[] array ->
+                dateTimeArray(Arrays.stream(array)
+                        .map(OffsetDateTime::toZonedDateTime)
+                        .toArray(ZonedDateTime[]::new));
+            case LocalTime[] array ->
+                localTimeArray(copyDefensively ? copy(array, new LocalTime[array.length]) : array);
+            case LocalDate[] array -> dateArray(copyDefensively ? copy(array, new LocalDate[array.length]) : array);
+            case TemporalAmount[] array -> durationArray(array); // no need to copy here, durationArray will copy
+            case VectorValue[] array ->
+                vectorArray(copyDefensively ? copy(array, new VectorValue[array.length]) : array);
+            case UUID[] array -> uuidArray(array);
+            default -> null;
+        };
     }
 
     private static <T> T copy(Object[] value, T target) {
@@ -596,8 +618,9 @@ public final class Values {
             case ZONED_DATE_TIME -> DateTimeValue.MIN_VALUE;
             case LOCAL_TIME -> LocalTimeValue.MIN_VALUE;
             case ZONED_TIME -> TimeValue.MIN_VALUE;
-            default -> throw new IllegalStateException(
-                    format("The minValue for valueGroup %s is not defined yet", valueGroup));
+            default ->
+                throw new IllegalStateException(
+                        format("The minValue for valueGroup %s is not defined yet", valueGroup));
         };
     }
 
@@ -611,8 +634,9 @@ public final class Values {
             case ZONED_DATE_TIME -> DateTimeValue.MAX_VALUE;
             case LOCAL_TIME -> LocalTimeValue.MAX_VALUE;
             case ZONED_TIME -> TimeValue.MAX_VALUE;
-            default -> throw new IllegalStateException(
-                    format("The maxValue for valueGroup %s is not defined yet", valueGroup));
+            default ->
+                throw new IllegalStateException(
+                        format("The maxValue for valueGroup %s is not defined yet", valueGroup));
         };
     }
 }

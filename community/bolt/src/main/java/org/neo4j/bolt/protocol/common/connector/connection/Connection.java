@@ -25,6 +25,7 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.ChannelPromise;
 import io.netty.util.AttributeKey;
+import java.net.SocketAddress;
 import java.time.Clock;
 import java.util.Map;
 import java.util.Objects;
@@ -40,9 +41,9 @@ import org.neo4j.bolt.protocol.common.connector.Connector;
 import org.neo4j.bolt.protocol.common.connector.connection.authentication.AuthenticationFlag;
 import org.neo4j.bolt.protocol.common.connector.connection.listener.ConnectionListener;
 import org.neo4j.bolt.protocol.common.connector.tx.TransactionOwner;
-import org.neo4j.bolt.protocol.common.message.request.RequestMessage;
 import org.neo4j.bolt.protocol.io.pipeline.PipelineContext;
 import org.neo4j.bolt.security.error.AuthenticationException;
+import org.neo4j.boltmessages.request.RequestMessage;
 import org.neo4j.internal.kernel.api.security.LoginContext;
 import org.neo4j.kernel.api.net.TrackedNetworkConnection;
 import org.neo4j.packstream.io.PackstreamBuf;
@@ -198,7 +199,7 @@ public interface Connection extends TrackedNetworkConnection, TransactionOwner {
      *
      * @return a set of capabilities or an empty list of none haven't been selected (yet).
      */
-    Set<ProtocolCapability> selectedCapabilities();
+    Set<ProtocolCapability> selectedProtocolCapabilities();
 
     /**
      * Evaluates whether this connection has selected a given protocol capability.
@@ -206,7 +207,7 @@ public interface Connection extends TrackedNetworkConnection, TransactionOwner {
      * @param capability a capability to evaluate.
      * @return true if the given capability has been selected, false otherwise.
      */
-    boolean hasSelectedCapability(ProtocolCapability capability);
+    boolean hasSelectedProtocolCapability(ProtocolCapability capability);
 
     /**
      * Selects a protocol revision for use with this connection.
@@ -225,7 +226,7 @@ public interface Connection extends TrackedNetworkConnection, TransactionOwner {
      * @param buf a buffer.
      * @return a packstream value reader.
      */
-    PackstreamValueReader<Connection> valueReader(PackstreamBuf buf);
+    PackstreamValueReader valueReader(PackstreamBuf buf);
 
     /**
      * Creates a writer context around a given target buffer.
@@ -362,6 +363,18 @@ public interface Connection extends TrackedNetworkConnection, TransactionOwner {
      * @return true if reset to a valid state, false otherwise.
      */
     boolean reset();
+
+    /**
+     * Sets the real client address when the connection is made through a proxy
+     * that uses PROXY protocol (HAProxy v1/v2).
+     * <p />
+     * This method should be called by the proxy protocol handler after successfully decoding
+     * the PROXY protocol header. The addresses will be used for authentication, logging,
+     * and connection tracking instead of the proxy's address.
+     *
+     * @param realClientAddress the actual client address from the proxy protocol header
+     */
+    void setProxyProtocolInfo(SocketAddress realClientAddress);
 
     /**
      * Evaluates whether this connection is currently considered active (e.g. has not been marked for closure or

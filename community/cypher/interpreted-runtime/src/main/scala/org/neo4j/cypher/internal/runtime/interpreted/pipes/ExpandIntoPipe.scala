@@ -21,19 +21,18 @@ package org.neo4j.cypher.internal.runtime.interpreted.pipes
 
 import org.neo4j.cypher.internal.expressions.SemanticDirection
 import org.neo4j.cypher.internal.runtime.ClosingIterator
-import org.neo4j.cypher.internal.runtime.ClosingLongIterator
+import org.neo4j.cypher.internal.runtime.ClosingLongIterator.emptyClosingRelationshipIterator
 import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.runtime.IsNoValue
 import org.neo4j.cypher.internal.runtime.PrimitiveLongHelper
-import org.neo4j.cypher.internal.runtime.RelationshipIterator
 import org.neo4j.cypher.internal.runtime.ResourceManager
-import org.neo4j.cypher.internal.runtime.interpreted.TransactionBoundQueryContext.RelationshipCursorIterator
 import org.neo4j.cypher.internal.runtime.interpreted.commands.convert.DirectionConverter.toGraphDb
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.ExpandIntoPipe.getRowNode
-import org.neo4j.cypher.internal.runtime.interpreted.pipes.ExpandIntoPipe.relationshipSelectionCursorIterator
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.ExpandIntoPipe.traceRelationshipSelectionCursor
+import org.neo4j.cypher.internal.runtime.iterators.RelationshipCursorIterator
 import org.neo4j.cypher.internal.util.attribution.Id
 import org.neo4j.cypher.operations.CypherTypeValueMapper
+import org.neo4j.exceptions.InternalException
 import org.neo4j.exceptions.ParameterWrongTypeException
 import org.neo4j.internal.kernel.api.RelationshipTraversalCursor
 import org.neo4j.internal.kernel.api.helpers.CachingExpandInto
@@ -55,7 +54,7 @@ import org.neo4j.values.virtual.VirtualValues
 case class ExpandIntoPipe(
   source: Pipe,
   fromName: String,
-  relName: String,
+  maybeRelName: Option[String],
   toName: String,
   dir: SemanticDirection,
   lazyTypes: RelationshipTypes
@@ -88,34 +87,45 @@ case class ExpandIntoPipe(
               case IsNoValue() => ClosingIterator.empty
               case n: VirtualNodeValue =>
                 val traversalCursor = query.traversalCursor()
-                val nodeCursor = query.nodeCursor()
+                val fromCursor = query.nodeCursor()
+                val toCursor = query.nodeCursor()
                 try {
-                  val selectionCursor = expandInto.connectingRelationships(
-                    nodeCursor,
-                    traversalCursor,
-                    fromNode.id(),
-                    lazyTypes.types(query),
-                    n.id()
-                  )
-                  traceRelationshipSelectionCursor(query.resources, selectionCursor, traversalCursor)
-                  val relationships = relationshipSelectionCursorIterator(selectionCursor, traversalCursor)
+                  val selectionCursor =
+                    expandInto.connectingRelationships(
+                      fromNode.id(),
+                      fromCursor,
+                      n.id(),
+                      toCursor,
+                      traversalCursor,
+                      lazyTypes.types(query)
+                    )
+                  val relationships = if (selectionCursor != null) {
+                    traceRelationshipSelectionCursor(query.resources, selectionCursor, traversalCursor)
+                    new RelationshipCursorIterator(selectionCursor, traversalCursor)
+                  } else {
+                    traversalCursor.close()
+                    emptyClosingRelationshipIterator
+                  }
                   if (!relationships.hasNext) ClosingIterator.empty
                   else PrimitiveLongHelper.map(
                     relationships,
                     r =>
-                      rowFactory.copyWith(
-                        row,
-                        relName,
-                        VirtualValues.relationship(
-                          r,
-                          relationships.startNodeId(),
-                          relationships.endNodeId(),
-                          relationships.typeId()
+                      maybeRelName.map(relName =>
+                        rowFactory.copyWith(
+                          row,
+                          relName,
+                          VirtualValues.relationship(
+                            r,
+                            relationships.startNodeId(),
+                            relationships.endNodeId(),
+                            relationships.typeId()
+                          )
                         )
-                      )
+                      ).getOrElse(row)
                   )
                 } finally {
-                  nodeCursor.close()
+                  fromCursor.close()
+                  toCursor.close()
                 }
               case value: Value =>
                 throw ParameterWrongTypeException.expectedNodeAtFoundInstead(
@@ -134,6 +144,9 @@ case class ExpandIntoPipe(
             }
 
           case IsNoValue() => ClosingIterator.empty
+
+          case x =>
+            throw InternalException.internalError(getClass.getSimpleName, s"Unexpected value $x")
         }
     }.closing(expandInto)
   }
@@ -152,12 +165,6 @@ object ExpandIntoPipe {
       resources.trace(traversalCursor)
     }
   }
-
-  def relationshipSelectionCursorIterator(
-    cursor: RelationshipTraversalCursor,
-    traversalCursor: RelationshipTraversalCursor
-  ): ClosingLongIterator with RelationshipIterator =
-    new RelationshipCursorIterator(cursor, traversalCursor)
 
   @inline
   def getRowNode(row: CypherRow, col: String): AnyValue = {

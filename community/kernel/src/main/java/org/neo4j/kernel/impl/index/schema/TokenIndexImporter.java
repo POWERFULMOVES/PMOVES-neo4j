@@ -22,6 +22,7 @@ package org.neo4j.kernel.impl.index.schema;
 import static org.neo4j.collection.Dependencies.dependenciesOf;
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
 import static org.neo4j.io.IOUtils.closeAll;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.impl.muninn.VersionStorage.EMPTY_STORAGE;
 import static org.neo4j.kernel.impl.api.index.IndexUpdateMode.ONLINE;
 
@@ -38,10 +39,12 @@ import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.api.exceptions.index.IndexEntryConflictException;
 import org.neo4j.kernel.api.index.IndexDirectoryStructure;
-import org.neo4j.storageengine.api.IndexEntryUpdate;
+import org.neo4j.kernel.api.index.IndexUpdater;
+import org.neo4j.storageengine.api.TokenIndexEntryUpdate;
 
 public class TokenIndexImporter implements IndexImporter {
     private static final String INDEX_TOKEN_IMPORTER_TAG = "indexTokenImporter";
@@ -68,12 +71,12 @@ public class TokenIndexImporter implements IndexImporter {
 
     @Override
     public Writer writer(boolean parallel) {
-        var actual = accessor.newUpdater(ONLINE, cursorContext, parallel);
+        IndexUpdater actual = accessor.newUpdater(ONLINE, cursorContext, parallel);
         return new Writer() {
             @Override
-            public void change(long entity, int[] removed, int[] added, boolean logical) {
+            public void change(long entity, int[] removals, int[] additions) {
                 try {
-                    actual.process(IndexEntryUpdate.change(entity, index, removed, added, logical));
+                    actual.process(TokenIndexEntryUpdate.tokenChange(entity, index, removals, additions));
                 } catch (IndexEntryConflictException e) {
                     throw new RuntimeException(e);
                 }
@@ -98,8 +101,8 @@ public class TokenIndexImporter implements IndexImporter {
     @Override
     public void close() throws IOException {
         Closeable flush = () -> {
-            try (var flushEvent = pageCacheTracer.beginFileFlush()) {
-                accessor.force(flushEvent, cursorContext);
+            try (FileFlushEvent flushEvent = pageCacheTracer.beginFileFlush()) {
+                accessor.force(flushEvent, EMPTY_ASYNC_BLOCK_ACCESSOR, cursorContext);
             }
         };
         closeAll(flush, accessor);
@@ -113,7 +116,7 @@ public class TokenIndexImporter implements IndexImporter {
             PageCacheTracer pageCacheTracer,
             ImmutableSet<OpenOption> openOptions,
             StorageEngineIndexingBehaviour indexingBehaviour) {
-        var context = DatabaseIndexContext.builder(
+        DatabaseIndexContext context = DatabaseIndexContext.builder(
                         pageCache, fs, contextFactory, pageCacheTracer, layout.getDatabaseName())
                 .withDependencyResolver(dependenciesOf(EMPTY_STORAGE))
                 .build();

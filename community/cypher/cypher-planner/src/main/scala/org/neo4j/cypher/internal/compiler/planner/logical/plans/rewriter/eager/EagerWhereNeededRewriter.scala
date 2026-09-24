@@ -45,7 +45,9 @@ import org.neo4j.cypher.internal.logical.plans.TransactionApply
 import org.neo4j.cypher.internal.logical.plans.TransactionForeach
 import org.neo4j.cypher.internal.logical.plans.Union
 import org.neo4j.cypher.internal.logical.plans.ValueHashJoin
+import org.neo4j.cypher.internal.logical.plans.ValueMergeJoin
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.Cardinalities
+import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.StableLeafPlans
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.cypher.internal.util.CancellationChecker
 import org.neo4j.cypher.internal.util.Rewriter
@@ -64,6 +66,7 @@ import scala.collection.mutable
  */
 case class EagerWhereNeededRewriter(
   cardinalities: Cardinalities,
+  stableLeafPlans: StableLeafPlans,
   attributes: Attributes[LogicalPlan],
   shouldCompressReasons: Boolean,
   cancellationChecker: CancellationChecker
@@ -82,7 +85,8 @@ case class EagerWhereNeededRewriter(
       collectReadsAndWrites(plan, semanticTable, anonymousVariableNameGenerator, childrenIds, cancellationChecker)
 
     // Step 2: Find conflicting plans
-    val conflicts = ConflictFinder.withCaching().findConflictingPlans(readsAndWrites, plan)
+    val conflicts =
+      ConflictFinder.withCaching().findConflictingPlans(readsAndWrites, plan)(childrenIds, stableLeafPlans)
 
     // Step 3: Find candidate lists where Eager can be planned
     val candidateLists = findCandidateLists(plan, conflicts, cancellationChecker)
@@ -91,12 +95,12 @@ case class EagerWhereNeededRewriter(
     val plansToEagerize = pickPlansToEagerize(cardinalities, candidateLists)
 
     // Step 5: Actually insert Eager operators
-    val insertEagerRewriter = bottomUp(Rewriter.lift {
+    val insertEagerRewriter = bottomUp.onRewriter(Rewriter.lift {
       case p: LogicalPlan if plansToEagerize.contains(p.id) =>
         eagerOnTopOf(p, plansToEagerize(p.id))
     })
 
-    val rewritingSteps = Seq(
+    val rewritingSteps: Seq[Rewriter] = Seq(
       insertEagerRewriter
     ) ++
       // Step 6: Optionally, compress reported eagerness reasons.
@@ -140,7 +144,14 @@ object EagerWhereNeededRewriter {
      * Tests whether the plan is nested on the RHS of a binary plan that might not have initialized the rhs
      * before yielding a row.
      */
-    def readMightNotBeInitialized(plan: LogicalPlan): Boolean
+    def cursorMightNotBeInitialized(plan: LogicalPlan): Boolean
+
+    /**
+     * Returns true if both plans are on the RHS of the same ApplyPlan.
+     * Used to determine whether a ReadWriteConflict is self-contained within one subquery
+     * invocation, allowing Eager elimination.
+     */
+    def sameApplyRhsScope(plan1: LogicalPlan, plan2: LogicalPlan): Boolean
   }
 
   private[eager] class ChildrenIds extends Attribute[LogicalPlan, BitSet] with PlanChildrenLookup {
@@ -155,6 +166,13 @@ object EagerWhereNeededRewriter {
      */
     private val yieldBeforeInitRhs = mutable.BitSet.empty
 
+    /**
+     * Maps each plan ID on the RHS of an ApplyPlan to the ID of the innermost enclosing ApplyPlan.
+     * Used to detect when two plans are in the same subquery invocation.
+     * First-write-wins semantics ensure the innermost scope is recorded for nested Apply plans.
+     */
+    private val applyByRhsPlanId = mutable.HashMap[Int, Int]()
+
     override def hasChild(plan: LogicalPlan, child: LogicalPlan): Boolean = {
       get(plan.id).contains(child.id.x)
     }
@@ -166,7 +184,13 @@ object EagerWhereNeededRewriter {
 
     override def isInTransactionalApply(plan: LogicalPlan): Boolean = transactionalApplyNestedPlans.contains(plan.id.x)
 
-    override def readMightNotBeInitialized(plan: LogicalPlan): Boolean = yieldBeforeInitRhs.contains(plan.id.x)
+    override def cursorMightNotBeInitialized(plan: LogicalPlan): Boolean = yieldBeforeInitRhs.contains(plan.id.x)
+
+    override def sameApplyRhsScope(plan1: LogicalPlan, plan2: LogicalPlan): Boolean =
+      (applyByRhsPlanId.get(plan1.id.x), applyByRhsPlanId.get(plan2.id.x)) match {
+        case (Some(id1), Some(id2)) => id1 == id2
+        case _                      => false
+      }
 
     /**
      * This method must be called with the plans in execution order.
@@ -188,6 +212,17 @@ object EagerWhereNeededRewriter {
             val lhsBits = get(lhs).incl(lhs.x)
             val rhsBits = get(rhs).incl(rhs.x)
             val res = lhsBits union rhsBits
+            // Track RHS plans of all ApplyPlan types for scope-aware conflict elimination.
+            // First-write-wins: the innermost enclosing ApplyPlan is recorded (bottom-up traversal
+            // processes inner plans first).
+            plan match {
+              case _: ApplyPlan =>
+                rhsBits.foreach { id =>
+                  if (!applyByRhsPlanId.contains(id))
+                    applyByRhsPlanId(id) = plan.id.x
+                }
+              case _ =>
+            }
             // Update transactionalApplyNestedPlans
             plan match {
               case _: TransactionApply | _: TransactionForeach => transactionalApplyNestedPlans |= res
@@ -195,7 +230,7 @@ object EagerWhereNeededRewriter {
             }
             // Update yieldBeforeInitRhs
             plan match {
-              case _: ApplyPlan | _: CartesianProduct | _: AssertSameNode | _: AssertSameRelationship | _: RepeatOptions | _: Union =>
+              case _: ApplyPlan | _: CartesianProduct | _: AssertSameNode | _: AssertSameRelationship | _: RepeatOptions | _: Union | _: ValueMergeJoin =>
                 yieldBeforeInitRhs |= rhsBits
               case _: LeftOuterHashJoin | _: NodeHashJoin | _: RightOuterHashJoin | _: ValueHashJoin | _: OrderedUnion =>
             }

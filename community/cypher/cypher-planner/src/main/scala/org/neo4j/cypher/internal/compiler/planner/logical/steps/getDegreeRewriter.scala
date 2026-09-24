@@ -174,7 +174,7 @@ case object getDegreeRewriter extends Rewriter {
 object QuerySolvableByGetDegree {
 
   object SetExtractor {
-    def unapplySeq[T](s: Set[T]): Option[Seq[T]] = Some(s.toSeq)
+    def unapplySeq[T](s: Set[T]): Some[Seq[T]] = Some(s.toSeq)
   }
 
   def unapply(arg: Any)
@@ -192,11 +192,12 @@ object QuerySolvableByGetDegree {
           patternNodes,
           SetExtractor(argument),
           Selections.empty,
-          IndexedSeq(),
           SetExtractor(),
           SetExtractor(),
+          SetExtractor(),
           IndexedSeq(),
-          SetExtractor()
+          SetExtractor(),
+          None
         ),
         InterestingOrder.empty,
         RegularQueryProjection(_, QueryPagination.empty, Selections.empty, _, _) | _: AggregatingQueryProjection,
@@ -222,8 +223,8 @@ object ExistsQuerySolvableByGetDegree {
         _,
         _
       ) => true
-    case AggregatingQueryProjection(groups, _, _, _, _, _) if groups.nonEmpty => true
-    case _                                                                    => false
+    case AggregatingQueryProjection(groups, _, _, _, _, _, _) if groups.nonEmpty => true
+    case _                                                                       => false
   }
 
   def unapply(arg: Any)
@@ -241,11 +242,12 @@ object ExistsQuerySolvableByGetDegree {
           patternNodes,
           SetExtractor(argument),
           Selections.empty,
-          IndexedSeq(),
           SetExtractor(),
           SetExtractor(),
+          SetExtractor(),
           IndexedSeq(),
-          SetExtractor()
+          SetExtractor(),
+          None
         ),
         InterestingOrder.empty,
         horizon,

@@ -19,24 +19,25 @@
  */
 package org.neo4j.cypher.internal.procs
 
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ExecutionEngine
 import org.neo4j.cypher.internal.ExecutionPlan
-import org.neo4j.cypher.internal.RuntimeName
-import org.neo4j.cypher.internal.SystemCommandRuntimeName
-import org.neo4j.cypher.internal.macros.AssertMacros.checkOnlyWhenAssertionsAreEnabled
+import org.neo4j.cypher.internal.macros.AssertMacros3.checkOnlyWhenAssertionsAreEnabled
+import org.neo4j.cypher.internal.notification.InternalNotification
 import org.neo4j.cypher.internal.plandescription.Argument
+import org.neo4j.cypher.internal.procs.AdministrationChainedExecutionPlan.formatQuery
 import org.neo4j.cypher.internal.result.InternalExecutionResult
 import org.neo4j.cypher.internal.runtime.ExecutionMode
 import org.neo4j.cypher.internal.runtime.ProfileMode
-import org.neo4j.cypher.internal.util.InternalNotification
 import org.neo4j.cypher.result.RuntimeResult
 import org.neo4j.graphdb.QueryStatistics
 import org.neo4j.graphdb.Transaction
 import org.neo4j.graphdb.TransientFailureException
 import org.neo4j.graphdb.security.AuthorizationViolationException
-import org.neo4j.internal.kernel.api.security.AccessMode
 import org.neo4j.internal.kernel.api.security.SecurityAuthorizationHandler
+import org.neo4j.internal.kernel.api.security.StaticAccessMode
 import org.neo4j.kernel.api.exceptions.Status.HasStatus
+import org.neo4j.kernel.api.query.RuntimeName
 import org.neo4j.kernel.impl.query.QuerySubscriber
 import org.neo4j.kernel.impl.query.TransactionalContext
 import org.neo4j.values.AnyValue
@@ -104,13 +105,14 @@ abstract class UpdatingSystemCommandExecutionPlanBase(
       assertPrivilegeAction(tx)
 
       val (updatedParams, notifications) =
-        parameterTransformer.transform(tx, securityContext, systemParams, params)
+        parameterTransformer.transform(tx, securityContext, systemParams.updatedWith(ctx.contextVars), params)
       val systemSubscriber =
         new SystemCommandQuerySubscriber(ctx, new RowDroppingQuerySubscriber(subscriber), queryHandler, updatedParams)
       assertCanWrite(tc, systemSubscriber)
       initAndFinally.execute(ctx, systemSubscriber, previousNotifications ++ notifications, updatedParams) { () =>
         val execution = normalExecutionEngine.executeSubquery(
-          queryPrefix + query,
+          // Use Cypher 25 for all inner queries of updating commands
+          formatQuery(query, CypherVersion.Cypher25),
           updatedParams,
           tc,
           isOutermostQuery = false,
@@ -139,7 +141,7 @@ abstract class UpdatingSystemCommandExecutionPlanBase(
     }
   }
 
-  override def runtimeName: RuntimeName = SystemCommandRuntimeName
+  override def runtimeName: RuntimeName = RuntimeName.SYSTEM
 
   override def metadata: Seq[Argument] = Nil
 
@@ -149,7 +151,7 @@ abstract class UpdatingSystemCommandExecutionPlanBase(
       throw AuthorizationViolationException.updatesWhenImpersonating()
     }
     if (checkCredentialsExpired) securityContext.assertCredentialsNotExpired(securityAuthorizationHandler)
-    Using.resource(tc.kernelTransaction().overrideWith(securityContext.withMode(AccessMode.Static.FULL))) { _ =>
+    Using.resource(tc.kernelTransaction().overrideWith(securityContext.withMode(StaticAccessMode.FULL))) { _ =>
       elevatedWork()
     }
   }

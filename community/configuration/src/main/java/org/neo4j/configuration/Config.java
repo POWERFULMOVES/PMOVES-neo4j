@@ -128,7 +128,7 @@ public class Config implements Configuration {
         private Config fromConfig;
         private final InternalLog log = new BufferingLog();
         private boolean expandCommands;
-        private Charset fileCharset = StandardCharsets.ISO_8859_1;
+        private Charset fileCharset = StandardCharsets.UTF_8;
         private String strictDuplicateDeclarationWarningMessage;
 
         private static <T> boolean allowedToOverrideValues(String setting, T value, Map<String, T> settingValues) {
@@ -255,10 +255,11 @@ public class Config implements Configuration {
             if (fromConfig != null) {
                 throw new IllegalArgumentException("Can only build a config from one other config.");
             }
-            while (config instanceof DatabaseConfig) {
-                config = ((DatabaseConfig) config).getGlobalConfig();
+            if (config instanceof DatabaseConfig dbConfig) {
+                fromConfig = dbConfig.asFlatternedConfig();
+            } else {
+                fromConfig = config;
             }
-            fromConfig = config;
             return this;
         }
 
@@ -1073,6 +1074,11 @@ public class Config implements Configuration {
         this.log = log;
     }
 
+    /**
+     * The declaration this configuration holds under {@code name} - the setting itself, not its value, which
+     * {@link #get(Setting)} reads. Throws {@link IllegalArgumentException} for a name this configuration declares
+     * nothing under.
+     */
     @SuppressWarnings("unchecked")
     public Setting<Object> getSetting(String name) {
         if (!settings.containsKey(name)) {
@@ -1081,6 +1087,11 @@ public class Config implements Configuration {
         return (Setting<Object>) settings.get(name).setting;
     }
 
+    /**
+     * Every setting this configuration declares, by name: those the {@link SettingsDeclaration} classes it was built
+     * from define, and one per {@link GroupSetting} instance configured for it. Whether a value was given or the
+     * default stands makes no difference to what is declared - {@link #isExplicitlySet(Setting)} tells the two apart.
+     */
     @SuppressWarnings("unchecked")
     public Map<String, Setting<Object>> getDeclaredSettings() {
         return settings.entrySet().stream()

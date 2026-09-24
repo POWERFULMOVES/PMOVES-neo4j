@@ -21,13 +21,16 @@ package org.neo4j.kernel.api.index;
 
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.neo4j.graphdb.Label.label;
+import static org.neo4j.graphdb.schema.IndexType.TEXT;
 
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.function.Executable;
 import org.neo4j.configuration.GraphDatabaseInternalSettings;
+import org.neo4j.exceptions.InvalidArgumentException;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.graphdb.RelationshipType;
 import org.neo4j.graphdb.Transaction;
 import org.neo4j.internal.kernel.api.TokenWrite;
@@ -46,7 +49,9 @@ import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.ExtensionCallback;
 import org.neo4j.test.extension.ImpermanentDbmsExtension;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
 
+@SkipOnSpd(reason = "Unsupported in SPD")
 @ImpermanentDbmsExtension(configurationCallback = "configuration")
 public class TextIndexCreationTest {
     @Inject
@@ -94,10 +99,11 @@ public class TextIndexCreationTest {
         assertUnsupported(() -> createTextIndex("rti", SchemaDescriptors.forRelType(relTypeId, compositeKey)));
     }
 
-    private void assertUnsupported(Executable executable) {
-        var message =
-                assertThrows(UnsupportedOperationException.class, executable).getMessage();
-        assertThat(message).isEqualTo("Composite indexes are not supported for TEXT index type.");
+    private void assertUnsupported(ThrowingCallable operation) {
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(operation)
+                .isInstanceOf(InvalidArgumentException.class)
+                .hasMessageContainingAll("A composite", TEXT.name(), "index is not supported")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_51N31);
     }
 
     @Test
@@ -108,15 +114,15 @@ public class TextIndexCreationTest {
 
         // Then
         awaitIndexesOnline();
-        try (var transaction = db.beginTx()) {
-            var ktx = ((TransactionImpl) transaction).kernelTransaction();
+        try (Transaction transaction = db.beginTx()) {
+            KernelTransaction ktx = ((TransactionImpl) transaction).kernelTransaction();
             assertValidTextIndex(ktx.schemaRead().indexGetForName("node_text_index"), propertyIds);
             assertValidTextIndex(ktx.schemaRead().indexGetForName("rel_text_index"), propertyIds);
         }
     }
 
     private void awaitIndexesOnline() {
-        try (var tx = db.beginTx()) {
+        try (Transaction tx = db.beginTx()) {
             tx.schema().awaitIndexesOnline(5, MINUTES);
         }
     }
@@ -131,11 +137,11 @@ public class TextIndexCreationTest {
 
     private void createTextIndex(String name, SchemaDescriptor schema) throws Exception {
         try (Transaction tx = db.beginTx()) {
-            var prototype = IndexPrototype.forSchema(schema)
+            IndexPrototype prototype = IndexPrototype.forSchema(schema)
                     .withIndexType(IndexType.TEXT)
                     .withIndexProvider(getIndexProviderDescriptor())
                     .withName(name);
-            var kernelTransaction = ((InternalTransaction) tx).kernelTransaction();
+            KernelTransaction kernelTransaction = ((InternalTransaction) tx).kernelTransaction();
             kernelTransaction.schemaWrite().indexCreate(prototype);
             tx.commit();
         }

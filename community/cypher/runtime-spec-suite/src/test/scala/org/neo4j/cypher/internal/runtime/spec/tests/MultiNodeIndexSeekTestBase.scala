@@ -34,6 +34,8 @@ import org.neo4j.internal.helpers.collection.Iterables
 
 import scala.collection.mutable.ArrayBuffer
 
+object MultiNodeIndexSeekTestBase
+
 /**
  * Testing of multi node index seek.
  *
@@ -45,7 +47,7 @@ abstract class MultiNodeIndexSeekTestBase[CONTEXT <: RuntimeContext](
   sizeHint: Int
 ) extends RuntimeTestSuite[CONTEXT](runtime = runtime, edition = edition)
     with PropertyIndexTestSupport[CONTEXT]
-    with RandomValuesTestSupport {
+    with RandomValuesTestSupport[CONTEXT] {
 
   test("should do double index seek") {
     // given

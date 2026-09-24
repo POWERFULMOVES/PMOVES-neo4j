@@ -30,6 +30,7 @@ import org.neo4j.values.storable.CoordinateReferenceSystem;
 import org.neo4j.values.storable.DateTimeValue;
 import org.neo4j.values.storable.DateValue;
 import org.neo4j.values.storable.DurationValue;
+import org.neo4j.values.storable.Float16Format;
 import org.neo4j.values.storable.LocalDateTimeValue;
 import org.neo4j.values.storable.LocalTimeValue;
 import org.neo4j.values.storable.TimeValue;
@@ -176,6 +177,47 @@ public final class ArrayEncoder {
         }
 
         @Override
+        public void writeInt8Vector(byte[] values) throws RuntimeException {
+            throw new UnsupportedOperationException("vector arrays are not supported");
+        }
+
+        @Override
+        public void writeInt16Vector(short[] values) throws RuntimeException {
+            throw new UnsupportedOperationException("vector arrays are not supported");
+        }
+
+        @Override
+        public void writeInt32Vector(int[] values) throws RuntimeException {
+            throw new UnsupportedOperationException("vector arrays are not supported");
+        }
+
+        @Override
+        public void writeInt64Vector(long[] values) throws RuntimeException {
+            throw new UnsupportedOperationException("vector arrays are not supported");
+        }
+
+        @Override
+        public void writeFloat16Vector(Float16Format format, short[] values) throws RuntimeException {
+            throw new UnsupportedOperationException("vector arrays are not supported");
+        }
+
+        @Override
+        public void writeFloat32Vector(float[] values) throws RuntimeException {
+            throw new UnsupportedOperationException("vector arrays are not supported");
+        }
+
+        @Override
+        public void writeFloat64Vector(double[] values) throws RuntimeException {
+            throw new UnsupportedOperationException("vector arrays are not supported");
+        }
+
+        @Override
+        public void writeUUID(long msb, long lsb) throws RuntimeException {
+            builder.append(Values.uuidValue(msb, lsb).prettyPrint());
+            builder.append('|');
+        }
+
+        @Override
         public void beginArray(int size, ArrayType arrayType) {
             if (size > 0) {
                 builder.append(typeChar(arrayType));
@@ -195,32 +237,16 @@ public final class ArrayEncoder {
         }
 
         private static char typeChar(ArrayType arrayType) {
-            switch (arrayType) {
-                case BOOLEAN:
-                    return 'Z';
-                case BYTE:
-                case SHORT:
-                case INT:
-                case LONG:
-                case FLOAT:
-                case DOUBLE:
-                    return 'D';
-                case CHAR:
-                case STRING:
-                    return 'L';
-                case POINT:
-                    return 'P';
-                case ZONED_DATE_TIME:
-                case LOCAL_DATE_TIME:
-                case DATE:
-                case ZONED_TIME:
-                case LOCAL_TIME:
-                    return 'T';
-                case DURATION:
-                    return 'A';
-                default:
-                    throw new UnsupportedOperationException("Not supported array type: " + arrayType);
-            }
+            return switch (arrayType) {
+                case BOOLEAN -> 'Z';
+                case BYTE, SHORT, INT, LONG, FLOAT, DOUBLE -> 'D';
+                case CHAR, STRING -> 'L';
+                case POINT -> 'P';
+                case ZONED_DATE_TIME, LOCAL_DATE_TIME, DATE, ZONED_TIME, LOCAL_TIME -> 'T';
+                case DURATION -> 'A';
+                case UUID -> 'U';
+                case VECTOR -> throw new UnsupportedOperationException("Not supported array type: " + arrayType);
+            };
         }
     }
 }

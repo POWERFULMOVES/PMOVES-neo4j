@@ -20,9 +20,11 @@
 package org.neo4j.kernel.impl.scheduler;
 
 import static java.lang.Thread.sleep;
+import static java.time.Duration.ofMinutes;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.waitAtMost;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -80,6 +82,53 @@ class CentralJobSchedulerTest {
                 RejectedExecutionException.class,
                 () -> scheduler.schedule(
                         Group.TASK_SCHEDULER, NOT_MONITORED, () -> fail("This task should not have been executed.")));
+    }
+
+    @Test
+    void countVirtualThreads() {
+        life.start();
+
+        var fabricWaitLatch = new CountDownLatch(1);
+        var collectorWaitLatch = new CountDownLatch(1);
+
+        assertEquals(0, scheduler.virtualThreadCount());
+        try {
+            for (int i = 0; i < 5; i++) {
+                scheduler.schedule(Group.FABRIC_WORKER, () -> {
+                    try {
+                        fabricWaitLatch.await();
+                    } catch (InterruptedException e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+            }
+
+            waitAtMost(ofMinutes(1)).untilAsserted(() -> {
+                assertEquals(5, scheduler.virtualThreadCount());
+            });
+
+            for (int i = 0; i < 5; i++) {
+                scheduler.schedule(Group.DATA_COLLECTOR, () -> {
+                    try {
+                        collectorWaitLatch.await();
+                    } catch (InterruptedException e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+            }
+
+            waitAtMost(ofMinutes(1)).untilAsserted(() -> {
+                assertEquals(10, scheduler.virtualThreadCount());
+            });
+
+        } finally {
+            collectorWaitLatch.countDown();
+            fabricWaitLatch.countDown();
+        }
+
+        waitAtMost(ofMinutes(2)).untilAsserted(() -> {
+            assertEquals(0, scheduler.virtualThreadCount());
+        });
     }
 
     // Tests scheduling a recurring job to run 5 times with 100ms in between.
@@ -399,6 +448,24 @@ class CentralJobSchedulerTest {
 
         scheduler.setThreadFactory(Group.BOLT_WORKER, (group, parentThreadGroup) -> schedulerThreadFactory);
         assertThat(scheduler.threadFactory(Group.BOLT_WORKER)).isSameAs(schedulerThreadFactory);
+    }
+
+    @Test
+    void respectGroupVirtualThreadFactory() {
+        life.start();
+
+        Thread graphEngineThread =
+                scheduler.threadFactory(Group.GRAPH_ENGINE_DATA_SOURCE_POOL).newThread(() -> {});
+        assertThat(graphEngineThread.isVirtual()).isTrue();
+    }
+
+    @Test
+    void respectRealThreadFactory() {
+        life.start();
+
+        Thread evictionThread =
+                scheduler.threadFactory(Group.PAGE_CACHE_EVICTION).newThread(() -> {});
+        assertThat(evictionThread.isVirtual()).isFalse();
     }
 
     @Test

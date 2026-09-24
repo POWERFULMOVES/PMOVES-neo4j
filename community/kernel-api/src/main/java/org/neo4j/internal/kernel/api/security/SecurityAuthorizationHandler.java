@@ -27,10 +27,8 @@ import java.util.Arrays;
 import java.util.function.IntFunction;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
-import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.graphdb.security.AuthorizationViolationException;
 import org.neo4j.internal.kernel.api.TokenSet;
-import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.messages.MessageUtil;
 
 /**
@@ -156,7 +154,7 @@ public class SecurityAuthorizationHandler {
                                 "Schema operation '%s' on database '%s' is denied for %s.",
                                 action, securityContext.database(), securityContext.description()));
             default:
-                // All is well
+            // All is well
         }
     }
 
@@ -248,25 +246,16 @@ public class SecurityAuthorizationHandler {
         }
     }
 
+    // TODO merge these with SecurityExceptionLogger / inline these calls
     public AuthorizationViolationException logAndGetAuthorizationException(
             SecurityContext securityContext, String message) {
-        securityLog.error(securityContext, message);
-        return AuthorizationViolationException.authorizationViolation(message);
+        return new SecurityExceptionLogger(securityLog)
+                .logAndGet(securityContext, message, AuthorizationViolationException.authorizationViolation(message));
     }
 
-    public AuthorizationViolationException logAndGetAuthorizationException(
-            ErrorGqlStatusObject gql, SecurityContext securityContext, String message, Status status) {
-        securityLog.error(securityContext, message);
-        return new AuthorizationViolationException(gql, message, status);
-    }
-
-    public static String generateCredentialsExpiredMessage(String message) {
-        return format(
-                "%s%n%nThe credentials you provided were valid, but must be changed before you can use this instance. "
-                        + "If this is the first time you are using Neo4j, this is to ensure you are not using the default credentials in production. "
-                        + "If you are not using default credentials, you are getting this message because an administrator requires a password change.%n"
-                        + "To change your password, issue an `ALTER CURRENT USER SET PASSWORD FROM 'current password' TO 'new password'` "
-                        + "statement against the system database.",
-                message);
+    public AuthorizationViolationException logAndGetCredentialExpiredException(
+            SecurityContext securityContext, String message) {
+        return new SecurityExceptionLogger(securityLog)
+                .logAndGet(securityContext, message, AuthorizationViolationException.credentialsExpired(message));
     }
 }

@@ -30,13 +30,16 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.BeforeEach;
 import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.Path;
 import org.neo4j.graphdb.RelationshipType;
+import org.neo4j.graphdb.Resource;
 import org.neo4j.graphdb.ResourceIterator;
 import org.neo4j.graphdb.Transaction;
 import org.neo4j.internal.helpers.collection.Iterators;
+import org.neo4j.internal.helpers.collection.ResourceClosingIterator;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.ExtensionCallback;
@@ -119,7 +122,7 @@ public abstract class Neo4jAlgoTestCase {
     protected static String getPathDef(Path path) {
         StringBuilder builder = new StringBuilder();
         for (Node node : path.nodes()) {
-            if (builder.length() > 0) {
+            if (!builder.isEmpty()) {
                 builder.append(',');
             }
             builder.append(node.getProperty(SimpleGraphBuilder.KEY_ID));
@@ -129,7 +132,7 @@ public abstract class Neo4jAlgoTestCase {
 
     private static void assertPaths(Iterable<? extends Path> paths, List<String> pathDefs) {
         List<String> unexpectedDefs = new ArrayList<>();
-        try (ResourceIterator<? extends Path> iterator = Iterators.asResourceIterator(paths.iterator())) {
+        try (ResourceIterator<? extends Path> iterator = asResourceIterator(paths.iterator())) {
             while (iterator.hasNext()) {
                 Path path = iterator.next();
 
@@ -144,9 +147,20 @@ public abstract class Neo4jAlgoTestCase {
         }
         assertTrue(
                 unexpectedDefs.isEmpty(),
-                "These unexpected paths were found: " + unexpectedDefs
-                        + ". In addition these expected paths weren't found:" + pathDefs);
-        assertTrue(pathDefs.isEmpty(), "These were expected, but not found: " + pathDefs);
+                "These unexpected paths were found: " + listOfPathDefsToString(unexpectedDefs)
+                        + ". In addition these expected paths weren't found:" + listOfPathDefsToString(pathDefs));
+        assertTrue(pathDefs.isEmpty(), "These were expected, but not found: " + listOfPathDefsToString(pathDefs));
+    }
+
+    protected static ResourceIterator<? extends Path> asResourceIterator(Iterator<? extends Path> iterator) {
+        if (iterator instanceof Resource resource) {
+            return ResourceClosingIterator.newResourceIterator(iterator, resource);
+        }
+        return Iterators.asResourceIterator(iterator);
+    }
+
+    private static String listOfPathDefsToString(List<String> listOfPathDefs) {
+        return listOfPathDefs.stream().map(p -> "[" + p + "]").collect(Collectors.joining(", "));
     }
 
     protected static void assertPaths(Iterable<? extends Path> paths, String... pathDefinitions) {

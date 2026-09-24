@@ -26,6 +26,7 @@ import java.lang.annotation.Annotation;
 import java.lang.reflect.Type;
 import javax.ws.rs.Produces;
 import javax.ws.rs.WebApplicationException;
+import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.MultivaluedMap;
 import javax.ws.rs.ext.MessageBodyWriter;
@@ -33,10 +34,10 @@ import javax.ws.rs.ext.Provider;
 import org.neo4j.server.http.cypher.format.DefaultJsonFactory;
 import org.neo4j.server.queryapi.QueryMimeTypes;
 import org.neo4j.server.queryapi.response.format.QueryAPICodec;
-import org.neo4j.server.queryapi.response.format.View;
+import org.neo4j.server.queryapi.types.View;
 
 @Provider
-@Produces(QueryMimeTypes.ALL)
+@Produces(QueryMimeTypes.ALL_JSON)
 public class ErrorResponseWriter implements MessageBodyWriter<HttpErrorResponse> {
 
     private final JsonFactory jsonFactory;
@@ -60,6 +61,13 @@ public class ErrorResponseWriter implements MessageBodyWriter<HttpErrorResponse>
             MultivaluedMap<String, Object> httpHeaders,
             OutputStream entityStream)
             throws IOException, WebApplicationException {
+        if (mediaType != null && !httpHeaders.containsKey(HttpHeaders.CONTENT_TYPE)) {
+            httpHeaders.add(HttpHeaders.CONTENT_TYPE, mediaType.toString());
+        } else if (!httpHeaders.containsKey(HttpHeaders.CONTENT_TYPE)) {
+            // If we don't know the content type, default it to application/json
+            httpHeaders.add(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON);
+        }
+
         jsonFactory.createGenerator(entityStream).writeObject(httpErrorResponse);
     }
 }

@@ -21,7 +21,7 @@ package org.neo4j.bolt.testing.messages;
 
 import io.netty.buffer.ByteBuf;
 import java.util.Map;
-import org.neo4j.bolt.negotiation.ProtocolVersion;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 import org.neo4j.bolt.protocol.v51.BoltProtocolV51;
 import org.neo4j.packstream.io.PackstreamBuf;
 import org.neo4j.packstream.struct.StructHeader;
@@ -51,13 +51,13 @@ public class BoltV51Wire extends BoltV50Wire {
         return PackstreamBuf.allocUnpooled()
                 .writeStructHeader(new StructHeader(1, MESSAGE_TAG_LOGON))
                 .writeMap(authToken)
-                .getTarget();
+                .raw();
     }
 
     @Override
     public ByteBuf logoff() {
         return PackstreamBuf.allocUnpooled()
                 .writeStructHeader(new StructHeader(0, MESSAGE_TAG_LOGOFF))
-                .getTarget();
+                .raw();
     }
 }

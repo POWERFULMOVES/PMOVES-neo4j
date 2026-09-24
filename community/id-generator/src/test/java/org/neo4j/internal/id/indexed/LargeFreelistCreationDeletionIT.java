@@ -19,13 +19,15 @@
  */
 package org.neo4j.internal.id.indexed;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
 import static org.neo4j.internal.id.IdSlotDistribution.SINGLE_IDS;
 import static org.neo4j.internal.id.indexed.IndexedIdGenerator.NO_MONITOR;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
+import static org.neo4j.io.pagecache.context.OldestVisibilityHorizonFactory.EMPTY_OLDEST_HORIZON_FACTORY;
 import static org.neo4j.test.Race.throwing;
 
 import java.util.ArrayList;
@@ -40,6 +42,7 @@ import org.neo4j.internal.id.TestIdType;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.test.Race;
@@ -83,7 +86,7 @@ class LargeFreelistCreationDeletionIT {
             try (var freelist = new IndexedIdGenerator(
                     pageCache,
                     fileSystem,
-                    directory.file("file.id"),
+                    new StoreFile(directory.file("file.id")),
                     immediate(),
                     TestIdType.TEST,
                     false,
@@ -100,7 +103,7 @@ class LargeFreelistCreationDeletionIT {
                     true,
                     true)) {
                 // Make sure ID cache is filled so that initial allocations won't slide highId unnecessarily.
-                freelist.maintenance(NULL_CONTEXT);
+                freelist.maintenance(NULL_CONTEXT, EMPTY_OLDEST_HORIZON_FACTORY);
 
                 Race race = new Race();
                 WorkSync<IndexedIdGenerator, Ids> workSync = new WorkSync<>(freelist);
@@ -135,7 +138,7 @@ class LargeFreelistCreationDeletionIT {
                 }
 
                 // Checkpoint
-                freelist.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+                freelist.checkpoint(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
                 System.out.println(freelist.getHighId());
             }
         }
@@ -145,7 +148,7 @@ class LargeFreelistCreationDeletionIT {
         MutableLongSet set = LongSets.mutable.empty();
         for (long[] allocatedId : allocatedIds) {
             for (long id : allocatedId) {
-                assertTrue(set.add(id));
+                assertThat(set.add(id)).isTrue();
             }
         }
     }

@@ -20,7 +20,6 @@
 package org.neo4j.cypher
 
 import org.neo4j.configuration.Config
-import org.neo4j.configuration.GraphDatabaseInternalSettings
 import org.neo4j.configuration.connectors.BoltConnector
 import org.neo4j.configuration.helpers.SocketAddress
 import org.neo4j.cypher.testing.api.CypherExecutorFactory
@@ -34,14 +33,14 @@ import scala.jdk.CollectionConverters.MapHasAsJava
 
 class DeprecationBoltAcceptanceTest extends DeprecationAcceptanceTestBase {
 
-  val boltConfig: Map[Setting[_], Object] =
+  val boltConfig: Map[Setting[?], Object] =
     Map(
       BoltConnector.enabled -> java.lang.Boolean.TRUE,
       BoltConnector.listen_address -> new SocketAddress("localhost", 0)
     )
 
   private val config = Config.newBuilder()
-    .set(GraphDatabaseInternalSettings.enable_experimental_cypher_versions, java.lang.Boolean.TRUE)
+    // Might need to be enabled when the next experimental version appear: .set(GraphDatabaseInternalSettings.enable_experimental_cypher_versions, java.lang.Boolean.TRUE)
     .set(boltConfig.asJava)
     .build()
 

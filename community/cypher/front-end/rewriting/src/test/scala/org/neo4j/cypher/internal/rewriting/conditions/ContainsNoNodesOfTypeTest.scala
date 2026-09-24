@@ -17,6 +17,7 @@
 package org.neo4j.cypher.internal.rewriting.conditions
 
 import org.neo4j.cypher.internal.ast.AstConstructionTestSupport
+import org.neo4j.cypher.internal.ast.FreeProjection
 import org.neo4j.cypher.internal.ast.Match
 import org.neo4j.cypher.internal.ast.Return
 import org.neo4j.cypher.internal.ast.ReturnItems
@@ -30,17 +31,18 @@ import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 class ContainsNoNodesOfTypeTest extends CypherFunSuite with AstConstructionTestSupport {
 
   val condition: Any => Seq[String] =
-    containsNoNodesOfType[UnaliasedReturnItem]().apply(_)(CancellationChecker.NeverCancelled)
+    ContainsNoNodesOfType[UnaliasedReturnItem]().apply(_)(CancellationChecker.NeverCancelled)
 
   test("Happy when not finding UnaliasedReturnItem") {
     val ast: ASTNode =
       Match(
         optional = false,
         matchMode = MatchMode.default(pos),
-        patternForMatch(NodePattern(None, None, None, None) _),
+        patternForMatch(NodePattern(None, None, None, None)(pos)),
         Seq(),
+        None,
         None
-      ) _
+      )(pos)
 
     condition(ast) should equal(Seq())
   }
@@ -48,11 +50,12 @@ class ContainsNoNodesOfTypeTest extends CypherFunSuite with AstConstructionTestS
   test("Fails when finding UnaliasedReturnItem") {
     val ast: ASTNode = Return(
       false,
-      ReturnItems(includeExisting = false, Seq(UnaliasedReturnItem(varFor("foo"), "foo") _)) _,
+      ReturnItems(FreeProjection, Seq(UnaliasedReturnItem(varFor("foo"), "foo")(pos)))(pos),
+      None,
       None,
       None,
       None
-    ) _
+    )(pos)
 
     condition(ast) should equal(
       Seq("Expected none but found UnaliasedReturnItem at position line 0, column 0 (offset: 0)")

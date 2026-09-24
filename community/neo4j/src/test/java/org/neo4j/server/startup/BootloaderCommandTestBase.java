@@ -85,7 +85,7 @@ import picocli.CommandLine;
 
 @TestDirectoryExtension
 @ExtendWith(BootloaderCommandTestBase.FailureOutputProvider.class)
-abstract class BootloaderCommandTestBase {
+public abstract class BootloaderCommandTestBase {
     @Inject
     private TestDirectory testDirectory;
 
@@ -96,10 +96,10 @@ abstract class BootloaderCommandTestBase {
     protected ByteArrayOutputStream err = new ByteArrayOutputStream();
     Path confFile;
     protected Path home;
-    Config config;
+    protected Config config;
 
     @BeforeEach
-    void setUp() throws Exception {
+    protected void setUp() throws Exception {
         // Windows allows us to do any simple character except for '\', '/', '.', '?', and '*
         // ` - _ [ ] { } $% ! ; @ =
         // Windows also limits path length to 260
@@ -205,6 +205,7 @@ abstract class BootloaderCommandTestBase {
                             .setPermissions(
                                     AclEntryPermission.READ_DATA,
                                     AclEntryPermission.WRITE_DATA,
+                                    AclEntryPermission.DELETE,
                                     AclEntryPermission.READ_ATTRIBUTES,
                                     AclEntryPermission.WRITE_ATTRIBUTES,
                                     AclEntryPermission.READ_NAMED_ATTRS,
@@ -253,7 +254,7 @@ abstract class BootloaderCommandTestBase {
      * Using System.setOut( os ), like SuppressOutputExtension, does not stop that
      * Wrapping the fork in a fork is the only option to reliably capture that output while not introducing possible flakyness with concurrent tests
      */
-    protected static class TestInFork {
+    public static class TestInFork {
         public interface TestCode {
             void run() throws Exception;
         }
@@ -285,10 +286,11 @@ abstract class BootloaderCommandTestBase {
                 test.run();
                 return false;
             } else {
-                var frame = StackWalker.getInstance().walk(frames -> frames.skip(1)
-                        .filter(BootloaderCommandTestBase::isTestFrame)
-                        .findFirst()
-                        .orElseThrow());
+                var frame = StackWalker.getInstance()
+                        .walk(frames -> frames.skip(1)
+                                .filter(BootloaderCommandTestBase::isTestFrame)
+                                .findFirst()
+                                .orElseThrow());
                 assertNotNull(frame, "No test found");
 
                 var process = start(

@@ -44,14 +44,16 @@ import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.layout.Neo4jLayout;
 import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.ZippedStoreCommunity;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
-import org.neo4j.kernel.impl.transaction.log.files.LogFilesBuilder;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.storageengine.api.StorageEngineFactory;
 import org.neo4j.test.LatestVersions;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.Neo4jLayoutExtension;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.LogFormatVersionProvider;
+import org.neo4j.wal.entry.LogFormat;
+import org.neo4j.wal.files.LogFilesBuilder;
 
 @Neo4jLayoutExtension
 class RecoveryOldAndUpgradedVersionsIT {
@@ -84,6 +86,7 @@ class RecoveryOldAndUpgradedVersionsIT {
         managementService = builder.build();
         GraphDatabaseAPI db = (GraphDatabaseAPI) managementService.database(dbName);
         assertKernelVersion(db, KernelVersion.V5_0);
+        assertLogFormat(db, KernelVersion.V5_0);
     }
 
     @ParameterizedTest
@@ -112,6 +115,7 @@ class RecoveryOldAndUpgradedVersionsIT {
         managementService = builder.build();
         db = (GraphDatabaseAPI) managementService.database(dbName);
         assertKernelVersion(db, LatestVersions.LATEST_KERNEL_VERSION);
+        assertLogFormat(db, LatestVersions.LATEST_KERNEL_VERSION);
     }
 
     @ParameterizedTest
@@ -139,6 +143,7 @@ class RecoveryOldAndUpgradedVersionsIT {
         managementService = builder.build();
         db = (GraphDatabaseAPI) managementService.database(dbName);
         assertKernelVersion(db, KernelVersion.V5_0);
+        assertLogFormat(db, KernelVersion.V5_0);
     }
 
     @ParameterizedTest
@@ -166,6 +171,7 @@ class RecoveryOldAndUpgradedVersionsIT {
         managementService = builder.build();
         db = (GraphDatabaseAPI) managementService.database(dbName);
         assertKernelVersion(db, LatestVersions.LATEST_KERNEL_VERSION);
+        assertLogFormat(db, LatestVersions.LATEST_KERNEL_VERSION);
     }
 
     @Test
@@ -186,6 +192,7 @@ class RecoveryOldAndUpgradedVersionsIT {
         // For system database we have no idea about the contents of the database while starting it
         // and have to pick a version when there are no logs at all - the latest.
         assertKernelVersion(db, LatestVersions.LATEST_KERNEL_VERSION);
+        assertLogFormat(db, LatestVersions.LATEST_LOG_FORMAT);
     }
 
     @Test
@@ -204,6 +211,18 @@ class RecoveryOldAndUpgradedVersionsIT {
         // For a regular database where we have no logs at all we should pick the version that
         // dbmsRuntimeVersionComponent tells us that we are on.
         assertKernelVersion(db, KernelVersion.V5_0);
+        assertLogFormat(db, KernelVersion.V5_0);
+    }
+
+    void assertLogFormat(GraphDatabaseAPI db, KernelVersion expectedKernelVersion) {
+        assertLogFormat(db, LogFormat.fromKernelVersion(expectedKernelVersion));
+    }
+
+    void assertLogFormat(GraphDatabaseAPI db, LogFormat expectedLogFormat) {
+        assertThat(db.getDependencyResolver()
+                        .resolveDependency(LogFormatVersionProvider.class)
+                        .getCurrentLogFormat())
+                .isEqualTo(expectedLogFormat);
     }
 
     private void removeTransactionLogs(DatabaseLayout dbLayout) throws IOException {

@@ -24,12 +24,12 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.neo4j.internal.helpers.NameUtil.escapeName;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.neo4j.driver.Value;
 import org.neo4j.driver.Values;
@@ -85,16 +85,14 @@ public interface OutputFormatter {
         return string != null && !string.trim().isEmpty();
     }
 
-    static char[] repeat(char c, int times) {
-        char[] chars = new char[times];
-        Arrays.fill(chars, c);
-        return chars;
-    }
-
-    static String repeat(String c, int times) {
-        StringBuilder sb = new StringBuilder(times * c.length());
+    static String repeatConditionally(String a, String b, int times, Function<Integer, Boolean> condition) {
+        StringBuilder sb = new StringBuilder(times * Math.max(a.length(), b.length()));
         for (int i = 0; i < times; i++) {
-            sb.append(c);
+            if (condition.apply(i)) {
+                sb.append(a);
+            } else {
+                sb.append(b);
+            }
         }
         return sb.toString();
     }
@@ -107,7 +105,9 @@ public interface OutputFormatter {
 
         Plan plan = summary.plan();
         result.put("Plan", Values.value(summary.hasProfile() ? "PROFILE" : "EXPLAIN"));
-        result.put("Statement", Values.value(summary.queryType().name()));
+        result.put(
+                "Statement",
+                Values.value(summary.queryType() != null ? summary.queryType().name() : ""));
         Map<String, Value> arguments = plan.arguments();
         Value emptyString = Values.value("");
         Value questionMark = Values.value("?");

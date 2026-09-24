@@ -20,6 +20,7 @@ import org.neo4j.cypher.internal.ast.semantics.SemanticCheck
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheckable
 import org.neo4j.cypher.internal.ast.semantics.SemanticExpressionCheck
 import org.neo4j.cypher.internal.ast.semantics.SemanticPatternCheck
+import org.neo4j.cypher.internal.ast.semantics.SemanticPatternCheck.TokenType
 import org.neo4j.cypher.internal.expressions.ContainerIndex
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.HasMappableExpressions
@@ -46,9 +47,9 @@ case class RemoveLabelItem(
   override def semanticCheck: SemanticCheck =
     SemanticExpressionCheck.simple(variable) chain
       SemanticExpressionCheck.simple(dynamicLabels) chain
-      SemanticPatternCheck.checkValidDynamicLabels(dynamicLabels, position) chain
+      SemanticPatternCheck.checkValidDynamicLabels(TokenType.NodeLabel, dynamicLabels, position) chain
       SemanticExpressionCheck.expectType(CTString.covariant | CTList(CTString).covariant, dynamicLabels) chain
-      SemanticPatternCheck.checkValidLabels(labels, position) chain
+      SemanticPatternCheck.checkValidLabels(TokenType.NodeLabel, labels, position) chain
       SemanticExpressionCheck.expectType(CTNode.covariant, variable)
 
   override def mapExpressions(f: Expression => Expression): RemoveItem = copy(
@@ -56,8 +57,7 @@ case class RemoveLabelItem(
   )(this.position)
 }
 
-case class RemovePropertyItem(property: LogicalProperty) extends RemoveItem {
-  override def position: InputPosition = property.position
+case class RemovePropertyItem(property: LogicalProperty)(val position: InputPosition) extends RemoveItem {
 
   override def semanticCheck: SemanticCheck = SemanticExpressionCheck.simple(property) chain
     SemanticPatternCheck.checkValidPropertyKeyNames(Seq(property.propertyKey))
@@ -65,21 +65,24 @@ case class RemovePropertyItem(property: LogicalProperty) extends RemoveItem {
   override def mapExpressions(f: Expression => Expression): RemoveItem =
     property match {
       case Property(map, propertyKey) =>
-        copy(Property(f(map), propertyKey)(property.position))
+        copy(Property(f(map), propertyKey)(property.position))(this.position)
       case _ => throw new IllegalStateException(
           s"We don't expect this to be called on any other logical properties. Got: $property"
         )
     }
 }
 
-case class RemoveDynamicPropertyItem(dynamicPropertyLookup: ContainerIndex) extends RemoveItem {
-  override def position: InputPosition = dynamicPropertyLookup.position
+case class RemoveDynamicPropertyItem(dynamicPropertyLookup: ContainerIndex)(val position: InputPosition)
+    extends RemoveItem {
 
   override def semanticCheck: SemanticCheck = SemanticExpressionCheck.simple(dynamicPropertyLookup) chain
-    SemanticPatternCheck.checkValidDynamicLabels(Seq(dynamicPropertyLookup.idx), position) chain
+    SemanticPatternCheck.checkValidDynamicLabels(TokenType.PropertyName, Seq(dynamicPropertyLookup.idx), position) chain
     SemanticExpressionCheck.expectType(CTNode.covariant | CTRelationship.covariant, dynamicPropertyLookup.expr)
 
   override def mapExpressions(f: Expression => Expression): RemoveItem = copy(
-    f(dynamicPropertyLookup).asInstanceOf[ContainerIndex]
-  )
+    dynamicPropertyLookup = dynamicPropertyLookup.copy(
+      expr = f(dynamicPropertyLookup.expr),
+      idx = f(dynamicPropertyLookup.idx)
+    )(dynamicPropertyLookup.position)
+  )(this.position)
 }

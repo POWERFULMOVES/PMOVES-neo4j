@@ -28,6 +28,8 @@ import org.neo4j.cypher.internal.runtime.spec.Edition
 import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 
+object UnionLabelScanTestBase
+
 abstract class UnionLabelScanTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
@@ -75,8 +77,6 @@ abstract class UnionLabelScanTestBase[CONTEXT <: RuntimeContext](
   }
 
   test("should scan all nodes of a label in ascending order") {
-    // parallel does not maintain order
-    assume(!isParallel)
 
     // given
     val nodes = givenGraph {
@@ -88,7 +88,7 @@ abstract class UnionLabelScanTestBase[CONTEXT <: RuntimeContext](
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("x")
-      .unionNodeByLabelsScan("x", Seq("Honey", "Almond", "Butter"), IndexOrderAscending)
+      .unionNodeByLabelsScan("x", Seq("Honey", "Almond", "Butter"), IndexOrderAscending).withLeveragedOrder()
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
@@ -98,8 +98,6 @@ abstract class UnionLabelScanTestBase[CONTEXT <: RuntimeContext](
   }
 
   test("should scan all nodes of a label in descending order") {
-    // parallel does not maintain order
-    assume(!isParallel)
 
     // given
     val nodes = givenGraph {
@@ -111,7 +109,7 @@ abstract class UnionLabelScanTestBase[CONTEXT <: RuntimeContext](
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("x")
-      .unionNodeByLabelsScan("x", Seq("Honey", "Almond", "Butter"), IndexOrderDescending)
+      .unionNodeByLabelsScan("x", Seq("Honey", "Almond", "Butter"), IndexOrderDescending).withLeveragedOrder()
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)

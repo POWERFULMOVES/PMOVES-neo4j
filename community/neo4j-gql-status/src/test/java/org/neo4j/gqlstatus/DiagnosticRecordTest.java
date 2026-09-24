@@ -19,17 +19,17 @@
  */
 package org.neo4j.gqlstatus;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
-import org.junit.jupiter.api.Disabled;
+import java.util.function.Supplier;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 class DiagnosticRecordTest {
     @Test
@@ -42,44 +42,44 @@ class DiagnosticRecordTest {
                 // TODO: enable this line again when re-introducing status parameters
                 );
 
-        assertEquals(expectedKeys, diagnosticRecordMap.keySet());
+        assertThat(diagnosticRecordMap).containsOnlyKeys(expectedKeys);
     }
 
     @Test
     void shouldHaveExpectedDefaultValues() {
         Map<String, Object> diagnosticRecordMap =
                 new DiagnosticRecord("", ErrorClassification.CLIENT_ERROR, 0, 0, 0, Map.of()).asMap();
-        assertEquals("/", diagnosticRecordMap.get("CURRENT_SCHEMA"));
-        assertEquals("", diagnosticRecordMap.get("OPERATION"));
-        assertEquals("0", diagnosticRecordMap.get("OPERATION_CODE"));
+        assertThat(diagnosticRecordMap.get("CURRENT_SCHEMA")).isEqualTo("/");
+        assertThat(diagnosticRecordMap.get("OPERATION")).isEqualTo("");
+        assertThat(diagnosticRecordMap.get("OPERATION_CODE")).isEqualTo("0");
     }
 
     @Test
     void shouldConstructProperPositionMap() {
         Map<String, Object> diagnosticRecordMap =
                 new DiagnosticRecord("", ErrorClassification.CLIENT_ERROR, 1, 2, 3, Map.of()).asMap();
-        assertInstanceOf(Map.class, diagnosticRecordMap.get("_position"));
+        assertThat(diagnosticRecordMap.get("_position")).isInstanceOf(Map.class);
 
         @SuppressWarnings("unchecked")
         Map<String, Object> position = (Map<String, Object>) diagnosticRecordMap.get("_position");
 
-        assertEquals(1, position.get("offset"));
-        assertEquals(2, position.get("line"));
-        assertEquals(3, position.get("column"));
+        assertThat(position).containsEntry("offset", 1);
+        assertThat(position).containsEntry("line", 2);
+        assertThat(position).containsEntry("column", 3);
     }
 
     @Test
     void shouldNotStoreUnknownErrorClassificationFromConstructor() {
         Map<String, Object> diagnosticRecordMap =
                 new DiagnosticRecord("", ErrorClassification.UNKNOWN, 0, 0, 0, Map.of()).asMap();
-        assertFalse(diagnosticRecordMap.containsKey("_classification"));
+        assertThat(diagnosticRecordMap).doesNotContainKey("_classification");
     }
 
     @Test
     void shouldNotStoreUnknownNotificationClassificationFromConstructor() {
         Map<String, Object> diagnosticRecordMap =
                 new DiagnosticRecord("", NotificationClassification.UNKNOWN, 0, 0, 0, Map.of()).asMap();
-        assertFalse(diagnosticRecordMap.containsKey("_classification"));
+        assertThat(diagnosticRecordMap).doesNotContainKey("_classification");
     }
 
     @Test
@@ -88,7 +88,7 @@ class DiagnosticRecordTest {
         diagnosticRecordBuilder.withClassification(ErrorClassification.UNKNOWN);
         Map<String, Object> diagnosticRecordMap =
                 diagnosticRecordBuilder.build().asMap();
-        assertFalse(diagnosticRecordMap.containsKey("_classification"));
+        assertThat(diagnosticRecordMap).doesNotContainKey("_classification");
     }
 
     @Test
@@ -97,89 +97,72 @@ class DiagnosticRecordTest {
         diagnosticRecordBuilder.withClassification(NotificationClassification.UNKNOWN);
         Map<String, Object> diagnosticRecordMap =
                 diagnosticRecordBuilder.build().asMap();
-        assertFalse(diagnosticRecordMap.containsKey("_classification"));
+        assertThat(diagnosticRecordMap).doesNotContainKey("_classification");
     }
 
-    @Disabled("enable this test again when re-introducing status parameters")
-    @Test
-    void shouldProduceValidJson() throws JsonProcessingException {
-        var params = Map.of("k1", "hello", "k2", 1, "k3", Map.of("innerK1", "innerV1"));
-        var dr = new DiagnosticRecord("testSeverity", ErrorClassification.CLIENT_ERROR, 1, 2, 3, params);
-        var jsonOpt = dr.asJson();
-        assertTrue(jsonOpt.isPresent());
-        var json = jsonOpt.get();
-        assertTrue(json.contains("\"k1\":\"hello\"")
-                && json.contains("\"k2\":1")
-                && json.contains("\"k3\":{\"innerK1\":\"innerV1\"}"));
-        ObjectMapper objectMapper = new ObjectMapper();
-        var parsed = objectMapper.readValue(json, Map.class);
-        assertEquals(dr.asMap(), parsed);
+    @ParameterizedTest
+    @MethodSource("propertyFixture")
+    <T> void shouldBuildDiagnosticRecordWithProperty(
+            DiagnosticRecordProperty<T> property, T value, Optional<T> expectedValue) {
+        var diagnosticRecord =
+                DiagnosticRecord.from().withProperty(property, value).build();
+
+        var map = diagnosticRecord.asMap();
+
+        if (expectedValue.isPresent()) {
+            assertThat(map).containsEntry(property.key(), expectedValue.get());
+        } else {
+            assertThat(map).doesNotContainKey(property.key());
+        }
     }
 
-    @Test
-    void shouldConstructDiagnosticRecordFromJson() {
-        var params = Map.of("k1", "hello", "k2", 1, "k3", Map.of("innerK1", "innerV1"));
-        var dr = new DiagnosticRecord("testSeverity", ErrorClassification.CLIENT_ERROR, 1, 2, 3, params);
-        var json =
-                """
-                {"OPERATION_CODE":"0","_classification":"CLIENT_ERROR","OPERATION":"","CURRENT_SCHEMA":"/","_status_parameters":{"k3":{"innerK1":"innerV1"},"k2":1,"k1":"hello"},"_severity":"testSeverity","_position":{"line":2,"column":3,"offset":1}}
-                """;
-        var drOpt = DiagnosticRecord.fromJson(json);
-        assertTrue(drOpt.isPresent());
-        var parsedDr = drOpt.get();
-        assertEquals(dr, parsedDr);
-        var parsedMap = parsedDr.asMap();
-        assertEquals("testSeverity", parsedMap.get("_severity"));
-        assertEquals("CLIENT_ERROR", parsedMap.get("_classification"));
-        assertEquals(Map.of("line", 2, "column", 3, "offset", 1), parsedMap.get("_position"));
-        // TODO: enable this line again when re-introducing status parameters
-        // assertEquals(params, parsedMap.get("_status_parameters"));
+    @ParameterizedTest
+    @MethodSource("propertyFixture")
+    <T> void shouldSetAPropertyInTheDiagnosticRecord(
+            DiagnosticRecordProperty<T> property, T value, Optional<T> expectedValue) {
+        var diagnosticRecord = new DiagnosticRecord();
+        diagnosticRecord.withProperty(property, value);
 
-        @SuppressWarnings("MisleadingEscapedSpace")
-        var jsonWithWhitespaces =
-                """
-                {
-                   "OPERATION_CODE":"0",
-                   "_classification" : "CLIENT_ERROR",
-                   "OPERATION":"",
-                   "CURRENT_SCHEMA" :"/",
-                   "_status_parameters":{
-                      "k3":{
-                         "innerK1":"innerV1"
-                      },
-                      "k2":1,
-                      "k1":"hello"
-                   },
-                   "_severity":"testSeverity",
-                   "_position":{
-                      "line":2,
-                      "column":3,    \s
-                      "offset":1
-                   }
-                }
-               \s""";
-        assertTrue(DiagnosticRecord.fromJson(jsonWithWhitespaces).isPresent());
-        var invalidJson =
-                """
-                {
-                   "OPERATION_CODE":"0",
-                   "_classification":"CLIENT_ERROR",
-                   "OPERATION":"",
-                   "CURRENT_SCHEMA":"/",
-                   "_status_parameters":{
-                      "k3":{
-                         "innerK1":"innerV1"
-                      },
-                      "k2":1,
-                      "k1":"hello"
-                   },
-                   "_severity":"testSeverity",
-                   "_position":{
-                      "line":2,
-                      "column":3,
-                      "offset":1
-                   }
-                """;
-        assertTrue(DiagnosticRecord.fromJson(invalidJson).isEmpty());
+        var map = diagnosticRecord.asMap();
+
+        if (expectedValue.isPresent()) {
+            assertThat(map).containsEntry(property.key(), expectedValue.get());
+        } else {
+            assertThat(map).doesNotContainKey(property.key());
+        }
+    }
+
+    private static Stream<Arguments> propertyFixture() {
+        Supplier<NonGqlStandardDiagnosticRecordProperty.Builder<String>> propertyBuilder =
+                () -> NonGqlStandardDiagnosticRecordProperty.Builder.fromKey("_custom_key");
+        var simpleProperty = propertyBuilder.get().build();
+        var omittedValueProperty = propertyBuilder
+                .get()
+                .withValueOmittedPredicate(o -> o != null && o.equals(""))
+                .build();
+        var transformedValueProperty = propertyBuilder
+                .get()
+                .withValueSerializer(o -> {
+                    if (o != null) {
+                        return "Value: ".concat(o.toString());
+                    }
+                    return null;
+                })
+                .build();
+        var disabledProperty = propertyBuilder.get().disabled().build();
+
+        return Stream.of(
+                Arguments.of(simpleProperty, "value", Optional.of("value")),
+                Arguments.of(simpleProperty, "", Optional.of("")),
+                Arguments.of(simpleProperty, null, Optional.empty()),
+                Arguments.of(omittedValueProperty, "value", Optional.of("value")),
+                Arguments.of(omittedValueProperty, "", Optional.empty()),
+                Arguments.of(omittedValueProperty, null, Optional.empty()),
+                Arguments.of(transformedValueProperty, "value", Optional.of("Value: value")),
+                Arguments.of(transformedValueProperty, "", Optional.of("Value: ")),
+                Arguments.of(transformedValueProperty, null, Optional.empty()),
+                Arguments.of(disabledProperty, "value", Optional.empty()),
+                Arguments.of(disabledProperty, "", Optional.empty()),
+                Arguments.of(disabledProperty, null, Optional.empty()));
     }
 }

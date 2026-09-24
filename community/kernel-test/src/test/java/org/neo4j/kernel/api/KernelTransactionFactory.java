@@ -34,11 +34,11 @@ import static org.neo4j.kernel.database.DatabaseIdFactory.from;
 import static org.neo4j.kernel.impl.api.chunk.TransactionRollbackProcess.EMPTY_ROLLBACK_PROCESS;
 import static org.neo4j.kernel.impl.api.transaction.serial.DatabaseSerialGuard.EMPTY_GUARD;
 import static org.neo4j.kernel.impl.locking.NoLocksClient.NO_LOCKS_CLIENT;
-import static org.neo4j.kernel.impl.util.collection.CollectionsFactorySupplier.ON_HEAP;
 
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import org.mockito.Mockito;
+import org.neo4j.collection.factory.OnHeapCollectionsFactory;
 import org.neo4j.collection.pool.Pool;
 import org.neo4j.configuration.Config;
 import org.neo4j.dbms.DbmsRuntimeVersionProvider;
@@ -52,6 +52,7 @@ import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
 import org.neo4j.kernel.KernelVersionProvider;
 import org.neo4j.kernel.api.procedure.ProcedureView;
+import org.neo4j.kernel.availability.AvailabilityGuard;
 import org.neo4j.kernel.database.DatabaseReference;
 import org.neo4j.kernel.database.DatabaseTracers;
 import org.neo4j.kernel.database.NormalizedDatabaseName;
@@ -59,6 +60,7 @@ import org.neo4j.kernel.impl.api.InternalTransactionCommitProcess;
 import org.neo4j.kernel.impl.api.KernelTransactionImplementation;
 import org.neo4j.kernel.impl.api.KernelTransactions;
 import org.neo4j.kernel.impl.api.LeaseService;
+import org.neo4j.kernel.impl.api.RaftUpgradeBarrier;
 import org.neo4j.kernel.impl.api.index.IndexingService;
 import org.neo4j.kernel.impl.api.index.stats.IndexStatisticsStore;
 import org.neo4j.kernel.impl.api.state.ConstraintIndexCreator;
@@ -69,12 +71,13 @@ import org.neo4j.kernel.impl.factory.GraphDatabaseFacade;
 import org.neo4j.kernel.impl.locking.LockManager;
 import org.neo4j.kernel.impl.monitoring.TransactionMonitor;
 import org.neo4j.kernel.impl.query.TransactionExecutionMonitor;
+import org.neo4j.kernel.impl.security.URIAccessRules;
 import org.neo4j.kernel.impl.transaction.SimpleTransactionIdStore;
-import org.neo4j.kernel.impl.transaction.log.TransactionCommitmentFactory;
 import org.neo4j.kernel.internal.event.DatabaseTransactionEventListeners;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.MemoryPools;
 import org.neo4j.monitoring.DatabaseHealth;
+import org.neo4j.monitoring.ExceptionHandlerService;
 import org.neo4j.resources.CpuClock;
 import org.neo4j.storageengine.api.CommandCreationContext;
 import org.neo4j.storageengine.api.StorageEngine;
@@ -88,6 +91,7 @@ import org.neo4j.time.Clocks;
 import org.neo4j.token.TokenHolders;
 import org.neo4j.token.api.TokenHolder;
 import org.neo4j.values.ElementIdMapper;
+import org.neo4j.wal.TransactionCommitmentFactory;
 
 public final class KernelTransactionFactory {
     public static class Instances {
@@ -104,10 +108,12 @@ public final class KernelTransactionFactory {
         StorageEngine storageEngine = mock(StorageEngine.class, RETURNS_MOCKS);
         StorageReader storageReader = mock(StorageReader.class);
         when(storageEngine.newReader()).thenReturn(storageReader);
-        when(storageEngine.newCommandCreationContext(anyBoolean())).thenReturn(mock(CommandCreationContext.class));
+        when(storageEngine.newCommandCreationContext(anyBoolean(), any()))
+                .thenReturn(mock(CommandCreationContext.class));
         when(storageEngine.createStorageCursors(any())).thenReturn(StoreCursors.NULL);
 
         var locks = mock(LockManager.class);
+        var exceptionHandlerService = mock(ExceptionHandlerService.class);
         when(locks.newClient()).thenReturn(NO_LOCKS_CLIENT);
         TransactionIdStore transactionIdStore = new SimpleTransactionIdStore();
         KernelVersionProvider kernelVersionProvider = LatestVersions.LATEST_KERNEL_VERSION_PROVIDER;
@@ -125,14 +131,14 @@ public final class KernelTransactionFactory {
                 storageEngine,
                 any -> CanWrite.INSTANCE,
                 new CursorContextFactory(new DefaultPageCacheTracer(), EMPTY_CONTEXT_SUPPLIER),
-                ON_HEAP,
+                OnHeapCollectionsFactory.INSTANCE,
                 new StandardConstraintSemantics(),
                 mock(SchemaState.class),
                 mockedTokenHolders(),
                 mock(ElementIdMapper.class),
                 mock(IndexingService.class),
                 mock(IndexStatisticsStore.class),
-                dependenciesOf(mock(GraphDatabaseFacade.class)),
+                dependenciesOf(mock(GraphDatabaseFacade.class), mock(URIAccessRules.class)),
                 from(DEFAULT_DATABASE_NAME, UUID.randomUUID()),
                 LeaseService.NO_LEASES,
                 MemoryPools.NO_TRACKING,
@@ -152,19 +158,23 @@ public final class KernelTransactionFactory {
                 NullLogProvider.getInstance(),
                 TransactionValidatorFactory.EMPTY_VALIDATOR_FACTORY,
                 EMPTY_GUARD,
+                RaftUpgradeBarrier.NO_OP,
                 storageEngine.getOpenOptions().contains(MULTI_VERSIONED),
-                TopologyGraphDbmsModel.HostedOnMode.SINGLE);
+                exceptionHandlerService,
+                TopologyGraphDbmsModel.HostedOnMode.SINGLE,
+                mock(AvailabilityGuard.class));
 
         DatabaseReference defaultSessionDb = Mockito.mock(DatabaseReference.class);
         Mockito.when(defaultSessionDb.fullName()).thenReturn(new NormalizedDatabaseName(DEFAULT_DATABASE_NAME));
         transaction.initialize(
                 0,
                 KernelTransaction.Type.IMPLICIT,
-                loginContext.authorize(LoginContext.IdLookup.EMPTY, defaultSessionDb, CommunitySecurityLog.NULL_LOG),
+                loginContext.authorize(LoginContext.IdLookup.EMPTY, defaultSessionDb, CommunitySecurityLog.NULL_LOG, 0),
                 NO_TIMEOUT,
                 1L,
                 EMBEDDED_CONNECTION,
-                mock(ProcedureView.class));
+                mock(ProcedureView.class),
+                0L);
 
         return new Instances(transaction);
     }

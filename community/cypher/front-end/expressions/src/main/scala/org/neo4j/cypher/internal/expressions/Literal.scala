@@ -17,6 +17,7 @@
 package org.neo4j.cypher.internal.expressions
 
 import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.cypher.internal.util.helpers.LazyVal
 
 import java.util
 
@@ -26,12 +27,14 @@ import scala.util.matching.Regex
 sealed trait Literal extends Expression {
   def value: AnyRef
   def asCanonicalStringVal: String
+  def position: InputPosition.Range
   def asSensitiveLiteral: Literal with SensitiveLiteral
   override def isConstantForQuery: Boolean = true
 }
 
 sealed trait NumberLiteral extends Literal {
   def stringVal: String
+  override def value: java.lang.Number
   override def asCanonicalStringVal: String = stringVal
 }
 
@@ -42,89 +45,101 @@ sealed trait IntegerLiteral extends NumberLiteral {
 sealed trait SignedIntegerLiteral extends IntegerLiteral
 sealed trait UnsignedIntegerLiteral extends IntegerLiteral
 
-sealed abstract class DecimalIntegerLiteral(stringVal: String) extends IntegerLiteral {
-  lazy val integerMatcher: Regex = """-?\d+((_\d+)?)*""" r
-
-  lazy val value: java.lang.Long = stringVal match {
-    case integerMatcher(_*) => java.lang.Long.parseLong(stringVal.toList.filter(c => c != '_').mkString)
-    // pass along to keep the same error message
-    case _ => java.lang.Long.parseLong(stringVal)
-  }
-}
-
-case class SignedDecimalIntegerLiteral(stringVal: String)(val position: InputPosition)
-    extends DecimalIntegerLiteral(stringVal) with SignedIntegerLiteral {
+case class SignedDecimalIntegerLiteral(stringVal: String)(override val position: InputPosition.Range)
+    extends IntegerLiteral with SignedIntegerLiteral with StringDecimalInteger {
 
   override def asSensitiveLiteral: Literal with SensitiveLiteral =
-    new SignedDecimalIntegerLiteral(stringVal)(position) with SensitiveLiteral {
-      override def literalLength: Int = stringVal.length
-    }
+    new SignedDecimalIntegerLiteral(stringVal)(position) with SensitiveLiteral
 }
 
-case class UnsignedDecimalIntegerLiteral(stringVal: String)(val position: InputPosition)
-    extends DecimalIntegerLiteral(stringVal) with UnsignedIntegerLiteral {
+case class UnsignedDecimalIntegerLiteral(
+  stringVal: String
+)(override val position: InputPosition.Range)
+    extends IntegerLiteral with UnsignedIntegerLiteral with StringDecimalInteger {
 
   override def asSensitiveLiteral: Literal with SensitiveLiteral =
-    new UnsignedDecimalIntegerLiteral(stringVal)(position) with SensitiveLiteral {
-      override def literalLength: Int = stringVal.length
-    }
+    new UnsignedDecimalIntegerLiteral(stringVal)(position) with SensitiveLiteral
 }
 
 sealed abstract class OctalIntegerLiteral(stringVal: String) extends IntegerLiteral {
-  lazy val octalMatcher: Regex = """-?0o(_?[0-7]+)+""" r
+  override def value: java.lang.Long = lazyValue.value
+  private val lazyValue: LazyVal[java.lang.Long] = LazyVal(OctalIntegerLiteral.octalToLong(stringVal))
+}
 
-  lazy val value: java.lang.Long = stringVal match {
-    case octalMatcher(_*) =>
-      java.lang.Long.decode(stringVal.toList.filter(c => c != '_').filter(c => c != 'o').mkString)
-    case _ => java.lang.Long.decode(stringVal.toList.filter(c => c != 'o').mkString)
+object OctalIntegerLiteral {
+  final private val octalMatcherWithUnderscore: Regex = """-?0o(_?[0-7]+)+""" r
+  final private val octalMatcherWithoutUnderscore: Regex = """-?0o?[0-7]+""" r
+
+  def octalToLong(stringValue: String): java.lang.Long = {
+    if (stringValue.contains("_")) {
+      if (!octalMatcherWithUnderscore.matches(stringValue)) {
+        throw new NumberFormatException(s"Invalid octal integer literal: $stringValue")
+      }
+      java.lang.Long.decode(stringValue.replace("_", "").replace("o", ""))
+    } else {
+      // Requires at least one octal digit, otherwise e.g. "0o" would incorrectly decode as 0.
+      if (!octalMatcherWithoutUnderscore.matches(stringValue)) {
+        throw new NumberFormatException(s"Invalid octal integer literal: $stringValue")
+      }
+      java.lang.Long.decode(stringValue.replace("o", ""))
+    }
   }
 }
 
-case class SignedOctalIntegerLiteral(stringVal: String)(val position: InputPosition)
+case class SignedOctalIntegerLiteral(stringVal: String)(override val position: InputPosition.Range)
     extends OctalIntegerLiteral(stringVal) with SignedIntegerLiteral {
 
   override def asSensitiveLiteral: Literal with SensitiveLiteral =
-    new SignedOctalIntegerLiteral(stringVal)(position) with SensitiveLiteral {
-      override def literalLength: Int = stringVal.length
-    }
+    new SignedOctalIntegerLiteral(stringVal)(position) with SensitiveLiteral
 }
 
 sealed abstract class HexIntegerLiteral(stringVal: String) extends IntegerLiteral {
-  lazy val hexMatcher: Regex = """-?0x(_?[0-9a-fA-F]+)+""" r
+  override def value: java.lang.Long = lazyValue.value
+  private val lazyValue: LazyVal[java.lang.Long] = LazyVal(HexIntegerLiteral.hexStringToLong(stringVal))
+}
 
-  lazy val value: java.lang.Long = stringVal match {
-    case hexMatcher(_*) => java.lang.Long.decode(stringVal.toList.filter(c => c != '_').mkString)
-    // pass along to keep the same error message
-    case _ => java.lang.Long.decode(stringVal)
+object HexIntegerLiteral {
+  final private val hexMatcher: Regex = """-?0x(_?[0-9a-fA-F]+)+""" r
+
+  def hexStringToLong(stringValue: String): java.lang.Long = {
+    if (stringValue.contains("_") && hexMatcher.matches(stringValue)) {
+      java.lang.Long.decode(stringValue.replace("_", ""))
+    } else {
+      java.lang.Long.decode(stringValue)
+    }
   }
 }
 
-case class SignedHexIntegerLiteral(stringVal: String)(val position: InputPosition) extends HexIntegerLiteral(stringVal)
+case class SignedHexIntegerLiteral(stringVal: String)(override val position: InputPosition.Range)
+    extends HexIntegerLiteral(stringVal)
     with SignedIntegerLiteral {
 
   override def asSensitiveLiteral: Literal with SensitiveLiteral =
-    new SignedHexIntegerLiteral(stringVal)(position) with SensitiveLiteral {
-      override def literalLength: Int = stringVal.length
-    }
+    new SignedHexIntegerLiteral(stringVal)(position) with SensitiveLiteral
 }
 
 sealed trait DoubleLiteral extends NumberLiteral {
   def value: java.lang.Double
 }
 
-case class DecimalDoubleLiteral(stringVal: String)(val position: InputPosition) extends DoubleLiteral {
-  lazy val doubleMatcher: Regex = """-?(\d+((_\d+)?)*)?(\.\d+((_\d+)?)*)?([eE]([+-])?\d+((_\d+)?)*)?""" r
-
-  lazy val value: java.lang.Double = stringVal match {
-    case doubleMatcher(_*) => java.lang.Double.parseDouble(stringVal.replace("_", ""))
-    // pass along to keep the same error message
-    case _ => java.lang.Double.parseDouble(stringVal)
-  }
+case class DecimalDoubleLiteral(stringVal: String)(override val position: InputPosition.Range) extends DoubleLiteral {
+  override def value: java.lang.Double = lazyValue.value
+  private val lazyValue: LazyVal[java.lang.Double] = LazyVal(DecimalDoubleLiteral.stringToDouble(stringVal))
 
   override def asSensitiveLiteral: Literal with SensitiveLiteral =
-    new DecimalDoubleLiteral(stringVal)(position) with SensitiveLiteral {
-      override def literalLength: Int = stringVal.length
+    new DecimalDoubleLiteral(stringVal)(position) with SensitiveLiteral
+}
+
+object DecimalDoubleLiteral {
+  private val doubleMatcher: Regex = """-?(\d+((_\d+)?)*)?(\.\d+((_\d+)?)*)?([eE]([+-])?\d+((_\d+)?)*)?""" r
+
+  def stringToDouble(stringValue: String): java.lang.Double = {
+    if (stringValue.contains("_") && doubleMatcher.matches(stringValue)) {
+      java.lang.Double.parseDouble(stringValue.replace("_", ""))
+    } else {
+      java.lang.Double.parseDouble(stringValue)
     }
+  }
 }
 
 // Note, the inputLength of the input position is not always equal to value.length because of escape characters.
@@ -137,9 +152,7 @@ case class StringLiteral(value: String)(val position: InputPosition.Range) exten
   }
 
   override def asSensitiveLiteral: Literal with SensitiveLiteral =
-    new StringLiteral(value)(position) with SensitiveLiteral {
-      override def literalLength: Int = position.inputLength
-    }
+    new StringLiteral(value)(position) with SensitiveLiteral
 }
 
 final case class SensitiveStringLiteral(value: Array[Byte])(val position: InputPosition.Range)
@@ -157,70 +170,65 @@ final case class SensitiveStringLiteral(value: Array[Byte])(val position: InputP
 
   override def hashCode(): Int = util.Arrays.hashCode(value)
 
-  override def literalLength: Int = position.inputLength
-
   override def isConstantForQuery: Boolean = true
 }
 
 trait SensitiveLiteral {
-  val position: InputPosition
+  val position: InputPosition.Range
 
   /**
    * Number of characters of the literal including quotes
    */
-  def literalLength: Int
+  final def literalLength: Int = position.inputLength
 }
 
-case class Null()(val position: InputPosition) extends Literal {
-  val value = null
+case class Null()(override val position: InputPosition.Range) extends Literal {
+  override val value: AnyRef = null
 
   override def asCanonicalStringVal = "NULL"
 
-  override def asSensitiveLiteral: Literal with SensitiveLiteral = new Null()(position) with SensitiveLiteral {
-    override def literalLength: Int = 4
-  }
+  override def asSensitiveLiteral: Literal with SensitiveLiteral = new Null()(position) with SensitiveLiteral
 }
 
 object Null {
   val NULL: Null = Null()(InputPosition.NONE)
 }
 
-case class Infinity()(val position: InputPosition) extends Literal {
+case class Infinity()(override val position: InputPosition.Range) extends Literal {
   val value: java.lang.Double = Double.PositiveInfinity
 
   override def asCanonicalStringVal = "Infinity"
 
-  override def asSensitiveLiteral: Literal with SensitiveLiteral = new Infinity()(position) with SensitiveLiteral {
-    override def literalLength: Int = 8
-  }
+  override def asSensitiveLiteral: Literal with SensitiveLiteral = new Infinity()(position) with SensitiveLiteral
 }
 
-case class NaN()(val position: InputPosition) extends Literal {
+case class NaN()(override val position: InputPosition.Range) extends Literal {
   val value: java.lang.Double = Double.NaN
   override def asCanonicalStringVal = "NaN"
 
-  override def asSensitiveLiteral: Literal with SensitiveLiteral = new NaN()(position) with SensitiveLiteral {
-    override def literalLength: Int = 3
-  }
+  override def asSensitiveLiteral: Literal with SensitiveLiteral = new NaN()(position) with SensitiveLiteral
 }
 
 sealed trait BooleanLiteral extends Literal
 
-case class True()(val position: InputPosition) extends BooleanLiteral {
+case class True()(override val position: InputPosition.Range) extends BooleanLiteral {
   val value: java.lang.Boolean = true
 
   override def asCanonicalStringVal = "true"
 
-  override def asSensitiveLiteral: Literal with SensitiveLiteral = new True()(position) with SensitiveLiteral {
-    override def literalLength: Int = 4
-  }
+  override def asSensitiveLiteral: Literal with SensitiveLiteral = new True()(position) with SensitiveLiteral
 }
 
-case class False()(val position: InputPosition) extends BooleanLiteral {
+case class False()(override val position: InputPosition.Range) extends BooleanLiteral {
   val value: java.lang.Boolean = false
   override def asCanonicalStringVal = "false"
 
-  override def asSensitiveLiteral: Literal with SensitiveLiteral = new False()(position) with SensitiveLiteral {
-    override def literalLength: Int = 5
-  }
+  override def asSensitiveLiteral: Literal with SensitiveLiteral = new False()(position) with SensitiveLiteral
+}
+
+case class ObfuscatedLiteral()(override val position: InputPosition.Range) extends Expression {
+  val value: java.lang.Boolean = false
+  override def asCanonicalStringVal = "******"
+
+  override def isConstantForQuery: Boolean = true
 }

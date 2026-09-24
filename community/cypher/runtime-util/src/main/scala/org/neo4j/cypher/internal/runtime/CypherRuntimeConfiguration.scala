@@ -47,8 +47,12 @@ object CypherRuntimeConfiguration {
       freeMemoryOfUnusedColumns = config.freeMemoryOfUnusedColumns,
       expressionEngineOption = config.expressionEngineOption,
       spdBatchSize = config.shardedPropertyBatchSize,
-      warnOnAggregationSkipNull = config.warnOnAggregationSkipNull
-    )
+      warnOnAggregationSkipNull = config.warnOnAggregationSkipNull,
+      errorIfShortestPathHasCommonNodesAtRuntime = config.errorIfShortestPathHasCommonNodesAtRuntime,
+      pipelinedSubqueryTransactionRetryEnabled = config.pipelinedSubqueryTransactionRetryEnabled,
+      enableNonFusedMerge = config.enableNonFusedMerge,
+      displayPlannerVersion = config.displayPlannerVersion
+    )(config)
   }
 
   def defaultConfiguration: CypherRuntimeConfiguration =
@@ -56,8 +60,8 @@ object CypherRuntimeConfiguration {
 }
 
 case class CypherRuntimeConfiguration(
-  pipelinedBatchSizeSmall: Int,
-  pipelinedBatchSizeBig: Int,
+  pipelinedBatchSizeSmall: Int, // NOTE: Only used when no ExecutionModel is provided in the LogicalQuery
+  pipelinedBatchSizeBig: Int, // NOTE: Only used when no ExecutionModel is provided in the LogicalQuery
   operatorFusionOverPipelineLimit: Int,
   operatorFusionLowerLimit: Int,
   schedulerTracing: SchedulerTracingConfiguration,
@@ -72,14 +76,29 @@ case class CypherRuntimeConfiguration(
   freeMemoryOfUnusedColumns: Boolean,
   expressionEngineOption: CypherExpressionEngineOption,
   spdBatchSize: Int,
-  warnOnAggregationSkipNull: Boolean
-) {
+  warnOnAggregationSkipNull: Boolean,
+  errorIfShortestPathHasCommonNodesAtRuntime: Boolean,
+  pipelinedSubqueryTransactionRetryEnabled: Boolean,
+  enableNonFusedMerge: Boolean,
+  displayPlannerVersion: Boolean = false
+)(val cypherConfiguration: CypherConfiguration = null) {
 
   Preconditions.checkArgument(
     pipelinedBatchSizeSmall <= pipelinedBatchSizeBig,
-    s"pipelinedBatchSizeSmall (got $pipelinedBatchSizeSmall) must be <= pipelinedBatchSizeBig (got $pipelinedBatchSizeBig)"
+    s"pipelinedBatchSizeSmall (got ${pipelinedBatchSizeSmall}) must be <= pipelinedBatchSizeBig (got ${pipelinedBatchSizeBig})"
   )
 
+  def forceEnableNonFusedMerge(): CypherRuntimeConfiguration = {
+    copy(enableNonFusedMerge = true)(cypherConfiguration)
+  }
+
+  def snapshot(): CypherRuntimeConfiguration = {
+    if (cypherConfiguration != null) {
+      CypherRuntimeConfiguration.fromCypherConfiguration(cypherConfiguration)
+    } else {
+      this.copy()(null)
+    }
+  }
 }
 
 object SchedulerTracingConfiguration {

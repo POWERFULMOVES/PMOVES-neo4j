@@ -21,13 +21,15 @@ package org.neo4j.collection;
 
 import static java.util.Collections.singletonList;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.neo4j.collection.factory.CollectionsFactory;
+import org.neo4j.collection.factory.OnHeapCollectionsFactory;
 import org.neo4j.exceptions.UnsatisfiedDependencyException;
 
 class DependenciesTest {
@@ -128,7 +130,8 @@ class DependenciesTest {
     void givenEmptyDependenciesWhenResolveWithTypeThenException() {
         Dependencies dependencies = new Dependencies();
 
-        assertThrows(UnsatisfiedDependencyException.class, () -> dependencies.resolveDependency(Collection.class));
+        assertThatThrownBy(() -> dependencies.resolveDependency(Collection.class))
+                .isInstanceOf(UnsatisfiedDependencyException.class);
     }
 
     @Test
@@ -140,6 +143,31 @@ class DependenciesTest {
         dependencies.satisfyDependency(foo);
         dependencies.satisfyDependency(bar);
 
-        assertThrows(IllegalArgumentException.class, () -> dependencies.resolveDependency(List.class));
+        assertThatThrownBy(() -> dependencies.resolveDependency(List.class))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void resolveOptionalDependency() {
+        Dependencies dependencies = new Dependencies();
+        dependencies.satisfyDependency(OnHeapCollectionsFactory.INSTANCE);
+
+        assertThat(dependencies.resolveOptionalDependency(CollectionsFactory.class))
+                .isPresent()
+                .hasValue(OnHeapCollectionsFactory.INSTANCE);
+        assertThat(dependencies.resolveOptionalDependency(RawIterator.class)).isEmpty();
+    }
+
+    @Test
+    void resolveOptionalDependencyFromParent() {
+        Dependencies parent = new Dependencies();
+        parent.satisfyDependency(OnHeapCollectionsFactory.INSTANCE);
+        var localDependencies = new Dependencies(parent);
+
+        assertThat(localDependencies.resolveOptionalDependency(CollectionsFactory.class))
+                .isPresent()
+                .hasValue(OnHeapCollectionsFactory.INSTANCE);
+        assertThat(localDependencies.resolveOptionalDependency(RawIterator.class))
+                .isEmpty();
     }
 }

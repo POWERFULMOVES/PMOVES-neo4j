@@ -34,18 +34,6 @@ public class NodePropertyExistenceException extends ConstraintValidationExceptio
     private final long nodeId;
     private final LabelSchemaDescriptor schema;
 
-    @Deprecated
-    private NodePropertyExistenceException(
-            LabelSchemaDescriptor schema,
-            Function<LabelSchemaDescriptor, ConstraintDescriptor> constraintFunc,
-            ConstraintValidationException.Phase phase,
-            long nodeId,
-            TokenNameLookup tokenNameLookup) {
-        super(constraintFunc.apply(schema), phase, format("Node(%d)", nodeId), tokenNameLookup);
-        this.schema = schema;
-        this.nodeId = nodeId;
-    }
-
     private NodePropertyExistenceException(
             ErrorGqlStatusObject gqlStatusObject,
             LabelSchemaDescriptor schema,
@@ -65,7 +53,7 @@ public class NodePropertyExistenceException extends ConstraintValidationExceptio
             ConstraintDescriptor descriptor,
             ConstraintValidationException.Phase phase,
             long nodeId) {
-        var propIds = schema.getPropertyIds();
+        int[] propIds = schema.getPropertyIds();
         // This might be a way to expose hidden properties to the user with roles with no access to those properties
         // TODO: check for user rights
         String[] propKeyNames = new String[propIds.length];

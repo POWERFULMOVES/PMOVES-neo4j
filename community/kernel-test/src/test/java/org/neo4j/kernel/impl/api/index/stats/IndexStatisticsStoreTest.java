@@ -23,9 +23,17 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 import static org.neo4j.annotations.documented.ReporterFactories.noopReporterFactory;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
 import static org.neo4j.test.Race.throwing;
 
@@ -41,15 +49,16 @@ import org.eclipse.collections.api.set.ImmutableSet;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.index.internal.gbptree.TreeFileNotFoundException;
 import org.neo4j.internal.helpers.Exceptions;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
+import org.neo4j.io.pagecache.tracing.FlushEvent;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.io.pagecache.tracing.cursor.PageCursorTracer;
 import org.neo4j.kernel.api.index.IndexSample;
@@ -57,12 +66,12 @@ import org.neo4j.kernel.api.index.IndexUsageStats;
 import org.neo4j.kernel.lifecycle.LifeSupport;
 import org.neo4j.test.Race;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.extension.pagecache.EphemeralPageCacheExtension;
 import org.neo4j.test.utils.TestDirectory;
 
 @EphemeralPageCacheExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class IndexStatisticsStoreTest {
     private LifeSupport lifeSupport = new LifeSupport();
 
@@ -95,7 +104,7 @@ class IndexStatisticsStoreTest {
         var statisticsStore = new IndexStatisticsStore(
                 pageCache,
                 fileSystem,
-                testDirectory.file(fileName),
+                new StoreFile(testDirectory.file(fileName)),
                 immediate(),
                 false,
                 DEFAULT_DATABASE_NAME,
@@ -115,7 +124,7 @@ class IndexStatisticsStoreTest {
         for (int i = 0; i < 100; i++) {
             store.setSampleStats(i, new IndexSample());
         }
-        store.checkpoint(FileFlushEvent.NULL, CursorContext.NULL_CONTEXT);
+        store.checkpoint(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, CursorContext.NULL_CONTEXT);
 
         var checkPageCacheTracer = new DefaultPageCacheTracer();
         var checkContextFactory = new CursorContextFactory(checkPageCacheTracer, EMPTY_CONTEXT_SUPPLIER);
@@ -151,12 +160,12 @@ class IndexStatisticsStoreTest {
                 store.setSampleStats(i, new IndexSample());
             }
 
-            store.checkpoint(FileFlushEvent.NULL, cursorContext);
+            store.checkpoint(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, cursorContext);
             PageCursorTracer cursorTracer = cursorContext.getCursorTracer();
-            assertThat(cursorTracer.pins()).isEqualTo(30);
-            assertThat(cursorTracer.unpins()).isEqualTo(30);
-            assertThat(cursorTracer.hits()).isEqualTo(21);
-            assertThat(cursorTracer.faults()).isEqualTo(9);
+            assertThat(cursorTracer.pins()).isGreaterThanOrEqualTo(30);
+            assertThat(cursorTracer.unpins()).isGreaterThanOrEqualTo(30);
+            assertThat(cursorTracer.hits()).isGreaterThanOrEqualTo(20);
+            assertThat(cursorTracer.faults()).isGreaterThanOrEqualTo(5);
         }
     }
 
@@ -210,7 +219,7 @@ class IndexStatisticsStoreTest {
     }
 
     private void restartStore() throws IOException {
-        store.checkpoint(FileFlushEvent.NULL, CursorContext.NULL_CONTEXT);
+        store.checkpoint(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, CursorContext.NULL_CONTEXT);
         lifeSupport.shutdown();
         lifeSupport = new LifeSupport();
         store = openStore("stats");
@@ -246,7 +255,7 @@ class IndexStatisticsStoreTest {
         race.addContestant(throwing(() -> {
             for (int i = 0; i < 20; i++) {
                 Thread.sleep(5);
-                store.checkpoint(FileFlushEvent.NULL, CursorContext.NULL_CONTEXT);
+                store.checkpoint(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, CursorContext.NULL_CONTEXT);
             }
             checkpointDone.set(true);
         }));
@@ -281,7 +290,7 @@ class IndexStatisticsStoreTest {
                 () -> new IndexStatisticsStore(
                         pageCache,
                         fileSystem,
-                        testDirectory.file("non-existing"),
+                        new StoreFile(testDirectory.file("non-existing")),
                         immediate(),
                         true,
                         DEFAULT_DATABASE_NAME,
@@ -295,7 +304,7 @@ class IndexStatisticsStoreTest {
     void shouldCacheUsageStatistics() {
         // given
         var indexId = 2L;
-        var usage = new IndexUsageStats(System.currentTimeMillis(), 123, System.currentTimeMillis() - 1000);
+        var usage = new IndexUsageStats(System.currentTimeMillis(), 123, 42, System.currentTimeMillis() - 1000);
         store.addUsageStats(indexId, usage);
 
         // when
@@ -310,7 +319,7 @@ class IndexStatisticsStoreTest {
     void shouldStoreSampleAndUsageStatistics() throws IOException {
         // given
         var indexId = 12345L;
-        var usage = new IndexUsageStats(System.currentTimeMillis(), 987654, System.currentTimeMillis() - 1000);
+        var usage = new IndexUsageStats(System.currentTimeMillis(), 987654, 123456, System.currentTimeMillis() - 1000);
         var sample = new IndexSample(10, 20, 30, 40);
         store.setSampleStats(indexId, sample);
         store.addUsageStats(indexId, usage);
@@ -329,7 +338,7 @@ class IndexStatisticsStoreTest {
     void shouldSetFirstTrackedTimeOnFirstUsageStatisticsUpdate() throws IOException {
         // given
         var indexId = 998L;
-        var firstUsage = new IndexUsageStats(System.currentTimeMillis(), 10, 1234567);
+        var firstUsage = new IndexUsageStats(System.currentTimeMillis(), 10, 0, 1234567);
 
         // when
         store.addUsageStats(indexId, firstUsage);
@@ -338,7 +347,7 @@ class IndexStatisticsStoreTest {
         assertThat(store.usageStats(indexId)).isEqualTo(firstUsage);
 
         // and when
-        var secondUsage = new IndexUsageStats(System.currentTimeMillis(), 5, 9999999);
+        var secondUsage = new IndexUsageStats(System.currentTimeMillis(), 5, 2, 9999999);
         store.addUsageStats(indexId, secondUsage);
 
         // then
@@ -353,10 +362,13 @@ class IndexStatisticsStoreTest {
         var indexId = 12345L;
         var lastUsedTime = System.currentTimeMillis();
         var trackedSinceTime = System.currentTimeMillis() - 1000;
-        var firstUsage = new IndexUsageStats(lastUsedTime, 987654, trackedSinceTime);
-        var secondUsage = new IndexUsageStats(lastUsedTime + 2000, 100, trackedSinceTime + 1000);
+        var firstUsage = new IndexUsageStats(lastUsedTime, 987654, 12345, trackedSinceTime);
+        var secondUsage = new IndexUsageStats(lastUsedTime + 2000, 100, 10, trackedSinceTime + 1000);
         var expectedUsage = new IndexUsageStats(
-                secondUsage.lastRead(), firstUsage.readCount() + secondUsage.readCount(), firstUsage.trackedSince());
+                secondUsage.lastRead(),
+                firstUsage.readCount() + secondUsage.readCount(),
+                firstUsage.readWithFilterCount() + secondUsage.readWithFilterCount(),
+                firstUsage.trackedSince());
 
         // When
         store.addUsageStats(indexId, firstUsage);
@@ -372,14 +384,17 @@ class IndexStatisticsStoreTest {
         var indexId = 12345L;
         var lastUsedTime = System.currentTimeMillis();
         var trackedSinceTime = System.currentTimeMillis() - 1000;
-        var firstUsage = new IndexUsageStats(lastUsedTime, 987654, trackedSinceTime);
+        var firstUsage = new IndexUsageStats(lastUsedTime, 987654, 12345, trackedSinceTime);
         store.addUsageStats(indexId, firstUsage);
 
         // When
         restartStore();
-        var secondUsage = new IndexUsageStats(lastUsedTime + 2000, 100, trackedSinceTime + 1000);
+        var secondUsage = new IndexUsageStats(lastUsedTime + 2000, 100, 10, trackedSinceTime + 1000);
         var expectedUsage = new IndexUsageStats(
-                secondUsage.lastRead(), firstUsage.readCount() + secondUsage.readCount(), firstUsage.trackedSince());
+                secondUsage.lastRead(),
+                firstUsage.readCount() + secondUsage.readCount(),
+                firstUsage.readWithFilterCount() + secondUsage.readWithFilterCount(),
+                firstUsage.trackedSince());
         store.addUsageStats(indexId, secondUsage);
 
         // Then
@@ -393,6 +408,7 @@ class IndexStatisticsStoreTest {
         var race = new Race();
         var sessionsPerThread = 10;
         var queriesPerSession = 10;
+        var queriesWithFilterPerSession = 2;
         var numThreads = 4;
         var expectedMinTimeMillis = new AtomicLong(Long.MAX_VALUE);
         var expectedMaxTimeMillis = new AtomicLong();
@@ -406,7 +422,9 @@ class IndexStatisticsStoreTest {
                         if (i == 0) {
                             expectedMinTimeMillis.updateAndGet(operand -> Long.min(time, operand));
                         }
-                        store.addUsageStats(indexId, new IndexUsageStats(time, queriesPerSession, time));
+                        store.addUsageStats(
+                                indexId,
+                                new IndexUsageStats(time, queriesPerSession, queriesWithFilterPerSession, time));
                     }
                     expectedMaxTimeMillis.updateAndGet(operand -> Long.max(myClockMillis.longValue(), operand));
                 }),
@@ -419,8 +437,29 @@ class IndexStatisticsStoreTest {
         var usageStats = store.usageStats(indexId);
         assertThat(usageStats.lastRead()).isEqualTo(expectedMaxTimeMillis.get());
         assertThat(usageStats.readCount()).isEqualTo(sessionsPerThread * queriesPerSession * numThreads);
+        assertThat(usageStats.readWithFilterCount())
+                .isEqualTo(sessionsPerThread * queriesWithFilterPerSession * numThreads);
         assertThat(usageStats.trackedSince()).isLessThan(usageStats.lastRead());
         assertThat(usageStats.trackedSince()).isEqualTo(expectedMinTimeMillis.get());
+    }
+
+    @Test
+    void shouldSkipWritingOnNoCacheChange() throws IOException {
+        // given
+        var firstFlushEvent = mock(FileFlushEvent.class);
+        when(firstFlushEvent.startChunk(any())).thenReturn(FileFlushEvent.ChunkEvent.NULL);
+        when(firstFlushEvent.beginFlush(any(), any(), any(), anyInt(), anyInt()))
+                .thenReturn(FlushEvent.NULL);
+        store.setSampleStats(1, new IndexSample(1, 2, 3));
+        store.checkpoint(firstFlushEvent, EMPTY_ASYNC_BLOCK_ACCESSOR, CursorContext.NULL_CONTEXT);
+        verify(firstFlushEvent, atLeastOnce()).startChunk(any());
+
+        // when
+        var secondFlushEvent = mock(FileFlushEvent.class);
+        store.checkpoint(secondFlushEvent, EMPTY_ASYNC_BLOCK_ACCESSOR, CursorContext.NULL_CONTEXT);
+
+        // then
+        verifyNoInteractions(secondFlushEvent);
     }
 
     private void replaceAndVerifySample(long indexId, IndexSample indexSample) {

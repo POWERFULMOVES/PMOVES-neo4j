@@ -27,6 +27,7 @@ import static org.neo4j.configuration.GraphDatabaseSettings.SYSTEM_DATABASE_NAME
 import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DATABASE_LABEL;
 import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DATABASE_NAME_PROPERTY;
 import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DATABASE_UUID_PROPERTY;
+import static org.neo4j.test.extension.SkipOnSpd.Note.incompatible;
 
 import java.util.HashSet;
 import java.util.UUID;
@@ -44,6 +45,7 @@ import org.neo4j.kernel.database.NamedDatabaseId;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
 
@@ -71,6 +73,10 @@ public class DefaultTopologyInfoServiceIT {
     }
 
     @Test
+    @SkipOnSpd(
+            reason =
+                    "EnterpriseTopologyInfoService doesn't behave exactly like DefaultTopologyInfoService because it needs a transaction and it wouldn't return the nonExistingDatabase",
+            notes = {incompatible})
     void shouldReturnInfoForAllExistingDatabases() {
         // given
         var dependencyResolver = ((GraphDatabaseAPI) dbms.database(DEFAULT_DATABASE_NAME)).getDependencyResolver();
@@ -82,16 +88,20 @@ public class DefaultTopologyInfoServiceIT {
         allDatabases.add(nonExistingDatabase);
 
         // when
-        // DefaultTopologyInfoService does not use the transaction
-        var results = topologyInfoService.databases(null, allDatabases, TopologyInfoService.RequestedExtras.NONE);
-        var returnedDatabases =
-                results.stream().collect(Collectors.toMap(DatabaseDetails::namedDatabaseId, Function.identity()));
+        try (var tx = dbms.database(SYSTEM_DATABASE_NAME).beginTx()) {
+            var results = topologyInfoService.databases(tx, allDatabases, TopologyInfoService.RequestedExtras.NONE);
+            var returnedDatabases =
+                    results.stream().collect(Collectors.toMap(DatabaseDetails::namedDatabaseId, Function.identity()));
 
-        // then
-        assertThat(returnedDatabases.size()).isEqualTo(allDatabases.size());
-        assertThat(returnedDatabases.get(nonExistingDatabase).status()).isEqualTo("unknown");
-        assertThat(returnedDatabases.get(existingDatabases.iterator().next()).status())
-                .isEqualTo("online");
+            // then
+            assertThat(returnedDatabases.size()).isEqualTo(allDatabases.size());
+            assertThat(returnedDatabases.get(nonExistingDatabase).actualStatus())
+                    .isEqualTo("unknown");
+            assertThat(returnedDatabases
+                            .get(existingDatabases.iterator().next())
+                            .actualStatus())
+                    .isEqualTo("online");
+        }
     }
 
     NamedDatabaseId getIdForName(String name) {

@@ -38,8 +38,10 @@ import org.neo4j.internal.schema.SchemaCommand;
 import org.neo4j.internal.schema.SchemaCommand.ConstraintCommand;
 import org.neo4j.internal.schema.SchemaCommand.ConstraintCommand.Create.NodeExistence;
 import org.neo4j.internal.schema.SchemaCommand.ConstraintCommand.Create.NodeKey;
+import org.neo4j.internal.schema.SchemaCommand.ConstraintCommand.Create.NodeLabelExistence;
 import org.neo4j.internal.schema.SchemaCommand.ConstraintCommand.Create.NodePropertyType;
 import org.neo4j.internal.schema.SchemaCommand.ConstraintCommand.Create.NodeUniqueness;
+import org.neo4j.internal.schema.SchemaCommand.ConstraintCommand.Create.RelationshipEndpointLabel;
 import org.neo4j.internal.schema.SchemaCommand.ConstraintCommand.Create.RelationshipExistence;
 import org.neo4j.internal.schema.SchemaCommand.ConstraintCommand.Create.RelationshipKey;
 import org.neo4j.internal.schema.SchemaCommand.ConstraintCommand.Create.RelationshipPropertyType;
@@ -71,10 +73,12 @@ class SchemaCommandsBuilder {
 
     private final SchemaCommandConverter schemaCommandConverter;
 
-    SchemaCommandsBuilder(ReaderConfig readerConfig, CypherVersion cypherVersion) {
+    private int numGraphTypeStatements = 0;
+    private int numConstraintStatements = 0;
+
+    SchemaCommandsBuilder(ReaderConfig readerConfig, SchemaCommandConverter commandConverter) {
         this.readerConfig = Objects.requireNonNull(readerConfig);
-        this.schemaCommandConverter =
-                new SchemaCommandConverter(cypherVersion, readerConfig.latestVectorIndexVersion());
+        this.schemaCommandConverter = Objects.requireNonNull(commandConverter);
     }
 
     List<SchemaCommand> build() {
@@ -82,21 +86,23 @@ class SchemaCommandsBuilder {
     }
 
     @SuppressWarnings("UnusedReturnValue")
-    SchemaCommandsBuilder withCommand(org.neo4j.cypher.internal.ast.SchemaCommand ast)
+    SchemaCommandsBuilder withCommand(org.neo4j.cypher.internal.ast.SchemaCommand ast, CypherVersion cypherVersion)
             throws SchemaCommandReaderException {
-        final var command = schemaCommandConverter.apply(ast);
+        final var command = schemaCommandConverter.apply(ast, cypherVersion, readerConfig.latestVectorIndexVersion());
         if (!readerConfig.allowEnterpriseFeatures()) {
             if (isEnterpriseOnly(command)) {
                 throw new SchemaCommandReaderException("Enterprise features are not currently supported");
-            }
-        } else if (!readerConfig.allowConstraints()) {
-            if (command instanceof ConstraintCommand) {
-                throw new SchemaCommandReaderException("Constraint commands are not currently supported");
             }
         } else if (!readerConfig.allowDropOperations()) {
             if (isDropCommand(command)) {
                 throw new SchemaCommandReaderException("Dropping indexes or constraints is not currently supported");
             }
+        }
+
+        if (command instanceof SchemaCommand.GraphType) {
+            numGraphTypeStatements += 1;
+        } else if (command instanceof ConstraintCommand) {
+            numConstraintStatements += 1;
         }
 
         allCommands.add(command);
@@ -107,6 +113,15 @@ class SchemaCommandsBuilder {
         final var result = Lists.mutable.<SchemaCommand>empty();
         final var namedCommands = new LinkedHashMap<String, SchemaCommand>();
         final var allSchemas = Multimaps.mutable.list.<String, SchemaCommand>empty();
+
+        if (numGraphTypeStatements > 0 && numConstraintStatements > 0) {
+            throw new SchemaCommandReaderException("Graph type command can not be mixed with constraint commands");
+        }
+
+        if (numGraphTypeStatements > 1) {
+            throw new SchemaCommandReaderException("Specify a single graph type command");
+        }
+
         for (var command : allCommands) {
             if (command instanceof IndexCommand.Create index) {
                 allSchemas.put(schemaKey(index), index);
@@ -191,7 +206,7 @@ class SchemaCommandsBuilder {
         }
 
         backedConstraints.forEach((backed1, backingType1) -> backedConstraints.forEach((backed2, backingType2) -> {
-            if (backed1 != backed2 && backed1.constraintType() == backed2.constraintType()) {
+            if (backed1 != backed2 && backingType1 == backingType2) {
                 throw new SchemaCommandReaderException("Duplicate backing indexes found for constraints '%s' and '%s'"
                         .formatted(backed1.name(), backed2.name()));
             }
@@ -259,9 +274,12 @@ class SchemaCommandsBuilder {
     }
 
     private static boolean isEnterpriseOnly(SchemaCommand command) {
-        // only UNIQUE constraints are supported in Community
-        return command instanceof ConstraintCommand.Create constraint
-                && constraint.constraintType() != ConstraintType.UNIQUE;
+        if (command instanceof ConstraintCommand.Create constraint) {
+            // only UNIQUE constraints are supported in Community
+            return constraint.constraintType() != ConstraintType.UNIQUE;
+        }
+
+        return command instanceof SchemaCommand.GraphType;
     }
 
     /**
@@ -273,58 +291,62 @@ class SchemaCommandsBuilder {
         return name == null ? command.toString() : name;
     }
 
+    private static List<String> allProperties(NodeVector command) {
+        final var all = Lists.mutable.<String>empty();
+        all.add(command.property());
+        all.addAll(command.additionalProperties());
+        return all;
+    }
+
+    private static List<String> allProperties(RelationshipVector command) {
+        final var all = Lists.mutable.<String>empty();
+        all.add(command.property());
+        all.addAll(command.additionalProperties());
+        return all;
+    }
+
     private static String schemaKey(IndexCommand.Create indexCommand) {
-        // oh for switch-enums
-        if (indexCommand instanceof NodeLookup) {
-            return NODE_LOOKUP_KEY;
-        } else if (indexCommand instanceof RelationshipLookup) {
-            return REL_LOOKUP_KEY;
-        } else if (indexCommand instanceof NodeRange command) {
-            return schemaKey(EntityType.NODE, command.label(), command.properties());
-        } else if (indexCommand instanceof RelationshipRange command) {
-            return schemaKey(EntityType.RELATIONSHIP, command.type(), command.properties());
-        } else if (indexCommand instanceof NodeText command) {
-            return schemaKey(EntityType.NODE, command.label(), command.property());
-        } else if (indexCommand instanceof RelationshipText command) {
-            return schemaKey(EntityType.RELATIONSHIP, command.type(), command.property());
-        } else if (indexCommand instanceof NodePoint command) {
-            return schemaKey(EntityType.NODE, command.label(), command.property());
-        } else if (indexCommand instanceof RelationshipPoint command) {
-            return schemaKey(EntityType.RELATIONSHIP, command.type(), command.property());
-        } else if (indexCommand instanceof NodeFulltext command) {
-            return schemaKey(EntityType.NODE, command.labels(), command.properties());
-        } else if (indexCommand instanceof RelationshipFulltext command) {
-            return schemaKey(EntityType.RELATIONSHIP, command.types(), command.properties());
-        } else if (indexCommand instanceof NodeVector command) {
-            return schemaKey(EntityType.NODE, command.label(), command.property());
-        } else if (indexCommand instanceof RelationshipVector command) {
-            return schemaKey(EntityType.RELATIONSHIP, command.type(), command.property());
-        } else {
-            throw new IllegalStateException("Unknown index operation: " + indexCommand);
-        }
+        return switch (indexCommand) {
+            case NodeLookup ignored -> NODE_LOOKUP_KEY;
+            case RelationshipLookup ignored -> REL_LOOKUP_KEY;
+            case NodeRange command -> schemaKey(EntityType.NODE, command.label(), command.properties());
+            case RelationshipRange command -> schemaKey(EntityType.RELATIONSHIP, command.type(), command.properties());
+            case NodeText command -> schemaKey(EntityType.NODE, command.label(), command.property());
+            case RelationshipText command -> schemaKey(EntityType.RELATIONSHIP, command.type(), command.property());
+            case NodePoint command -> schemaKey(EntityType.NODE, command.label(), command.property());
+            case RelationshipPoint command -> schemaKey(EntityType.RELATIONSHIP, command.type(), command.property());
+            case NodeFulltext command -> schemaKey(EntityType.NODE, command.labels(), command.properties());
+            case RelationshipFulltext command ->
+                schemaKey(EntityType.RELATIONSHIP, command.types(), command.properties());
+            case NodeVector command -> schemaKey(EntityType.NODE, command.labels(), allProperties(command));
+            case RelationshipVector command ->
+                schemaKey(EntityType.RELATIONSHIP, command.types(), allProperties(command));
+        };
     }
 
     private static String schemaKey(ConstraintCommand.Create constraint) {
-        // oh for switch-enums
-        if (constraint instanceof NodeUniqueness command) {
-            return schemaKey(EntityType.NODE, command.label(), command.properties());
-        } else if (constraint instanceof RelationshipUniqueness command) {
-            return schemaKey(EntityType.RELATIONSHIP, command.type(), command.properties());
-        } else if (constraint instanceof NodeKey command) {
-            return schemaKey(EntityType.NODE, command.label(), command.properties());
-        } else if (constraint instanceof RelationshipKey command) {
-            return schemaKey(EntityType.RELATIONSHIP, command.type(), command.properties());
-        } else if (constraint instanceof NodeExistence command) {
-            return schemaKey(EntityType.NODE, command.label(), command.property());
-        } else if (constraint instanceof RelationshipExistence command) {
-            return schemaKey(EntityType.RELATIONSHIP, command.type(), command.property());
-        } else if (constraint instanceof NodePropertyType command) {
-            return schemaKey(EntityType.NODE, command.label(), command.property());
-        } else if (constraint instanceof RelationshipPropertyType command) {
-            return schemaKey(EntityType.RELATIONSHIP, command.type(), command.property());
-        } else {
-            throw new IllegalStateException("Unknown constraint operation: " + constraint);
-        }
+        return switch (constraint) {
+            case NodeUniqueness command -> schemaKey(EntityType.NODE, command.label(), command.properties());
+            case RelationshipUniqueness command ->
+                schemaKey(EntityType.RELATIONSHIP, command.type(), command.properties());
+            case NodeKey command -> schemaKey(EntityType.NODE, command.label(), command.properties());
+            case RelationshipKey command -> schemaKey(EntityType.RELATIONSHIP, command.type(), command.properties());
+            case NodeExistence command -> schemaKey(EntityType.NODE, command.label(), command.property());
+            case RelationshipExistence command ->
+                schemaKey(EntityType.RELATIONSHIP, command.type(), command.property());
+            case NodePropertyType command -> schemaKey(EntityType.NODE, command.label(), command.property());
+            case RelationshipPropertyType command ->
+                schemaKey(EntityType.RELATIONSHIP, command.type(), command.property());
+            case NodeLabelExistence command ->
+                schemaKey(EntityType.RELATIONSHIP, command.label(), List.of(":" + command.requiredLabel()));
+            case RelationshipEndpointLabel command ->
+                schemaKey(
+                        EntityType.NODE,
+                        command.type(),
+                        List.of(
+                                ":" + command.requiredLabel(),
+                                "@" + command.endpointType().name()));
+        };
     }
 
     private static String schemaKey(EntityType entityType, List<String> entities, List<String> properties) {

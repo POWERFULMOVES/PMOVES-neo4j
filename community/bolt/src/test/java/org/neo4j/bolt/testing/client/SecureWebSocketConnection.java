@@ -31,23 +31,28 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLPeerUnverifiedException;
-import org.neo4j.bolt.testing.client.error.BoltTestClientException;
+import org.neo4j.bolt.protocol.common.connector.transport.ConnectorTransport;
+import org.neo4j.bolt.testing.client.error.BoltTestClientStateException;
 import org.neo4j.bolt.testing.client.tls.NaiveTrustManager;
+import org.neo4j.bolt.testing.messages.BoltWire;
 
 public final class SecureWebSocketConnection extends WebSocketConnection implements SecureBoltTestConnection {
+
     private static final Factory factory = new Factory();
 
     public static BoltTestConnection.Factory factory() {
         return factory;
     }
 
-    public SecureWebSocketConnection(InetSocketAddress address) {
-        super(address);
+    public SecureWebSocketConnection(ConnectorTransport transport, BoltWire wire, InetSocketAddress address) {
+        super(transport, wire, address);
     }
 
     @Override
     protected SslContext sslContext() throws SSLException {
-        var builder = SslContextBuilder.forClient().trustManager(NaiveTrustManager.getInstance());
+        var builder = SslContextBuilder.forClient()
+                .endpointIdentificationAlgorithm(null)
+                .trustManager(NaiveTrustManager.getInstance());
 
         if (this.certificate != null) {
             builder.keyManager(this.privateKey, this.certificate);
@@ -72,20 +77,21 @@ public final class SecureWebSocketConnection extends WebSocketConnection impleme
         }
     }
 
+    @Override
     protected URI webSocketAddress() {
         try {
             return new URI("wss", null, this.address.getHostString(), this.address.getPort(), "/", null, null);
         } catch (URISyntaxException ex) {
-            throw new BoltTestClientException("Failed to construct WebSocket address", ex);
+            throw new BoltTestClientStateException("Failed to construct WebSocket address", ex);
         }
     }
 
     private static class Factory implements BoltTestConnection.Factory {
 
         @Override
-        public BoltTestConnection create(SocketAddress address) {
+        public BoltTestConnection create(ConnectorTransport transport, BoltWire wire, SocketAddress address) {
             if (address instanceof InetSocketAddress inetSocketAddress) {
-                return new SecureWebSocketConnection(inetSocketAddress);
+                return new SecureWebSocketConnection(transport, wire, inetSocketAddress);
             }
 
             throw new IllegalArgumentException("Cannot initialize TLS WebSocket connection with address of type "

@@ -22,11 +22,15 @@ package org.neo4j.kernel.impl.factory;
 import static java.util.Objects.requireNonNull;
 import static org.neo4j.kernel.impl.coreapi.DefaultTransactionExceptionMapper.INSTANCE;
 
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import org.neo4j.common.DependencyResolver;
 import org.neo4j.configuration.Config;
 import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.HostedOnMode;
+import org.neo4j.graphdb.TransactionFailureHelper;
 import org.neo4j.internal.kernel.api.connectioninfo.ClientConnectionInfo;
 import org.neo4j.internal.kernel.api.connectioninfo.RoutingInfo;
 import org.neo4j.internal.kernel.api.exceptions.TransactionFailureException;
@@ -48,6 +52,7 @@ import org.neo4j.kernel.impl.query.Neo4jTransactionalContextFactory;
 import org.neo4j.kernel.impl.query.TransactionalContext;
 import org.neo4j.kernel.impl.query.TransactionalContextFactory;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
+import org.neo4j.time.SystemNanoClock;
 
 /**
  * Default implementation of the GraphDatabaseService interface.
@@ -65,9 +70,11 @@ public class GraphDatabaseFacade extends GraphDatabaseTransactions implements Gr
             DbmsInfo dbmsInfo,
             HostedOnMode mode,
             TransactionalContext.DatabaseMode databaseMode,
-            DatabaseAvailabilityGuard availabilityGuard) {
-        super(config);
-        this.database = requireNonNull(database);
+            DatabaseAvailabilityGuard availabilityGuard,
+            SystemNanoClock clock,
+            BooleanSupplier multiVersioned) {
+        super(config, clock, requireNonNull(database).getNamedDatabaseId().databaseId(), multiVersioned);
+        this.database = database;
         this.availabilityGuard = requireNonNull(availabilityGuard);
         this.dbmsInfo = requireNonNull(dbmsInfo);
         this.mode = requireNonNull(mode);
@@ -90,7 +97,8 @@ public class GraphDatabaseFacade extends GraphDatabaseTransactions implements Gr
     @Override
     public InternalTransaction beginTransaction(
             Type type, LoginContext loginContext, ClientConnectionInfo clientInfo, long timeout, TimeUnit unit) {
-        return beginTransactionInternal(type, loginContext, clientInfo, null, unit.toMillis(timeout), null, INSTANCE);
+        return beginTransactionInternal(
+                type, loginContext, clientInfo, null, Collections.emptyList(), unit.toMillis(timeout), null, INSTANCE);
     }
 
     @Override
@@ -99,6 +107,7 @@ public class GraphDatabaseFacade extends GraphDatabaseTransactions implements Gr
             LoginContext loginContext,
             ClientConnectionInfo clientInfo,
             RoutingInfo routingInfo,
+            List<String> bookmarks,
             long timeout,
             TimeUnit unit,
             Consumer<Status> terminationCallback,
@@ -108,6 +117,7 @@ public class GraphDatabaseFacade extends GraphDatabaseTransactions implements Gr
                 loginContext,
                 clientInfo,
                 routingInfo,
+                bookmarks,
                 unit.toMillis(timeout),
                 terminationCallback,
                 transactionExceptionMapper);
@@ -118,6 +128,7 @@ public class GraphDatabaseFacade extends GraphDatabaseTransactions implements Gr
             LoginContext loginContext,
             ClientConnectionInfo connectionInfo,
             RoutingInfo routingInfo,
+            List<String> bookmarks,
             long timeoutMillis,
             Consumer<Status> terminationCallback,
             TransactionExceptionMapper transactionExceptionMapper) {
@@ -132,7 +143,10 @@ public class GraphDatabaseFacade extends GraphDatabaseTransactions implements Gr
                 terminationCallback,
                 transactionExceptionMapper,
                 database.getElementIdMapper(),
-                routingInfo);
+                routingInfo,
+                bookmarks,
+                database.getInternalLogProvider(),
+                database.getExceptionHandlerService());
     }
 
     @Override
@@ -156,7 +170,7 @@ public class GraphDatabaseFacade extends GraphDatabaseTransactions implements Gr
             availabilityGuard.assertDatabaseAvailable();
             return database.getKernel().beginTransaction(type, loginContext, connectionInfo, timeout);
         } catch (UnavailableException | TransactionFailureException e) {
-            throw new org.neo4j.graphdb.TransactionFailureException(e.getMessage(), e, e.status());
+            throw TransactionFailureHelper.wrapError(e);
         }
     }
 

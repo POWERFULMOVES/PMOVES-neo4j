@@ -17,18 +17,30 @@
 package org.neo4j.cypher.internal.util.symbols
 
 import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.cypher.internal.util.symbols.CypherType.normalizeTypes
 
 case class ListType(innerType: CypherType, isNullable: Boolean)(val position: InputPosition) extends CypherType {
 
   val parentType: CypherType = CTAny
   override val legacyIteratedType: CypherType = innerType
 
-  override lazy val coercibleTo: Set[CypherType] = Set(CTBoolean) ++ parentType.coercibleTo
+  override def coercibleTo: Set[CypherType] = Set(CTBoolean) ++ parentType.coercibleTo
 
   override def parents: Seq[CypherType] =
     innerType.parents.map(innerTypeParent => this.copy(innerTypeParent, isNullable)(position)) ++ super.parents
 
-  override val toString = s"List<$innerType>"
+  override def covariant: TypeSpec = this.invariant.covariant
+
+  override def invariant: TypeSpec = normalizeTypes(this.innerType) match {
+    case c: ClosedDynamicUnionType if c.innerTypes.forall(innerType => innerType.parentType == CTNumber) =>
+      TypeSpec.exact(CTList(CTNumber))
+    case _: ClosedDynamicUnionType => this.copy(CTAny)(position).invariant
+    case _                         => TypeSpec.exact(this)
+  }
+
+  override val isNotNullContaining: Boolean = !isNullable || innerType.isNotNullContaining
+
+  override val toClassString = s"List<$innerType>"
   override val toCypherTypeString = s"LIST<${innerType.description}>"
 
   override def normalizedCypherTypeString(): String = {
@@ -61,7 +73,6 @@ case class ListType(innerType: CypherType, isNullable: Boolean)(val position: In
             }
           case innerList: ListType => otherList match {
               case otherInnerList: ListType => innerList.isSubtypeOf(otherInnerList)
-              case _                        => false
             }
           case NothingType()                                => true
           case NullType() if otherList.innerType.isNullable => true
@@ -86,14 +97,14 @@ case class ListType(innerType: CypherType, isNullable: Boolean)(val position: In
       super.isAssignableFrom(other)
   }
 
-  override def leastUpperBound(other: CypherType): CypherType = other match {
+  override infix def leastUpperBound(other: CypherType): CypherType = other match {
     case otherCollection: ListType =>
       copy(innerType leastUpperBound otherCollection.innerType)(position)
     case _ =>
       super.leastUpperBound(other)
   }
 
-  override def greatestLowerBound(other: CypherType): Option[CypherType] = other match {
+  override infix def greatestLowerBound(other: CypherType): Option[CypherType] = other match {
     case otherCollection: ListType =>
       (innerType greatestLowerBound otherCollection.innerType).map(f => copy(f)(position))
     case _ =>

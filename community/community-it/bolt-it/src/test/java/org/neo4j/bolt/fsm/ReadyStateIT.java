@@ -20,23 +20,23 @@
 package org.neo4j.bolt.fsm;
 
 import static org.neo4j.bolt.testing.assertions.ResponseRecorderAssertions.assertThat;
-import static org.neo4j.bolt.testing.assertions.StateMachineAssertions.assertThat;
+import static org.neo4j.bolt.testing.assertions.StateMachineHandleAssertions.assertThat;
 
 import java.util.List;
 import org.mockito.Mockito;
 import org.neo4j.bolt.fsm.error.StateMachineException;
 import org.neo4j.bolt.protocol.common.fsm.States;
-import org.neo4j.bolt.protocol.common.message.request.RequestMessage;
 import org.neo4j.bolt.test.annotation.CommunityStateMachineTestExtension;
 import org.neo4j.bolt.testing.annotation.Version;
 import org.neo4j.bolt.testing.annotation.fsm.StateMachineTest;
 import org.neo4j.bolt.testing.annotation.fsm.initializer.Authenticated;
 import org.neo4j.bolt.testing.assertions.MapValueAssertions;
-import org.neo4j.bolt.testing.assertions.StateMachineAssertions;
+import org.neo4j.bolt.testing.assertions.StateMachineHandleAssertions;
 import org.neo4j.bolt.testing.messages.BoltMessages;
 import org.neo4j.bolt.testing.response.ResponseRecorder;
 import org.neo4j.bolt.tx.Transaction;
 import org.neo4j.bolt.tx.statement.Statement;
+import org.neo4j.boltmessages.request.RequestMessage;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.values.storable.Values;
 
@@ -45,7 +45,7 @@ class ReadyStateIT {
 
     @StateMachineTest
     void shouldMoveToInterruptedOnInterrupt(
-            @Authenticated StateMachine fsm, BoltMessages messages, ResponseRecorder recorder)
+            @Authenticated StateMachineHandle fsm, BoltMessages messages, ResponseRecorder recorder)
             throws StateMachineException {
         fsm.connection().interrupt();
 
@@ -55,7 +55,7 @@ class ReadyStateIT {
         assertThat(fsm).isInterrupted();
     }
 
-    private void shouldCloseConnectionOnMessage(StateMachine fsm, RequestMessage message) {
+    private void shouldCloseConnectionOnMessage(StateMachineHandle fsm, RequestMessage message) {
         var recorder = new ResponseRecorder();
 
         assertThat(fsm).shouldKillConnection(it -> it.process(message, recorder));
@@ -64,46 +64,47 @@ class ReadyStateIT {
     }
 
     @StateMachineTest
-    void shouldCloseConnectionOnPull(@Authenticated StateMachine fsm, BoltMessages messages) {
+    void shouldCloseConnectionOnPull(@Authenticated StateMachineHandle fsm, BoltMessages messages) {
         shouldCloseConnectionOnMessage(fsm, messages.pull());
     }
 
     @StateMachineTest
-    void shouldCloseConnectionOnDiscard(@Authenticated StateMachine fsm, BoltMessages messages) {
+    void shouldCloseConnectionOnDiscard(@Authenticated StateMachineHandle fsm, BoltMessages messages) {
         shouldCloseConnectionOnMessage(fsm, messages.discard());
     }
 
     @StateMachineTest
-    void shouldCloseConnectionOnCommit(@Authenticated StateMachine fsm, BoltMessages messages) {
+    void shouldCloseConnectionOnCommit(@Authenticated StateMachineHandle fsm, BoltMessages messages) {
         shouldCloseConnectionOnMessage(fsm, messages.commit());
     }
 
     @StateMachineTest
-    void shouldCloseConnectionOnRollback(@Authenticated StateMachine fsm, BoltMessages messages) {
+    void shouldCloseConnectionOnRollback(@Authenticated StateMachineHandle fsm, BoltMessages messages) {
         shouldCloseConnectionOnMessage(fsm, messages.rollback());
     }
 
     @StateMachineTest
-    void shouldCloseConnectionOnGoodbye(@Authenticated StateMachine fsm, BoltMessages messages) {
+    void shouldCloseConnectionOnGoodbye(@Authenticated StateMachineHandle fsm, BoltMessages messages) {
         shouldCloseConnectionOnMessage(fsm, messages.goodbye());
     }
 
-    @StateMachineTest(until = @Version(major = 5, minor = 7))
+    @StateMachineTest(until = @Version(major = 5, minor = 6))
     void shouldMoveToAutoCommitOnRunNoDb_succ(
-            @Authenticated StateMachine fsm, BoltMessages messages, ResponseRecorder recorder) throws Throwable {
+            @Authenticated StateMachineHandle fsm, BoltMessages messages, ResponseRecorder recorder) throws Throwable {
         // When
         fsm.process(messages.run("CREATE (n {k:'k'}) RETURN n.k"), recorder);
 
         // Then
-        assertThat(recorder).hasSuccessResponse(meta -> MapValueAssertions.assertThat(meta)
-                .containsKey("fields")
-                .containsKey("t_first")
-                .doesNotContainKey("db"));
+        assertThat(recorder)
+                .hasSuccessResponse(meta -> MapValueAssertions.assertThat(meta)
+                        .containsKey("fields")
+                        .containsKey("t_first")
+                        .doesNotContainKey("db"));
 
-        StateMachineAssertions.assertThat(fsm).isInState(States.AUTO_COMMIT);
+        StateMachineHandleAssertions.assertThat(fsm).isInState(States.AUTO_COMMIT);
     }
 
-    static void mockTransaction(StateMachine fsm, String homeDb) throws Throwable {
+    static void mockTransaction(StateMachineHandle fsm, String homeDb) throws Throwable {
         var txMock = Mockito.mock(Transaction.class);
         var statementMock = Mockito.mock(Statement.class);
         Mockito.doReturn(homeDb).when(fsm.connection()).selectedDefaultDatabase();
@@ -124,7 +125,7 @@ class ReadyStateIT {
 
     @StateMachineTest(since = @Version(major = 5, minor = 8))
     void shouldMoveToAutoCommitOnRunWithDb_succ(
-            @Authenticated StateMachine fsm, BoltMessages messages, ResponseRecorder recorder) throws Throwable {
+            @Authenticated StateMachineHandle fsm, BoltMessages messages, ResponseRecorder recorder) throws Throwable {
         // Given
         final var expectedHomeDb = "neo5j";
         mockTransaction(fsm, expectedHomeDb);
@@ -133,19 +134,20 @@ class ReadyStateIT {
         fsm.process(messages.run("CREATE (n {k:'k'}) RETURN n.k"), recorder);
 
         // Then
-        assertThat(recorder).hasSuccessResponse(meta -> MapValueAssertions.assertThat(meta)
-                .containsKey("fields")
-                .containsKey("t_first")
-                .containsEntry("db", Values.of(expectedHomeDb)));
+        assertThat(recorder)
+                .hasSuccessResponse(meta -> MapValueAssertions.assertThat(meta)
+                        .containsKey("fields")
+                        .containsKey("t_first")
+                        .containsEntry("db", Values.of(expectedHomeDb)));
 
         Mockito.verify(fsm.connection()).resolveDefaultDatabase();
 
-        StateMachineAssertions.assertThat(fsm).isInState(States.AUTO_COMMIT);
+        StateMachineHandleAssertions.assertThat(fsm).isInState(States.AUTO_COMMIT);
     }
 
     @StateMachineTest
     void shouldMoveToAutoCommitOnRunOnSelectedDb_succ(
-            @Authenticated StateMachine fsm, BoltMessages messages, ResponseRecorder recorder) throws Throwable {
+            @Authenticated StateMachineHandle fsm, BoltMessages messages, ResponseRecorder recorder) throws Throwable {
         // Given
         mockTransaction(fsm, "someOtherDb");
 
@@ -153,19 +155,20 @@ class ReadyStateIT {
         fsm.process(messages.run("CREATE (n {k:'k'}) RETURN n.k", "neo5j"), recorder);
 
         // Then
-        assertThat(recorder).hasSuccessResponse(meta -> MapValueAssertions.assertThat(meta)
-                .containsKey("fields")
-                .containsKey("t_first")
-                .doesNotContainKey("db"));
+        assertThat(recorder)
+                .hasSuccessResponse(meta -> MapValueAssertions.assertThat(meta)
+                        .containsKey("fields")
+                        .containsKey("t_first")
+                        .doesNotContainKey("db"));
 
         Mockito.verify(fsm.connection(), Mockito.never()).resolveDefaultDatabase();
 
-        StateMachineAssertions.assertThat(fsm).isInState(States.AUTO_COMMIT);
+        StateMachineHandleAssertions.assertThat(fsm).isInState(States.AUTO_COMMIT);
     }
 
-    @StateMachineTest(until = @Version(major = 5, minor = 7))
+    @StateMachineTest(until = @Version(major = 5, minor = 6))
     void shouldMoveToInTransactionOnBeginNoDb_succ(
-            @Authenticated StateMachine fsm, BoltMessages messages, ResponseRecorder recorder) throws Throwable {
+            @Authenticated StateMachineHandle fsm, BoltMessages messages, ResponseRecorder recorder) throws Throwable {
         // When
         fsm.process(messages.begin(), recorder);
 
@@ -175,27 +178,28 @@ class ReadyStateIT {
 
         Mockito.verify(fsm.connection(), Mockito.never()).resolveDefaultDatabase();
 
-        StateMachineAssertions.assertThat(fsm).isInState(States.IN_TRANSACTION);
+        StateMachineHandleAssertions.assertThat(fsm).isInState(States.IN_TRANSACTION);
     }
 
     @StateMachineTest(since = @Version(major = 5, minor = 8))
     void shouldMoveToInTransactionWithBeginWithDb_succ(
-            @Authenticated StateMachine fsm, BoltMessages messages, ResponseRecorder recorder) throws Throwable {
+            @Authenticated StateMachineHandle fsm, BoltMessages messages, ResponseRecorder recorder) throws Throwable {
         // When
         fsm.process(messages.begin(), recorder);
 
         // Then
-        assertThat(recorder).hasSuccessResponse(meta -> MapValueAssertions.assertThat(meta)
-                .containsEntry("db", Values.of(fsm.connection().selectedDefaultDatabase())));
+        assertThat(recorder)
+                .hasSuccessResponse(meta -> MapValueAssertions.assertThat(meta)
+                        .containsEntry("db", Values.of(fsm.connection().selectedDefaultDatabase())));
 
         Mockito.verify(fsm.connection()).resolveDefaultDatabase();
 
-        StateMachineAssertions.assertThat(fsm).isInState(States.IN_TRANSACTION);
+        StateMachineHandleAssertions.assertThat(fsm).isInState(States.IN_TRANSACTION);
     }
 
     @StateMachineTest()
     void shouldMoveToInTransactionWithBeginOnSelectedDb_succ(
-            @Authenticated StateMachine fsm, BoltMessages messages, ResponseRecorder recorder) throws Throwable {
+            @Authenticated StateMachineHandle fsm, BoltMessages messages, ResponseRecorder recorder) throws Throwable {
         // Given
         mockTransaction(fsm, "someOtherDb");
 
@@ -208,12 +212,12 @@ class ReadyStateIT {
 
         Mockito.verify(fsm.connection(), Mockito.never()).resolveDefaultDatabase();
 
-        StateMachineAssertions.assertThat(fsm).isInState(States.IN_TRANSACTION);
+        StateMachineHandleAssertions.assertThat(fsm).isInState(States.IN_TRANSACTION);
     }
 
     @StateMachineTest(since = @Version(major = 5, minor = 1))
     void shouldMoveBackToAuthenticationStateAfterALogoffMessage(
-            StateMachine fsm, BoltMessages messages, ResponseRecorder recorder) throws StateMachineException {
+            StateMachineHandle fsm, BoltMessages messages, ResponseRecorder recorder) throws StateMachineException {
         // Given
         fsm.process(messages.hello(), recorder);
         fsm.process(messages.logon(), recorder);
@@ -224,6 +228,6 @@ class ReadyStateIT {
         // Then
         assertThat(recorder).hasSuccessResponse();
 
-        StateMachineAssertions.assertThat(fsm).isInState(States.AUTHENTICATION);
+        StateMachineHandleAssertions.assertThat(fsm).isInState(States.AUTHENTICATION);
     }
 }

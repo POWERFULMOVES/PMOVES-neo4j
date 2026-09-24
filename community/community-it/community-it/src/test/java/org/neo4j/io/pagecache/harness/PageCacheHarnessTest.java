@@ -21,6 +21,7 @@ package org.neo4j.io.pagecache.harness;
 
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.PagedFile.PF_SHARED_READ_LOCK;
 import static org.neo4j.io.pagecache.PagedFile.PF_SHARED_WRITE_LOCK;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
@@ -47,12 +48,14 @@ import org.junit.jupiter.api.parallel.ResourceLock;
 import org.neo4j.io.fs.StoreChannel;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.PageCacheTestSupport;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.randomharness.Command;
 import org.neo4j.io.pagecache.randomharness.PageCountRecordFormat;
 import org.neo4j.io.pagecache.randomharness.Phase;
 import org.neo4j.io.pagecache.randomharness.RandomPageCacheTestHarness;
 import org.neo4j.io.pagecache.randomharness.RecordFormat;
 import org.neo4j.io.pagecache.randomharness.StandardRecordFormat;
+import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
@@ -109,7 +112,8 @@ abstract class PageCacheHarnessTest<T extends PageCache> extends PageCacheTestSu
             additionalDisabledCommands().forEach(harness::disableCommands);
             harness.setPreparation((cache, fs, filesTouched) -> {
                 Path file = filesTouched.iterator().next();
-                try (var pf = cache.map(file, cache.pageSize(), DEFAULT_DATABASE_NAME, getOpenOptions());
+                try (var pf = cache.map(
+                                new StoreFile(file), cache.pageSize(), DEFAULT_DATABASE_NAME, getOpenOptions());
                         var cursor = pf.io(0, PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
                     for (int pageId = 0; pageId < filePageCount; pageId++) {
                         cursor.next();
@@ -219,7 +223,7 @@ abstract class PageCacheHarnessTest<T extends PageCache> extends PageCacheTestSu
         return (cache, fs1, filesTouched) -> {
             for (Path file : filesTouched) {
                 var openOptions = getOpenOptions();
-                try (var pf = cache.map(file, cache.pageSize(), DEFAULT_DATABASE_NAME, openOptions);
+                try (var pf = cache.map(new StoreFile(file), cache.pageSize(), DEFAULT_DATABASE_NAME, openOptions);
                         var cursor = pf.io(0, PF_SHARED_READ_LOCK, NULL_CONTEXT)) {
                     for (int pageId = 0; pageId < filePageCount && cursor.next(); pageId++) {
                         try {
@@ -229,6 +233,11 @@ abstract class PageCacheHarnessTest<T extends PageCache> extends PageCacheTestSu
                             throw th;
                         }
                     }
+                    // The adversary is disabled by the time verification runs, but the on-disk copy may still
+                    // hold torn writes from cooperative eviction during the (adversarial) command phase. Flush
+                    // the authoritative in-cache pages down before reading the raw channel below, otherwise the
+                    // raw-file assertion checks an unreconciled disk state the page cache never guaranteed.
+                    pf.flushAndForce(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR);
                 }
                 var reservedBytes = cache.pageReservedBytes(openOptions);
                 try (StoreChannel channel = fs1.read(file)) {

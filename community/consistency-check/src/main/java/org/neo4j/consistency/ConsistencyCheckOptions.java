@@ -19,7 +19,7 @@
  */
 package org.neo4j.consistency;
 
-import static org.neo4j.internal.helpers.MathUtil.clamp;
+import static java.lang.Math.clamp;
 import static picocli.CommandLine.Help.Visibility.ALWAYS;
 import static picocli.CommandLine.Help.Visibility.NEVER;
 
@@ -91,10 +91,12 @@ public class ConsistencyCheckOptions {
             showDefaultValue = ALWAYS,
             defaultValue = "90%",
             converter = MaxOffHeapMemoryConverter.class,
-            description = "Maximum memory that neo4j-admin can use for page cache and various caching data structures "
-                    + "to improve performance. Value can be plain numbers, "
-                    + "like 10000000 or e.g. 20G for 20 gigabytes, or even e.g. 70%%, which will amount to 70%%"
-                    + " of currently free memory on the machine.")
+            description =
+                    "Maximum off-heap memory that the command can use for page cache and various caching data structures "
+                            + "to improve performance. Use this option to tune the command memory usage; the command does "
+                            + "not use the server.memory.pagecache.size configuration setting for this purpose. Values can "
+                            + "be plain numbers, such as 10000000, or, for example, 20G for 20 gigabytes, or 70%%, which "
+                            + "will amount to 70%% of currently free memory on the machine.")
     private long maxOffHeapMemory;
 
     @Option(
@@ -155,7 +157,7 @@ public class ConsistencyCheckOptions {
 
     private static class NumberOfThreadsConverter implements CommandLine.ITypeConverter<Integer> {
         @Override
-        public Integer convert(String value) throws Exception {
+        public Integer convert(String value) {
             if ("all".equals(value)) {
                 return Runtime.getRuntime().availableProcessors();
             }

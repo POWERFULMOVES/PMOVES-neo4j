@@ -24,23 +24,23 @@ import org.neo4j.cypher.internal.ast.Query
 import org.neo4j.cypher.internal.ast.UnionAll
 import org.neo4j.cypher.internal.ast.UnionDistinct
 import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
+import org.neo4j.cypher.internal.compiler.ast.convert.plannerQuery.PlannerQueryBuilder
 import org.neo4j.cypher.internal.compiler.ast.convert.plannerQuery.StatementConverters
-import org.neo4j.cypher.internal.frontend.phases.BaseContext
 import org.neo4j.cypher.internal.frontend.phases.BaseState
 import org.neo4j.cypher.internal.frontend.phases.CompilationPhaseTracer.CompilationPhase.LOGICAL_PLANNING
 import org.neo4j.cypher.internal.frontend.phases.Namespacer
 import org.neo4j.cypher.internal.frontend.phases.Phase
-import org.neo4j.cypher.internal.frontend.phases.StatementCondition
 import org.neo4j.cypher.internal.frontend.phases.Transformer
 import org.neo4j.cypher.internal.frontend.phases.collapseMultipleInPredicates
+import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerConfig
 import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerFactory
 import org.neo4j.cypher.internal.frontend.phases.rewriting.cnf.CNFNormalizer.PredicatesInCNF
 import org.neo4j.cypher.internal.ir.PlannerQuery
 import org.neo4j.cypher.internal.ir.QueryProjection
+import org.neo4j.cypher.internal.rewriting.conditions.AggregationsAreIsolated
+import org.neo4j.cypher.internal.rewriting.conditions.ContainsNamedPathOnlyForShortestPath
+import org.neo4j.cypher.internal.rewriting.conditions.ContainsNoNodesOfType
 import org.neo4j.cypher.internal.rewriting.conditions.SemanticInfoAvailable
-import org.neo4j.cypher.internal.rewriting.conditions.aggregationsAreIsolated
-import org.neo4j.cypher.internal.rewriting.conditions.containsNamedPathOnlyForShortestPath
-import org.neo4j.cypher.internal.rewriting.conditions.containsNoNodesOfType
 import org.neo4j.cypher.internal.util.StepSequencer
 import org.neo4j.exceptions.InternalException
 import org.neo4j.exceptions.NotSystemDatabaseException
@@ -48,23 +48,23 @@ import org.neo4j.exceptions.NotSystemDatabaseException
 /**
  * From the normalized ast, create the corresponding PlannerQuery.
  */
-case class CreatePlannerQuery(semanticFeatures: Set[SemanticFeature])
-    extends Phase[BaseContext, BaseState, LogicalPlanState] {
+case object CreatePlannerQueryTransformer extends Phase[PlannerContext, BaseState, LogicalPlanState] {
 
   override def phase = LOGICAL_PLANNING
 
-  override def process(from: BaseState, context: BaseContext): LogicalPlanState = from.statement() match {
+  override def process(from: BaseState, context: PlannerContext): LogicalPlanState = from.statement() match {
     case query: Query =>
+      val statementConverters = StatementConverters(PlannerQueryBuilder.Config.fromPlannerConfig(context.config))
       val plannerQuery: PlannerQuery =
-        if (semanticFeatures.contains(SemanticFeature.UseAsMultipleGraphsSelector))
-          StatementConverters.convertCompositePlannerQuery(
+        if (context.semanticFeatures.contains(SemanticFeature.UseAsMultipleGraphsSelector))
+          statementConverters.convertCompositePlannerQuery(
             query = query,
             semanticTable = from.semanticTable(),
             anonymousVariableNameGenerator = from.anonymousVariableNameGenerator,
             cancellationChecker = context.cancellationChecker
           )
         else
-          StatementConverters.convertToPlannerQuery(
+          statementConverters.convertToPlannerQuery(
             query = query,
             semanticTable = from.semanticTable(),
             anonymousVariableNameGenerator = from.anonymousVariableNameGenerator,
@@ -75,11 +75,9 @@ case class CreatePlannerQuery(semanticFeatures: Set[SemanticFeature])
 
       LogicalPlanState(from).copy(maybeQuery = Some(plannerQuery))
 
-    case command: AdministrationCommand => throw new NotSystemDatabaseException(
-        s"This is an administration command and it should be executed against the system database: ${command.name}"
-      )
+    case command: AdministrationCommand => throw NotSystemDatabaseException.notSystemDatabaseException(command.name)
 
-    case x => throw new InternalException(s"Expected a Query and not `$x`")
+    case x => throw InternalException.internalError(this.getClass.getSimpleName, s"Expected a Query and not `$x`")
   }
 
   override def postConditions: Set[StepSequencer.Condition] = CreatePlannerQuery.postConditions
@@ -89,13 +87,13 @@ case object CreatePlannerQuery extends StepSequencer.Step with PlanPipelineTrans
 
   override def preConditions: Set[StepSequencer.Condition] = Set(
     // We would get MatchErrors if the first 3 conditions would not be met.
-    StatementCondition(containsNamedPathOnlyForShortestPath),
-    StatementCondition(containsNoNodesOfType[UnionAll]()),
-    StatementCondition(containsNoNodesOfType[UnionDistinct]()),
+    ContainsNamedPathOnlyForShortestPath,
+    ContainsNoNodesOfType[UnionAll](),
+    ContainsNoNodesOfType[UnionDistinct](),
     // The PlannerQuery we create should already contain disambiguated names
     Namespacer.completed,
     // and we want to take advantage of isolated aggregations in the planner
-    StatementCondition(aggregationsAreIsolated),
+    AggregationsAreIsolated,
     collapseMultipleInPredicates.completed
   ) ++
     // The PlannerQuery should be created based on normalised predicates
@@ -108,8 +106,6 @@ case object CreatePlannerQuery extends StepSequencer.Step with PlanPipelineTrans
   override def invalidatedConditions: Set[StepSequencer.Condition] = Set.empty
 
   override def getTransformer(
-    pushdownPropertyReads: Boolean,
-    semanticFeatures: Seq[SemanticFeature]
-  ): Transformer[BaseContext, BaseState, LogicalPlanState] =
-    CreatePlannerQuery(semanticFeatures.toSet)
+    planPipelineConfig: PlanPipelineTransformerConfig
+  ): Transformer[PlannerContext, BaseState, LogicalPlanState] = CreatePlannerQueryTransformer
 }

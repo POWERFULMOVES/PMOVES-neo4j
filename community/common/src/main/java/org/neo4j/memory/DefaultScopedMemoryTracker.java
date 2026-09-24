@@ -107,9 +107,13 @@ public class DefaultScopedMemoryTracker implements ScopedMemoryTracker {
     public void close() {
         heapEstimatorCache.fullReset();
         // On a parent ScopedMemoryTracker, only release memory if that parent was not already closed.
-        if (!(delegate instanceof ScopedMemoryTracker) || !((ScopedMemoryTracker) delegate).isClosed()) {
-            delegate.releaseNative(trackedNative);
-            delegate.releaseHeap(trackedHeap);
+        if (!(delegate instanceof final ScopedMemoryTracker scoped && scoped.isClosed())) {
+            if (trackedNative != 0) {
+                delegate.releaseNative(trackedNative);
+            }
+            if (trackedHeap != 0) {
+                delegate.releaseHeap(trackedHeap);
+            }
         }
         trackedNative = 0;
         trackedHeap = 0;

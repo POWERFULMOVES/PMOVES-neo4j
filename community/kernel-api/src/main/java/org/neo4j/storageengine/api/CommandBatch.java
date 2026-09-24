@@ -19,6 +19,8 @@
  */
 package org.neo4j.storageengine.api;
 
+import static org.neo4j.storageengine.AppendIndexProvider.UNKNOWN_APPEND_INDEX;
+
 import org.neo4j.common.Subject;
 import org.neo4j.kernel.KernelVersionProvider;
 
@@ -56,6 +58,12 @@ public interface CommandBatch extends CommandStream, KernelVersionProvider {
     int getLeaseId();
 
     /**
+     * @return the identifiers for leases associated with other databases and servers for this transaction.
+     * This is only used for coordinating transaction validity in a sharded cluster
+     */
+    Leases leases();
+
+    /**
      * @return the subject associated with the transaction.
      * Typically, an authenticated end user that created the transaction.
      */
@@ -79,6 +87,13 @@ public interface CommandBatch extends CommandStream, KernelVersionProvider {
     boolean isFirst();
 
     /**
+     * True if command batch is part of a sequence of transactional command batches (longer than 1).
+     */
+    default boolean isMultiChunked() {
+        return !isFirst() || !isLast();
+    }
+
+    /**
      * True if command batch is a rollback batch for one of the transactions.
      */
     boolean isRollback();
@@ -94,8 +109,24 @@ public interface CommandBatch extends CommandStream, KernelVersionProvider {
     long appendIndex();
 
     /**
+     * Get append index of previous transaction in multi-chunked series.
+     */
+    default long previousBatchAppendIndex() {
+        return UNKNOWN_APPEND_INDEX;
+    }
+
+    /**
+     * Get command batch chunk id
+     */
+    long chunkId();
+
+    /**
      * Set command batch append index. Append index of command batch becomes available only after appending it into the log files.
      * @param appendIndex provided batch append index
      */
     void setAppendIndex(long appendIndex);
+
+    default boolean isEmptyTransaction() {
+        return commandCount() == 0 && isFirst() && isLast();
+    }
 }

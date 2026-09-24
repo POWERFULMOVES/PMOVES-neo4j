@@ -19,28 +19,33 @@
  */
 package org.neo4j.kernel.api.impl.schema.populator;
 
+import static org.neo4j.kernel.api.impl.index.lucene.LuceneDocumentsFactory.ENTITY_ID_KEY;
+
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.Arrays;
-import org.neo4j.internal.schema.SchemaDescriptorSupplier;
-import org.neo4j.kernel.api.impl.schema.TextDocumentStructure;
-import org.neo4j.kernel.api.impl.schema.writer.LuceneIndexWriter;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDocumentsFactory;
+import org.neo4j.kernel.api.impl.schema.writer.LucenePartitionIndexWriter;
 import org.neo4j.kernel.api.index.IndexUpdater;
 import org.neo4j.kernel.impl.index.schema.IndexUpdateIgnoreStrategy;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
+import org.neo4j.storageengine.api.UpdateMode;
 import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
+import org.neo4j.values.storable.Value;
 
 /**
  * A {@link TextIndexPopulatingUpdater} used for non-unique Lucene schema indexes.
  */
 public class TextIndexPopulatingUpdater implements IndexUpdater {
 
-    private final LuceneIndexWriter writer;
+    private final LucenePartitionIndexWriter writer;
     private final IndexUpdateIgnoreStrategy ignoreStrategy;
+    private final LuceneDocumentsFactory documentsFactory;
 
-    public TextIndexPopulatingUpdater(LuceneIndexWriter writer, IndexUpdateIgnoreStrategy ignoreStrategy) {
+    public TextIndexPopulatingUpdater(LucenePartitionIndexWriter writer, IndexUpdateIgnoreStrategy ignoreStrategy) {
         this.writer = writer;
         this.ignoreStrategy = ignoreStrategy;
+        documentsFactory = writer.documentsFactory();
     }
 
     @Override
@@ -49,26 +54,27 @@ public class TextIndexPopulatingUpdater implements IndexUpdater {
     }
 
     @Override
-    public void process(IndexEntryUpdate<?> update) {
-        final var valueUpdate = asValueUpdate(update);
+    public void process(IndexEntryUpdate update) {
+        ValueIndexEntryUpdate valueUpdate = asValueUpdate(update);
         if (valueUpdate == null) {
             return;
         }
 
         try {
-            final var entityId = valueUpdate.getEntityId();
-            final var values = valueUpdate.values();
-            final var updateMode = valueUpdate.updateMode();
+            long entityId = valueUpdate.getEntityId();
+            Value[] values = valueUpdate.values();
+            UpdateMode updateMode = valueUpdate.updateMode();
             switch (updateMode) {
-                case ADDED -> writer.updateDocument(
-                        TextDocumentStructure.newTermForChangeOrRemove(entityId),
-                        TextDocumentStructure.documentRepresentingProperties(entityId, values));
-                case CHANGED -> writer.updateOrDeleteDocument(
-                        TextDocumentStructure.newTermForChangeOrRemove(entityId),
-                        TextDocumentStructure.documentRepresentingProperties(entityId, values));
-                case REMOVED -> writer.deleteDocuments(TextDocumentStructure.newTermForChangeOrRemove(entityId));
-                default -> throw new IllegalStateException(
-                        "Unknown update mode " + updateMode + " for values " + Arrays.toString(values));
+                case ADDED ->
+                    writer.updateDocument(
+                            ENTITY_ID_KEY, entityId, documentsFactory.reusableTextDocument(entityId, values));
+                case CHANGED ->
+                    writer.updateOrDeleteDocument(
+                            ENTITY_ID_KEY, entityId, documentsFactory.reusableTextDocument(entityId, values));
+                case REMOVED -> writer.deleteDocuments(ENTITY_ID_KEY, entityId);
+                default ->
+                    throw new IllegalStateException(
+                            "Unknown update mode " + updateMode + " for values " + Arrays.toString(values));
             }
         } catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -76,9 +82,8 @@ public class TextIndexPopulatingUpdater implements IndexUpdater {
     }
 
     @Override
-    public <INDEX_KEY extends SchemaDescriptorSupplier> ValueIndexEntryUpdate<INDEX_KEY> asValueUpdate(
-            IndexEntryUpdate<INDEX_KEY> update) {
-        final var valueUpdate = IndexUpdater.super.asValueUpdate(update);
+    public ValueIndexEntryUpdate asValueUpdate(IndexEntryUpdate update) {
+        ValueIndexEntryUpdate valueUpdate = IndexUpdater.super.asValueUpdate(update);
         return !ignoreStrategy.ignore(valueUpdate) ? ignoreStrategy.toEquivalentUpdate(valueUpdate) : null;
     }
 }

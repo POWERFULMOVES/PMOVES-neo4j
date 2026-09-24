@@ -93,6 +93,16 @@ public interface Status {
                 "The client made a request for a format which has been deprecated.",
                 SeverityLevel.WARNING,
                 NotificationCategory.DEPRECATION),
+        FeatureDeprecationWarning(
+                ClientNotification,
+                "This feature is deprecated and will be removed in future versions.",
+                SeverityLevel.WARNING,
+                NotificationCategory.DEPRECATION),
+        UnsupportedType(
+                ClientNotification,
+                "Client does not support this type.",
+                SeverityLevel.WARNING,
+                NotificationCategory.UNSUPPORTED),
         NoThreadsAvailable(
                 TransientError, // TODO: see above
                 "There are no available threads to serve this request at the moment. You can retry at a later time "
@@ -132,7 +142,7 @@ public interface Status {
                 "The transaction is of the wrong type to service the request. For instance, a transaction that has "
                         + "had schema modifications performed in it cannot be used to subsequently perform data operations, "
                         + "and vice versa."),
-        TransactionValidationFailed(ClientError, "Transaction changes did not pass validation checks"),
+        TransactionValidationFailed(ClientError, "Transaction changes did not pass validation checks."),
         TransactionHookFailed(ClientError, "Transaction hook failure."),
         TransactionMarkedAsFailed(
                 ClientError,
@@ -287,6 +297,11 @@ public interface Status {
                         + "be materialized in main memory before proceeding",
                 SeverityLevel.INFORMATION,
                 NotificationCategory.PERFORMANCE),
+        VirtualGraphPostProcessing(
+                ClientNotification,
+                "The query plan against a virtual graph contains a potentially expensive post-processing step.",
+                SeverityLevel.INFORMATION,
+                NotificationCategory.PERFORMANCE),
         JoinHintUnfulfillableWarning(
                 ClientNotification,
                 "The database was unable to plan a hinted join.",
@@ -295,12 +310,6 @@ public interface Status {
         NoApplicableIndex(
                 ClientNotification,
                 "Adding a schema index may speed up this query.",
-                SeverityLevel.INFORMATION,
-                NotificationCategory.PERFORMANCE),
-        @Deprecated
-        SuboptimalIndexForWildcardQuery(
-                ClientNotification,
-                "Index cannot execute wildcard query efficiently",
                 SeverityLevel.INFORMATION,
                 NotificationCategory.PERFORMANCE),
         UnboundedVariableLengthPattern(
@@ -315,18 +324,15 @@ public interface Status {
                         + "might be used in order to find the requested shortest path.",
                 SeverityLevel.INFORMATION,
                 NotificationCategory.PERFORMANCE),
-
-        @Deprecated
-        SideEffectVisibility(
-                ClientNotification,
-                "Using a subquery expression within a mutating statement has implications for its side-effect visibility",
-                SeverityLevel.WARNING,
-                NotificationCategory.DEPRECATION),
-
         // client notifications (not supported/deprecated)
         RuntimeUnsupportedWarning(
                 ClientNotification,
                 "This query is not supported by the chosen runtime.",
+                SeverityLevel.WARNING,
+                NotificationCategory.UNSUPPORTED),
+        PlannerVersionUnsupportedWarning(
+                ClientNotification,
+                "The requested planner version is no longer supported.",
                 SeverityLevel.WARNING,
                 NotificationCategory.UNSUPPORTED),
         FeatureDeprecationWarning(
@@ -334,12 +340,6 @@ public interface Status {
                 "This feature is deprecated and will be removed in future versions.",
                 SeverityLevel.WARNING,
                 NotificationCategory.DEPRECATION),
-        @Deprecated
-        RuntimeExperimental(
-                ClientNotification,
-                "This feature is experimental and should not be used in production systems.",
-                SeverityLevel.WARNING,
-                NotificationCategory.UNSUPPORTED),
         UnsupportedAdministrationCommand(ClientError, "This administration command is not supported."),
 
         // client notifications (unknown tokens)
@@ -359,21 +359,30 @@ public interface Status {
                 SeverityLevel.WARNING,
                 NotificationCategory.UNRECOGNIZED),
 
+        // client notifications
         SubqueryVariableShadowing(
                 ClientNotification,
                 "Variable in subquery is shadowing a variable with the same name from the outer scope.",
                 SeverityLevel.INFORMATION,
                 NotificationCategory.GENERIC),
-
         RedundantOptionalProcedure(
                 ClientNotification,
                 "The use of `OPTIONAL` is redundant when `CALL` is a void procedure.",
                 SeverityLevel.INFORMATION,
                 NotificationCategory.GENERIC),
-
         RedundantOptionalSubquery(
                 ClientNotification,
                 "The use of `OPTIONAL` is redundant when `CALL` is a unit subquery.",
+                SeverityLevel.INFORMATION,
+                NotificationCategory.GENERIC),
+        IdentifierShadowingVariable(
+                ClientNotification,
+                "An identifier is shadowing a variable in scope.",
+                SeverityLevel.INFORMATION,
+                NotificationCategory.GENERIC),
+        CallableShadowing(
+                ClientNotification,
+                "A callable is shadowing another callable in scope.",
                 SeverityLevel.INFORMATION,
                 NotificationCategory.GENERIC),
 
@@ -459,7 +468,8 @@ public interface Status {
                 ClientError,
                 "A token name, such as a label, relationship type or property key, used is not valid. Tokens cannot "
                         + "be empty strings and cannot be null."),
-        TokenLengthError(ClientError, "A token name, such as a label, relationship type or property key is too long"),
+        TokenLengthError(ClientError, "A token name, such as a label, relationship type or property key is too long."),
+        SchemaRuleEntrySizeLimitError(ClientError, "A schema rule entry exceeded the maximum allowed size."),
 
         // client notifications
         HintedIndexNotFound(
@@ -471,6 +481,11 @@ public interface Status {
                 ClientNotification, "`%s` has no effect.", SeverityLevel.INFORMATION, NotificationCategory.SCHEMA),
         IndexOrConstraintDoesNotExist(
                 ClientNotification, "`%s` has no effect.", SeverityLevel.INFORMATION, NotificationCategory.SCHEMA),
+        VectorIndexDimensionsNotSpecified(
+                ClientNotification,
+                "Vector index dimensions not specified.",
+                SeverityLevel.INFORMATION,
+                NotificationCategory.SCHEMA),
 
         // database errors
         ConstraintCreationFailed(DatabaseError, "Creating a requested constraint failed."),
@@ -573,10 +588,20 @@ public interface Status {
                 "External auth for user is not enabled.",
                 SeverityLevel.WARNING,
                 NotificationCategory.SECURITY),
+        OidcCredentialForwardingNotEnabled(
+                ClientNotification,
+                "OIDC credential forwarding is not enabled.",
+                SeverityLevel.WARNING,
+                NotificationCategory.SECURITY),
         CommandHasNoEffect(
                 ClientNotification, "`%s` has no effect.", SeverityLevel.INFORMATION, NotificationCategory.SECURITY),
         ImpossibleRevokeCommand(
-                ClientNotification, "`%s` has no effect.", SeverityLevel.WARNING, NotificationCategory.SECURITY);
+                ClientNotification, "`%s` has no effect.", SeverityLevel.WARNING, NotificationCategory.SECURITY),
+        ShardedPrivilegePerformance(
+                ClientNotification,
+                "Privilege with a severe performance impact on sharded databases.",
+                SeverityLevel.INFORMATION,
+                NotificationCategory.SECURITY);
 
         private final Code code;
 
@@ -655,7 +680,9 @@ public interface Status {
         DatabaseUnavailable(
                 TransientError,
                 "The database is not currently available to serve your request, refer to the database logs for more "
-                        + "details. Retrying your request at a later time may succeed.");
+                        + "details. Retrying your request at a later time may succeed."),
+        EntityIdNotFound(TransientError, "The request referred to an entity id that does not exist."),
+        RemoteFailure(TransientError, "A request to a remote system failed. You may retry the request.");
 
         private final Code code;
 
@@ -742,7 +769,21 @@ public interface Status {
                 ClientNotification,
                 "`ALTER DATABASE` has no effect.",
                 SeverityLevel.INFORMATION,
-                NotificationCategory.TOPOLOGY);
+                NotificationCategory.TOPOLOGY),
+
+        ServerCaughtUp(
+                ClientNotification, "Server has caught up.", SeverityLevel.INFORMATION, NotificationCategory.TOPOLOGY),
+
+        ServerFailed(ClientNotification, "Server failed.", SeverityLevel.WARNING, NotificationCategory.TOPOLOGY),
+
+        ServerCatchingUp(
+                ClientNotification,
+                "Server is still catching up.",
+                SeverityLevel.WARNING,
+                NotificationCategory.TOPOLOGY),
+
+        ServerNotAvailable(
+                ClientNotification, "Server is not available.", SeverityLevel.WARNING, NotificationCategory.TOPOLOGY);
 
         private final Code code;
 
@@ -764,24 +805,6 @@ public interface Status {
         }
     }
 
-    enum Fabric implements Status {
-        @Deprecated
-        RemoteExecutionFailed(DatabaseError, "The database was unable to execute a remote part of the statement."),
-        @Deprecated
-        AccessMode(ClientError, "The request could not be completed due to access mode violation");
-
-        private final Code code;
-
-        @Override
-        public Code code() {
-            return code;
-        }
-
-        Fabric(Classification classification, String description) {
-            this.code = new Code(classification, this, description);
-        }
-    }
-
     enum ChangeDataCapture implements Status {
         Disabled(DatabaseError, "Change Data Capture is not currently enabled for this database"),
         ScanFailure(DatabaseError, "Unable to read the Change Data Capture data for this database"),
@@ -798,6 +821,23 @@ public interface Status {
         }
 
         ChangeDataCapture(Classification classification, String description) {
+            this.code = new Code(classification, this, description);
+        }
+    }
+
+    enum Data implements Status {
+        DataUnsupportedByStoreFormat(
+                ClientError,
+                "some data added in this transaction is not supported by the store format of this database");
+
+        private final Code code;
+
+        @Override
+        public Code code() {
+            return code;
+        }
+
+        Data(Classification classification, String description) {
             this.code = new Code(classification, this, description);
         }
     }

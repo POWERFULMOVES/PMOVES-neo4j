@@ -20,37 +20,23 @@
 package org.neo4j.kernel.impl.newapi;
 
 import static java.util.Arrays.stream;
-import static org.neo4j.kernel.impl.newapi.TxStateIndexChanges.indexUpdatesForBoundingBoxSeek;
-import static org.neo4j.kernel.impl.newapi.TxStateIndexChanges.indexUpdatesForRangeSeek;
-import static org.neo4j.kernel.impl.newapi.TxStateIndexChanges.indexUpdatesForRangeSeekByPrefix;
-import static org.neo4j.kernel.impl.newapi.TxStateIndexChanges.indexUpdatesForScan;
-import static org.neo4j.kernel.impl.newapi.TxStateIndexChanges.indexUpdatesForSeek;
-import static org.neo4j.kernel.impl.newapi.TxStateIndexChanges.indexUpdatesForSuffixOrContains;
-import static org.neo4j.kernel.impl.newapi.TxStateIndexChanges.indexUpdatesWithValuesForBoundingBoxSeek;
-import static org.neo4j.kernel.impl.newapi.TxStateIndexChanges.indexUpdatesWithValuesForRangeSeek;
-import static org.neo4j.kernel.impl.newapi.TxStateIndexChanges.indexUpdatesWithValuesForRangeSeekByPrefix;
-import static org.neo4j.kernel.impl.newapi.TxStateIndexChanges.indexUpdatesWithValuesForScan;
-import static org.neo4j.kernel.impl.newapi.TxStateIndexChanges.indexUpdatesWithValuesForSeek;
-import static org.neo4j.kernel.impl.newapi.TxStateIndexChanges.indexUpdatesWithValuesForSuffixOrContains;
 
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
-import java.util.List;
 import org.eclipse.collections.api.iterator.LongIterator;
-import org.eclipse.collections.api.set.primitive.LongSet;
-import org.eclipse.collections.impl.factory.primitive.LongSets;
 import org.eclipse.collections.impl.iterator.ImmutableEmptyLongIterator;
+import org.neo4j.internal.kernel.api.EntityIndexCursor;
 import org.neo4j.internal.kernel.api.IndexQueryConstraints;
-import org.neo4j.internal.kernel.api.IndexResultScore;
 import org.neo4j.internal.kernel.api.KernelReadTracer;
 import org.neo4j.internal.kernel.api.PropertyIndexQuery;
 import org.neo4j.internal.kernel.api.Read;
 import org.neo4j.internal.kernel.api.ValueIndexCursor;
+import org.neo4j.internal.kernel.api.security.AccessMode;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexOrder;
 import org.neo4j.internal.schema.IndexQuery.IndexQueryType;
+import org.neo4j.internal.schema.IndexRemovalSnapshot;
 import org.neo4j.kernel.api.AccessModeProvider;
 import org.neo4j.kernel.api.index.IndexProgressor;
 import org.neo4j.kernel.api.txstate.TransactionState;
@@ -60,13 +46,13 @@ import org.neo4j.kernel.impl.newapi.TxStateIndexChanges.AddedWithValuesAndRemove
 import org.neo4j.storageengine.api.LongReference;
 import org.neo4j.storageengine.api.PropertySelection;
 import org.neo4j.values.storable.Value;
-import org.neo4j.values.storable.ValueTuple;
 
-abstract class DefaultEntityValueIndexCursor<CURSOR> extends IndexCursor<IndexProgressor, CURSOR>
-        implements ValueIndexCursor, IndexResultScore, EntityIndexSeekClient, SortedMergeJoin.Sink {
+public abstract class DefaultEntityValueIndexCursor<CURSOR> extends IndexCursor<IndexProgressor, CURSOR>
+        implements ValueIndexCursor, EntityIndexSeekClient, SortedMergeJoin.Sink, EntityIndexCursor {
     protected Read read;
     protected TxStateHolder txStateHolder;
     protected AccessModeProvider accessModeProvider;
+    protected AccessMode accessMode;
     protected long entity;
     private float score;
     private PropertyIndexQuery[] query;
@@ -74,14 +60,15 @@ abstract class DefaultEntityValueIndexCursor<CURSOR> extends IndexCursor<IndexPr
 
     private LongIterator added = ImmutableEmptyLongIterator.INSTANCE;
     private Iterator<EntityWithPropertyValues> addedWithValues = Collections.emptyIterator();
-    private LongSet removed = LongSets.immutable.empty();
+    private LongSetContains removed = (value) -> false;
     private boolean needsValues;
     private IndexOrder indexOrder;
     private final SortedMergeJoin sortedMergeJoin = new SortedMergeJoin();
     private boolean shortcutSecurity;
     private boolean needStoreFilter;
     private PropertySelection propertySelection;
-    private final boolean applyAccessModeToTxState;
+    protected final boolean applyAccessModeToTxState;
+    private int numberOfProperties;
 
     DefaultEntityValueIndexCursor(CursorPool<CURSOR> pool, boolean applyAccessModeToTxState) {
         super(pool);
@@ -106,30 +93,28 @@ abstract class DefaultEntityValueIndexCursor<CURSOR> extends IndexCursor<IndexPr
         this.needStoreFilter = needStoreFilter;
         this.propertySelection = PropertySelection.selection(indexQueryKeys(query));
         sortedMergeJoin.initialize(indexOrder);
+        // The query[] length doesn't always match the number of properties in the index since we allow a single
+        // "*" query even for composite indexes.
+        numberOfProperties = descriptor.schema().getPropertyIds().length;
 
         this.query = query;
 
         if (tracer != null) {
-            tracer.onIndexSeek();
+            tracer.onIndexSeek(descriptor);
         }
 
-        shortcutSecurity = setupSecurity(descriptor);
+        shortcutSecurity = canAccessAllDescribedEntities(descriptor);
 
         if (!indexIncludesTransactionState && txStateHolder.hasTxStateWithChanges() && query.length > 0) {
-            // Extract out the equality queries
-            List<Value> exactQueryValues = new ArrayList<>(query.length);
             int i = 0;
             while (i < query.length && query[i].type() == IndexQueryType.EXACT) {
-                exactQueryValues.add(((PropertyIndexQuery.ExactPredicate) query[i]).value());
                 i++;
             }
-            Value[] exactValues = exactQueryValues.toArray(new Value[0]);
 
             if (i == query.length) {
-                // Only exact queries
-                // No need to order, all values are the same
+                // Only exact queries — no need to order, all values are the same.
                 this.indexOrder = IndexOrder.NONE;
-                seekQuery(descriptor, exactValues);
+                consultTxState(descriptor);
             } else {
                 PropertyIndexQuery nextQuery = query[i];
                 switch (nextQuery.type()) {
@@ -137,33 +122,28 @@ abstract class DefaultEntityValueIndexCursor<CURSOR> extends IndexCursor<IndexPr
                         // This also covers the rewritten suffix/contains for composite index
                         // If composite index all following will be exists as well so no need to consider those
                         setNeedsValuesIfRequiresOrder();
-                        if (exactQueryValues.isEmpty()) {
-                            // First query is allEntries or exists, use scan
-                            scanQuery(descriptor);
-                        } else {
-                            rangeQuery(descriptor, exactValues, null);
-                        }
+                        consultTxState(descriptor);
                     }
 
                     case RANGE -> {
                         // This case covers first query to be range or exact followed by range
                         // If composite index all following will be exists as well so no need to consider those
                         setNeedsValuesIfRequiresOrder();
-                        rangeQuery(descriptor, exactValues, (PropertyIndexQuery.RangePredicate<?>) nextQuery);
+                        consultTxState(descriptor);
                     }
 
                     case BOUNDING_BOX -> {
                         // This case covers first query to be bounding box or exact followed by bounding box
                         // If composite index all following will be exists as well so no need to consider those
                         setNeedsValuesIfRequiresOrder();
-                        boundingBoxQuery(descriptor, exactValues, (PropertyIndexQuery.BoundingBoxPredicate) nextQuery);
+                        consultTxState(descriptor);
                     }
 
                     case STRING_PREFIX -> {
                         // This case covers first query to be prefix or exact followed by prefix
                         // If composite index all following will be exists as well so no need to consider those
                         setNeedsValuesIfRequiresOrder();
-                        prefixQuery(descriptor, exactValues, (PropertyIndexQuery.StringPrefixPredicate) nextQuery);
+                        consultTxState(descriptor);
                     }
 
                     case STRING_SUFFIX, STRING_CONTAINS -> {
@@ -171,7 +151,7 @@ abstract class DefaultEntityValueIndexCursor<CURSOR> extends IndexCursor<IndexPr
                         // for composite index, the suffix/contains should already
                         // have been rewritten as exists + filter, so no need to consider it here
                         assert query.length == 1;
-                        suffixOrContainsQuery(descriptor, nextQuery);
+                        consultTxState(descriptor);
                     }
 
                     case NEAREST_NEIGHBORS -> {
@@ -179,10 +159,25 @@ abstract class DefaultEntityValueIndexCursor<CURSOR> extends IndexCursor<IndexPr
                         // TODO VECTOR: handle transaction state!
                     }
 
-                    default -> throw new UnsupportedOperationException(
-                            "Query not supported: " + Arrays.toString(query));
+                    default ->
+                        throw new UnsupportedOperationException("Query not supported: " + Arrays.toString(query));
                 }
             }
+        }
+    }
+
+    private void consultTxState(IndexDescriptor descriptor) {
+        TransactionState txState = txStateHolder.txState();
+        if (needsValues) {
+            AddedWithValuesAndRemoved changes =
+                    TxStateIndexChanges.computeForQueryWithValues(txState, descriptor, indexOrder, query);
+            addedWithValues = changes.added().iterator();
+            removed = removed(txState, changes.removed());
+        } else {
+            AddedAndRemoved changes =
+                    TxStateIndexChanges.computeForQueryWithoutValues(txState, descriptor, indexOrder, query);
+            added = changes.added().longIterator();
+            removed = removed(txState, changes.removed());
         }
     }
 
@@ -221,10 +216,6 @@ abstract class DefaultEntityValueIndexCursor<CURSOR> extends IndexCursor<IndexPr
 
     protected abstract boolean doStoreValuePassesQueryFilter(
             long reference, PropertySelection propertySelection, PropertyIndexQuery[] query);
-
-    protected boolean allowsAll() {
-        return false;
-    }
 
     @Override
     public final boolean needsValues() {
@@ -286,7 +277,7 @@ abstract class DefaultEntityValueIndexCursor<CURSOR> extends IndexCursor<IndexPr
         if (sortedMergeJoin.needsA() && addedWithValues.hasNext()) {
             while (addedWithValues.hasNext()) {
                 EntityWithPropertyValues entityWithPropertyValues = addedWithValues.next();
-                if (!applyAccessModeToTxState || canAccessEntityAndProperties(entityWithPropertyValues.getEntityId())) {
+                if (!applyAccessModeToTxState || allowed(entityWithPropertyValues.getEntityId())) {
                     sortedMergeJoin.setA(entityWithPropertyValues.getEntityId(), entityWithPropertyValues.getValues());
                     break;
                 }
@@ -295,7 +286,7 @@ abstract class DefaultEntityValueIndexCursor<CURSOR> extends IndexCursor<IndexPr
 
         if (sortedMergeJoin.needsB()) {
             while (indexNext()) {
-                if (!applyAccessModeToTxState || canAccessEntityAndProperties(entity)) {
+                if (!applyAccessModeToTxState || allowed(entity)) {
                     sortedMergeJoin.setB(entity, values);
                     break;
                 }
@@ -316,15 +307,20 @@ abstract class DefaultEntityValueIndexCursor<CURSOR> extends IndexCursor<IndexPr
     }
 
     @Override
-    public final void initState(Read read, TxStateHolder txStateHolder, AccessModeProvider accessModeProvider) {
+    public final void initState(
+            Read read,
+            TxStateHolder txStateHolder,
+            AccessModeProvider accessModeProvider,
+            boolean includeChangesFromThisTransaction) {
         this.read = read;
-        this.txStateHolder = txStateHolder;
+        this.txStateHolder = includeChangesFromThisTransaction ? txStateHolder : TxStateHolder.EMPTY_TX_STATE;
         this.accessModeProvider = accessModeProvider;
+        this.accessMode = accessModeProvider.getAccessMode();
     }
 
     @Override
     public final int numberOfProperties() {
-        return query == null ? 0 : query.length;
+        return numberOfProperties;
     }
 
     @Override
@@ -353,9 +349,11 @@ abstract class DefaultEntityValueIndexCursor<CURSOR> extends IndexCursor<IndexPr
             this.read = null;
             this.txStateHolder = null;
             this.accessModeProvider = null;
+            this.accessMode = null;
             this.added = ImmutableEmptyLongIterator.INSTANCE;
             this.addedWithValues = Collections.emptyIterator();
-            this.removed = LongSets.immutable.empty();
+            this.removed = (value) -> false;
+            this.numberOfProperties = 0;
         }
         super.closeInternal();
     }
@@ -379,110 +377,8 @@ abstract class DefaultEntityValueIndexCursor<CURSOR> extends IndexCursor<IndexPr
         }
     }
 
-    private void prefixQuery(
-            IndexDescriptor descriptor, Value[] equalityPrefix, PropertyIndexQuery.StringPrefixPredicate predicate) {
-        TransactionState txState = txStateHolder.txState();
-
-        if (needsValues) {
-            AddedWithValuesAndRemoved changes = indexUpdatesWithValuesForRangeSeekByPrefix(
-                    txState, descriptor, equalityPrefix, predicate.prefix(), indexOrder);
-            addedWithValues = changes.added().iterator();
-            removed = removed(txState, changes.removed());
-        } else {
-            AddedAndRemoved changes = indexUpdatesForRangeSeekByPrefix(
-                    txState, descriptor, equalityPrefix, predicate.prefix(), indexOrder);
-            added = changes.added().longIterator();
-            removed = removed(txState, changes.removed());
-        }
-    }
-
-    private void rangeQuery(
-            IndexDescriptor descriptor, Value[] equalityPrefix, PropertyIndexQuery.RangePredicate<?> predicate) {
-        TransactionState txState = txStateHolder.txState();
-
-        if (needsValues) {
-            AddedWithValuesAndRemoved changes =
-                    indexUpdatesWithValuesForRangeSeek(txState, descriptor, equalityPrefix, predicate, indexOrder);
-            addedWithValues = changes.added().iterator();
-            removed = removed(txState, changes.removed());
-        } else {
-            AddedAndRemoved changes =
-                    indexUpdatesForRangeSeek(txState, descriptor, equalityPrefix, predicate, indexOrder);
-            added = changes.added().longIterator();
-            removed = removed(txState, changes.removed());
-        }
-    }
-
-    private void boundingBoxQuery(
-            IndexDescriptor descriptor, Value[] equalityPrefix, PropertyIndexQuery.BoundingBoxPredicate predicate) {
-        TransactionState txState = txStateHolder.txState();
-
-        if (needsValues) {
-            AddedWithValuesAndRemoved changes =
-                    indexUpdatesWithValuesForBoundingBoxSeek(txState, descriptor, equalityPrefix, predicate);
-            addedWithValues = changes.added().iterator();
-            removed = removed(txState, changes.removed());
-        } else {
-            AddedAndRemoved changes = indexUpdatesForBoundingBoxSeek(txState, descriptor, equalityPrefix, predicate);
-            added = changes.added().longIterator();
-            removed = removed(txState, changes.removed());
-        }
-    }
-
-    private void scanQuery(IndexDescriptor descriptor) {
-        TransactionState txState = txStateHolder.txState();
-
-        if (needsValues) {
-            AddedWithValuesAndRemoved changes = indexUpdatesWithValuesForScan(txState, descriptor, indexOrder);
-            addedWithValues = changes.added().iterator();
-            removed = removed(txState, changes.removed());
-        } else {
-            AddedAndRemoved changes = indexUpdatesForScan(txState, descriptor, indexOrder);
-            added = changes.added().longIterator();
-            removed = removed(txState, changes.removed());
-        }
-    }
-
-    private void suffixOrContainsQuery(IndexDescriptor descriptor, PropertyIndexQuery query) {
-        TransactionState txState = txStateHolder.txState();
-
-        if (needsValues) {
-            AddedWithValuesAndRemoved changes =
-                    indexUpdatesWithValuesForSuffixOrContains(txState, descriptor, query, indexOrder);
-            addedWithValues = changes.added().iterator();
-            removed = removed(txState, changes.removed());
-        } else {
-            AddedAndRemoved changes = indexUpdatesForSuffixOrContains(txState, descriptor, query, indexOrder);
-            added = changes.added().longIterator();
-            removed = removed(txState, changes.removed());
-        }
-    }
-
-    private void seekQuery(IndexDescriptor descriptor, Value[] values) {
-        TransactionState txState = txStateHolder.txState();
-
-        if (needsValues) {
-            AddedWithValuesAndRemoved changes =
-                    indexUpdatesWithValuesForSeek(txState, descriptor, ValueTuple.of(values));
-            addedWithValues = changes.added().iterator();
-            removed = removed(txState, changes.removed());
-        } else {
-            AddedAndRemoved changes = indexUpdatesForSeek(txState, descriptor, ValueTuple.of(values));
-            added = changes.added().longIterator();
-            removed = removed(txState, changes.removed());
-        }
-    }
-
     final long entityReference() {
         return entity;
-    }
-
-    final void readEntity(EntityReader entityReader) {
-        entityReader.read(read);
-    }
-
-    private boolean setupSecurity(IndexDescriptor descriptor) {
-        return allowsAll() || canAccessAllDescribedEntities(descriptor);
     }
 
     private static int[] indexQueryKeys(PropertyIndexQuery[] query) {
@@ -493,7 +389,7 @@ abstract class DefaultEntityValueIndexCursor<CURSOR> extends IndexCursor<IndexPr
         return keys;
     }
 
-    final boolean allowed(long reference) {
+    private boolean allowed(long reference) {
         return shortcutSecurity || canAccessEntityAndProperties(reference);
     }
 
@@ -507,7 +403,7 @@ abstract class DefaultEntityValueIndexCursor<CURSOR> extends IndexCursor<IndexPr
     /**
      * Gets entities removed in the current transaction that are relevant for the index.
      */
-    abstract LongSet removed(TransactionState txState, LongSet removedFromIndex);
+    abstract LongSetContains removed(TransactionState txState, IndexRemovalSnapshot removedFromIndex);
 
     /**
      * Checks if the user is allowed to see the entity and properties the cursor is currently pointing at.
@@ -525,7 +421,7 @@ abstract class DefaultEntityValueIndexCursor<CURSOR> extends IndexCursor<IndexPr
     abstract String implementationName();
 
     @FunctionalInterface
-    interface EntityReader {
-        void read(Read read);
+    protected interface LongSetContains {
+        boolean contains(long value);
     }
 }

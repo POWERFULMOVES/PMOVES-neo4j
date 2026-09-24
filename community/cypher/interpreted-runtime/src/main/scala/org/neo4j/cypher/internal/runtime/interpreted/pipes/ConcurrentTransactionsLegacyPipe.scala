@@ -19,7 +19,7 @@
  */
 package org.neo4j.cypher.internal.runtime.interpreted.pipes
 
-import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour
+import org.neo4j.cypher.internal.logical.plans.TransactionalPlan.RecoveryMode
 import org.neo4j.cypher.internal.runtime.ClosingIterator
 import org.neo4j.cypher.internal.runtime.ClosingIterator.JavaIteratorAsClosingIterator
 import org.neo4j.cypher.internal.runtime.CypherRow
@@ -39,9 +39,19 @@ abstract class AbstractConcurrentTransactionsLegacyPipe(
   inner: Pipe,
   batchSize: Expression,
   concurrency: Option[Expression],
-  onErrorBehaviour: InTransactionsOnErrorBehaviour,
-  statusVariableOpt: Option[String]
-) extends AbstractConcurrentTransactionsPipe(source, inner, batchSize, concurrency, onErrorBehaviour) {
+  recoveryMode: RecoveryMode,
+  statusVariableOpt: Option[String],
+  retryPolicy: TransactionRetryPolicy,
+  disjointBy: Seq[Expression]
+) extends AbstractConcurrentTransactionsPipe(
+      source,
+      inner,
+      batchSize,
+      concurrency,
+      recoveryMode,
+      retryPolicy,
+      disjointBy
+    ) {
 
   override protected def withStatus(
     output: ClosingIterator[CypherRow],
@@ -57,17 +67,21 @@ case class ConcurrentTransactionApplyLegacyPipe(
   inner: Pipe,
   batchSize: Expression,
   concurrency: Option[Expression],
-  onErrorBehaviour: InTransactionsOnErrorBehaviour,
+  recoveryMode: RecoveryMode,
   nullableVariables: Set[String],
-  statusVariableOpt: Option[String]
+  statusVariableOpt: Option[String],
+  retryPolicy: TransactionRetryPolicy,
+  disjointBy: Seq[Expression]
 )(val id: Id = Id.INVALID_ID)
     extends AbstractConcurrentTransactionsLegacyPipe(
       source,
       inner,
       batchSize,
       concurrency,
-      onErrorBehaviour,
-      statusVariableOpt
+      recoveryMode,
+      statusVariableOpt,
+      retryPolicy,
+      disjointBy
     ) {
 
   private lazy val nullEntries: Seq[(String, AnyValue)] = {
@@ -85,13 +99,20 @@ case class ConcurrentTransactionApplyLegacyPipe(
 
   override protected def createTask(
     innerPipe: TransactionPipeWrapper,
-    batch: EagerBuffer[CypherRow],
+    batch: TransactionBatch,
     memoryTracker: MemoryTracker,
     state: QueryState,
     outputQueue: ArrayBlockingQueue[TaskOutputResult],
     activeTaskCount: AtomicInteger
   ): Runnable = {
-    new ConcurrentTransactionApplyResultsTask(innerPipe, batch, memoryTracker, state, outputQueue, activeTaskCount)
+    new ConcurrentTransactionApplyResultsTask(
+      innerPipe,
+      batch,
+      memoryTracker,
+      state,
+      outputQueue,
+      activeTaskCount
+    )
   }
 }
 
@@ -100,16 +121,20 @@ case class ConcurrentTransactionForeachLegacyPipe(
   inner: Pipe,
   batchSize: Expression,
   concurrency: Option[Expression],
-  onErrorBehaviour: InTransactionsOnErrorBehaviour,
-  statusVariableOpt: Option[String]
+  recoveryMode: RecoveryMode,
+  statusVariableOpt: Option[String],
+  retryPolicy: TransactionRetryPolicy,
+  disjointBy: Seq[Expression]
 )(val id: Id = Id.INVALID_ID)
     extends AbstractConcurrentTransactionsLegacyPipe(
       source,
       inner,
       batchSize,
       concurrency,
-      onErrorBehaviour,
-      statusVariableOpt
+      recoveryMode,
+      statusVariableOpt,
+      retryPolicy,
+      disjointBy
     ) {
 
   override protected def nullRows(lhs: EagerBuffer[CypherRow], state: QueryState): ClosingIterator[CypherRow] = {
@@ -118,12 +143,19 @@ case class ConcurrentTransactionForeachLegacyPipe(
 
   override protected def createTask(
     innerPipe: TransactionPipeWrapper,
-    batch: EagerBuffer[CypherRow],
+    batch: TransactionBatch,
     memoryTracker: MemoryTracker,
     state: QueryState,
     outputQueue: ArrayBlockingQueue[TaskOutputResult],
     activeTaskCount: AtomicInteger
   ): Runnable = {
-    new ConcurrentTransactionForeachResultsTask(innerPipe, batch, memoryTracker, state, outputQueue, activeTaskCount)
+    new ConcurrentTransactionForeachResultsTask(
+      innerPipe,
+      batch,
+      memoryTracker,
+      state,
+      outputQueue,
+      activeTaskCount
+    )
   }
 }

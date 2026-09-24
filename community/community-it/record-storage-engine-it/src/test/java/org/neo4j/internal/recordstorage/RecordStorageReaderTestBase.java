@@ -109,7 +109,7 @@ public abstract class RecordStorageReaderTestBase {
         this.storageEngine = builder.build();
         this.storageReader = storageEngine.newReader();
         this.commitReader = storageEngine.newReader();
-        this.commitContext = storageEngine.newCommandCreationContext(false);
+        this.commitContext = storageEngine.newCommandCreationContext(false, INSTANCE);
         storageCursors = storageEngine.createStorageCursors(NULL_CONTEXT);
         commitContext.initialize(
                 LatestVersions.LATEST_KERNEL_VERSION_PROVIDER,
@@ -179,7 +179,10 @@ public abstract class RecordStorageReaderTestBase {
         int labelId = getOrCreateLabelId(label);
         int propertyKeyId = getOrCreatePropertyKeyId(propertyKey);
         UniquenessConstraintDescriptor constraint = ConstraintDescriptorFactory.uniqueForLabel(labelId, propertyKeyId);
-        constraint = constraint.withName(index.getName()).withOwnedIndexId(index.getId());
+        constraint = constraint
+                .withName(index.getName())
+                .withOwnedIndexId(index.getId())
+                .withId(commitContext.reserveSchema());
         txState.constraintDoAdd(constraint);
         apply(txState);
         return index;
@@ -193,7 +196,10 @@ public abstract class RecordStorageReaderTestBase {
         int propertyKeyId = getOrCreatePropertyKeyId(propertyKey);
         UniquenessConstraintDescriptor constraint =
                 ConstraintDescriptorFactory.uniqueForSchema(SchemaDescriptors.forRelType(typeId, propertyKeyId));
-        constraint = constraint.withName(index.getName()).withOwnedIndexId(index.getId());
+        constraint = constraint
+                .withName(index.getName())
+                .withOwnedIndexId(index.getId())
+                .withId(commitContext.reserveSchema());
         txState.constraintDoAdd(constraint);
         apply(txState);
         return index;
@@ -205,7 +211,10 @@ public abstract class RecordStorageReaderTestBase {
         int labelId = getOrCreateLabelId(label);
         int propertyKeyId = getOrCreatePropertyKeyId(propertyKey);
         KeyConstraintDescriptor constraint = ConstraintDescriptorFactory.nodeKeyForLabel(labelId, propertyKeyId);
-        constraint = constraint.withName(index.getName()).withOwnedIndexId(index.getId());
+        constraint = constraint
+                .withName(index.getName())
+                .withOwnedIndexId(index.getId())
+                .withId(commitContext.reserveSchema());
         txState.constraintDoAdd(constraint);
         apply(txState);
     }
@@ -214,7 +223,10 @@ public abstract class RecordStorageReaderTestBase {
         IndexDescriptor index = createUniqueIndex(type, propertyKey);
         TxState txState = new TxState();
         KeyConstraintDescriptor constraint = ConstraintDescriptorFactory.keyForSchema(index.schema());
-        constraint = constraint.withName(index.getName()).withOwnedIndexId(index.getId());
+        constraint = constraint
+                .withName(index.getName())
+                .withOwnedIndexId(index.getId())
+                .withId(commitContext.reserveSchema());
         txState.constraintDoAdd(constraint);
         apply(txState);
     }
@@ -316,7 +328,8 @@ public abstract class RecordStorageReaderTestBase {
                 INSTANCE);
         storageEngine.apply(
                 new GroupOfCommands(txId, storageCursors, commands.toArray(new StorageCommand[0])),
-                TransactionApplicationMode.EXTERNAL);
+                TransactionApplicationMode.EXTERNAL,
+                INSTANCE);
     }
 
     protected int labelId(Label label) {
@@ -331,7 +344,7 @@ public abstract class RecordStorageReaderTestBase {
         try {
             return tokenHolders.relationshipTypeTokens().getTokenById(id).name();
         } catch (TokenNotFoundException e) {
-            throw new RelationshipTypeIdNotFoundKernelException(id, e);
+            throw RelationshipTypeIdNotFoundKernelException.relationshipTypeNotFound(id, e);
         }
     }
 

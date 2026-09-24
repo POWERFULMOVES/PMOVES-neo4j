@@ -74,6 +74,21 @@ public class ByteBufferReadableChannel implements ReadableChannel {
     }
 
     @Override
+    public long getAppendIndex() throws IOException {
+        return getLong();
+    }
+
+    @Override
+    public byte getContentType() {
+        return UNSPECIFIED_CONTENT_TYPE;
+    }
+
+    @Override
+    public long getTerm() throws IOException {
+        return BASE_TERM;
+    }
+
+    @Override
     public int read(ByteBuffer dst) throws IOException {
         int remaining = buffer.remaining();
         dst.put(buffer);

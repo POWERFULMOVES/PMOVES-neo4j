@@ -25,7 +25,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 import org.assertj.core.api.AbstractAssert;
-import org.neo4j.bolt.negotiation.ProtocolVersion;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 import org.neo4j.bolt.testing.client.BoltTestConnection;
 import org.neo4j.bolt.testing.client.error.BoltTestClientIOException;
 import org.neo4j.bolt.testing.client.error.BoltTestClientInterruptedException;
@@ -116,7 +116,7 @@ public abstract class BoltTestConnectionAssertions<
             Predicates.await(
                     () -> {
                         try {
-                            return actual.isClosed();
+                            return actual.isDisconnected();
                         } catch (BoltTestClientInterruptedException ex) {
                             fail(ex);
                         }

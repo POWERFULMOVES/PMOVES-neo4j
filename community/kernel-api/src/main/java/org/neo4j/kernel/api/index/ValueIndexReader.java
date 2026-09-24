@@ -42,15 +42,36 @@ public interface ValueIndexReader extends IndexReader {
 
     /**
      * Queries the index for the given {@link PropertyIndexQuery} predicates.
-     * @param client the client which will control the progression though query results.
-     * @param constraints constraints upon the query result, like ordering and whether the index should fetch property values alongside the entity ids.
-     * @param query the query so serve.
+     *
+     * @param client        the client which will control the progression though query results.
+     * @param queryContext
+     * @param cursorContext context with which query should be executed with
+     * @param constraints   constraints upon the query result, like ordering and whether the index should fetch property values alongside the entity ids.
+     * @param query         the query to serve.
      */
     void query(
             IndexProgressor.EntityValueClient client,
-            QueryContext context,
+            QueryContext queryContext,
+            CursorContext cursorContext,
             IndexQueryConstraints constraints,
             PropertyIndexQuery... query)
+            throws IndexNotApplicableKernelException;
+
+    /**
+     * Reports the index queried to monitors and usage tracking. Typically called from within {@code query(...)}
+     */
+    void reportIndexQueried(QueryContext context, PropertyIndexQuery... queries);
+
+    /**
+     * Validates the given query whether it can be run on this index.
+     * {@link #query(IndexProgressor.EntityValueClient, QueryContext, CursorContext, IndexQueryConstraints, PropertyIndexQuery...)}
+     * should do this automatically, but this validation can be run separately by calling this method.
+     *
+     * @param constraints constraints upon the query result, like ordering and whether the index should fetch property values alongside the entity ids.
+     * @param query the query validate.
+     * @throws IndexNotApplicableKernelException
+     */
+    void validateQuery(IndexQueryConstraints constraints, PropertyIndexQuery... query)
             throws IndexNotApplicableKernelException;
 
     /**
@@ -61,7 +82,8 @@ public interface ValueIndexReader extends IndexReader {
      * @return The {@link PartitionedValueSeek} from which partitions can be reserved.
      */
     PartitionedValueSeek valueSeek(
-            int desiredNumberOfPartitions, QueryContext queryContext, PropertyIndexQuery... query);
+            int desiredNumberOfPartitions, QueryContext queryContext, PropertyIndexQuery... query)
+            throws IndexNotApplicableKernelException;
 
     ValueIndexReader EMPTY = new ValueIndexReader() {
         // Used for checking index correctness
@@ -79,9 +101,20 @@ public interface ValueIndexReader extends IndexReader {
         @Override
         public void query(
                 IndexProgressor.EntityValueClient client,
-                QueryContext context,
+                QueryContext queryContext,
+                CursorContext cursorContext,
                 IndexQueryConstraints constraints,
                 PropertyIndexQuery... query) {
+            // do nothing
+        }
+
+        @Override
+        public void reportIndexQueried(QueryContext context, PropertyIndexQuery... queries) {
+            // do nothing
+        }
+
+        @Override
+        public void validateQuery(IndexQueryConstraints constraints, PropertyIndexQuery... query) {
             // do nothing
         }
 

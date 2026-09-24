@@ -23,7 +23,6 @@ import org.neo4j.common.EntityType
 import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.AllConstraints
 import org.neo4j.cypher.internal.ast.AllExistsConstraints
-import org.neo4j.cypher.internal.ast.CommandResultItem
 import org.neo4j.cypher.internal.ast.KeyConstraints
 import org.neo4j.cypher.internal.ast.NodeAllExistsConstraints
 import org.neo4j.cypher.internal.ast.NodeKeyConstraints
@@ -40,9 +39,10 @@ import org.neo4j.cypher.internal.ast.RelPropTypeConstraints
 import org.neo4j.cypher.internal.ast.RelUniqueConstraints
 import org.neo4j.cypher.internal.ast.RelationshipSourceLabelConstraints
 import org.neo4j.cypher.internal.ast.RelationshipTargetLabelConstraints
-import org.neo4j.cypher.internal.ast.ShowColumn
 import org.neo4j.cypher.internal.ast.ShowConstraintType
+import org.neo4j.cypher.internal.ast.ShowConstraintsClause.classificationColumn
 import org.neo4j.cypher.internal.ast.ShowConstraintsClause.createStatementColumn
+import org.neo4j.cypher.internal.ast.ShowConstraintsClause.enforcedLabelColumn
 import org.neo4j.cypher.internal.ast.ShowConstraintsClause.entityTypeColumn
 import org.neo4j.cypher.internal.ast.ShowConstraintsClause.idColumn
 import org.neo4j.cypher.internal.ast.ShowConstraintsClause.labelsOrTypesColumn
@@ -53,23 +53,32 @@ import org.neo4j.cypher.internal.ast.ShowConstraintsClause.propertiesColumn
 import org.neo4j.cypher.internal.ast.ShowConstraintsClause.propertyTypeColumn
 import org.neo4j.cypher.internal.ast.ShowConstraintsClause.typeColumn
 import org.neo4j.cypher.internal.ast.UniqueConstraints
+import org.neo4j.cypher.internal.logical.plans.CommandDefaultColumn
+import org.neo4j.cypher.internal.logical.plans.CommandYieldColumn
 import org.neo4j.cypher.internal.runtime.ClosingIterator
 import org.neo4j.cypher.internal.runtime.ConstraintInfo
 import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.runtime.QueryContext
+import org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands.ShowConstraintsCommand.constraintIsAddedInTransaction
 import org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands.ShowConstraintsCommand.createConstraintStatement
 import org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands.ShowConstraintsCommand.getConstraintType
 import org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands.ShowSchemaCommandHelper.createNodeConstraintCommand
 import org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands.ShowSchemaCommandHelper.createRelConstraintCommand
 import org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands.ShowSchemaCommandHelper.extractOptionsMap
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.QueryState
+import org.neo4j.exceptions.InternalException
 import org.neo4j.internal.schema
 import org.neo4j.internal.schema.ConstraintDescriptor
 import org.neo4j.internal.schema.EndpointType
 import org.neo4j.internal.schema.GraphTypeDependence
+import org.neo4j.internal.schema.constraints.PropertyTypeSet
+import org.neo4j.internal.schema.constraints.TypeRepresentation
+import org.neo4j.kernel.api.exceptions.InvalidArgumentsException
 import org.neo4j.values.AnyValue
 import org.neo4j.values.storable.Values
 import org.neo4j.values.virtual.VirtualValues
+
+import java.util.Locale
 
 import scala.collection.immutable.ListMap
 import scala.jdk.CollectionConverters.SeqHasAsJava
@@ -84,8 +93,8 @@ import scala.jdk.CollectionConverters.SeqHasAsJava
 // ] CONSTRAINT[S] [WHERE clause | YIELD clause]
 case class ShowConstraintsCommand(
   constraintType: ShowConstraintType,
-  columns: List[ShowColumn],
-  yieldColumns: List[CommandResultItem],
+  columns: List[CommandDefaultColumn],
+  yieldColumns: List[CommandYieldColumn],
   cypherVersion: CypherVersion
 ) extends Command(columns, yieldColumns) {
   private val returnCypher5Values: Boolean = cypherVersion == CypherVersion.Cypher5
@@ -132,7 +141,11 @@ case class ShowConstraintsCommand(
         c =>
           c.`type`().equals(schema.ConstraintType.PROPERTY_TYPE) && c.schema.entityType.equals(EntityType.RELATIONSHIP)
       case AllConstraints => _ => true // Should keep all and not filter away any constraints
-      case c              => throw new IllegalStateException(s"Unknown constraint type: $c")
+      case c => throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"Unknown constraint type for show constraints. Missing case for constraint type: $c.",
+          s"Unknown constraint type: $c"
+        )
     }
 
     val relevantConstraints = constraints.filter {
@@ -151,7 +164,7 @@ case class ShowConstraintsCommand(
               requestedColumnsNames.contains(createStatementColumn))
           )
             Some(
-              constraintDescriptor.asPropertyTypeConstraint().propertyType().userDescription()
+              constraintDescriptor.asPropertyTypeConstraint().propertyType()
             )
           else None
         // These don't really have a default/fallback and is used in multiple columns
@@ -192,6 +205,13 @@ case class ShowConstraintsCommand(
               .map(props => VirtualValues.fromList(props.asJava)) // make it a ListValue
               .getOrElse(Values.NO_VALUE) // empty list should be NO_VALUE instead of empty list
             propertiesColumn -> properties
+          // The enforced label of this constraint, or null for property enforcing constraints
+          case `enforcedLabelColumn` =>
+            enforcedLabelColumn -> constraintInfo.enforcedLabel.map(Values.stringValue).getOrElse(Values.NO_VALUE)
+          // The classification of this constraint, one of "undesignated", "independent", "dependent"
+          case `classificationColumn` =>
+            classificationColumn ->
+              Values.stringValue(constraintDescriptor.graphTypeDependence().toString.toLowerCase(Locale.ROOT))
           // The name of the index associated to the constraint
           case `ownedIndexColumn` =>
             val ownedIndex =
@@ -203,7 +223,8 @@ case class ShowConstraintsCommand(
             ownedIndexColumn -> ownedIndex
           // The Cypher type this constraint restricts its property to
           case `propertyTypeColumn` =>
-            propertyTypeColumn -> propertyType.map(Values.stringValue).getOrElse(Values.NO_VALUE)
+            propertyTypeColumn ->
+              propertyType.map(p => Values.stringValue(p.userDescription())).getOrElse(Values.NO_VALUE)
           // The options for this constraint, shows index provider and config of the backing index
           case `optionsColumn` => optionsColumn -> getOptions(constraintDescriptor, constraintInfo)
           // The statement to recreate the constraint, or null for dependent constraints
@@ -221,11 +242,14 @@ case class ShowConstraintsCommand(
           case unknown =>
             // This match should cover all existing columns but we get scala warnings
             // on non-exhaustive match due to it being string values
-            throw new IllegalStateException(s"Missing case for column: $unknown")
+            throw InternalException.internalError(
+              this.getClass.getSimpleName,
+              s"Unknown column for show constraints. Missing case for column: $unknown.",
+              s"Missing case for column: $unknown"
+            )
         }.toMap[String, AnyValue]
     }
-    val updatedRows = updateRowsWithPotentiallyRenamedColumns(rows.toList)
-    ClosingIterator.apply(updatedRows.iterator)
+    ClosingIterator.apply(rows.iterator)
   }
 
   private def getOptions(
@@ -234,18 +258,15 @@ case class ShowConstraintsCommand(
   ) = {
     if (constraintDescriptor.isIndexBackedConstraint) {
       val index = constraintInfo.maybeIndex.getOrElse(
-        throw new IllegalStateException(
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"Expected to find an index for index backed constraint ${constraintDescriptor.getName}.",
           s"Expected to find an index for index backed constraint ${constraintDescriptor.getName}"
         )
       )
-      extractOptionsMap(index.getIndexType, index.getIndexProvider, index.getIndexConfig)
+      extractOptionsMap(index.getIndexType, index.getIndexProvider, index.getIndexConfig, cypherVersion)
     } else Values.NO_VALUE
   }
-
-  private def constraintIsAddedInTransaction(ctx: QueryContext, constraintDescriptor: ConstraintDescriptor): Boolean =
-    Option(ctx.transactionalContext.kernelQueryContext.getTransactionStateOrNull)
-      .map(_.constraintsChanges)
-      .exists(_.isAdded(constraintDescriptor))
 }
 
 object ShowConstraintsCommand {
@@ -255,7 +276,7 @@ object ShowConstraintsCommand {
     constraintType: ShowConstraintType,
     labelsOrTypes: List[String],
     properties: List[String],
-    propertyType: Option[String],
+    maybePropertyType: Option[PropertyTypeSet],
     graphTypeDependence: GraphTypeDependence,
     returnCypher5Values: Boolean
   ): String = {
@@ -276,15 +297,25 @@ object ShowConstraintsCommand {
       case _: RelPropExistsConstraints =>
         createRelConstraintCommand(name, labelsOrTypes, properties, "IS NOT NULL")
       case NodePropTypeConstraints =>
-        val typeString = propertyType.getOrElse(
-          throw new IllegalArgumentException(s"Expected a property type for $constraintType constraint.")
-        )
-        createNodeConstraintCommand(name, labelsOrTypes, properties, s"IS :: $typeString")
+        maybePropertyType match {
+          case Some(typeSet) if TypeRepresentation.hasVectorTypes(typeSet) && returnCypher5Values => null
+          case Some(typeSet) =>
+            createNodeConstraintCommand(name, labelsOrTypes, properties, s"IS :: ${typeSet.userDescription()}")
+          case _ => throw InvalidArgumentsException.internalError(
+              this.getClass.getSimpleName,
+              s"Expected a property type for $constraintType constraint."
+            )
+        }
       case RelPropTypeConstraints =>
-        val typeString = propertyType.getOrElse(
-          throw new IllegalArgumentException(s"Expected a property type for $constraintType constraint.")
-        )
-        createRelConstraintCommand(name, labelsOrTypes, properties, s"IS :: $typeString")
+        maybePropertyType match {
+          case Some(typeSet) if TypeRepresentation.hasVectorTypes(typeSet) && returnCypher5Values => null
+          case Some(typeSet) =>
+            createRelConstraintCommand(name, labelsOrTypes, properties, s"IS :: ${typeSet.userDescription()}")
+          case _ => throw InvalidArgumentsException.internalError(
+              this.getClass.getSimpleName,
+              s"Expected a property type for $constraintType constraint."
+            )
+        }
       case RelationshipSourceLabelConstraints =>
         // Should not get here as they are always dependent, but lets have the cases anyway for security
         // and if we ever want to add them as independent constraints as well
@@ -297,7 +328,8 @@ object ShowConstraintsCommand {
         // Should not get here as they are always dependent, but lets have the cases anyway for security
         // and if we ever want to add them as independent constraints as well
         null
-      case _ => throw new IllegalArgumentException(
+      case _ => throw InvalidArgumentsException.internalError(
+          this.getClass.getSimpleName,
           s"Did not expect constraint type ${constraintType.prettyPrint} for constraint create command."
         )
     }
@@ -328,9 +360,19 @@ object ShowConstraintsCommand {
           case EndpointType.END   => RelationshipTargetLabelConstraints
         }
       case (schema.ConstraintType.NODE_LABEL_EXISTENCE, EntityType.NODE) => NodeLabelExistenceConstraints
-      case _ => throw new IllegalStateException(
+      case _ => throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"Invalid constraint combination: ConstraintType $internalConstraintType, EntityType $entityType and EndpointType $endpointType.",
           s"Invalid constraint combination: ConstraintType $internalConstraintType, EntityType $entityType and EndpointType $endpointType."
         )
     }
   }
+
+  private[showcommands] def constraintIsAddedInTransaction(
+    ctx: QueryContext,
+    constraintDescriptor: ConstraintDescriptor
+  ): Boolean =
+    Option(ctx.transactionalContext.kernelQueryContext.getTransactionStateOrNull)
+      .map(_.constraintsChanges)
+      .exists(_.isAdded(constraintDescriptor))
 }

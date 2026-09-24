@@ -32,29 +32,31 @@ import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.neo4j.bolt.BoltServer;
-import org.neo4j.bolt.fsm.StateMachine;
+import org.neo4j.bolt.fsm.StateMachineHandle;
 import org.neo4j.bolt.fsm.error.BoltException;
 import org.neo4j.bolt.fsm.error.StateMachineException;
 import org.neo4j.bolt.protocol.common.BoltProtocol;
 import org.neo4j.bolt.protocol.common.connection.Job;
 import org.neo4j.bolt.protocol.common.connector.Connector;
+import org.neo4j.bolt.protocol.common.connector.admissioncontrol.ConnectionAdmissionControlTracker;
+import org.neo4j.bolt.protocol.common.connector.admissioncontrol.ConnectionAdmissionControlTrackerFactory;
 import org.neo4j.bolt.protocol.common.connector.connection.listener.ConnectionListener;
+import org.neo4j.bolt.protocol.common.connector.notification.NotificationManager;
+import org.neo4j.bolt.protocol.common.connector.notification.NotificationManagerImpl;
 import org.neo4j.bolt.protocol.common.fsm.error.AuthenticationStateTransitionException;
 import org.neo4j.bolt.protocol.common.fsm.response.ResponseHandler;
-import org.neo4j.bolt.protocol.common.message.AccessMode;
 import org.neo4j.bolt.protocol.common.message.Error;
-import org.neo4j.bolt.protocol.common.message.notifications.NotificationsConfig;
-import org.neo4j.bolt.protocol.common.message.request.RequestMessage;
 import org.neo4j.bolt.protocol.common.signal.StateSignal;
 import org.neo4j.bolt.protocol.error.BoltNetworkException;
 import org.neo4j.bolt.tx.Transaction;
-import org.neo4j.bolt.tx.TransactionType;
 import org.neo4j.bolt.tx.error.TransactionException;
-import org.neo4j.dbms.admissioncontrol.AdmissionControlService;
+import org.neo4j.boltmessages.AccessMode;
+import org.neo4j.boltmessages.TransactionType;
+import org.neo4j.boltmessages.notifications.NotificationsConfig;
+import org.neo4j.boltmessages.request.RequestMessage;
 import org.neo4j.dbms.admissioncontrol.AdmissionControlToken;
 import org.neo4j.graphdb.security.AuthorizationExpiredException;
 import org.neo4j.kernel.impl.query.NotificationConfiguration;
@@ -85,14 +87,13 @@ public class AtomicSchedulingConnection extends AbstractConnection {
 
     private final AtomicInteger remainingInterrupts = new AtomicInteger();
     private final AtomicReference<Transaction> transaction = new AtomicReference<>();
+    protected final ConnectionAdmissionControlTracker admissionControlTracker;
 
     /**
      * A flag to denote that the connection should create a new admission control token.
      * This is set to false when a transaction receives it's first RUN currently, and is reset when the transaction
      * finishes. This is likely to change, but as a solution it works.
      */
-    private final AtomicBoolean connectionRequiresAdmissionControl = new AtomicBoolean(true);
-
     public AtomicSchedulingConnection(
             Connector connector,
             String id,
@@ -102,10 +103,12 @@ public class AtomicSchedulingConnection extends AbstractConnection {
             LogService logService,
             ExecutorService executor,
             Clock clock,
-            AdmissionControlService admissionControlService) {
-        super(connector, id, channel, connectedAt, memoryTracker, logService, admissionControlService);
+            ConnectionAdmissionControlTracker admissionControlTracker,
+            NotificationManager notificationManager) {
+        super(connector, id, channel, connectedAt, memoryTracker, notificationManager, logService);
         this.executor = executor;
         this.clock = clock;
+        this.admissionControlTracker = admissionControlTracker;
     }
 
     @Override
@@ -121,13 +124,8 @@ public class AtomicSchedulingConnection extends AbstractConnection {
     @Override
     public void submit(RequestMessage message) {
         this.notifyListeners(listener -> listener.onRequestReceived(message));
-        if (this.admissionControl.enabled()
-                && message.requiresAdmissionControl()
-                && this.connectionRequiresAdmissionControl.compareAndSet(true, false)) {
-            this.submit(new ProcessJob(this, this.clock.millis(), message, this.admissionControl.requestToken()));
-        } else {
-            this.submit(new ProcessJob(this, this.clock.millis(), message, null));
-        }
+        var token = this.admissionControlTracker.onMessage(message, this.selectedDefaultDatabase());
+        this.submit(new ProcessJob(this, this.clock.millis(), message, token));
     }
 
     @Override
@@ -230,16 +228,17 @@ public class AtomicSchedulingConnection extends AbstractConnection {
                 case SCHEDULED -> this.schedule(false);
 
                 case CLOSING ->
-                // if we did not successfully return the connection to its idle state, and it has been marked for
-                // termination, we'll make sure to terminate it now as the original caller did not complete this
-                // step during our execution phase
-                this.doClose();
+                    // if we did not successfully return the connection to its idle state, and it has been marked for
+                    // termination, we'll make sure to terminate it now as the original caller did not complete this
+                    // step during our execution phase
+                    this.doClose();
 
                 case CLOSED ->
-                // if the connection has been closed during this execution cycle, we'll simply log this fact for
-                // debugging purposes - there is nothing else to do here as this object is effectively considered dead
-                // at this point and has already been removed from the connection registry
-                log.debug("[%s] Connection has already been terminated via its worker thread", this.id);
+                    // if the connection has been closed during this execution cycle, we'll simply log this fact for
+                    // debugging purposes - there is nothing else to do here as this object is effectively considered
+                    // dead
+                    // at this point and has already been removed from the connection registry
+                    log.debug("[%s] Connection has already been terminated via its worker thread", this.id);
             }
         }
     }
@@ -328,7 +327,7 @@ public class AtomicSchedulingConnection extends AbstractConnection {
         }
     }
 
-    private void executeJob(StateMachine fsm, Job job) {
+    private void executeJob(StateMachineHandle fsm, Job job) {
         this.channel.write(StateSignal.BEGIN_JOB_PROCESSING);
 
         try {
@@ -382,13 +381,17 @@ public class AtomicSchedulingConnection extends AbstractConnection {
             databaseName = this.selectedDefaultDatabase();
         }
 
+        var db = databaseName;
+        this.notifyListeners(l -> l.onPrepareTransaction(type, mode, db));
+
         var notificationsConfig = resolveNotificationsConfig(transactionNotificationsConfig);
 
         // optimistically create the transaction as we do not know what state the connection is in
         // at the moment
         var transaction = this.connector()
                 .transactionManager()
-                .create(type, this, databaseName, mode, bookmarks, timeout, metadata, notificationsConfig);
+                .create(type, this, db, mode, bookmarks, timeout, metadata, notificationsConfig);
+
         // if another transaction has been created in the meantime or was already present when the
         // method was originally invoked, we'll destroy the optimistically created transaction and
         // throw immediately to indicate misuse
@@ -423,8 +426,6 @@ public class AtomicSchedulingConnection extends AbstractConnection {
 
     @Override
     public void closeTransaction() throws TransactionException {
-        this.connectionRequiresAdmissionControl.set(true);
-
         var tx = this.transaction.getAndSet(null);
         if (tx == null) {
             return;
@@ -435,6 +436,7 @@ public class AtomicSchedulingConnection extends AbstractConnection {
 
     @Override
     public void interrupt() {
+        this.admissionControlTracker.onReset();
         // increment the interrupt timer internally in order to keep track on when we are supposed
         // to reset to a valid state
         var previous = this.remainingInterrupts.getAndIncrement();
@@ -626,7 +628,7 @@ public class AtomicSchedulingConnection extends AbstractConnection {
             AtomicSchedulingConnection conn, long queuedAt, RequestMessage message, AdmissionControlToken token)
             implements Job {
         @Override
-        public void perform(StateMachine machine, ResponseHandler responseHandler) throws StateMachineException {
+        public void perform(StateMachineHandle machine, ResponseHandler responseHandler) throws StateMachineException {
             var processingStartedAt = this.conn.clock.millis();
             var queuedForMillis = processingStartedAt - queuedAt;
             conn.notifyListeners(listener -> listener.onRequestBeginProcessing(message, queuedForMillis));
@@ -649,23 +651,24 @@ public class AtomicSchedulingConnection extends AbstractConnection {
         private final ExecutorService executor;
         private final Clock clock;
         private final LogService logService;
-        private final AdmissionControlService admissionControl;
+        private final ConnectionAdmissionControlTrackerFactory connectionAdmissionControlTrackerFactory;
 
         public Factory(
                 ExecutorService executor,
                 Clock clock,
                 LogService logService,
-                AdmissionControlService admissionControl) {
+                ConnectionAdmissionControlTrackerFactory connectionAdmissionControlTrackerFactory) {
             this.executor = executor;
             this.clock = clock;
             this.logService = logService;
-            this.admissionControl = admissionControl;
+            this.connectionAdmissionControlTrackerFactory = connectionAdmissionControlTrackerFactory;
         }
 
         @Override
         public AtomicSchedulingConnection create(Connector connector, String id, Channel channel) {
             // TODO: Configurable chunk size for tuning?
             var memoryTracker = ConnectionMemoryTracker.createForPool(connector.memoryPool());
+            var notificationManager = new NotificationManagerImpl();
             memoryTracker.allocateHeap(SHALLOW_SIZE);
 
             return new AtomicSchedulingConnection(
@@ -677,7 +680,8 @@ public class AtomicSchedulingConnection extends AbstractConnection {
                     this.logService,
                     this.executor,
                     this.clock,
-                    this.admissionControl);
+                    this.connectionAdmissionControlTrackerFactory.createNewTracker(),
+                    notificationManager);
         }
     }
 }

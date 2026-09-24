@@ -42,9 +42,8 @@ import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.fs.StoreChannel;
 import org.neo4j.io.memory.ByteBuffers;
 import org.neo4j.io.pagecache.buffer.IOBufferFactory;
-import org.neo4j.io.pagecache.impl.SingleFilePageSwapperFactory;
+import org.neo4j.io.pagecache.impl.muninn.swapper.PageSwapperFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
-import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.scheduler.JobScheduler;
 import org.neo4j.test.scheduler.ThreadPoolJobScheduler;
 
@@ -113,9 +112,14 @@ public abstract class PageCacheTestSupport<T extends PageCache> {
         fs.close();
     }
 
-    protected final T createPageCache(PageSwapperFactory swapperFactory, int maxPages, PageCacheTracer tracer) {
+    protected final T createPageCache(FileSystemAbstraction fs, int maxPages, PageCacheTracer tracer) {
+        return createPageCache(fs, maxPages, tracer, null);
+    }
+
+    protected final T createPageCache(
+            FileSystemAbstraction fs, int maxPages, PageCacheTracer tracer, PageSwapperFactory swapperFactory) {
         T pageCache =
-                fixture.createPageCache(swapperFactory, maxPages, tracer, jobScheduler, fixture.getBufferFactory());
+                fixture.createPageCache(fs, maxPages, tracer, jobScheduler, fixture.getBufferFactory(), swapperFactory);
         pageCachePageSize = pageCache.pageSize();
         pageCachePayloadSize = pageCache.pageSize() - reservedBytes;
         recordsPerFilePage = pageCachePayloadSize / recordSize;
@@ -124,16 +128,6 @@ public abstract class PageCacheTestSupport<T extends PageCache> {
         filePageSize = filePayloadSize + reservedBytes;
         bufA = ByteBuffers.allocate(recordSize, ByteOrder.LITTLE_ENDIAN, INSTANCE);
         return pageCache;
-    }
-
-    protected T createPageCache(FileSystemAbstraction fs, int maxPages, PageCacheTracer tracer) {
-        PageSwapperFactory swapperFactory = createDefaultPageSwapperFactory(fs, tracer);
-        return createPageCache(swapperFactory, maxPages, tracer);
-    }
-
-    protected SingleFilePageSwapperFactory createDefaultPageSwapperFactory(
-            FileSystemAbstraction fs, PageCacheTracer tracer) {
-        return new SingleFilePageSwapperFactory(fs, tracer, EmptyMemoryTracker.INSTANCE);
     }
 
     protected final T getPageCache(FileSystemAbstraction fs, int maxPages, PageCacheTracer tracer) {
@@ -146,6 +140,10 @@ public abstract class PageCacheTestSupport<T extends PageCache> {
 
     protected void configureStandardPageCache() {
         getPageCache(fs, maxPages, PageCacheTracer.NULL);
+    }
+
+    protected final void doNotCloseAllocatorOnShutdown() {
+        fixture.withCloseAllocatorOnShutdown(false);
     }
 
     protected final void tearDownPageCache(T pageCache) {
@@ -336,6 +334,10 @@ public abstract class PageCacheTestSupport<T extends PageCache> {
         }
     }
 
+    protected final void doNotEnableBackgroundEviction() {
+        fixture.withBackgroundEvictionEnabled(false);
+    }
+
     protected static Runnable closePageFile(final PagedFile file) {
         return file::close;
     }
@@ -345,13 +347,16 @@ public abstract class PageCacheTestSupport<T extends PageCache> {
         private Function<String, Path> fileConstructor = Path::of;
         private IOBufferFactory bufferFactory;
         private int reservedBytes = PageCache.RESERVED_BYTES;
+        private boolean closeAllocatorOnShutdown = true;
+        private boolean backgroundEvictionEnabled = true;
 
         public abstract T createPageCache(
-                PageSwapperFactory swapperFactory,
+                FileSystemAbstraction fs,
                 int maxPages,
                 PageCacheTracer tracer,
                 JobScheduler jobScheduler,
-                IOBufferFactory bufferFactory);
+                IOBufferFactory bufferFactory,
+                PageSwapperFactory swapperFactory);
 
         public abstract void tearDownPageCache(T pageCache);
 
@@ -365,6 +370,28 @@ public abstract class PageCacheTestSupport<T extends PageCache> {
 
         public int getReservedBytes() {
             return reservedBytes;
+        }
+
+        public boolean asyncIO() {
+            return false;
+        }
+
+        public final boolean backgroundEvictionEnabled() {
+            return backgroundEvictionEnabled;
+        }
+
+        public final Fixture<T> withBackgroundEvictionEnabled(boolean backgroundEvictionEnabled) {
+            this.backgroundEvictionEnabled = backgroundEvictionEnabled;
+            return this;
+        }
+
+        public final boolean closeAllocatorOnShutdown() {
+            return closeAllocatorOnShutdown;
+        }
+
+        public final Fixture<T> withCloseAllocatorOnShutdown(boolean closeAllocatorOnShutdown) {
+            this.closeAllocatorOnShutdown = closeAllocatorOnShutdown;
+            return this;
         }
 
         public final Fixture<T> withFileSystemAbstraction(

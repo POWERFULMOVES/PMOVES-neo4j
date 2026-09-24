@@ -28,6 +28,8 @@ import org.neo4j.graphdb.RelationshipType
 
 import scala.util.Random
 
+object UndirectedRelationshipByIdSeekTestBase
+
 abstract class UndirectedRelationshipByIdSeekTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
@@ -44,7 +46,7 @@ abstract class UndirectedRelationshipByIdSeekTestBase[CONTEXT <: RuntimeContext]
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("r", "x", "y")
-      .undirectedRelationshipByIdSeek("r", "x", "y", Set.empty, relToFind.getId)
+      .relationshipByIdSeek("(x)-[r]-(y)", Set.empty, relToFind.getId)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
@@ -63,7 +65,7 @@ abstract class UndirectedRelationshipByIdSeekTestBase[CONTEXT <: RuntimeContext]
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("r")
-      .undirectedRelationshipByIdSeek("r", "x", "y", Set.empty, rel.getId.toDouble)
+      .relationshipByIdSeek("(x)-[r]-(y)", Set.empty, rel.getId.toDouble)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
@@ -80,7 +82,7 @@ abstract class UndirectedRelationshipByIdSeekTestBase[CONTEXT <: RuntimeContext]
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("r", "x", "y")
-      .undirectedRelationshipByIdSeek("r", "x", "y", Set.empty, toNotFind)
+      .relationshipByIdSeek("(x)-[r]-(y)", Set.empty, toNotFind)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
@@ -98,7 +100,7 @@ abstract class UndirectedRelationshipByIdSeekTestBase[CONTEXT <: RuntimeContext]
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("r", "x", "y")
-      .undirectedRelationshipByIdSeek("r", "x", "y", Set.empty, toFind.map(_.getId): _*)
+      .relationshipByIdSeek("(x)-[r]-(y)", Set.empty, toFind.map(_.getId): _*)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
@@ -123,7 +125,7 @@ abstract class UndirectedRelationshipByIdSeekTestBase[CONTEXT <: RuntimeContext]
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("r", "x", "y")
-      .undirectedRelationshipByIdSeek("r", "x", "y", Set.empty, relationshipsToLookFor: _*)
+      .relationshipByIdSeek("(x)-[r]-(y)", Set.empty, relationshipsToLookFor: _*)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
@@ -148,7 +150,7 @@ abstract class UndirectedRelationshipByIdSeekTestBase[CONTEXT <: RuntimeContext]
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("r", "x", "y")
       .filter(s"id(r) = ${attachedToFind.getId}")
-      .undirectedRelationshipByIdSeek("r", "x", "y", Set.empty, toSeekFor.map(_.getId): _*)
+      .relationshipByIdSeek("(x)-[r]-(y)", Set.empty, toSeekFor.map(_.getId): _*)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
@@ -172,7 +174,7 @@ abstract class UndirectedRelationshipByIdSeekTestBase[CONTEXT <: RuntimeContext]
       .apply()
       .|.limit(limit)
       .|.sort("r ASC", "x ASC")
-      .|.undirectedRelationshipByIdSeek("r", "x", "y", Set("a1"), relationships.head.getId)
+      .|.relationshipByIdSeek("(x)-[r]-(y)", Set("a1"), relationships.head.getId)
       .allNodeScan("a1")
       .build()
 
@@ -196,7 +198,7 @@ abstract class UndirectedRelationshipByIdSeekTestBase[CONTEXT <: RuntimeContext]
       .produceResults("r", "x", "y")
       .nonFuseable()
       .expand("(x)-[r2]->(y2)")
-      .undirectedRelationshipByIdSeek("r", "x", "y", Set.empty, r.getId)
+      .relationshipByIdSeek("(x)-[r]-(y)", Set.empty, r.getId)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
@@ -221,7 +223,7 @@ abstract class UndirectedRelationshipByIdSeekTestBase[CONTEXT <: RuntimeContext]
       .produceResults("r", "x", "y")
       .nonFuseable()
       .expand("(x)-[r2]->(y2)")
-      .undirectedRelationshipByIdSeek("r", "x", "y", Set.empty, rs.map(_.getId): _*)
+      .relationshipByIdSeek("(x)-[r]-(y)", Set.empty, rs.map(_.getId): _*)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
@@ -244,7 +246,7 @@ abstract class UndirectedRelationshipByIdSeekTestBase[CONTEXT <: RuntimeContext]
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("r", "x", "y")
-      .undirectedRelationshipByIdSeek("r", "x", "y", Set.empty, relToFind.getId)
+      .relationshipByIdSeek("(x)-[r]-(y)", Set.empty, relToFind.getId)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
@@ -265,7 +267,7 @@ abstract class UndirectedRelationshipByIdSeekTestBase[CONTEXT <: RuntimeContext]
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("r", "x", "y")
-      .undirectedRelationshipByIdSeek("r", "x", "y", Set.empty, Seq.fill(10)(relToFind.getId): _*)
+      .relationshipByIdSeek("(x)-[r]-(y)", Set.empty, Seq.fill(10)(relToFind.getId): _*)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
@@ -284,11 +286,63 @@ abstract class UndirectedRelationshipByIdSeekTestBase[CONTEXT <: RuntimeContext]
       .produceResults("r")
       .semiApply()
       .|.expand("(c)-[:BA]->(d)")
-      .|.undirectedRelationshipByIdSeek("unused1", "unused2", "c", Set(), abs.head.getId)
+      .|.relationshipByIdSeek("(unused2)-[unused1]-(c)", Set(), abs.head.getId)
       .allRelationshipsScan("(a)-[r]-(b)")
       .build()
 
     val actual = execute(query, runtime)
     actual should beColumns("r").withRows(inAnyOrder(expected))
+  }
+
+  test("should not produce any extra row after distinct") {
+    // given
+    val r = givenGraph {
+      val Seq(n1, n2) = nodeGraph(2)
+      val r = n1.createRelationshipTo(n2, RelationshipType.withName("R"))
+      r.setProperty("p", "hello")
+      r
+    }
+
+    // when
+    val query = new LogicalQueryBuilder(this)
+      .produceResults("p")
+      .distinct("r.p AS p")
+      .relationshipByIdSeek("(x)-[r]-(y)", Set(), r.getId)
+      .build()
+
+    // then
+    val actual = execute(query, runtime)
+    actual should beColumns("p").withSingleRow("hello")
+  }
+
+  test("seek + property read") {
+    // given
+    val relationships = givenGraph {
+      val (_, rels) = circleGraph(sizeHint)
+      rels.zipWithIndex.foreach {
+        case (r, i) => r.setProperty("prop", i)
+      }
+      rels
+    }
+
+    val chosenIndex = random.nextInt(relationships.length)
+    val relToFind = relationships(chosenIndex)
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("r", "x", "y")
+      .filter(s"r.prop = $chosenIndex")
+      .relationshipByIdSeek("(x)-[r]-(y)", Set.empty, relToFind.getId)
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("r", "x", "y").withRows(
+      Seq(
+        Array(relToFind, relToFind.getStartNode, relToFind.getEndNode),
+        Array(relToFind, relToFind.getEndNode, relToFind.getStartNode)
+      )
+    )
   }
 }

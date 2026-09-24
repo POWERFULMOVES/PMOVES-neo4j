@@ -23,8 +23,8 @@ import static org.neo4j.index.internal.gbptree.RootLayerConfiguration.singleRoot
 
 import java.io.IOException;
 import java.nio.file.OpenOption;
-import java.nio.file.Path;
 import java.util.List;
+import java.util.OptionalLong;
 import org.eclipse.collections.api.set.ImmutableSet;
 import org.neo4j.common.DependencyResolver;
 import org.neo4j.common.EmptyDependencyResolver;
@@ -32,6 +32,7 @@ import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 
 /**
@@ -46,7 +47,7 @@ public class GBPTree<KEY, VALUE> extends MultiRootGBPTree<SingleRoot, KEY, VALUE
     public GBPTree(
             PageCache pageCache,
             FileSystemAbstraction fileSystem,
-            Path indexFile,
+            StoreFile storeFile,
             Layout<KEY, VALUE> layout,
             Monitor monitor,
             Header.Reader headerReader,
@@ -61,7 +62,7 @@ public class GBPTree<KEY, VALUE> extends MultiRootGBPTree<SingleRoot, KEY, VALUE
         this(
                 pageCache,
                 fileSystem,
-                indexFile,
+                storeFile,
                 layout,
                 monitor,
                 headerReader,
@@ -80,7 +81,7 @@ public class GBPTree<KEY, VALUE> extends MultiRootGBPTree<SingleRoot, KEY, VALUE
     public GBPTree(
             PageCache pageCache,
             FileSystemAbstraction fileSystem,
-            Path indexFile,
+            StoreFile storeFile,
             Layout<KEY, VALUE> layout,
             Monitor monitor,
             Header.Reader headerReader,
@@ -96,7 +97,7 @@ public class GBPTree<KEY, VALUE> extends MultiRootGBPTree<SingleRoot, KEY, VALUE
         this(
                 pageCache,
                 fileSystem,
-                indexFile,
+                storeFile,
                 layout,
                 monitor,
                 headerReader,
@@ -115,7 +116,7 @@ public class GBPTree<KEY, VALUE> extends MultiRootGBPTree<SingleRoot, KEY, VALUE
     public GBPTree(
             PageCache pageCache,
             FileSystemAbstraction fileSystem,
-            Path indexFile,
+            StoreFile storeFile,
             Layout<KEY, VALUE> layout,
             Monitor monitor,
             Header.Reader headerReader,
@@ -133,7 +134,7 @@ public class GBPTree<KEY, VALUE> extends MultiRootGBPTree<SingleRoot, KEY, VALUE
         super(
                 pageCache,
                 fileSystem,
-                indexFile,
+                storeFile,
                 layout,
                 monitor,
                 headerReader,
@@ -147,7 +148,8 @@ public class GBPTree<KEY, VALUE> extends MultiRootGBPTree<SingleRoot, KEY, VALUE
                 pageCacheTracer,
                 dependencyResolver,
                 treeNodeLayoutFactory,
-                structureWriteLog);
+                structureWriteLog,
+                false);
         access = rootLayer.access(SingleRoot.SINGLE_ROOT);
     }
 
@@ -182,5 +184,10 @@ public class GBPTree<KEY, VALUE> extends MultiRootGBPTree<SingleRoot, KEY, VALUE
     @Override
     public boolean exists(CursorContext cursorContext) {
         return true;
+    }
+
+    @Override
+    public OptionalLong rootTreeNodeId(CursorContext cursorContext) {
+        return access.rootTreeNodeId(cursorContext);
     }
 }

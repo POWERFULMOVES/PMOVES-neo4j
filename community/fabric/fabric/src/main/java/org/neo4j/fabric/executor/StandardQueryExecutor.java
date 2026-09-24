@@ -21,32 +21,28 @@ package org.neo4j.fabric.executor;
 
 import static scala.jdk.javaapi.CollectionConverters.asJava;
 
-import java.util.Collection;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.Executor;
-import java.util.concurrent.atomic.AtomicReference;
-import org.neo4j.bolt.protocol.common.message.AccessMode;
-import org.neo4j.cypher.internal.FullyParsedQuery;
+import org.neo4j.boltmessages.AccessMode;
+import org.neo4j.cypher.internal.preparser.FullyParsedQuery;
 import org.neo4j.fabric.eval.UseEvaluation;
 import org.neo4j.fabric.planning.FabricPlan;
 import org.neo4j.fabric.planning.FabricPlanner;
 import org.neo4j.fabric.planning.Fragment;
-import org.neo4j.fabric.stream.Prefetcher;
+import org.neo4j.fabric.stream.FragmentResult;
+import org.neo4j.fabric.stream.QueryInput;
 import org.neo4j.fabric.stream.Record;
 import org.neo4j.fabric.stream.StatementResult;
-import org.neo4j.fabric.stream.summary.MergedQueryStatistics;
+import org.neo4j.fabric.stream.StatementResults;
 import org.neo4j.fabric.transaction.FabricTransaction;
 import org.neo4j.fabric.transaction.TransactionMode;
-import org.neo4j.graphdb.GqlStatusObject;
-import org.neo4j.graphdb.Notification;
 import org.neo4j.kernel.impl.query.QueryRoutingMonitor;
+import org.neo4j.notifications.NotificationImplementation;
 import org.neo4j.values.AnyValue;
 import org.neo4j.values.virtual.MapValue;
 import org.neo4j.values.virtual.MapValueBuilder;
 import org.neo4j.values.virtual.VirtualValues;
-import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
 
 /**
  * Standard query means other than CALL IN TRANSACTION in this context.
@@ -54,96 +50,115 @@ import reactor.core.publisher.Mono;
 class StandardQueryExecutor extends SingleQueryFragmentExecutor {
 
     private final Fragment.Exec fragment;
+    private final ProfilingContext profilingContext;
 
     StandardQueryExecutor(
             Fragment.Exec fragment,
             FabricPlanner.PlannerInstance plannerInstance,
-            Executor fabricWorkerExecutor,
             FabricTransaction.FabricExecutionContext ctx,
             UseEvaluation.Instance useEvaluator,
             FabricPlan plan,
             MapValue queryParams,
             AccessMode accessMode,
-            Set<Notification> notifications,
-            Set<GqlStatusObject> gqlStatusObjects,
-            AtomicReference<Collection<GqlStatusObject>> lastAddedGqlStatusObjects,
             QueryStatementLifecycles.StatementLifecycle lifecycle,
-            Prefetcher prefetcher,
             QueryRoutingMonitor queryRoutingMonitor,
-            MergedQueryStatistics statistics,
             Tracer tracer,
-            FragmentExecutor fragmentExecutor,
-            ProfilingContext profilingContext) {
+            ProfilingContext profilingContext,
+            FragmentExecutor fragmentExecutor) {
         super(
                 plannerInstance,
-                fabricWorkerExecutor,
                 ctx,
                 useEvaluator,
                 plan,
                 queryParams,
                 accessMode,
-                notifications,
-                gqlStatusObjects,
-                lastAddedGqlStatusObjects,
                 lifecycle,
-                prefetcher,
                 queryRoutingMonitor,
-                statistics,
                 tracer,
-                fragmentExecutor,
-                profilingContext);
+                fragmentExecutor);
         this.fragment = fragment;
+        this.profilingContext = profilingContext;
     }
 
     FragmentResult run(Record argument) {
         var prepareResult = prepare(fragment, argument);
-        MapValue parameters =
-                addParamsFromRecord(queryParams(), prepareResult.argumentValues(), asJava(fragment.parameters()));
+        MapValue parameters = addParamsFromRecord(
+                queryParams(),
+                prepareResult.argumentValues(),
+                asJava(fragment.parameters()),
+                prepareResult.graphWithNotification().graph().name().name());
+        List<NotificationImplementation> notifications = new ArrayList<>();
+        if (prepareResult.graphWithNotification().notification().isDefined()) {
+            notifications.add(
+                    prepareResult.graphWithNotification().notification().get());
+        }
         return doExecuteFragment(
-                fragment, parameters, prepareResult.graph(), prepareResult.transactionMode(), () -> fragmentExecutor()
-                        .run(fragment.input(), argument));
+                fragment,
+                parameters,
+                prepareResult.graphWithNotification().graph(),
+                prepareResult.transactionMode(),
+                () -> fragmentExecutor().run(fragment.input(), argument),
+                notifications);
     }
 
     @Override
-    Mono<StatementResult> runRemote(
+    FragmentResult runRemote(
             Location.Remote location,
             ExecutionOptions options,
             String query,
             TransactionMode transactionMode,
             MapValue params) {
-        return ctx().getRemote().run(location, options, query, transactionMode, params);
+        var profilingFragment = profilingContext.fragmentStart(location, query);
+        var result = ctx().getRemote().run(location, options, query, transactionMode, params);
+        return StatementResults.toFragmentResult(result, profilingFragment);
     }
 
     @Override
-    StatementResult runLocal(
+    FragmentResult runLocal(
             Location.Local location,
             TransactionMode transactionMode,
             QueryStatementLifecycles.StatementLifecycle parentLifecycle,
             FullyParsedQuery query,
             MapValue params,
-            Flux<Record> input,
+            FragmentResult input,
             ExecutionOptions executionOptions,
             Boolean targetsComposite) {
-        return ctx().getLocal()
+        var queryInput = new QueryInput() {
+
+            @Override
+            public Record next() {
+                return input.next();
+            }
+
+            @Override
+            public void consume() {
+                input.consume();
+            }
+        };
+
+        var profilingFragment = profilingContext.fragmentStart(location, query.description());
+        StatementResult result = ctx().getLocal()
                 .run(
                         location,
                         transactionMode,
                         parentLifecycle,
                         query,
                         params,
-                        input,
+                        queryInput,
                         executionOptions,
                         targetsComposite);
+        return StatementResults.toFragmentResult(result, profilingFragment);
     }
 
-    private MapValue addParamsFromRecord(MapValue params, Map<String, AnyValue> record, Map<String, String> bindings) {
+    private MapValue addParamsFromRecord(
+            MapValue params, Map<String, AnyValue> record, Map<String, String> bindings, String graphName) {
         int resultSize = params.size() + bindings.size();
         if (resultSize == 0) {
             return VirtualValues.EMPTY_MAP;
         }
         MapValueBuilder builder = new MapValueBuilder(resultSize);
         params.foreach(builder::add);
-        bindings.forEach((var, par) -> builder.add(par, validateValue(record.get(var))));
+        bindings.forEach((var, par) -> builder.add(par, validateValue(record.get(var), var, graphName)));
         return builder.build();
     }
 }

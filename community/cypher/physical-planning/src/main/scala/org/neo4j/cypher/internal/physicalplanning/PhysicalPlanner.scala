@@ -21,14 +21,16 @@ package org.neo4j.cypher.internal.physicalplanning
 
 import org.neo4j.cypher.internal.ast.semantics.CachableSemanticTable
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
+import org.neo4j.cypher.internal.physicalplanning.PhysicalPlanningAttributes.AcyclicPlans
 import org.neo4j.cypher.internal.physicalplanning.PhysicalPlanningAttributes.ApplyPlans
 import org.neo4j.cypher.internal.physicalplanning.PhysicalPlanningAttributes.ArgumentSizes
 import org.neo4j.cypher.internal.physicalplanning.PhysicalPlanningAttributes.LiveVariables
 import org.neo4j.cypher.internal.physicalplanning.PhysicalPlanningAttributes.TrailPlans
+import org.neo4j.cypher.internal.physicalplanning.debug.events.PhysicalPlanning
 import org.neo4j.cypher.internal.planner.spi.ReadTokenContext
 import org.neo4j.cypher.internal.runtime.CypherRuntimeConfiguration
 import org.neo4j.cypher.internal.runtime.ParameterMapping
-import org.neo4j.cypher.internal.runtime.debug.DebugSupport
+import org.neo4j.cypher.internal.runtime.debug.events.Debug
 import org.neo4j.cypher.internal.runtime.expressionVariableAllocation
 import org.neo4j.cypher.internal.runtime.expressionVariableAllocation.AvailableExpressionVariables
 import org.neo4j.cypher.internal.runtime.expressionVariableAllocation.Result
@@ -49,10 +51,7 @@ object PhysicalPlanner {
     cancellationChecker: CancellationChecker,
     allocatePipelinedSlots: Boolean = false
   ): PhysicalPlan = {
-    DebugSupport.PHYSICAL_PLANNING.log(
-      "======== BEGIN Physical Planning with %-31s ===========================",
-      breakingPolicy.getClass.getSimpleName
-    )
+    Debug.log(PhysicalPlanning.Begin(breakingPolicy.getClass.getSimpleName))
     val Result(logicalPlan, nExpressionSlots, availableExpressionVars) =
       expressionVariableAllocation.allocate(beforeRewrite)
     val (withSlottedParameters, parameterMapping) = slottedParameters(logicalPlan)
@@ -71,10 +70,8 @@ object PhysicalPlanner {
       allocatePipelinedSlots
     )
     val finalLogicalPlan = new SlottedRewriter(tokenContext)
-      .apply(withSlottedParameters, slotMetaData.slotConfigurations, slotMetaData.trailPlans)
-    DebugSupport.PHYSICAL_PLANNING.log(
-      "======== END Physical Planning =================================================================="
-    )
+      .apply(withSlottedParameters, slotMetaData.slotConfigurations, slotMetaData.trailPlans, slotMetaData.acyclicPlans)
+    Debug.log(PhysicalPlanning.End)
     PhysicalPlan(
       finalLogicalPlan,
       nExpressionSlots,
@@ -82,6 +79,7 @@ object PhysicalPlanner {
       slotMetaData.argumentSizes,
       slotMetaData.applyPlans,
       slotMetaData.trailPlans,
+      slotMetaData.acyclicPlans,
       slotMetaData.nestedPlanArgumentConfigurations.finalizeSlots(),
       availableExpressionVars,
       parameterMapping
@@ -96,6 +94,7 @@ case class PhysicalPlan(
   argumentSizes: ArgumentSizes,
   applyPlans: ApplyPlans,
   trailPlans: TrailPlans,
+  acyclicPlans: AcyclicPlans,
   nestedPlanArgumentConfigurations: ImmutableAttribute[SlotConfiguration],
   availableExpressionVariables: AvailableExpressionVariables,
   parameterMapping: ParameterMapping

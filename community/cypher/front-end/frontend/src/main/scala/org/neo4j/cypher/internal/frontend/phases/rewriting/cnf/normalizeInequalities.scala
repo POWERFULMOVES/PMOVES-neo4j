@@ -26,13 +26,12 @@ import org.neo4j.cypher.internal.frontend.phases.BaseContext
 import org.neo4j.cypher.internal.frontend.phases.BaseState
 import org.neo4j.cypher.internal.rewriting.conditions.AndsAboveOrs
 import org.neo4j.cypher.internal.rewriting.conditions.OrRewrittenToOrs
-import org.neo4j.cypher.internal.rewriting.conditions.SemanticInfoAvailable
 import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.StepSequencer
 import org.neo4j.cypher.internal.util.StepSequencer.DefaultPostCondition
 import org.neo4j.cypher.internal.util.topDown
 
-case object normalizeInequalities extends Rewriter with CnfPhase with DefaultPostCondition {
+case object normalizeInequalities extends Rewriter with CnfPhaseRewriter with DefaultPostCondition {
 
   override def apply(that: AnyRef): AnyRef = instance(that)
 
@@ -65,6 +64,4 @@ case object normalizeInequalities extends Rewriter with CnfPhase with DefaultPos
     // If the predicates are already in CNF (AndsAboveOrs), there are more opportunities for this rewriter to be applied
     AndsAboveOrs
   )
-
-  override def invalidatedConditions: Set[StepSequencer.Condition] = SemanticInfoAvailable
 }

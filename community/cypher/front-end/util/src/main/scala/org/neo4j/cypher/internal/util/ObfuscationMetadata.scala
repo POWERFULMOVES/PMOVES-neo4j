@@ -16,15 +16,55 @@
  */
 package org.neo4j.cypher.internal.util
 
+import org.neo4j.cypher.internal.util.symbols.CTAny
+
+/**
+ * Obfuscation metadata collected during parsing, carrying two separate views of the literals to redact
+ */
 final case class ObfuscationMetadata(
   sensitiveLiteralOffsets: Vector[LiteralOffset],
+  allLiteralOffsets: Vector[LiteralOffset],
   sensitiveParameterNames: Set[String]
 ) {
-  def isEmpty: Boolean = sensitiveLiteralOffsets.isEmpty && sensitiveParameterNames.isEmpty
+
+  def isEmpty: Boolean =
+    sensitiveLiteralOffsets.isEmpty && allLiteralOffsets.isEmpty && sensitiveParameterNames.isEmpty
+
+  // Constructed via the companion `apply` (not `new`), so both offset vectors are normalized — a future
+  // switch to `new ObfuscationMetadata(...)` here would silently drop that normalization. See `normalize`.
+  def merge(other: ObfuscationMetadata): ObfuscationMetadata = ObfuscationMetadata(
+    sensitiveLiteralOffsets.appendedAll(other.sensitiveLiteralOffsets),
+    allLiteralOffsets.appendedAll(other.allLiteralOffsets),
+    sensitiveParameterNames.union(other.sensitiveParameterNames)
+  )
 }
 
 object ObfuscationMetadata {
-  def empty() = new ObfuscationMetadata(Vector.empty, Set.empty)
+
+  def apply(
+    sensitiveOffsets: Vector[LiteralOffset],
+    allOffsets: Vector[LiteralOffset],
+    params: Set[String]
+  ): ObfuscationMetadata =
+    new ObfuscationMetadata(normalize(sensitiveOffsets), normalize(allOffsets), params)
+
+  /**
+   * De-duplicate, sort by start, and keep at most one offset per start position. When several offsets share a
+   * start, prefer a known length and keep the widest (fail closed — redact at least as much as any candidate
+   * asked for); fall back to an unknown-length (`None`) offset only when no known length exists at that start.
+   */
+  private def normalize(offsets: Vector[LiteralOffset]): Vector[LiteralOffset] =
+    offsets
+      .groupBy(_.start(0))
+      .toVector
+      .map { case (_, group) =>
+        val withKnownLength = group.filter(_.length.isDefined)
+        if (withKnownLength.isEmpty) group.head
+        else withKnownLength.maxBy(_.length.get)
+      }
+      .sortBy(_.start(0))
+
+  def empty() = new ObfuscationMetadata(Vector.empty, Vector.empty, Set.empty)
 }
 
 /**
@@ -33,8 +73,17 @@ object ObfuscationMetadata {
  * @param start offset of the literal relative to the query string without preparser options
  * @line line number of the literal relative to the query string without preparser options
  * @param length length of literal in query string
+ * @param literalTypeName Cypher type name of the literal, e.g. "STRING"; "ANY" when unknown
+ * @param wrapInBraces whether the obfuscated marker should be wrapped in `{}` at this offset. Used for the
+ *                      literal text segments of a string interpolation.
  */
-case class LiteralOffset(private val start: Int, private val line: Int, length: Option[Int]) {
+case class LiteralOffset(
+  private val start: Int,
+  private val line: Int,
+  length: Option[Int],
+  literalTypeName: String = CTAny.toCypherTypeString,
+  wrapInBraces: Boolean = false
+) {
   def start(preParserOffset: Int): Int = start + preParserOffset
   def line(preParserLineOffset: Int): Int = line + preParserLineOffset
 }

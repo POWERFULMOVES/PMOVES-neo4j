@@ -21,7 +21,7 @@ package org.neo4j.bolt.fsm;
 
 import static org.neo4j.bolt.testing.assertions.MapValueAssertions.assertThat;
 import static org.neo4j.bolt.testing.assertions.ResponseRecorderAssertions.assertThat;
-import static org.neo4j.bolt.testing.assertions.StateMachineAssertions.assertThat;
+import static org.neo4j.bolt.testing.assertions.StateMachineHandleAssertions.assertThat;
 import static org.neo4j.values.storable.Values.stringValue;
 
 import org.neo4j.bolt.protocol.common.fsm.States;
@@ -34,14 +34,16 @@ import org.neo4j.kernel.internal.Version;
 @CommunityStateMachineTestExtension
 class ConnectedStateAnonymousIT {
 
-    @StateMachineTest(until = @org.neo4j.bolt.testing.annotation.Version(major = 5, minor = 1))
-    void shouldHandleHelloMessage(StateMachine fsm, BoltMessages messages, ResponseRecorder recorder) throws Throwable {
+    @StateMachineTest(until = @org.neo4j.bolt.testing.annotation.Version(major = 5, minor = 0))
+    void shouldHandleHelloMessage(StateMachineHandle fsm, BoltMessages messages, ResponseRecorder recorder)
+            throws Throwable {
         fsm.process(messages.hello(), recorder);
 
         // Then
-        assertThat(recorder).hasSuccessResponse(meta -> assertThat(meta)
-                .containsEntry("server", stringValue("Neo4j/" + Version.getNeo4jVersion()))
-                .containsEntry("connection_id", stringValue("bolt-test")));
+        assertThat(recorder)
+                .hasSuccessResponse(meta -> assertThat(meta)
+                        .containsEntry("server", stringValue("Neo4j/" + Version.getNeo4jVersion()))
+                        .containsEntry("connection_id", stringValue("bolt-test")));
 
         assertThat(fsm).isInState(States.READY);
     }

@@ -21,12 +21,8 @@ package org.neo4j.internal.schema.constraints;
 
 import static org.neo4j.common.EntityType.NODE;
 import static org.neo4j.common.EntityType.RELATIONSHIP;
-import static org.neo4j.internal.schema.ConstraintType.EXISTS;
-import static org.neo4j.internal.schema.ConstraintType.PROPERTY_TYPE;
 import static org.neo4j.internal.schema.ConstraintType.UNIQUE;
 import static org.neo4j.internal.schema.ConstraintType.UNIQUE_EXISTS;
-import static org.neo4j.internal.schema.GraphTypeDependence.DEPENDENT;
-import static org.neo4j.internal.schema.GraphTypeDependence.INDEPENDENT;
 import static org.neo4j.internal.schema.GraphTypeDependence.UNDESIGNATED;
 import static org.neo4j.internal.schema.SchemaUserDescription.TOKEN_ID_NAME_LOOKUP;
 
@@ -43,56 +39,29 @@ import org.neo4j.string.Mask;
 import org.neo4j.util.Preconditions;
 
 /**
- * Internal representation of a graph constraint, including the schema unit it targets (eg. label-property combination)
+ * Internal representation of a graph key or uniqueness constraint, including the schema unit it targets (eg. label-property combination)
  * and how that schema unit is constrained (eg. "has to exist", or "must be unique").
  */
-public class ConstraintDescriptorImplementation
-        implements ConstraintDescriptor,
-                ExistenceConstraintDescriptor,
-                KeyConstraintDescriptor,
-                UniquenessConstraintDescriptor,
-                TypeConstraintDescriptor {
+public class ConstraintDescriptorImplementation extends ConstraintDescriptorAdaptor
+        implements ConstraintDescriptor, KeyConstraintDescriptor, UniquenessConstraintDescriptor {
     private final ConstraintType type;
     private final GraphTypeDependence graphTypeDependence;
     private final SchemaDescriptor schema;
-    private final long id;
     private final String name;
     private final Long ownedIndex;
     private final IndexType ownedIndexType;
-    private final PropertyTypeSet propertyType;
-
-    static ConstraintDescriptorImplementation makeExistsConstraint(SchemaDescriptor schema) {
-        return makeExistsConstraint(schema, false);
-    }
-
-    static ConstraintDescriptorImplementation makeExistsConstraint(SchemaDescriptor schema, boolean isDependent) {
-        return new ConstraintDescriptorImplementation(
-                EXISTS, isDependent ? DEPENDENT : INDEPENDENT, schema, NO_ID, null, null, null, null);
-    }
 
     static KeyConstraintDescriptor makeUniqueExistsConstraint(SchemaDescriptor schema, IndexType indexType) {
         Preconditions.checkState(indexType != null, "Index type should be supplied for index-backed constraints");
 
         return new ConstraintDescriptorImplementation(
-                UNIQUE_EXISTS, UNDESIGNATED, schema, NO_ID, null, null, indexType, null);
+                UNIQUE_EXISTS, UNDESIGNATED, schema, NO_ID, null, null, indexType);
     }
 
     static UniquenessConstraintDescriptor makeUniqueConstraint(SchemaDescriptor schema, IndexType indexType) {
         Preconditions.checkState(indexType != null, "Index type should be supplied for index-backed constraints");
 
-        return new ConstraintDescriptorImplementation(UNIQUE, UNDESIGNATED, schema, NO_ID, null, null, indexType, null);
-    }
-
-    static TypeConstraintDescriptor makePropertyTypeConstraint(SchemaDescriptor schema, PropertyTypeSet propertyType) {
-        return makePropertyTypeConstraint(schema, propertyType, false);
-    }
-
-    static TypeConstraintDescriptor makePropertyTypeConstraint(
-            SchemaDescriptor schema, PropertyTypeSet propertyType, boolean isDependent) {
-        Preconditions.checkState(
-                propertyType != null, "Property types should be supplied for property type constraints");
-        return new ConstraintDescriptorImplementation(
-                PROPERTY_TYPE, isDependent ? DEPENDENT : INDEPENDENT, schema, NO_ID, null, null, null, propertyType);
+        return new ConstraintDescriptorImplementation(UNIQUE, UNDESIGNATED, schema, NO_ID, null, null, indexType);
     }
 
     private ConstraintDescriptorImplementation(
@@ -102,16 +71,14 @@ public class ConstraintDescriptorImplementation
             long id,
             String name,
             Long ownedIndex,
-            IndexType ownedIndexType,
-            PropertyTypeSet propertyType) {
+            IndexType ownedIndexType) {
+        super(id);
         this.type = type;
         this.graphTypeDependence = graphTypeDependence;
         this.schema = schema;
-        this.id = id;
         this.name = name;
         this.ownedIndex = ownedIndex;
         this.ownedIndexType = ownedIndexType;
-        this.propertyType = propertyType;
     }
 
     // METHODS
@@ -157,53 +124,18 @@ public class ConstraintDescriptorImplementation
 
     private String userDescription(TokenNameLookup tokenNameLookup, Mask mask) {
         return SchemaUserDescription.forConstraint(
-                tokenNameLookup, id, name, type, schema(), ownedIndex, propertyType, null, mask);
-    }
-
-    @Override
-    public boolean isNodePropertyTypeConstraint() {
-        return schema.entityType() == NODE && type == PROPERTY_TYPE;
-    }
-
-    @Override
-    public boolean isRelationshipPropertyTypeConstraint() {
-        return schema.entityType() == RELATIONSHIP && type == PROPERTY_TYPE;
-    }
-
-    @Override
-    public boolean isPropertyTypeConstraint() {
-        return type == PROPERTY_TYPE;
-    }
-
-    @Override
-    public TypeConstraintDescriptor asPropertyTypeConstraint() {
-        if (!isPropertyTypeConstraint()) {
-            throw conversionException(TypeConstraintDescriptor.class);
-        }
-        return this;
-    }
-
-    @Override
-    public boolean isPropertyExistenceConstraint() {
-        return type == EXISTS;
-    }
-
-    @Override
-    public boolean isRelationshipPropertyExistenceConstraint() {
-        return schema.entityType() == RELATIONSHIP && type == EXISTS;
-    }
-
-    @Override
-    public boolean isNodePropertyExistenceConstraint() {
-        return schema.entityType() == NODE && type == EXISTS;
-    }
-
-    @Override
-    public ExistenceConstraintDescriptor asPropertyExistenceConstraint() {
-        if (!isPropertyExistenceConstraint()) {
-            throw conversionException(ExistenceConstraintDescriptor.class);
-        }
-        return this;
+                tokenNameLookup,
+                id,
+                name,
+                type,
+                schema(),
+                graphTypeDependence,
+                ownedIndex,
+                null,
+                null,
+                null,
+                null,
+                mask);
     }
 
     @Override
@@ -266,36 +198,15 @@ public class ConstraintDescriptorImplementation
     }
 
     @Override
-    public boolean isRelationshipEndpointLabelConstraint() {
-        return false;
-    }
-
-    @Override
-    public boolean isNodeLabelExistenceConstraint() {
-        return false;
-    }
-
-    @Override
-    public RelationshipEndpointLabelConstraintDescriptor asRelationshipEndpointLabelConstraint() {
-        throw conversionException(RelationshipEndpointLabelConstraintDescriptor.class);
-    }
-
-    @Override
-    public NodeLabelExistenceConstraintDescriptor asNodeLabelExistenceConstraint() {
-        throw conversionException(NodeLabelExistenceConstraintDescriptor.class);
-    }
-
-    private IllegalStateException conversionException(Class<? extends ConstraintDescriptor> targetType) {
-        return new IllegalStateException("Cannot cast this schema to a " + targetType
-                + " because it does not match that structure: " + this + ".");
-    }
-
-    @Override
     public final boolean equals(Object o) {
         if (!(o instanceof ConstraintDescriptor that)) {
             return false;
         }
+        return equalsIgnoreName(that) && Objects.equals(this.name, that.getName());
+    }
 
+    @Override
+    public final boolean equalsIgnoreName(ConstraintDescriptor that) {
         if (this.type != that.type()) {
             return false;
         }
@@ -313,25 +224,29 @@ public class ConstraintDescriptorImplementation
             return false;
         }
 
-        if (that.enforcesPropertyType()
-                && !this.propertyType.equals(that.asPropertyTypeConstraint().propertyType())) {
+        return !that.enforcesPropertyType();
+    }
+
+    // The constraints implementing this class must be unique on the combined fields constraintType, entityToken and
+    // propertyToken(s)
+    // It is also disallowed to have identical schema (entityToken and propertyToken(s)) and identical index type
+    @Override
+    public boolean conflictsWith(ConstraintDescriptor other) {
+        if (!this.schema().equals(other.schema())) {
             return false;
         }
 
-        return true;
+        if (this.isIndexBackedConstraint() && other.isIndexBackedConstraint()) {
+            return this.asIndexBackedConstraint().indexType()
+                    == other.asIndexBackedConstraint().indexType();
+        }
+
+        return this.type == other.type();
     }
 
     @Override
     public final int hashCode() {
-        return Objects.hash(type, graphTypeDependence, schema);
-    }
-
-    @Override
-    public long getId() {
-        if (id == NO_ID) {
-            throw new IllegalStateException("This constraint descriptor have no id assigned: " + this);
-        }
-        return id;
+        return Objects.hash(type, graphTypeDependence, schema, name);
     }
 
     @Override
@@ -363,7 +278,7 @@ public class ConstraintDescriptorImplementation
     @Override
     public ConstraintDescriptorImplementation withId(long id) {
         return new ConstraintDescriptorImplementation(
-                type, graphTypeDependence, schema, id, name, ownedIndex, ownedIndexType, propertyType);
+                type, graphTypeDependence, schema, id, name, ownedIndex, ownedIndexType);
     }
 
     @Override
@@ -373,15 +288,7 @@ public class ConstraintDescriptorImplementation
         }
         name = SchemaNameUtil.sanitiseName(name);
         return new ConstraintDescriptorImplementation(
-                type, graphTypeDependence, schema, id, name, ownedIndex, ownedIndexType, propertyType);
-    }
-
-    @Override
-    public PropertyTypeSet propertyType() {
-        if (!enforcesPropertyType()) {
-            throw new IllegalStateException("This constraint does not enforce property types.");
-        }
-        return propertyType;
+                type, graphTypeDependence, schema, id, name, ownedIndex, ownedIndexType);
     }
 
     @Override
@@ -389,7 +296,7 @@ public class ConstraintDescriptorImplementation
         Preconditions.checkState(
                 ownedIndexType != null, "ConstraintDescriptor missing IndexType when connected to index");
         return new ConstraintDescriptorImplementation(
-                type, graphTypeDependence, schema, id, name, ownedIndex, ownedIndexType, propertyType);
+                type, graphTypeDependence, schema, id, name, ownedIndex, ownedIndexType);
     }
 
     @Override

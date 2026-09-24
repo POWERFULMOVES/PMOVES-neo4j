@@ -49,7 +49,7 @@ import org.neo4j.internal.kernel.api.procs.ProcedureCallContext;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexType;
 import org.neo4j.kernel.api.KernelTransaction;
-import org.neo4j.kernel.api.impl.fulltext.FulltextAdapter;
+import org.neo4j.kernel.api.impl.schema.fulltext.FulltextIndexProvider;
 import org.neo4j.kernel.api.procedure.SystemProcedure;
 import org.neo4j.kernel.api.txstate.TxStateHolder;
 import org.neo4j.kernel.impl.api.index.IndexingService;
@@ -58,7 +58,6 @@ import org.neo4j.procedure.Context;
 import org.neo4j.procedure.Description;
 import org.neo4j.procedure.Name;
 import org.neo4j.procedure.Procedure;
-import org.neo4j.procedure.UnsupportedDatabaseTypes;
 import org.neo4j.util.FeatureToggles;
 
 /**
@@ -82,35 +81,35 @@ public class FulltextProcedures {
     public DependencyResolver resolver;
 
     @Context
-    public FulltextAdapter accessor;
+    public ProcedureCallContext callContext;
 
     @Context
-    public ProcedureCallContext callContext;
+    public SpdBuiltInProcedures spdBuiltInProcedures;
 
     @SystemProcedure
     @Description("List the available analyzers that the full-text indexes can be configured with.")
     @Procedure(name = "db.index.fulltext.listAvailableAnalyzers", mode = READ)
     public Stream<AvailableAnalyzer> listAvailableAnalyzers() {
-        return accessor.listAvailableAnalyzers().map(AvailableAnalyzer::new);
+        return FulltextIndexProvider.listAvailableAnalyzers().map(AvailableAnalyzer::new);
     }
 
     @SystemProcedure
     @Description(
             "Wait for the updates from recently committed transactions to be applied to any eventually-consistent full-text indexes.")
     @Procedure(name = "db.index.fulltext.awaitEventuallyConsistentIndexRefresh", mode = READ)
-    @UnsupportedDatabaseTypes(UnsupportedDatabaseTypes.DatabaseType.SPD)
     public void awaitRefresh() {
         if (callContext.isSystemDatabase()) {
             return;
         }
 
-        accessor.awaitRefresh();
+        if (spdBuiltInProcedures.isGraphShard()) {
+            spdBuiltInProcedures.awaitFulltextIndexRefresh();
+        }
         resolver.resolveDependency(IndexingService.class).awaitFulltextIndexRefresh();
     }
 
     @SystemProcedure
-    @Description(
-            """
+    @Description("""
             Query the given full-text index. Returns the matching nodes and their Lucene query score, ordered by score.
             Valid _key: value_ pairs for the `options` map are:
 
@@ -143,15 +142,20 @@ public class FulltextProcedures {
                     + entityType + ", so it cannot be queried for nodes.");
         }
         NodeValueIndexCursor cursor = tx.cursors().allocateNodeValueIndexCursor(tx.cursorContext(), tx.memoryTracker());
-        IndexReadSession indexSession = tx.dataRead().indexReadSession(indexReference);
-        IndexQueryConstraints constraints = queryConstraints(options);
-        tx.dataRead()
-                .nodeIndexSeek(
-                        tx.queryContext(),
-                        indexSession,
-                        cursor,
-                        constraints,
-                        PropertyIndexQuery.fulltextSearch(query, queryAnalyzer(options)));
+        try {
+            IndexReadSession indexSession = tx.dataRead().indexReadSession(indexReference);
+            IndexQueryConstraints constraints = queryConstraints(options);
+            tx.dataRead()
+                    .nodeIndexSeek(
+                            tx.queryContext(),
+                            indexSession,
+                            cursor,
+                            constraints,
+                            PropertyIndexQuery.fulltextSearch(query, queryAnalyzer(options)));
+        } catch (Throwable t) {
+            cursor.close();
+            throw t;
+        }
 
         Spliterator<NodeOutput> spliterator = new SpliteratorAdaptor<>() {
             @Override
@@ -195,8 +199,7 @@ public class FulltextProcedures {
     }
 
     @SystemProcedure
-    @Description(
-            """
+    @Description("""
             Query the given full-text index. Returns the matching relationships and their Lucene query score, ordered by score.
             Valid _key: value_ pairs for the `options` map are:
 
@@ -230,15 +233,20 @@ public class FulltextProcedures {
         }
         RelationshipValueIndexCursor cursor =
                 tx.cursors().allocateRelationshipValueIndexCursor(tx.cursorContext(), tx.memoryTracker());
-        IndexReadSession indexReadSession = tx.dataRead().indexReadSession(indexReference);
-        IndexQueryConstraints constraints = queryConstraints(options);
-        tx.dataRead()
-                .relationshipIndexSeek(
-                        tx.queryContext(),
-                        indexReadSession,
-                        cursor,
-                        constraints,
-                        PropertyIndexQuery.fulltextSearch(query, queryAnalyzer(options)));
+        try {
+            IndexReadSession indexReadSession = tx.dataRead().indexReadSession(indexReference);
+            IndexQueryConstraints constraints = queryConstraints(options);
+            tx.dataRead()
+                    .relationshipIndexSeek(
+                            tx.queryContext(),
+                            indexReadSession,
+                            cursor,
+                            constraints,
+                            PropertyIndexQuery.fulltextSearch(query, queryAnalyzer(options)));
+        } catch (Throwable t) {
+            cursor.close();
+            throw t;
+        }
 
         Spliterator<RelationshipOutput> spliterator = new SpliteratorAdaptor<>() {
             @Override
@@ -283,7 +291,7 @@ public class FulltextProcedures {
                                 .txState()
                                 .indexDiffSetsBySchema(index.schema())
                                 .isAdded(index))
-                && !tx.isSPDTransaction()) {
+                && !spdBuiltInProcedures.isSpd()) {
             // If the index was not created in this transaction, then wait for it to come online before querying.
             Schema schema = transaction.schema();
             schema.awaitIndexOnline(index.getName(), INDEX_ONLINE_QUERY_TIMEOUT_SECONDS, TimeUnit.SECONDS);
